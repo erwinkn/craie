@@ -354,12 +354,12 @@ impl LayoutPartialTree for TreeView<'_> {
         compute_cached_layout(self, node_id, inputs, |tree, node_id, inputs| {
             let id = from_taffy(node_id);
             let hidden = tree.host.node(id).map(|n| n.hidden()).unwrap_or(true);
-            if hidden {
-                return compute_hidden_layout(tree, node_id);
-            }
             // Clone the style: the leaf arm borrows `tree` mutably for the
             // measure callback while Taffy still holds the style ref.
             let style = tree.style_of(id).clone();
+            if hidden || style.display == taffy::Display::None {
+                return compute_hidden_layout(tree, node_id);
+            }
             if tree
                 .host
                 .node(id)

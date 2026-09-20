@@ -15,7 +15,7 @@
 use parley::Layout as ParleyLayout;
 
 use crate::geom::{Point, Size};
-use crate::host::{Host, NodeId, NodeKind, ROOT};
+use crate::host::{Host, NodeId, NodeKind, ROOT, StyleId};
 use crate::layout::{self, Layouts, MeasuredText};
 use crate::scene::{Color, QuadInstance, Scene};
 use crate::text::TextEngine;
@@ -154,7 +154,11 @@ impl Ui {
             if !next.is_nil() {
                 stack.push((next, ox, oy));
             }
-            if node.hidden() {
+            // `display: none` collapses layout but wouldn't stop paint on
+            // its own — treat it like the hidden bit here too.
+            let styled_away = self.layouts.style(StyleId(node.style)).display
+                == taffy::Display::None;
+            if node.hidden() || styled_away {
                 continue;
             }
             let data = self.layouts.data(id);
@@ -283,5 +287,42 @@ mod tests {
             shown_count > hidden_count,
             "unhiding node 3 must add its glyphs: {hidden_count} -> {shown_count}"
         );
+    }
+
+    /// `display: none` must remove the subtree from layout AND paint —
+    /// the flag path and the style path are equivalent.
+    #[test]
+    fn display_none_skips_subtree() {
+        let mut enc = Encoder::new();
+        let mut s = taffy::Style::default();
+        s.display = taffy::Display::Flex;
+        s.flex_direction = taffy::FlexDirection::Column;
+        enc.style(1, &s);
+        let mut gone = taffy::Style::default();
+        gone.display = taffy::Display::None;
+        enc.style(2, &gone);
+
+        enc.create(0, KIND_VIEW);
+        enc.set_style(0, 1);
+        enc.place(NIL, 0, NIL);
+        // Hidden-by-style container with a text child.
+        enc.create(1, KIND_VIEW);
+        enc.set_style(1, 2);
+        enc.place(0, 1, NIL);
+        enc.create(2, KIND_TEXT);
+        enc.set_text(2, "invisible");
+        enc.place(1, 2, NIL);
+        // Sibling still paints.
+        enc.create(3, KIND_TEXT);
+        enc.set_text(3, "visible");
+        enc.place(0, 3, NIL);
+        let buf = enc.finish(1);
+
+        let mut ui = Ui::new(1.0);
+        ui.apply(&buf).unwrap();
+        let scene = ui.render(Size::new(800.0, 600.0));
+        assert!(scene.glyphs.len() > 0);
+        // "invisible" (9 chars) must not emit; "visible" (7) does.
+        assert!(scene.glyphs.len() < 10, "{} glyphs", scene.glyphs.len());
     }
 }
