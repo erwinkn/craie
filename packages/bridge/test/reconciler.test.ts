@@ -5,7 +5,16 @@ import type { Transport } from "../src/host.js"
 
 class FakeTransport implements Transport {
   frames: Uint8Array[] = []
+  ackCb: ((seq: number) => void) | null = null
   send(frame: Uint8Array) { this.frames.push(frame.slice()) }
+  onAck(cb: (seq: number) => void) { this.ackCb = cb }
+  /** Simulates native applying every sent frame. */
+  ackAll() {
+    for (const f of this.frames) {
+      const seq = Number(new DataView(f.buffer, f.byteOffset).getBigUint64(8, true))
+      this.ackCb?.(seq)
+    }
+  }
   close() {}
 }
 
@@ -87,4 +96,35 @@ test("update emits only the changed op", async () => {
   await new Promise(r => setTimeout(r, 0))
   expect(t.frames.length).toBe(1)
   expect(ops(t.frames[0]!)).toEqual([0x02]) // set_text only
+})
+
+test("ids recycle only after native ack", async () => {
+  const t = new FakeTransport()
+  const root = createRoot(t)
+  function App({ show }: { show: boolean }) {
+    return createElement(View, null,
+      show ? createElement(Text, null, "ephemeral") : null,
+      createElement(Text, null, "pinned"))
+  }
+  root.renderSync(createElement(App, { show: true }))
+  await new Promise(r => setTimeout(r, 0))
+  t.ackAll()
+
+  // Remove the text: its id must NOT be reused until the ack arrives.
+  root.renderSync(createElement(App, { show: false }))
+  await new Promise(r => setTimeout(r, 0))
+  root.renderSync(createElement(App, { show: true }))
+  await new Promise(r => setTimeout(r, 0))
+  // Without an ack for the removing txn, the remount got a fresh id.
+  // The last frame should contain create+place for a new node id != old.
+  const last = t.frames.at(-1)!
+  const dv = new DataView(last.buffer, last.byteOffset)
+  let at = 20 + 4 // 0 or 1 strings? remount has set_text -> strings exist
+  const strings = dv.getUint32(16, true)
+  at = 20
+  for (let i = 0; i < strings; i++) at += 4 + dv.getUint32(at, true)
+  // first op should be create; read its id
+  expect(last[at]).toBe(0x01)
+  const newId = dv.getUint32(at + 1, true)
+  expect(newId).not.toBe(0) // the removed node's id stayed out of the pool
 })

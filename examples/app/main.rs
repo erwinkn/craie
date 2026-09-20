@@ -148,7 +148,10 @@ impl Inner {
             let mut applied = 0u32;
             for buf in self.inbox.drain() {
                 match self.ui.apply(&buf) {
-                    Ok(_) => applied += 1,
+                    Ok(seq) => {
+                        applied += 1;
+                        self.inbox.acks.ack(seq);
+                    }
                     Err(e) => eprintln!("[craie] bad txn: {e:?}"),
                 }
             }

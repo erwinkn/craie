@@ -121,21 +121,27 @@ it with their own channel, delivered to `App::woke`).
 `bridge::listen` binds a localhost TCP socket; a reader thread per
 connection frames `u32 len | txn` payloads into an mpsc channel and
 wakes the loop. The main thread drains the inbox in `woke`, applies
-transactions, and repaints once. The socket thread never touches host
+transactions, repaints once, and writes a bare `u64` seq back per
+applied transaction (`AckSink`). The socket thread never touches host
 state. TCP stands in for the napi shared buffer — same properties that
 matter (opaque bytes, wake-based delivery, no JS on the main thread),
 zero toolchain.
+
+Acks close the loop for id ownership: JS holds removed ids until the
+transaction that removed them is acknowledged, then recycles them.
+Reuse can never race native apply, and `Root.flush()` resolves only
+after the frame is confirmed.
 
 ## JS side (`packages/bridge`)
 
 - `wire.ts`: byte-exact encoder mirror (writer, string interning,
   positional style encoding, style dedup).
-- `host.ts`: JS-owned dense ids with a free list, prop diffing to
-  minimal ops, `queueMicrotask` seal per commit.
+- `host.ts`: JS-owned dense ids with a free list gated on native acks,
+  prop diffing to minimal ops, `queueMicrotask` seal per commit.
 - `index.ts`: react-reconciler 0.33 mutation-mode config; `<View>` and
   `<Text>` components; `shouldSetTextContent` absorbs string children
   into the text prop.
-- `client.ts`: `u32 len | payload` TCP transport.
+- `client.ts`: `u32 len | payload` TCP transport with ack parsing.
 
 ## What is deliberately not here
 

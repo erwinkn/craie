@@ -6,10 +6,27 @@ import type { Transport } from "./host.js"
 
 export class TcpTransport implements Transport {
   private socket: Socket
+  private ackCb: ((seq: number) => void) | null = null
+  private ackBuf = Buffer.alloc(0)
 
   /** Use `connect` — the constructor exists for tests and custom sockets. */
   constructor(socket: Socket) {
     this.socket = socket
+    socket.on("data", (chunk: Buffer) => this.readAcks(chunk))
+  }
+
+  /** Acks are bare little-endian u64 seqs on the return direction. */
+  private readAcks(chunk: Buffer) {
+    this.ackBuf = Buffer.concat([this.ackBuf, chunk])
+    while (this.ackBuf.length >= 8) {
+      const seq = Number(this.ackBuf.readBigUInt64LE(0))
+      this.ackBuf = this.ackBuf.subarray(8)
+      this.ackCb?.(seq)
+    }
+  }
+
+  onAck(cb: (seq: number) => void) {
+    this.ackCb = cb
   }
 
   send(frame: Uint8Array) {

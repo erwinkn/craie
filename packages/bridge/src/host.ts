@@ -20,6 +20,9 @@ export interface HostNode {
 export interface Transport {
   send(frame: Uint8Array): void
   close(reason?: string): void
+  /** Native acks an applied transaction by seq. Optional: transports that
+   * don't ack leave ids unrecycled (safe, leaks the free list). */
+  onAck?(cb: (seq: number) => void): void
 }
 
 const MAX_ID = 0xffff_fffd
@@ -50,8 +53,27 @@ export class CraieHost {
   private seq = 0
   private encoder = new Encoder()
   private scheduled = false
+  /** Ids removed in the currently-open transaction. */
+  private removing: number[] = []
+  /** seq -> ids that may be recycled once native acks the txn. */
+  private awaitingAck = new Map<number, number[]>()
+  private flushWaiters = new Map<number, () => void>()
 
-  constructor(private transport: Transport) {}
+  constructor(private transport: Transport) {
+    transport.onAck?.((seq) => this.ack(seq))
+  }
+
+  /** Native applied transaction `seq`: recycle its removed ids and
+   * resolve its flush waiters. */
+  private ack(seq: number) {
+    const ids = this.awaitingAck.get(seq)
+    if (ids !== undefined) {
+      this.awaitingAck.delete(seq)
+      for (const id of ids) this.freeIds.push(id)
+    }
+    this.flushWaiters.get(seq)?.()
+    this.flushWaiters.delete(seq)
+  }
 
   private alloc(): number {
     const free = this.freeIds.pop()
@@ -73,14 +95,22 @@ export class CraieHost {
   }
 
   private seal() {
-    const buf = this.encoder.finish(++this.seq)
+    const seq = ++this.seq
+    const buf = this.encoder.finish(seq)
     this.encoder = new Encoder()
+    if (this.removing.length) {
+      this.awaitingAck.set(seq, this.removing)
+      this.removing = []
+    }
     this.transport.send(buf)
   }
 
-  /** Flush any recorded ops now (e.g. before teardown or a checkpoint). */
-  flush() {
+  /** Sends pending ops and resolves once native acks the transaction. */
+  flush(): Promise<void> {
     this.seal()
+    const seq = this.seq
+    if (!this.transport.onAck) return Promise.resolve()
+    return new Promise((resolve) => this.flushWaiters.set(seq, resolve))
   }
 
   node(type: string, props: Record<string, any>): HostNode {
@@ -117,8 +147,8 @@ export class CraieHost {
   remove(n: HostNode) {
     if (!n.mounted) return
     if (this.ready()) this.encoder.remove(n.id)
-    // TCP ordering means the remove lands before any create reusing the id.
-    this.freeIds.push(n.id)
+    // Held until the removing transaction is acknowledged, then recycled.
+    this.removing.push(n.id)
     n.mounted = false
   }
 

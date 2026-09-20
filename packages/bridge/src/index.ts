@@ -150,8 +150,9 @@ export class Root {
   renderSync(node: ReactNode) {
     reconciler.flushSyncFromReconciler(() => this.render(node))
   }
-  flush() {
-    this.host.flush()
+  /** Sends pending ops; resolves when native acks the transaction. */
+  flush(): Promise<void> {
+    return this.host.flush()
   }
 }
 
