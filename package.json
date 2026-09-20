@@ -1,0 +1,6 @@
+{
+  "name": "craie",
+  "private": true,
+  "packageManager": "pnpm@11.8.0",
+  "scripts": {}
+}

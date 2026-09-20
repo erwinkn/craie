@@ -1,0 +1,37 @@
+[package]
+name = "craie"
+description = "Experimental native desktop renderer/runtime for React, in Rust"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+winit.workspace = true
+wgpu.workspace = true
+parley.workspace = true
+swash.workspace = true
+etagere.workspace = true
+bytemuck.workspace = true
+pollster.workspace = true
+tracing.workspace = true
+taffy = { version = "=0.14.0", default-features = false, features = ["std", "flexbox"] }
+
+[dev-dependencies]
+png = "=0.18.1"
+
+# Rust examples live at the repository root (see ../../examples/).
+[[example]]
+name = "text"
+path = "../../examples/text/main.rs"
+
+[[example]]
+name = "sizes"
+path = "../../examples/sizes/main.rs"
+
+[[example]]
+name = "app"
+path = "../../examples/app/main.rs"
