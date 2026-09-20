@@ -12,11 +12,13 @@ React mutations into a general retained-mode framework? See
 ## Run it
 
 ```sh
+pnpm install   # workspace deps for packages/bridge + examples/js
+
 # native window driven by wire transactions (listens on 127.0.0.1:9470)
 cargo run --example app
 
 # React app over the socket (sidebar + messages + composer, ticking)
-bun examples/js/demo.tsx
+bun examples/js/demo.tsx           # CRAIE_PORT=9471 to pick a port
 
 # headless renders
 cargo run --example text -- --screenshot /tmp/text.png   # direct demo
