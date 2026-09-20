@@ -1,0 +1,26 @@
+{
+  "name": "@craie/bridge",
+  "version": "0.1.0",
+  "type": "module",
+  "license": "MIT OR Apache-2.0",
+  "description": "React -> Craie binary wire encoder, reconciler, and socket transport",
+  "exports": {
+    ".": "./src/index.ts",
+    "./wire": "./src/wire.ts"
+  },
+  "scripts": {
+    "test": "bun test"
+  },
+  "dependencies": {
+    "react-reconciler": "0.33.0"
+  },
+  "peerDependencies": {
+    "react": "^19.2.0"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.4.2",
+    "@types/react": "^19.2.0",
+    "@types/react-reconciler": "^0.28.0",
+    "typescript": "^5.3.0"
+  }
+}

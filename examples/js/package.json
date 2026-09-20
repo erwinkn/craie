@@ -1,0 +1,9 @@
+{
+  "name": "@craie/demo-js",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@craie/bridge": "workspace:*",
+    "react": "^19.2.0"
+  }
+}

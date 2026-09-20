@@ -126,17 +126,27 @@ impl Ui {
         self.scene.glyphs.clear();
         self.scene.clear = Some(Color(self.clear));
 
-        // (node, parent content-box origin in absolute px)
+        // (node, parent content-box origin in absolute px). A node's next
+        // sibling shares its parent origin; its first child gets the node's
+        // own content origin. Sibling-then-child keeps pre-order with no
+        // per-node allocation.
         let mut stack: Vec<(NodeId, f32, f32)> = Vec::new();
-        let roots: Vec<NodeId> = self.host.siblings(self.host.first_child(ROOT)).collect();
-        for &r in roots.iter().rev() {
-            stack.push((r, 0.0, 0.0));
+        let first_root = self.host.first_child(ROOT);
+        if !first_root.is_nil() {
+            stack.push((first_root, 0.0, 0.0));
         }
 
         while let Some((id, ox, oy)) = stack.pop() {
             let Some(node) = self.host.node(id) else {
                 continue;
             };
+            // Siblings share this node's parent origin — push the next one
+            // before the hidden check so a hidden node doesn't truncate
+            // the list.
+            let next = NodeId(node.next_sibling);
+            if !next.is_nil() {
+                stack.push((next, ox, oy));
+            }
             if node.hidden() {
                 continue;
             }
@@ -168,16 +178,9 @@ impl Ui {
                 _ => {}
             }
 
-            // Children in reverse so the stack pops in tree order.
             let first = self.host.first_child(id);
-            for c in self
-                .host
-                .siblings(first)
-                .collect::<Vec<_>>()
-                .into_iter()
-                .rev()
-            {
-                stack.push((c, cx, cy));
+            if !first.is_nil() {
+                stack.push((first, cx, cy));
             }
         }
     }

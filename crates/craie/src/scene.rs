@@ -62,7 +62,7 @@ impl GlyphInstance {
 ///
 /// Rebuilt only when paint data is dirty; the GPU upload of each buffer is
 /// tracked separately so an unchanged scene uploads nothing.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct Scene {
     pub clear: Option<Color>,
     pub quads: Vec<QuadInstance>,
