@@ -24,6 +24,9 @@ struct Page {
     /// CPU mirror of the page contents (bytes_per_pixel * size^2).
     data: Vec<u8>,
     dirty: Option<RectPx>,
+    /// Union of everything ever blitted — the region the GPU must have on
+    /// a fresh texture (grow / first sync). Never cleared.
+    used: Option<RectPx>,
 }
 
 impl Page {
@@ -32,6 +35,7 @@ impl Page {
             alloc: AtlasAllocator::new(size2(page_size as i32, page_size as i32)),
             data: vec![0; (page_size * page_size * bpp) as usize],
             dirty: None,
+            used: None,
         }
     }
 }
@@ -107,6 +111,13 @@ impl GlyphAtlas {
         (&p.data, p.dirty)
     }
 
+    /// Union of all allocated content on a page — what a fresh GPU texture
+    /// needs to receive even when the incremental dirty rect is clean.
+    pub fn page_used(&self, color: bool, page: usize) -> Option<RectPx> {
+        let pages = if color { &self.color } else { &self.alpha };
+        pages[page].used
+    }
+
     pub fn clear_dirty(&mut self) {
         for p in self.alpha.iter_mut().chain(self.color.iter_mut()) {
             p.dirty = None;
@@ -169,8 +180,10 @@ fn blit(page: &mut Page, page_size: u32, bpp: u32, slot: AtlasSlot, w: u32, h: u
         page.data[dst..dst + row_bytes].copy_from_slice(&src[src_off..src_off + row_bytes]);
     }
     let rect = RectPx::new(x as u32, y as u32, x as u32 + w, y as u32 + h);
-    match &mut page.dirty {
-        Some(d) => d.union(rect),
-        None => page.dirty = Some(rect),
+    for slot in [&mut page.dirty, &mut page.used] {
+        match slot {
+            Some(d) => d.union(rect),
+            None => *slot = Some(rect),
+        }
     }
 }

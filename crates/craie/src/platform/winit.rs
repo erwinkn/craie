@@ -23,6 +23,8 @@ pub fn run<A: App>(title: &str, logical_size: Size, app: A) -> ! {
         },
         attrs: WindowAttributes::default()
             .with_title(title)
+            // Repo rule: windows never steal focus from the user.
+            .with_active(false)
             .with_surface_size(LogicalSize::new(
                 logical_size.width as f64,
                 logical_size.height as f64,

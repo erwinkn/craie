@@ -10,8 +10,8 @@
 //! Units: everything in this module is physical pixels. Style values
 //! written by the bridge/demo are already scaled.
 //!
-//! Taffy features are restricted to `flexbox` + `calc`; block/grid/float
-//! are compiled out until Craie needs them.
+//! Taffy features are restricted to `flexbox`; block/grid/float/calc are
+//! compiled out until Craie needs them.
 
 use taffy::{
     AvailableSpace, Cache, CacheTree, Layout, LayoutFlexboxContainer, LayoutInput, LayoutOutput,

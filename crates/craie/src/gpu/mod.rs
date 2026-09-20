@@ -227,21 +227,22 @@ impl Renderer {
         atlas.clear_dirty();
     }
 
+    /// Fresh texture arrays (first sync or growth) discard every prior
+    /// upload, so each page pushes its `used` union — the allocated
+    /// region, not the whole 2048² page.
     fn upload_all(&mut self, gpu: &Gpu, atlas: &mut GlyphAtlas) {
-        let full = RectPx::new(
-            0,
-            0,
-            crate::text::ATLAS_PAGE_SIZE,
-            crate::text::ATLAS_PAGE_SIZE,
-        );
         let a = self.atlas.as_ref().unwrap();
         for p in 0..atlas.alpha_pages() {
             let (data, _) = atlas.page_bytes(false, p);
-            self.atlas_upload_bytes += Self::upload_rect(gpu, &a.alpha, p as u32, full, data, 1);
+            if let Some(rect) = atlas.page_used(false, p) {
+                self.atlas_upload_bytes += Self::upload_rect(gpu, &a.alpha, p as u32, rect, data, 1);
+            }
         }
         for p in 0..atlas.color_pages() {
             let (data, _) = atlas.page_bytes(true, p);
-            self.atlas_upload_bytes += Self::upload_rect(gpu, &a.color, p as u32, full, data, 4);
+            if let Some(rect) = atlas.page_used(true, p) {
+                self.atlas_upload_bytes += Self::upload_rect(gpu, &a.color, p as u32, rect, data, 4);
+            }
         }
         atlas.clear_dirty();
     }

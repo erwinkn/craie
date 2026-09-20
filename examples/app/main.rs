@@ -257,6 +257,10 @@ fn run_screenshot(path: &str, w: u32, h: u32, scale: f32) {
         ui.host.len()
     );
     renderer.sync_atlas(&gpu, &mut ui.text.atlas);
+    eprintln!(
+        "[craie] atlas upload: {} bytes",
+        renderer.atlas_upload_bytes
+    );
 
     let target = gpu.device.create_texture(&wgpu::TextureDescriptor {
         label: Some("screenshot"),
