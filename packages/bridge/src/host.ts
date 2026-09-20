@@ -97,7 +97,8 @@ export class CraieHost {
   private seal() {
     const seq = ++this.seq
     const buf = this.encoder.finish(seq)
-    this.encoder = new Encoder()
+    // Style ids persist across txns; reset() keeps the table.
+    this.encoder.reset()
     if (this.removing.length) {
       this.awaitingAck.set(seq, this.removing)
       this.removing = []
@@ -144,10 +145,18 @@ export class CraieHost {
     }
   }
 
-  remove(n: HostNode) {
+  /** Unlinks `n` without freeing its slot — removal unmounts it; the
+   * node's own `release` (via detachDeletedInstance) frees it. */
+  detach(n: HostNode) {
+    if (!n.mounted) return
+    if (this.ready()) this.encoder.detach(n.id)
+  }
+
+  /** React deleted `n` for good: free the native slot. The id is held
+   * until the removing transaction is acknowledged, then recycled. */
+  release(n: HostNode) {
     if (!n.mounted) return
     if (this.ready()) this.encoder.remove(n.id)
-    // Held until the removing transaction is acknowledged, then recycled.
     this.removing.push(n.id)
     n.mounted = false
   }

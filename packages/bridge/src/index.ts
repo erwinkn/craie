@@ -72,8 +72,10 @@ const config = {
     parent.root.place(parent, child, before),
   insertInContainerBefore: (root: CraieHost, child: HostNode, before: HostNode) =>
     root.place(null, child, before),
-  removeChild: (parent: HostNode, child: HostNode) => parent.root.remove(child),
-  removeChildFromContainer: (root: CraieHost, child: HostNode) => root.remove(child),
+  // Removal unlinks the subtree root here; every deleted node in the
+  // subtree then frees its own slot through detachDeletedInstance.
+  removeChild: (parent: HostNode, child: HostNode) => parent.root.detach(child),
+  removeChildFromContainer: (root: CraieHost, child: HostNode) => root.detach(child),
 
   commitUpdate: (n: HostNode, _type: string, oldProps: any, props: any) =>
     n.root.update(n, oldProps, props),
@@ -95,7 +97,7 @@ const config = {
   prepareForCommit: () => null,
   resetAfterCommit: noop,
   preparePortalMount: noop,
-  detachDeletedInstance: noop,
+  detachDeletedInstance: (n: HostNode) => n.root.release(n),
   clearContainer: noop,
   commitMount: noop,
 

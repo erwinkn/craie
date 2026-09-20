@@ -352,4 +352,14 @@ export class Encoder {
     w.at += this.opBytes.at
     return w.bytes.slice(0, w.at)
   }
+
+  /** Clears per-transaction state (strings + ops) while keeping the
+   * buffers and the style table — style definitions persist on the
+   * native side for the life of the connection. */
+  reset() {
+    this.w.at = 0
+    this.opBytes.at = 0
+    this.strings.length = 0
+    this.stringIx.clear()
+  }
 }

@@ -128,3 +128,52 @@ test("ids recycle only after native ack", async () => {
   const newId = dv.getUint32(at + 1, true)
   expect(newId).not.toBe(0) // the removed node's id stayed out of the pool
 })
+
+test("subtree deletion frees every node, ids recycle after ack", async () => {
+  const t = new FakeTransport()
+  const root = createRoot(t)
+  function App({ show }: { show: boolean }) {
+    return createElement(View, null,
+      show ? createElement(View, null,
+        createElement(Text, null, "a"),
+        createElement(Text, null, "b")) : null)
+  }
+  root.renderSync(createElement(App, { show: true }))
+  await new Promise(r => setTimeout(r, 0))
+  t.ackAll()
+  t.frames.length = 0
+
+  // Delete view + 2 texts. Expect 1 detach (top) + 3 removes, all 5-byte ops.
+  root.renderSync(createElement(App, { show: false }))
+  await new Promise(r => setTimeout(r, 0))
+  const frame = t.frames.at(-1)!
+  const dv = new DataView(frame.buffer, frame.byteOffset)
+  expect(dv.getUint32(16, true)).toBe(0) // no strings
+  const ops = (frame.length - 20) / 5
+  expect(ops).toBe(4)
+  let removes = 0
+  for (let i = 20; i < frame.length; i += 5) if (frame[i] === 0x07) removes++
+  expect(removes).toBe(3)
+
+  // After ack, remounting must reuse the 3 freed ids — no fresh id
+  // beyond 3 may appear in a create op.
+  t.ackAll()
+  t.frames.length = 0
+  root.renderSync(createElement(App, { show: true }))
+  await new Promise(r => setTimeout(r, 0))
+  const createIds: number[] = []
+  const re = t.frames.at(-1)!
+  const dv2 = new DataView(re.buffer, re.byteOffset)
+  let at = 20
+  for (let i = 0; i < dv2.getUint32(16, true); i++) at += 4 + dv2.getUint32(at, true)
+  const sizes: Record<number, number> = {
+    0x01: 6, 0x02: 9, 0x03: 13, 0x04: 9, 0x05: 13, 0x06: 5, 0x07: 5, 0x08: 6,
+  }
+  while (at < re.length) {
+    const tag = re[at]
+    if (tag === 0x01) createIds.push(dv2.getUint32(at + 1, true))
+    at += sizes[tag] ?? (() => { throw Error(`op 0x${tag.toString(16)}`) })()
+  }
+  expect(createIds.length).toBe(3)
+  expect(Math.max(...createIds)).toBeLessThanOrEqual(3)
+})
