@@ -42,8 +42,6 @@ What this says:
 
 ## Text stack: Parley + Swash + etagere
 
-## Text stack: Parley + Swash + etagere
-
 Chosen over GPUI's cosmic-text-style approach because the split matches
 what Craie owns: Parley does shaping, bidi, and line breaking; Swash does
 rasterization only; Craie owns the cache key and the atlas. The seams are
@@ -74,12 +72,10 @@ positions rasterize at the fractional offset. Rounding is `round()` not
 
 ### Atlas upload cost
 
-First `sync_atlas` uploads whole pages: 1 alpha page (4 MiB) + 1 color
-page (16 MiB) = 20 MiB in the demo's first frame. Subsequent updates
-upload only etagere dirty rects. The initial whole-page upload is
-wasteful (the pages are mostly empty) and could be restricted to the
-union of allocated rects. Noted, not fixed; it costs one large copy at
-startup.
+Each page tracks a `used` union of everything ever blitted. Fresh
+texture arrays (first sync, page-array growth) upload `used` per page —
+60 KiB on the wire-demo's first frame, down from 20 MiB of whole pages.
+Steady-state updates upload only etagere dirty rects.
 
 ## Renderer
 
@@ -160,14 +156,16 @@ per-node stores (`Cache`, unrounded `Layout`, final `LayoutData`).
 
 ## Verification so far
 
-- `cargo test`: 12 lib tests (host + wire) + 1 cross-language fixture
-  test.
-- `bun test` in `packages/bridge`: 5 tests (golden wire bytes, style
-  mask round-trip, reconciler mount/update op emission).
+- `cargo test`: 14 lib tests (host, wire, ui: resize reflow +
+  hidden-sibling paint) + 1 cross-language fixture test.
+- `bun test` in `packages/bridge`: 6 tests (golden wire bytes, style
+  mask round-trip, reconciler mount/update ops, ack-gated id recycling).
 - `cargo run --example text -- --screenshot`: multilingual render incl.
   RTL Arabic, CJK, color emoji — verified visually.
 - `cargo run --example app -- --screenshot`: wire-built UI rendered
   through the full apply -> Taffy -> Parley -> GPU path.
+- Ack round-trip verified over the live socket: `Root.flush()` resolves
+  only after the app applies the transaction.
 - Idle is by construction (`Wait` + redraw only on request). The bridge
   path wakes the loop only when a frame arrives; measured indirectly —
   between ticks the app logs nothing.

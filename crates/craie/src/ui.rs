@@ -89,8 +89,14 @@ impl Ui {
     /// untouched subtrees — but callers should still gate on
     /// `needs_paint`.
     pub fn render(&mut self, size: Size) -> &Scene {
-        let roots: Vec<NodeId> = self.host.siblings(self.host.first_child(ROOT)).collect();
-        for root in roots {
+        let mut root = self.host.first_child(ROOT);
+        while !root.is_nil() {
+            // Read the next sibling before compute borrows the host.
+            let next = self
+                .host
+                .node(root)
+                .map(|n| NodeId(n.next_sibling))
+                .unwrap_or(NodeId::NIL);
             layout::compute(
                 &mut self.host,
                 &mut self.layouts,
@@ -100,6 +106,7 @@ impl Ui {
                 root,
                 size,
             );
+            root = next;
         }
         self.paint();
         self.host.clear_paint_dirty();
@@ -183,5 +190,98 @@ impl Ui {
                 stack.push((first, cx, cy));
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::wire::Encoder;
+
+    const KIND_VIEW: u8 = 0;
+    const KIND_TEXT: u8 = 1;
+    const NIL: u32 = u32::MAX;
+
+    fn txn() -> Vec<u8> {
+        let mut enc = Encoder::new();
+        let mut s = taffy::Style::default();
+        s.display = taffy::Display::Flex;
+        // Column container: children get the container width as definite
+        // cross-axis space, which is what wraps text to the viewport.
+        s.flex_direction = taffy::FlexDirection::Column;
+        s.size = taffy::Size {
+            width: taffy::Dimension::percent(1.0),
+            height: taffy::Dimension::percent(1.0),
+        };
+        enc.style(1, &s);
+        enc.create(0, KIND_VIEW);
+        enc.set_style(0, 1);
+        enc.place(NIL, 0, NIL);
+        enc.create(1, KIND_TEXT);
+        enc.set_text(1, &"word ".repeat(60));
+        enc.text_props(1, 20.0, 0xFFFF_FFFF);
+        enc.place(0, 1, NIL);
+        enc.finish(1)
+    }
+
+    /// The resize path: no mutation arrives, `invalidate_layout` alone
+    /// must cause text to rewrap to the new available width.
+    #[test]
+    fn resize_reflows_text() {
+        let mut ui = Ui::new(1.0);
+        ui.apply(&txn()).unwrap();
+        ui.render(Size::new(1600.0, 800.0));
+        let wide = ui.text_layout(NodeId(1)).unwrap().len();
+
+        ui.invalidate_layout();
+        ui.render(Size::new(300.0, 800.0));
+        let narrow = ui.text_layout(NodeId(1)).unwrap().len();
+
+        assert!(
+            narrow > wide,
+            "narrower viewport must wrap to more lines: {wide} -> {narrow}"
+        );
+    }
+
+    /// Hidden subtrees emit nothing but don't truncate siblings.
+    #[test]
+    fn hidden_skips_paint_keeps_siblings() {
+        let mut enc = Encoder::new();
+        let mut s = taffy::Style::default();
+        s.display = taffy::Display::Flex;
+        s.size = taffy::Size {
+            width: taffy::Dimension::percent(1.0),
+            height: taffy::Dimension::percent(1.0),
+        };
+        enc.style(1, &s);
+        enc.create(0, KIND_VIEW);
+        enc.set_style(0, 1);
+        enc.place(NIL, 0, NIL);
+        // The middle node is hidden; "after" must still paint — a hidden
+        // node must not truncate its sibling chain.
+        for (id, text) in [(2u32, "before"), (3, "hidden"), (4, "after")] {
+            enc.create(id, KIND_TEXT);
+            enc.set_text(id, text);
+            enc.text_props(id, 20.0, 0xFFFF_FFFF);
+            if id == 3 {
+                enc.hidden(id, true);
+            }
+            enc.place(0, id, NIL);
+        }
+        let buf = enc.finish(1);
+        let mut ui = Ui::new(1.0);
+        ui.apply(&buf).unwrap();
+        let hidden_count = ui.render(Size::new(800.0, 600.0)).glyphs.len();
+        assert!(hidden_count > 0);
+
+        let mut enc = Encoder::new();
+        enc.hidden(3, false);
+        let buf = enc.finish(2);
+        ui.apply(&buf).unwrap();
+        let shown_count = ui.render(Size::new(800.0, 600.0)).glyphs.len();
+        assert!(
+            shown_count > hidden_count,
+            "unhiding node 3 must add its glyphs: {hidden_count} -> {shown_count}"
+        );
     }
 }
