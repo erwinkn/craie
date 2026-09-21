@@ -76,6 +76,9 @@ pub struct Layouts {
     cache: Vec<Cache>,
     unrounded: Vec<Layout>,
     rects: Vec<LayoutData>,
+    /// Taffy cache behavior, for experiments: hits/misses since `new`.
+    pub cache_hits: u64,
+    pub cache_misses: u64,
 }
 
 fn row_mut<T: Default + Clone>(rows: &mut Vec<T>, i: usize) -> &mut T {
@@ -93,6 +96,8 @@ impl Layouts {
             cache: Vec::new(),
             unrounded: Vec::new(),
             rects: Vec::new(),
+            cache_hits: 0,
+            cache_misses: 0,
         }
     }
 
@@ -180,6 +185,36 @@ pub fn compute(
     };
     compute_root_layout(&mut view, to_taffy(root), space);
     round_layout(&mut view, to_taffy(root));
+}
+
+/// `compute` instrumented: returns (root-layout ms, rounding ms) so
+/// experiments can price Taffy's rounding pass separately.
+pub fn compute_timed(
+    host: &mut Host,
+    store: &mut Layouts,
+    text: &mut TextEngine,
+    texts: &mut Vec<Option<MeasuredText>>,
+    root: NodeId,
+    available: Size,
+) -> (f64, f64) {
+    invalidate(host, store);
+    let mut view = TreeView {
+        host,
+        store,
+        text,
+        texts,
+    };
+    let space = TSize {
+        width: AvailableSpace::Definite(available.width),
+        height: AvailableSpace::Definite(available.height),
+    };
+    let t = std::time::Instant::now();
+    compute_root_layout(&mut view, to_taffy(root), space);
+    let compute_ms = t.elapsed().as_secs_f64() * 1000.0;
+    let t = std::time::Instant::now();
+    round_layout(&mut view, to_taffy(root));
+    let round_ms = t.elapsed().as_secs_f64() * 1000.0;
+    (compute_ms, round_ms)
 }
 
 /// Clears the Taffy cache for every node in the host's dirty queue and all
@@ -383,7 +418,13 @@ impl LayoutFlexboxContainer for TreeView<'_> {
 
 impl CacheTree for TreeView<'_> {
     fn cache_get(&mut self, node_id: TaffyId, input: &LayoutInput) -> Option<LayoutOutput> {
-        row_mut(&mut self.store.cache, from_taffy(node_id).0 as usize).get(input)
+        let hit = row_mut(&mut self.store.cache, from_taffy(node_id).0 as usize).get(input);
+        if hit.is_some() {
+            self.store.cache_hits += 1;
+        } else {
+            self.store.cache_misses += 1;
+        }
+        hit
     }
 
     fn cache_store(&mut self, node_id: TaffyId, input: &LayoutInput, output: LayoutOutput) {

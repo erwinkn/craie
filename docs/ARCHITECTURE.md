@@ -22,11 +22,11 @@ crates/node       N-API: NativeClient.submit -> Session queue -> wake
 bridge.rs         bounded commit queue + ack queue (Session)
 wire.rs           flat op stream decode, applied to the host
 ui.rs             facade: apply -> layout -> paint, one scene
-host/             retained tree: 40-byte node headers in a Vec<NodeHeader>
+host/             retained tree: 20-byte node headers in a Vec<NodeHeader>
 layout/           Taffy low-level traits over host storage + text measure
-scene.rs          flat paint data: Vec<QuadInstance>, Vec<GlyphInstance>
+scene.rs          one ordered Vec<Instance> — quads and glyphs unified
 text/             Parley layout -> Swash raster -> glyph cache -> atlas
-gpu/              wgpu: 2 instanced pipelines, growable buffers, atlas arrays
+gpu/              wgpu: 1 instanced pipeline, growable buffer, atlas arrays
 platform/         winit window, Wait control flow, redraw on request
 app.rs            the shared host app: session -> ui -> surface -> present
 ```
@@ -59,13 +59,18 @@ native `taffy::Style` record. The format and a JS fixture are checked by
 
 ## Retained host (`host/`)
 
-`NodeHeader` is 40 bytes: five sibling/parent links, `child_count`, an
-`aux` row index into per-kind side tables, an interned `style` id, a
-`kind` index (top bit = hidden), a `generation` counter, and dirty
-flags. Ids are JS-assigned and index the arena directly; free slots
-carry `EMPTY_KIND`; `generation` bumps on reuse so stale references can
-never reach the new occupant. Children are a doubly-linked sibling list
-in the header — mutations allocate nothing.
+`NodeHeader` is 20 bytes: a `parent` link, an `aux` row index into
+per-kind side tables, a wire `style` id, a `kind` index (top bit =
+hidden), a `generation` counter, and dirty flags. Ids are JS-assigned
+and index the arena directly; free slots carry `EMPTY_KIND`;
+`generation` bumps on reuse so stale references can never reach the new
+occupant. Children live in a `Vec<NodeId>` side table parallel to the
+arena (plus a `roots` list) — indexed access for Taffy, no sibling
+links, empty vecs allocate nothing.
+
+Dirty tracking is a queue: a LAYOUT transition pushes the node onto
+`layout_dirty` once, and the layout pass drains it and walks ancestors —
+no arena-wide flag scans.
 
 Sparse per-kind data lives in side tables addressed by `aux`: `TextRow`
 (text, font size, color) for `TEXT`, `ViewRow` (background color) for
@@ -75,15 +80,19 @@ Sparse per-kind data lives in side tables addressed by `aux`: `TextRow`
 
 Taffy 0.14 is used through its low-level traits (`TraversePartialTree`,
 `LayoutPartialTree`, `CacheTree`, `RoundTree`,
-`LayoutFlexboxContainer`) — it reads children and interned styles
-straight out of the host and writes results into `Layouts`, a parallel
-per-node store (cache, unrounded layout, final rect + content-box
-offset). There is no second authoritative tree.
+`LayoutFlexboxContainer`) — it reads children and wire styles straight
+out of the host and writes results into `Layouts`, a parallel per-node
+store (cache, unrounded layout, final rect + content-box offset). There
+is no second authoritative tree.
+
+All of this is in **logical units**: styles, wrap widths, rects. The
+display scale enters only at emit, where glyph origins and raster sizes
+convert to physical pixels, so a monitor-scale change never reshapes.
 
 Dirty propagation is explicit: a node's Taffy cache key covers only its
 own inputs, so a mutation clears the cache on the node and every
-ancestor (`invalidate`). `clear_all_caches` covers style redefinition
-and resizes.
+ancestor (`invalidate`, driven by the host's dirty queue).
+`clear_all_caches` covers style redefinition and resizes.
 
 TEXT leaves are measured through Parley inside the leaf measure
 callback; the resulting `Layout<Color>` is retained per node
@@ -93,11 +102,16 @@ text or its wrap width changed.
 ## Paint (`ui.rs`, `scene.rs`)
 
 `Ui::render` computes layout for each root, then does a pre-order DFS
-over sibling links accumulating parent content-box origins — no per-node
-allocation. Views with a non-transparent background emit one
-`QuadInstance`; text nodes emit `GlyphInstance` rows from their retained
-Parley layout. The scene is three flat vectors rebuilt in place; the GPU
-upload of each buffer is tracked separately.
+accumulating parent content-box origins (logical units). Nodes whose
+border box misses the viewport emit nothing; children are still
+visited. The scene is ONE `Vec<Instance>` in document order — painter
+order is vector order — uploaded to a single growable buffer and drawn
+in a single draw call.
+
+Each text node keeps an `EmittedText` batch: physical-pixel instances
+keyed on scale, origin, and color. An unchanged repaint replays the
+batch with zero shaping, rasterization, or glyph-cache lookups; a
+color-only change rewrites instance colors in place.
 
 ## Text pipeline (`text/`)
 
@@ -110,8 +124,10 @@ rects; GPU upload writes only dirty regions.
 
 ## GPU (`gpu/`)
 
-One device, two instanced pipelines, growable vertex buffers, atlas
-texture arrays. Two draw calls per frame regardless of node count.
+One device, one instanced pipeline, one growable vertex buffer, atlas
+texture arrays. One draw call per frame regardless of node count —
+`Instance` unifies rects (`FLAG_SOLID`, no fetch) and glyphs (atlas
+sample), so blending order follows instance order.
 
 ## Platform (`platform/`), bridge (`bridge.rs`), and node (`crates/node`)
 
@@ -151,6 +167,7 @@ after the frame is confirmed.
 
 No events/hit-testing, no scrolling, no text input, no animation, no
 accessibility, no multi-window, no `<Image>`. Per-subtree paint damage
-and layout damage regions are not implemented — `paint` re-emits the
-whole scene and the root flex pass re-runs on any change (see
-EXPERIMENTS for what that costs at 5,000 rows).
+and layout damage regions are not implemented — `paint` re-walks the
+tree each repaint (emitting only viewport-visible instances) and the
+root flex pass re-runs on any change (see EXPERIMENTS for what that
+costs at 5,000 rows).

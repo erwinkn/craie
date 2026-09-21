@@ -1,5 +1,5 @@
 //! Text subsystem: Parley layout -> Swash raster -> Craie cache/atlas ->
-//! flat `GlyphInstance` rows.
+//! flat `Instance` rows in the unified scene.
 //!
 //! Coarse resources (`FontContext`, `LayoutContext`, `ScaleContext`) are
 //! created once and reused; nothing here is per-paragraph.

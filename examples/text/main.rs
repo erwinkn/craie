@@ -129,7 +129,7 @@ fn paragraphs() -> Vec<Para> {
         )],
     ));
 
-    let code = "let quad = QuadInstance { pos, size, color }; // monospace";
+    let code = "let inst = Instance::quad(x, y, w, h, color); // monospace";
     let mut code_para = para(
         code,
         14.0,

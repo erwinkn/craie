@@ -355,7 +355,7 @@ export class Encoder {
 
   /** Clears per-transaction state (strings + ops) while keeping the
    * buffers and the style table — style definitions persist on the
-   * native side for the life of the connection. */
+   * native side for the life of the session. */
   reset() {
     this.w.at = 0
     this.opBytes.at = 0

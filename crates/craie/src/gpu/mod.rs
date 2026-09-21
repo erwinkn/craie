@@ -18,7 +18,7 @@ use crate::geom::RectPx;
 use crate::scene::Scene;
 use crate::text::GlyphAtlas;
 
-/// Uniform shared by both pipelines: surface size in physical pixels.
+/// Uniform for the scene pipeline: surface size in physical pixels.
 #[repr(C)]
 #[derive(Clone, Copy, Pod, bytemuck::Zeroable)]
 struct ViewportUniform {

@@ -13,7 +13,7 @@ use crate::geom::Size;
 
 /// Cross-thread wake handle for the event loop. Clone it freely; `wake`
 /// pokes a `Wait`-state loop so the main thread can drain work queues
-/// (e.g. wire transactions arriving over the bridge socket).
+/// (e.g. transactions submitted to the bridge `Session`).
 #[derive(Clone)]
 pub struct Wake {
     pub(crate) proxy: ::winit::event_loop::EventLoopProxy,
@@ -84,8 +84,8 @@ pub trait App: 'static {
     /// background threads (bridge listener, timers) interrupt `Wait`.
     fn ready(&mut self, window: &Window, wake: &Wake);
 
-    /// A background thread called `Wake::wake`. Drain your queues here.
-    /// Return true to exit the event loop.
+    /// A `Wake::wake` fired — typically a `Session` submit. Drain your
+    /// queues here. Return true to exit the event loop.
     fn woke(&mut self, _window: &Window) -> bool {
         false
     }

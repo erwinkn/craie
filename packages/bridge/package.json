@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "type": "module",
   "license": "MIT OR Apache-2.0",
-  "description": "React -> Craie binary wire encoder, reconciler, and socket transport",
+  "description": "React -> Craie binary wire encoder, reconciler, and native transport",
   "exports": {
     ".": "./src/index.ts",
     "./wire": "./src/wire.ts"

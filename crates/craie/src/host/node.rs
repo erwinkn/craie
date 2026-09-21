@@ -56,8 +56,8 @@ pub struct TextRow {
 const DEFAULT_FONT_SIZE: f32 = 14.0;
 const DEFAULT_COLOR: u32 = 0xFFFF_FFFF;
 
-/// Content of a VIEW-kind node: paint data only. Layout inputs live in the
-/// interned style; the flex result lives in `Layouts`.
+/// Content of a VIEW-kind node: paint data only. Layout inputs live in
+/// the wire-addressed style; the flex result lives in `Layouts`.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct ViewRow {
     /// Background fill, 0xRRGGBBAA. Alpha 0 paints nothing.
@@ -109,7 +109,7 @@ pub struct NodeHeader {
     pub parent: u32,
     /// Row in this kind's side table. `u32::MAX` when the kind stores no row.
     pub aux: u32,
-    /// Interned style handle; `u32::MAX` when unstyled.
+    /// Wire style id; `u32::MAX` when unstyled.
     pub style: u32,
     /// Kind index with the `HIDDEN` top bit; `EMPTY_KIND` marks a free slot.
     kind: u16,

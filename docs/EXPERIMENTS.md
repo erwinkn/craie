@@ -6,38 +6,75 @@ reason it landed.
 ## 5,000-row benchmark (`examples/bench`, release build)
 
 A root column with 5,000 rows, each a styled view containing one text
-node (10,001 nodes total). Numbers on this machine (M-series, 1600x1000
-@2x):
+node (10,001 nodes total). Numbers on this machine (Apple M5 Max,
+1600x1000 @2x), phases measured independently:
 
 | phase                        | time      | allocs  | notes |
 |------------------------------|-----------|---------|-------|
-| encode txn (Rust side)       | 10.5 ms   | 10,031  | JS-side analogue |
+| encode txn (Rust side)       | 11.3 ms   | 10,031  | JS-side analogue |
 | wire bytes                   | 683 KB    |         | ~68 B/node incl. strings |
-| decode + apply               | 0.47 ms   | 5,057   | ~47 ns/node — strings + rows |
-| layout + paint, cold         | 456 ms    | 516k    | Parley shapes 5,000 paragraphs |
-| layout + paint, warm/clean   | 205 ms    | 5,004   | re-runs root flex + re-emits 222k glyphs |
-| apply 500 `set_text`         | 0.02 ms   | 9       | |
-| layout + paint, 500 updates  | 261 ms    | 52k     | 500 re-measures + root relayout |
+| decode + apply               | 0.54 ms   | 10,095  | ~54 ns/node — strings + rows |
+| layout, cold                 | 216.6 ms  | 476k    | Taffy flex + Parley shapes 5,000 leaves |
+| — compute vs rounding        | 215.8 / 0.07 ms |  | rounding is free |
+| paint + emit, cold           | 1.81 ms   | 263     | 1,101 instances after viewport culling |
+| paint, warm unchanged        | 0.04 ms   | 12      | replays retained EmittedText batches |
+| layout, warm unchanged       | 0.06 ms   | 0       | Taffy cache absorbs the whole tree |
+| Taffy cache                  | 10,001 hits / 75,001 misses | | cold-run counters |
+| apply 500 `set_text`         | 0.02 ms   | 17      | |
+| layout, 500 dirty            | 10.7 ms   | 44.5k   | 500 re-measures + root relayout |
+| paint, 500 dirty             | 0.19 ms   | 33      | only dirty text re-emits |
+| commit copy + drain          | 0.01 ms   | 3       | 683 KB txn through Session |
+| atlas upload                 | 0.14 ms   | 47      | 105,728 bytes |
+| draw submit, first           | 0.66 ms   | 85      | buffer upload + 1 draw call |
+| GPU completion, first        | 21.8 ms   | 3       | first-submit warmup |
+| draw submit, warm            | 0.18 ms   | 51      | |
+| GPU completion, warm         | 0.70 ms   | 0       | |
 
-Retained state: 10,001 nodes x 40 B = 390 KiB of headers; live heap ~70
-MB, dominated by 5,000 retained Parley `Layout`s (shaping output is the
-heavy retained state, not our rows) and the 222k-row glyph instance
-vector.
+Retained state: 10,001 nodes x 20 B = 195 KiB of headers; live heap ~35
+MiB, dominated by 5,000 retained Parley `Layout`s (shaping output is the
+heavy retained state, not our rows).
+
+## Marbre-like transcript (2,000 messages + 300 stream ticks)
+
+A chat-shaped tree — sidebar, 2,000 message rows with mixed text, a
+composer — followed by 300 single-message-append transactions:
+
+| phase                        | time      | allocs  |
+|------------------------------|-----------|---------|
+| mount txn                    | 372 KB    |         |
+| decode + apply               | 0.54 ms   | 8,595   |
+| layout, cold                 | 125.5 ms  | 313k    |
+| paint + emit, cold           | 1.32 ms   | 306     |
+| paint, warm unchanged        | 0.03 ms   | 10      |
+| 300 stream txns total        | 203 ms    | 74k     |
+| — per-txn avg: apply         | 0.000 ms  |         |
+| — per-txn avg: layout        | 0.645 ms  |         |
+| — per-txn avg: paint         | 0.031 ms  |         |
 
 What this says:
 
-- **The wire path is free.** Decode+apply is 0.5 ms for 10k nodes and
-  0.02 ms for 500 updates. The retained host is not the bottleneck.
-- **Layout is incremental but paint is not.** A 500-row update re-runs
-  the root flex pass (Taffy caches the leaves) and the scene rebuild
-  re-emits every glyph instance. At list scale, the ~200 ms warm repaint
-  is the dominant cost and it is *O(visible + invisible nodes)* — a
-  real app needs a viewport/virtualized list or subtree damage tracking
-  before this matters, which is exactly what a Marbre-like UI would need.
-- **Retained Parley layouts are the memory floor.** ~70 MB live for 5k
-  short rows. If text memory matters, keep shaped layouts only for the
-  visible window.
-- **encode 10 ms for 10k nodes in Rust**; the TS encoder will differ but
+- **The wire path is free.** Decode+apply is 0.5 ms for 10k nodes; the
+  in-process session copy is 0.01 ms for a 683 KB commit. A bounded
+  queue beats a shared-memory ring at these sizes — no further transport
+  work is justified.
+- **Taffy layout is the whole story.** Cold layout is ~120–220 ms for
+  10k nodes; incremental layout is ~0.65 ms per streaming append. Paint,
+  emit, upload, and GPU completion are all noise next to it. Any future
+  optimization effort goes to layout (or to not laying out — see below).
+- **Warm frames cost nothing.** An unchanged repaint replays retained
+  `EmittedText` batches: 0.03–0.04 ms, ~10 allocs, zero shaping,
+  rasterization, or glyph-cache lookups. Taffy's cache makes warm
+  layout 0.06 ms. Keeping the cache is justified; replacing it buys
+  nothing.
+- **Retained Parley layouts are the memory floor.** ~35 MiB live for
+  5k–10k short rows. The 20 B header is 0.5% of that. If text memory
+  matters, the fix is windowing shaped layouts to the visible range —
+  not shrinking our own storage.
+- **Viewport culling already does the heavy lifting.** 1,101 instances
+  reach the GPU from a 10k-node tree. The remaining cost is that
+  *layout still visits every node*; a virtualized list or subtree
+  damage tracking is the next lever when transcript-scale UIs land.
+- **encode 11 ms for 10k nodes in Rust**; the TS encoder differs but
   the op count is the same.
 
 ## Text stack: Parley + Swash + etagere
@@ -54,6 +91,16 @@ styled runs): 41 glyph runs, 443 glyph instances, 300 rasterizations on
 first emit. The cache absorbs the rest. Re-emit after reflow rasterizes
 nothing new.
 
+Shaped Parley layouts are retained per text node (`MeasuredText`, 328 B
+slot + heap). A dirty text re-measures inside the leaf callback; a clean
+text in a relayout re-emits without reshaping. On top of that, each node
+keeps an `EmittedText` batch — physical-pixel instances keyed on
+(scale, origin, color) — so an unchanged repaint does zero text work,
+and a color-only change rewrites instance colors in place. Color is not
+part of the layout key; `set_color` marks TEXT-free paint dirty only.
+
+Swash scalers are created lazily — a cache hit never constructs one.
+
 ### ICU4X segmentation
 
 Parley warns `No segmentation model for complex script: Chinese/Japanese`
@@ -68,28 +115,37 @@ wrapping until the demo needs it. Deferred.
 The cache quantizes glyph offsets to quarter pixels (2 bits per axis,
 baked into `GlyphKey`). Whole-pixel positions share a bitmap; fractional
 positions rasterize at the fractional offset. Rounding is `round()` not
-`trunc()`, so the bucket 4 case folds into the next integer.
+`trunc()`, so the bucket 4 case folds into the next integer. Coord
+interning is a small linear-scan table — no per-run `Box` allocations.
 
 ### Atlas upload cost
 
 Each page tracks a `used` union of everything ever blitted. Fresh
 texture arrays (first sync, page-array growth) upload `used` per page —
 60 KiB on the wire-demo's first frame, down from 20 MiB of whole pages.
-Steady-state updates upload only etagere dirty rects.
+Steady-state updates upload only etagere dirty rects. Measured at bench
+scale: 0.14 ms and 105 KB for the whole first frame.
 
 ## Renderer
 
-Two instanced draw calls per frame regardless of node count: quads
-(`TriangleStrip`, `draw(0..4, n)`) and glyphs. Instance rows are
-`Pod` structs (`QuadInstance` 20 B, `GlyphInstance` 40 B) uploaded into
-growable vertex buffers. No per-node GPU objects, no draw call per node.
+One instanced draw call per frame regardless of node count. Quads and
+glyphs share a 40-byte `Instance` row in a single document-ordered
+`Vec` — `FLAG_SOLID` marks a rect (no atlas fetch), `FLAG_COLOR` a color
+bitmap glyph — uploaded to one growable vertex buffer. Paint order is
+vector order; the old quad-then-glyph split (glyphs could never paint
+under a later quad) is gone. Nodes outside the viewport emit nothing.
+
+Measured: 0.18 ms warm submit + 0.70 ms warm completion. The 21.8 ms
+first-frame GPU completion is Metal warmup, not steady state. wgpu adds
+no measurable overhead at this scene size.
 
 ### wgpu 30 API changes that bit
 
 - `Surface::get_current_texture` returns a `CurrentSurfaceTexture` enum
   (Success / Suboptimal / Timeout / Occluded / Outdated / Lost /
-  Validation), not `Result`. Present happens on `Drop`, not
-  `present()`.
+  Validation), not `Result`. Present is explicit —
+  `queue.present(frame)` after `window.pre_present_notify()`; dropping
+  the frame discards it.
 - Pipeline layouts take `Option<&BindGroupLayout>` entries and vertex
   buffers take `Option<VertexBufferLayout>`.
 - `RenderPassDescriptor` has a `multiview_mask` field.
@@ -115,20 +171,28 @@ Copied from gpui-react commit `46cb47d` ("schema-driven binary wire and
 pack native rows"), which measured ~0.7 ms native mount of 5,000 nodes
 and cut the wire from ~825 KB to ~435 KB vs JSON.
 
-`NodeHeader` is 40 bytes (see `cargo run --example sizes`). The main
-differences from a naive `Rc`-tree: JS-assigned dense ids index the arena
-directly, `EMPTY_KIND` marks free slots instead of a native free list,
-`generation` makes stale references safe, and children are sibling links
-in the header so mutations allocate nothing.
+`NodeHeader` is 20 bytes: `parent` link, `aux` side-table row, wire
+`style` id, `kind` index (+hidden bit), `generation`, dirty flags. Ids
+are JS-assigned and index the arena directly; `EMPTY_KIND` marks free
+slots; `generation` bumps on reuse so stale references can never reach
+the new occupant. Children live in a `Vec<NodeId>` side table (plus a
+`roots` list): indexed O(1) access for Taffy, no sibling links, empty
+vecs allocate nothing.
 
-Measured: decode+apply of the 10k-node mount txn takes 0.47 ms — the
-packed host is not where frame time goes.
+Dirty tracking is a queue, not a scan: a LAYOUT transition pushes the
+node onto `layout_dirty` once; the layout pass drains it and walks
+ancestors. Local updates never touch the other 9,999 nodes.
+
+Measured: decode+apply of the 10k-node mount txn takes 0.54 ms; 500
+text updates apply in 0.02 ms.
 
 ## Taffy integration
 
 Taffy runs over the host through its low-level traits; it never owns a
-node. `Layouts` holds interned `taffy::Style`s plus three parallel
-per-node stores (`Cache`, unrounded `Layout`, final `LayoutData`).
+node. `Layouts` holds the decoded `taffy::Style`s indexed by wire id —
+JS already dedupes styles, so there is no native interning pass — plus
+three parallel per-node stores (`Cache`, unrounded `Layout`, final
+`LayoutData`).
 
 - The measure callback receives content-box `AvailableSpace` — wrap
   width is `available.width` when definite, no padding subtraction
@@ -136,10 +200,17 @@ per-node stores (`Cache`, unrounded `Layout`, final `LayoutData`).
 - A leaf whose cache key misses gets re-measured; the retained Parley
   layout is keyed on (text dirty | wrap width bits), so unchanged text
   in a relayout emits without reshaping.
-- Dirty = flag on the node + walk ancestors clearing their Taffy caches
-  (a node's cache key doesn't include children).
+- Dirty = bit on the node + queue push + walk ancestors clearing their
+  Taffy caches (a node's cache key doesn't include children). Text
+  color does NOT set layout-dirty; text content and font do.
 - `layout.location` is relative to the parent's *content* box; paint
   accumulates `parent.content_origin` (border + padding) while walking.
+- Cache behavior measured: 10,001 hits / 75,001 misses on the cold run;
+  warm unchanged layout is 0.06 ms. Rounding is 0.07 ms of a 216 ms
+  pass — `RoundTree` is free. The cache stays.
+- All coordinates are logical points; the display scale enters only at
+  emit, where glyph origins and raster sizes go physical. A scale change
+  invalidates emitted batches, not shaped layouts.
 
 ## Wire + JS bridge
 
@@ -147,25 +218,31 @@ per-node stores (`Cache`, unrounded `Layout`, final `LayoutData`).
   there is no schema negotiation. The JS encoder and Rust decoder are
   pinned to the same constants by `tests/wire_fixture.rs` (fixture
   generated by `packages/bridge/scripts/gen-fixture.ts`).
-- `queueMicrotask` seals one transaction per commit — React batches
-  inside a commit already, so a commit maps to exactly one socket frame.
-- E2E verified: `cargo run --example app` + `bun examples/js/demo.tsx`
-  renders a Marbre-style chat layout (sidebar, message list, composer)
-  ticking once a second; each tick is one ~200-byte transaction applied
-  and painted once.
+- `queueMicrotask` seals one transaction per commit, and a commit maps
+  to exactly one `Session::submit` — one copied `Vec<u8>` into a bounded
+  queue (256 txns / 4 MiB), one `Wake` to the event loop.
+- Ack is a `u64` seq through the session's condvar; `recv_acks` blocks
+  the ack task until seqs exist. JS recycles removed ids only after
+  their txn's seq acks. No sockets, no shared memory, no polling.
+- Commit copy measured: 0.01 ms for a 683 KB transaction. A ring buffer
+  would save nothing measurable.
+- E2E verified: `bun examples/js/host.ts` runs React in a worker,
+  submits through `craie-node` (N-API), wakes the winit loop, applies,
+  renders, presents, acks.
 
 ## Verification so far
 
-- `cargo test`: 14 lib tests (host, wire, ui: resize reflow +
-  hidden-sibling paint) + 1 cross-language fixture test.
-- `bun test` in `packages/bridge`: 6 tests (golden wire bytes, style
-  mask round-trip, reconciler mount/update ops, ack-gated id recycling).
+- `cargo test`: 17 lib tests (host, wire, ui, layout) + 1 cross-language
+  fixture test.
+- `bun test` in `packages/bridge`: 7 tests, 49 assertions (golden wire
+  bytes, style mask round-trip, reconciler mount/update ops, ack-gated
+  id recycling).
 - `cargo run --example text -- --screenshot`: multilingual render incl.
   RTL Arabic, CJK, color emoji — verified visually.
 - `cargo run --example app -- --screenshot`: wire-built UI rendered
-  through the full apply -> Taffy -> Parley -> GPU path.
-- Ack round-trip verified over the live socket: `Root.flush()` resolves
-  only after the app applies the transaction.
+  through the full apply -> Taffy -> Parley -> GPU path. Ordered paint
+  verified (code background under monospace text).
+- Ack round-trip verified through the session: `Root.flush()` resolves
+  only after the native side applies the transaction.
 - Idle is by construction (`Wait` + redraw only on request). The bridge
-  path wakes the loop only when a frame arrives; measured indirectly —
-  between ticks the app logs nothing.
+  wakes the loop only when a commit lands; between ticks nothing runs.

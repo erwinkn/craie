@@ -112,6 +112,25 @@ impl Ui {
         }
     }
 
+    /// `layout` instrumented: returns (root-layout ms, rounding ms).
+    pub fn layout_timed(&mut self, size: Size) -> (f64, f64) {
+        let mut total = (0.0, 0.0);
+        for i in 0..self.host.child_count(ROOT) {
+            let root = self.host.child_at(ROOT, i);
+            let (c, r) = layout::compute_timed(
+                &mut self.host,
+                &mut self.layouts,
+                &mut self.text,
+                &mut self.texts,
+                root,
+                size,
+            );
+            total.0 += c;
+            total.1 += r;
+        }
+        total
+    }
+
     /// Paint phase only: rebuilds the flat scene at the current layout.
     /// `viewport` is the logical viewport for culling.
     pub fn paint(&mut self, viewport: Size) {

@@ -1,6 +1,5 @@
 //! Compact paint representation: the flat display data produced from the
-//! retained host (or, in milestone 0, directly from a laid-out text scene)
-//! and consumed by the wgpu renderer.
+//! retained host and consumed by the wgpu renderer.
 //!
 //! One node must never imply one GPU resource or one draw call. Everything
 //! here is a row in a `Vec` destined for a shared instance buffer.

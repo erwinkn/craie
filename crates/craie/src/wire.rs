@@ -10,8 +10,8 @@
 //!
 //! Strings come first so ops can reference them by index. Ops are a flat
 //! stream of u8-tagged records with positional fields — no names, no
-//! nesting. Decoding borrows string bytes from the buffer; nothing is
-//! copied except interned styles.
+//! nesting. Decoding borrows string bytes from the buffer; the only
+//! owned copies are the `taffy::Style`s stored under their wire ids.
 //!
 //! A `style` op carries a u64 presence mask followed by fields in schema
 //! order (see `fields` below). Today the encoders write full records; the

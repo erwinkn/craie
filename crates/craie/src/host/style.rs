@@ -1,6 +1,5 @@
-/// Interned style handle. Style *storage* lands with the Taffy milestone:
-/// the plan is a compact common style + side tables for sparse fields,
-/// not `taffy::Style` per node.
+/// Style handle — the dense id JS already assigns on the wire. The wire
+/// id IS the index into `Layouts::styles`; no second interning pass.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 #[repr(transparent)]
 pub struct StyleId(pub u32);
