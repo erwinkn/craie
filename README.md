@@ -27,6 +27,10 @@ cargo run --example app -- --screenshot /tmp/app.png     # wire-built UI
 # diagnostics + benchmark
 cargo run --example sizes
 cargo run --release --example bench
+
+# gpui-react-parity frame benchmark: dumps real React commits,
+# replays them natively at 100/1k/5k rows
+scripts/measure-framebench.sh /tmp/craie-framebench
 ```
 
 ## The bridge

@@ -39,3 +39,7 @@ path = "../../examples/app/main.rs"
 [[example]]
 name = "bench"
 path = "../../examples/bench/main.rs"
+
+[[example]]
+name = "framebench"
+path = "../../examples/framebench/main.rs"

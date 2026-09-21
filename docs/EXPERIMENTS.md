@@ -77,6 +77,50 @@ What this says:
 - **encode 11 ms for 10k nodes in Rust**; the TS encoder differs but
   the op count is the same.
 
+## Frame-cost comparison (`examples/framebench`)
+
+The craie counterpart of gpui-react's `fixtures/performance`: same
+scene (800x600, 32-px status line, N identical 20-px text rows, `flow`
+retained shape), same protocol (mount, first draw, 10 warmup + 100
+measured iterations of a one-op status update + draw, then scroll
+steps, then removal + empty draw, live bytes per phase). Transactions
+are real React commits — `examples/js/dump-framebench.tsx` renders the
+scene through `createRoot`/`renderSync` and captures the sealed frames;
+`framebench` replays them. `scripts/measure-framebench.sh` sweeps
+100/1k/5k rows x 3 reps.
+
+Two substitutions, matching what Craie can do today:
+
+- **No `list` scene.** List virtualization is planned work; only the
+  retained-everything `flow` comparison exists.
+- **`scrollAndDraw` replaces `wheelAndDraw`.** Craie has no input
+  events or native scroller yet (both planned), so a scroll step
+  applies a React-driven `marginTop` change on the content view — the
+  mechanism a craie app ships today. After the first step defines the
+  style, each scroll txn is a single `set_style` op, exactly what the
+  reconciler emits.
+
+Medians on this machine (GPU submit included in `draw`, completion
+excluded — same boundary as the fixture):
+
+| phase        | 100 rows | 1,000 rows | 5,000 rows |
+|--------------|----------|------------|------------|
+| mount        | 0.02 ms  | 0.05 ms    | 0.23 ms    |
+| firstDraw    | 8.2 ms   | 8.4 ms     | 37 ms      |
+| update.apply | ~0 ms    | ~0 ms      | ~0 ms      |
+| update.draw  | 0.16 ms  | 0.15 ms    | 0.13 ms    |
+| scroll.apply | ~0 ms    | ~0 ms      | ~0 ms      |
+| scroll.draw  | 0.12 ms  | 0.30 ms    | 1.15 ms    |
+| remove       | 0.03 ms  | 0.18 ms    | 1.3 ms     |
+
+Live bytes (5k rows): +962 KiB at mount, +26.6 MiB at first draw
+(retained Parley layouts), ~+350 KiB over the update phase, −16 MiB
+freed at removal.
+
+Note the row shape differs from the synthetic bench above: rows are
+bare fixed-height texts (5004 nodes), so Taffy skips the measure
+callback and Parley shaping lands entirely in `firstDraw`.
+
 ## Text stack: Parley + Swash + etagere
 
 Chosen over GPUI's cosmic-text-style approach because the split matches
