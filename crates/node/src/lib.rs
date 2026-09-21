@@ -23,15 +23,29 @@ fn sessions() -> &'static Sessions {
     SESSIONS.get_or_init(Sessions::new)
 }
 
+/// The thread that owns the platform event loop. On macOS this is
+/// genuinely the main thread (AppKit requires it); elsewhere there is no
+/// portable main-thread query, so the first `NativeHost` creation declares
+/// it and winit enforces the real contract when the loop is created.
+static MAIN_THREAD: OnceLock<std::thread::ThreadId> = OnceLock::new();
+
 fn is_main_thread() -> bool {
     #[cfg(target_os = "macos")]
     unsafe {
-        libc::pthread_main_np() != 0
+        return libc::pthread_main_np() != 0;
     }
     #[cfg(not(target_os = "macos"))]
     {
-        true // permissive until a non-macOS check is needed
+        match MAIN_THREAD.get() {
+            Some(id) => *id == std::thread::current().id(),
+            // No host yet: allow this thread to claim main-thread status.
+            None => true,
+        }
     }
+}
+
+fn declare_main_thread() {
+    MAIN_THREAD.get_or_init(|| std::thread::current().id());
 }
 
 thread_local! {
@@ -61,6 +75,7 @@ impl NativeHost {
         if !is_main_thread() {
             return Err(Error::from_reason("NativeHost requires the main thread"));
         }
+        declare_main_thread();
         if RUNNING.with(|r| r.get()) {
             return Err(Error::from_reason("A native host is already active"));
         }

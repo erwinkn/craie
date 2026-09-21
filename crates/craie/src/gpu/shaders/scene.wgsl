@@ -25,13 +25,23 @@ struct VsOut {
     @location(3) @interpolate(flat) flags: u32,
 };
 
+// Colors are authored as sRGB 0xRRGGBBAA. Compositing is linear and
+// premultiplied: decode the authored channels, multiply by alpha, and let
+// the *-srgb render target encode back to sRGB on store. Glyph coverage
+// (R8) is already linear.
+fn srgb_decode(v: f32) -> f32 {
+    if (v <= 0.04045) {
+        return v / 12.92;
+    }
+    return pow((v + 0.055) / 1.055, 2.4);
+}
+
 fn unpack(c: u32) -> vec4<f32> {
-    return vec4<f32>(
-        f32((c >> 24u) & 0xffu) / 255.0,
-        f32((c >> 16u) & 0xffu) / 255.0,
-        f32((c >> 8u) & 0xffu) / 255.0,
-        f32(c & 0xffu) / 255.0,
-    );
+    let r = f32((c >> 24u) & 0xffu) / 255.0;
+    let g = f32((c >> 16u) & 0xffu) / 255.0;
+    let b = f32((c >> 8u) & 0xffu) / 255.0;
+    let a = f32(c & 0xffu) / 255.0;
+    return vec4<f32>(srgb_decode(r), srgb_decode(g), srgb_decode(b), a);
 }
 
 @vertex
@@ -55,16 +65,19 @@ fn vs_main(in: VsIn, @builtin(vertex_index) vi: u32) -> VsOut {
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     if (in.flags & 2u) != 0u {
-        // Solid rect: no atlas fetch.
+        // Solid rect: no atlas fetch. Premultiply in linear space.
         let c = in.color;
         return vec4<f32>(c.rgb * c.a, c.a);
     }
     if (in.flags & 1u) != 0u {
-        // Color bitmap glyph (emoji): RGBA straight alpha -> premultiply.
+        // Color bitmap glyph (emoji): the atlas stores sRGB-encoded RGBA;
+        // decode then premultiply.
         let t = textureSample(atlas_color, atlas_sampler, in.uv, i32(in.page));
-        return vec4<f32>(t.rgb * t.a, t.a);
+        let rgb = vec3<f32>(srgb_decode(t.r), srgb_decode(t.g), srgb_decode(t.b));
+        return vec4<f32>(rgb * t.a, t.a);
     }
+    // Alpha glyph: coverage is linear; tint with the decoded run color.
     let a = textureSample(atlas_alpha, atlas_sampler, in.uv, i32(in.page)).r;
     let c = in.color;
-    return vec4<f32>(c.rgb * c.a * a, c.a * a);
+    return vec4<f32>(c.rgb * (c.a * a), c.a * a);
 }

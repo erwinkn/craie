@@ -20,7 +20,7 @@ fn js_fixture_decodes() {
 
     let mut host = Host::new();
     let mut layouts = Layouts::new();
-    txn.apply(&mut host, &mut layouts);
+    txn.apply(&mut host, &mut layouts).unwrap();
 
     // The fixture ends with remove(1): one live view remains.
     assert_eq!(host.len(), 1);

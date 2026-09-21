@@ -7,7 +7,7 @@
 use swash::FontRef;
 use swash::scale::image::{Content, Image};
 use swash::scale::{Render, ScaleContext, Scaler, Source, StrikeWith};
-use swash::zeno::{Format, Vector};
+use swash::zeno::{Angle, Format, Transform, Vector};
 
 use parley::FontData;
 
@@ -45,23 +45,29 @@ impl Rasterizer {
     }
 
     /// Rasterizes one glyph at a subpixel offset (fraction of a pixel,
-    /// already quantized by the cache layer). `embolden` applies a faux-bold
-    /// strength; pass 0.0 for none.
+    /// already quantized by the cache layer). `embolden` applies a
+    /// faux-bold strength and `skew` a faux-italic angle in degrees;
+    /// pass 0 / None for neither.
     pub fn render(
         scaler: &mut Scaler<'_>,
         glyph: u16,
         offset: Vector,
         embolden: f32,
+        skew: Option<f32>,
     ) -> Option<Rastered> {
-        let image = Render::new(&[
+        let mut render = Render::new(&[
             Source::ColorOutline(0),
             Source::ColorBitmap(StrikeWith::BestFit),
             Source::Outline,
-        ])
-        .format(Format::Alpha)
-        .embolden(embolden)
-        .offset(offset)
-        .render(scaler, glyph)?;
+        ]);
+        render
+            .format(Format::Alpha)
+            .embolden(embolden)
+            .offset(offset);
+        if let Some(deg) = skew {
+            render.transform(Some(Transform::skew(Angle::from_degrees(deg), Angle::ZERO)));
+        }
+        let image = render.render(scaler, glyph)?;
         let color = matches!(image.content, Content::Color);
         Some(Rastered { image, color })
     }

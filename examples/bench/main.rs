@@ -251,7 +251,7 @@ fn bench_rows() {
 fn bench_gpu(ui: &mut Ui) {
     use craie::gpu::{Gpu, Renderer};
     let gpu = Gpu::headless();
-    let format = wgpu::TextureFormat::Rgba8Unorm;
+    let format = wgpu::TextureFormat::Rgba8UnormSrgb;
     let mut renderer = Renderer::new(&gpu, format);
     let (w, h) = ((VIEW.width * SCALE) as u32, (VIEW.height * SCALE) as u32);
     let target = gpu.device.create_texture(&wgpu::TextureDescriptor {

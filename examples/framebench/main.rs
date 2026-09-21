@@ -42,6 +42,12 @@ const VIEW: Size = Size {
 
 static ALLOCS: AtomicUsize = AtomicUsize::new(0);
 static BYTES: AtomicUsize = AtomicUsize::new(0);
+/// Live bytes by log2 size class — answers "what is the heap made of".
+static HISTO: [AtomicUsize; 40] = [const { AtomicUsize::new(0) }; 40];
+
+fn bucket(size: usize) -> usize {
+    (usize::BITS - size.leading_zeros()) as usize // 1->1, 2-3->2, 4-7->3, ...
+}
 
 struct Counting;
 
@@ -49,10 +55,12 @@ unsafe impl GlobalAlloc for Counting {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         ALLOCS.fetch_add(1, Ordering::Relaxed);
         BYTES.fetch_add(layout.size(), Ordering::Relaxed);
+        HISTO[bucket(layout.size())].fetch_add(layout.size(), Ordering::Relaxed);
         unsafe { System.alloc(layout) }
     }
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
         BYTES.fetch_sub(layout.size(), Ordering::Relaxed);
+        HISTO[bucket(layout.size())].fetch_sub(layout.size(), Ordering::Relaxed);
         unsafe { System.dealloc(ptr, layout) }
     }
 }
@@ -62,6 +70,25 @@ static A: Counting = Counting;
 
 fn live() -> usize {
     BYTES.load(Ordering::Relaxed)
+}
+
+fn histo() -> [usize; 40] {
+    std::array::from_fn(|i| HISTO[i].load(Ordering::Relaxed))
+}
+
+/// Prints size classes whose live bytes grew between two snapshots.
+fn histo_growth(before: &[usize; 40], after: &[usize; 40]) {
+    for i in 0..40 {
+        if after[i] > before[i] {
+            eprintln!(
+                "    {:>14}: +{} KiB (2^{}..2^{} byte allocs)",
+                "growth",
+                (after[i] - before[i]) / 1024,
+                i - 1,
+                i
+            );
+        }
+    }
 }
 
 fn ms(t: Instant) -> f64 {
@@ -128,7 +155,7 @@ struct GpuSide {
 impl GpuSide {
     fn new() -> GpuSide {
         let gpu = Gpu::headless();
-        let format = wgpu::TextureFormat::Rgba8Unorm;
+        let format = wgpu::TextureFormat::Rgba8UnormSrgb;
         let renderer = Renderer::new(&gpu, format);
         let (w, h) = ((VIEW.width * SCALE) as u32, (VIEW.height * SCALE) as u32);
         let target = gpu.device.create_texture(&wgpu::TextureDescriptor {
@@ -215,6 +242,7 @@ fn main() {
         let mut ui = Ui::new(SCALE);
         let mut gpu = gpu_enabled.then(GpuSide::new);
         let baseline = live();
+        let baseline_histo = histo();
 
         let t = Instant::now();
         ui.apply(&mount).unwrap();
@@ -223,6 +251,10 @@ fn main() {
 
         let (first_draw, ..) = draw(&mut ui, &mut gpu);
         let after_first_draw = live();
+        if rep == 0 {
+            eprintln!("  live growth at firstDraw by alloc size:");
+            histo_growth(&baseline_histo, &histo());
+        }
 
         let mut upd_apply = Vec::with_capacity(ops - warmup);
         let mut upd_draw = Vec::with_capacity(ops - warmup);

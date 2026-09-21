@@ -7,6 +7,7 @@
 
 import { Worker, isMainThread, parentPort, workerData } from "node:worker_threads"
 import { createRequire } from "node:module"
+import { fileURLToPath } from "node:url"
 import { createRoot, type Root } from "./index.js"
 import type { Transport } from "./host.js"
 
@@ -33,7 +34,7 @@ export function loadBindings(path?: string): Bindings {
   const resolved =
     path ??
     process.env.CRAIE_NODE ??
-    new URL("../../../craie-node.node", import.meta.url).pathname
+    fileURLToPath(new URL("../../../craie-node.node", import.meta.url))
   const bindings = require(resolved) as Bindings
   if (bindings.craieRuntimeVersion() !== 1) throw Error("Craie native bridge protocol mismatch")
   return bindings
@@ -58,7 +59,18 @@ export class NativeTransport implements Transport {
   }
 
   send(frame: Uint8Array) {
-    this.client.submit(frame)
+    try {
+      this.client.submit(frame)
+    } catch (error) {
+      // A dropped transaction corrupts every dependent delta; the session
+      // cannot continue. Close it so the native side exits cleanly, then
+      // let the error propagate to the caller.
+      this.closed = true
+      try {
+        this.client.close(error instanceof Error ? error.message : String(error))
+      } catch {}
+      throw error
+    }
   }
 
   onAck(cb: (seq: number) => void) {

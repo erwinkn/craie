@@ -53,6 +53,17 @@ pub struct TextRow {
     pub color: u32,
 }
 
+impl TextRow {
+    /// The initial state for a freshly created (or recycled) text node.
+    fn blank() -> TextRow {
+        TextRow {
+            text: String::new(),
+            font_size: DEFAULT_FONT_SIZE,
+            color: DEFAULT_COLOR,
+        }
+    }
+}
+
 const DEFAULT_FONT_SIZE: f32 = 14.0;
 const DEFAULT_COLOR: u32 = 0xFFFF_FFFF;
 
@@ -219,20 +230,33 @@ impl Host {
             ..NodeHeader::EMPTY
         };
         if kind == NodeKind::TEXT {
-            let row = self.free_texts.pop().unwrap_or_else(|| {
-                self.texts.push(TextRow {
-                    text: String::new(),
-                    font_size: DEFAULT_FONT_SIZE,
-                    color: DEFAULT_COLOR,
-                });
-                (self.texts.len() - 1) as u32
-            });
+            let row = match self.free_texts.pop() {
+                // A recycled row is reset to defaults: the previous
+                // occupant's text/props must never leak into a new node.
+                Some(row) => {
+                    let slot = &mut self.texts[row as usize];
+                    slot.text.clear();
+                    slot.font_size = DEFAULT_FONT_SIZE;
+                    slot.color = DEFAULT_COLOR;
+                    row
+                }
+                None => {
+                    self.texts.push(TextRow::blank());
+                    (self.texts.len() - 1) as u32
+                }
+            };
             node.aux = row;
         } else if kind == NodeKind::VIEW {
-            let row = self.free_views.pop().unwrap_or_else(|| {
-                self.views.push(ViewRow::default());
-                (self.views.len() - 1) as u32
-            });
+            let row = match self.free_views.pop() {
+                Some(row) => {
+                    self.views[row as usize] = ViewRow::default();
+                    row
+                }
+                None => {
+                    self.views.push(ViewRow::default());
+                    (self.views.len() - 1) as u32
+                }
+            };
             node.aux = row;
         }
         self.live += 1;
@@ -293,6 +317,9 @@ impl Host {
     /// removes per node, so a removed node's subtree is released by its own
     /// remove ops; here we only free this node's side-table row.
     pub fn remove(&mut self, id: NodeId) {
+        if self.node(id).is_none() {
+            return;
+        }
         self.detach(id);
         let index = id.index();
         self.children[index] = Vec::new();
@@ -314,6 +341,9 @@ impl Host {
 
     /// Unlinks `id` from its parent without freeing the slot.
     pub fn detach(&mut self, id: NodeId) {
+        if self.node(id).is_none() {
+            return;
+        }
         let parent = self.nodes[id.index()].parent;
         if parent == NodeId::DETACHED.0 {
             return;
@@ -333,7 +363,8 @@ impl Host {
         self.nodes.len()
     }
 
-    /// Parent of `id`, or NIL/DETACHED sentinels.
+    /// Raw parent link of `id`: a live parent, DETACHED, or NIL (absent).
+    /// Callers walking ancestors must stop on both sentinels.
     pub fn parent(&self, id: NodeId) -> NodeId {
         self.node(id)
             .map(|n| NodeId(n.parent))

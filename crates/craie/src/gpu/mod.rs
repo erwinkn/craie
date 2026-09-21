@@ -26,6 +26,14 @@ struct ViewportUniform {
     _pad: [f32; 2],
 }
 
+fn srgb_to_linear(v: f64) -> f64 {
+    if v <= 0.04045 {
+        v / 12.92
+    } else {
+        ((v + 0.055) / 1.055).powf(2.4)
+    }
+}
+
 fn atlas_tex_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
     wgpu::BindGroupLayoutEntry {
         binding,
@@ -241,9 +249,10 @@ impl Renderer {
     }
 
     /// Uploads one rect of a CPU page mirror into a texture-array layer.
-    /// Full-width rows are already 256-byte aligned in the page mirror and
-    /// upload without repacking; narrower rects go through a padded staging
-    /// copy. Returns bytes written.
+    /// `Queue::write_texture` does not share the 256-byte row-alignment
+    /// rule of encoder copies, so the page mirror is uploaded in place —
+    /// `offset` + `bytes_per_row` address the rect directly. Returns bytes
+    /// the queue consumed.
     fn upload_rect(
         gpu: &Gpu,
         texture: &wgpu::Texture,
@@ -259,17 +268,7 @@ impl Renderer {
             return 0;
         }
         let src_stride = (page_size * bpp) as usize;
-        let owned;
-        let (data, row_pitch): (&[u8], u32) = if w == page_size {
-            let start = rect.min_y as usize * src_stride;
-            (
-                &page_data[start..start + h as usize * src_stride],
-                page_size * bpp,
-            )
-        } else {
-            owned = repack(page_data, src_stride, rect, bpp);
-            (&owned, (w * bpp).next_multiple_of(256))
-        };
+        let offset = (rect.min_y as usize * src_stride + rect.min_x as usize * bpp as usize) as u64;
         gpu.queue.write_texture(
             wgpu::TexelCopyTextureInfo {
                 texture,
@@ -281,10 +280,10 @@ impl Renderer {
                 },
                 aspect: wgpu::TextureAspect::All,
             },
-            data,
+            page_data,
             wgpu::TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(row_pitch),
+                offset,
+                bytes_per_row: Some(page_size * bpp),
                 rows_per_image: Some(h),
             },
             wgpu::Extent3d {
@@ -293,7 +292,7 @@ impl Renderer {
                 depth_or_array_layers: 1,
             },
         );
-        (row_pitch as u64) * h as u64
+        (page_size * bpp) as u64 * h as u64
     }
 
     /// Uploads instance data and draws the scene in one draw call.
@@ -323,10 +322,12 @@ impl Renderer {
                     resolve_target: None,
                     depth_slice: None,
                     ops: wgpu::Operations {
+                        // Clear colors are specified in the target's linear
+                        // space; authored sRGB is decoded here.
                         load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: ((clear.0 >> 24) & 0xff) as f64 / 255.0,
-                            g: ((clear.0 >> 16) & 0xff) as f64 / 255.0,
-                            b: ((clear.0 >> 8) & 0xff) as f64 / 255.0,
+                            r: srgb_to_linear(((clear.0 >> 24) & 0xff) as f64 / 255.0),
+                            g: srgb_to_linear(((clear.0 >> 16) & 0xff) as f64 / 255.0),
+                            b: srgb_to_linear(((clear.0 >> 8) & 0xff) as f64 / 255.0),
                             a: (clear.0 & 0xff) as f64 / 255.0,
                         }),
                         store: wgpu::StoreOp::Store,
@@ -348,21 +349,6 @@ impl Renderer {
         }
         gpu.queue.submit([encoder.finish()]);
     }
-}
-
-/// Copies a sub-rect out of a tightly packed page into a buffer whose rows
-/// are padded to the 256-byte `write_texture` alignment.
-fn repack(page: &[u8], stride: usize, rect: RectPx, bpp: u32) -> Vec<u8> {
-    let w = (rect.max_x - rect.min_x) as usize;
-    let h = (rect.max_y - rect.min_y) as usize;
-    let row_bytes = w * bpp as usize;
-    let padded = row_bytes.next_multiple_of(256);
-    let mut out = vec![0u8; padded * h];
-    for row in 0..h {
-        let src = (rect.min_y as usize + row) * stride + rect.min_x as usize * bpp as usize;
-        out[row * padded..row * padded + row_bytes].copy_from_slice(&page[src..src + row_bytes]);
-    }
-    out
 }
 
 /// Writes `instances` into a growable GPU buffer; recreates the buffer when

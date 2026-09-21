@@ -18,7 +18,7 @@ use taffy::{
     AvailableSpace, Cache, CacheTree, Layout, LayoutFlexboxContainer, LayoutInput, LayoutOutput,
     LayoutPartialTree, NodeId as TaffyId, RoundTree, RunMode, Size as TSize, Style,
     TraversePartialTree, TraverseTree, compute_cached_layout, compute_flexbox_layout,
-    compute_hidden_layout, compute_leaf_layout, compute_root_layout, round_layout,
+    compute_hidden_layout, compute_leaf_layout, compute_root_layout,
 };
 
 use crate::geom::{Rect, Size};
@@ -37,7 +37,12 @@ use crate::text::{ParagraphSpec, TextEngine};
 #[derive(Clone, Copy, Debug, Default)]
 pub struct LayoutData {
     pub rect: Rect,
+    /// Content-box origin relative to the border box: border+padding
+    /// left/top.
     pub content: [f32; 2],
+    /// Total border+padding insets (horizontal, vertical): the content
+    /// box size is `rect.size - insets`.
+    pub insets: [f32; 2],
 }
 
 /// Paint-ready instances for a text node, keyed on the inputs that change
@@ -59,7 +64,7 @@ pub struct EmittedText {
 /// layout costs no reshaping and no re-rasterization.
 pub struct MeasuredText {
     pub layout: TextLayout<Color>,
-    wrap_bits: u32,
+    pub wrap_bits: u32,
     /// Cached emit output; `None` until first paint after a (re)layout.
     pub emitted: Option<EmittedText>,
 }
@@ -184,11 +189,11 @@ pub fn compute(
         height: AvailableSpace::Definite(available.height),
     };
     compute_root_layout(&mut view, to_taffy(root), space);
-    round_layout(&mut view, to_taffy(root));
+    view.finalize(to_taffy(root));
 }
 
-/// `compute` instrumented: returns (root-layout ms, rounding ms) so
-/// experiments can price Taffy's rounding pass separately.
+/// `compute` instrumented: returns (root-layout ms, finalize ms) so
+/// experiments can price the result-copy pass separately.
 pub fn compute_timed(
     host: &mut Host,
     store: &mut Layouts,
@@ -212,7 +217,7 @@ pub fn compute_timed(
     compute_root_layout(&mut view, to_taffy(root), space);
     let compute_ms = t.elapsed().as_secs_f64() * 1000.0;
     let t = std::time::Instant::now();
-    round_layout(&mut view, to_taffy(root));
+    view.finalize(to_taffy(root));
     let round_ms = t.elapsed().as_secs_f64() * 1000.0;
     (compute_ms, round_ms)
 }
@@ -225,12 +230,19 @@ fn invalidate(host: &mut Host, store: &mut Layouts) {
     for id in host.take_layout_dirty() {
         let mut cur = id;
         loop {
-            *row_mut(&mut store.cache, cur.0 as usize) = Cache::default();
+            // Detached/subtree-orphaned nodes carry DETACHED as their
+            // parent — walking into the sentinel would index the arena
+            // out of bounds, so the bounds check comes first.
+            let idx = cur.0 as usize;
+            if idx >= host.slot_count() || cur == NodeId::DETACHED {
+                break;
+            }
+            *row_mut(&mut store.cache, idx) = Cache::default();
             if let Some(n) = host.node_mut(cur) {
                 n.flags.clear(NodeFlags::LAYOUT);
             }
             let p = host.parent(cur);
-            if p.is_nil() {
+            if p.is_nil() || p == NodeId::DETACHED {
                 break;
             }
             cur = p;
@@ -257,14 +269,38 @@ impl TreeView<'_> {
         self.store.style(sid)
     }
 
+    /// Copies the computed (unrounded) layout into `rects` recursively.
+    /// Coordinates stay logical/fractional here — snapping happens on the
+    /// physical grid at paint time, so a non-integer display scale never
+    /// accumulates rounding error.
+    fn finalize(&mut self, node_id: TaffyId) {
+        let layout = self.get_unrounded_layout(node_id);
+        self.set_final_layout(node_id, &layout);
+        let count = self.child_count(node_id);
+        for i in 0..count {
+            self.finalize(self.get_child_id(node_id, i));
+        }
+    }
+
     /// Leaf measurement. TEXT nodes shape through Parley at the content
     /// width Taffy offers; other leaves are zero-sized.
+    ///
+    /// `available` carries Taffy's sizing mode: a definite width is the
+    /// content box to wrap at, `MaxContent` measures unwrapped, and
+    /// `MinContent` wraps at every break opportunity (wrap width zero).
+    /// `known` dimensions are already final — nothing to measure.
     fn measure(
         &mut self,
         id: NodeId,
-        _known: TSize<Option<f32>>,
+        known: TSize<Option<f32>>,
         available: TSize<AvailableSpace>,
     ) -> TSize<f32> {
+        if let (Some(w), Some(h)) = (known.width, known.height) {
+            return TSize {
+                width: w,
+                height: h,
+            };
+        }
         let Some(node) = self.host.node(id) else {
             return TSize::ZERO;
         };
@@ -276,7 +312,8 @@ impl TreeView<'_> {
         // available.width is the content box: wrap text there.
         let wrap = match available.width {
             AvailableSpace::Definite(w) => Some(w.max(0.0)),
-            _ => None,
+            AvailableSpace::MinContent => Some(0.0),
+            AvailableSpace::MaxContent => None,
         };
         let wrap_bits = wrap.map(f32::to_bits).unwrap_or(u32::MAX);
 
@@ -457,6 +494,10 @@ impl RoundTree for TreeView<'_> {
         data.content = [
             layout.border.left + layout.padding.left,
             layout.border.top + layout.padding.top,
+        ];
+        data.insets = [
+            layout.border.left + layout.border.right + layout.padding.left + layout.padding.right,
+            layout.border.top + layout.border.bottom + layout.padding.top + layout.padding.bottom,
         ];
         if let Some(n) = self.host.node_mut(id) {
             n.flags.clear(NodeFlags::LAYOUT);

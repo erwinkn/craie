@@ -218,7 +218,7 @@ fn dump_scene(
 
 fn run_screenshot(path: &str, w: u32, h: u32, scale: f32) {
     let gpu = Gpu::headless();
-    let format = wgpu::TextureFormat::Rgba8Unorm;
+    let format = wgpu::TextureFormat::Rgba8UnormSrgb;
     let mut renderer = Renderer::new(&gpu, format);
     let mut ui = Ui::new(scale);
     ui.apply(&demo_txn()).expect("demo txn");

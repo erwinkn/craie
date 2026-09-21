@@ -154,6 +154,7 @@ impl TextEngine {
         } else {
             0.0
         };
+        let skew = synthesis.skew();
         // Lazy: a run whose glyphs all hit the cache never builds a scaler.
         let mut scaler = None;
 
@@ -188,6 +189,7 @@ impl TextEngine {
                         glyph.id as u16,
                         Vector::new(cache::subpixel_offset(sx), cache::subpixel_offset(sy)),
                         embolden,
+                        skew,
                     ) else {
                         continue;
                     };

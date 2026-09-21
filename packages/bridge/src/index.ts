@@ -33,7 +33,32 @@ export function View(props: ViewProps) {
   return createElement("view", props)
 }
 export function Text(props: TextProps) {
+  // Flatten primitive children ("a" {b} "c") into a single `text` prop so
+  // mixed string/expression JSX still forms one paragraph. Nested
+  // non-primitive children (styled spans) keep their instances.
+  const children = props.children
+  if (
+    props.text === undefined &&
+    children !== undefined &&
+    flattenText(children) !== undefined
+  ) {
+    return createElement("text", { ...props, text: flattenText(children), children: undefined })
+  }
   return createElement("text", props)
+}
+
+function flattenText(children: ReactNode): string | undefined {
+  if (typeof children === "string" || typeof children === "number") return String(children)
+  if (Array.isArray(children)) {
+    let out = ""
+    for (const c of children) {
+      if (typeof c === "string" || typeof c === "number") out += c
+      else if (c === null || c === undefined || c === false) continue
+      else return undefined
+    }
+    return out
+  }
+  return undefined
 }
 
 // ---------------------------------------------------------------- reconciler
@@ -90,9 +115,12 @@ const config = {
   getPublicInstance: (n: HostNode) => n,
   getRootHostContext: () => context,
   getChildHostContext: () => context,
-  // String children become the node's text; no nested text instance.
-  shouldSetTextContent: (_t: string, props: any) =>
-    typeof props.children === "string" || typeof props.children === "number",
+  // String children become a text node's `text` prop. Only the `text`
+  // element may absorb them — a View that swallowed string children would
+  // render nothing.
+  shouldSetTextContent: (type: string, props: any) =>
+    type === "text" &&
+    (typeof props.children === "string" || typeof props.children === "number"),
   finalizeInitialChildren: () => false,
   prepareForCommit: () => null,
   resetAfterCommit: noop,

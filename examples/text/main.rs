@@ -292,7 +292,7 @@ impl platform::App for Demo {
 
 fn run_screenshot(path: &str, w: u32, h: u32, scale: f32) {
     let gpu = Gpu::headless();
-    let format = wgpu::TextureFormat::Rgba8Unorm;
+    let format = wgpu::TextureFormat::Rgba8UnormSrgb;
     let mut renderer = Renderer::new(&gpu, format);
     let mut text = TextEngine::new();
     let paras = paragraphs();

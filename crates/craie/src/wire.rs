@@ -435,6 +435,10 @@ pub enum WireError {
     BadOp(u8),
     BadString(usize),
     BadUtf8,
+    /// The transaction decoded but references something invalid: an
+    /// unknown/absent node, wrong kind, a placement cycle, or a reserved
+    /// sentinel id. Nothing was applied.
+    Invalid(&'static str),
 }
 
 /// A decoded transaction. Strings borrow from the input buffer.
@@ -744,9 +748,18 @@ pub fn decode(buf: &[u8]) -> Result<Txn<'_>, WireError> {
 // ---------------------------------------------------------------- apply
 
 impl Txn<'_> {
-    /// Applies the transaction to the retained host and style table.
-    /// Ordering is the sender's; the host performs no reordering.
-    pub fn apply(&self, host: &mut Host, layouts: &mut Layouts) {
+    /// Validates the whole transaction against current host state, then
+    /// applies it. Validation simulates create/remove/place effects so
+    /// references to ids created earlier in the same transaction resolve
+    /// correctly; on failure nothing is applied.
+    pub fn apply(&self, host: &mut Host, layouts: &mut Layouts) -> Result<(), WireError> {
+        self.validate(host)?;
+        self.apply_unchecked(host, layouts);
+        Ok(())
+    }
+
+    /// Applies without validation — benches and tests with trusted input.
+    pub fn apply_unchecked(&self, host: &mut Host, layouts: &mut Layouts) {
         for op in &self.ops {
             match op {
                 Op::Create { id, kind } => {
@@ -799,6 +812,142 @@ impl Txn<'_> {
                 }
             }
         }
+    }
+
+    /// Checks every op against host state plus the effects of earlier ops
+    /// in the same transaction. O(ops), no host mutation.
+    fn validate(&self, host: &Host) -> Result<(), WireError> {
+        use std::collections::HashMap;
+        // Overlay of liveness changes made by earlier ops: node id ->
+        // (live?, kind). Absent entries consult the host.
+        let mut diff: HashMap<u32, (bool, NodeKind)> = HashMap::new();
+        // Overlay of parent links after earlier places/detaches.
+        let mut parents: HashMap<u32, u32> = HashMap::new();
+
+        fn kind_of(host: &Host, diff: &HashMap<u32, (bool, NodeKind)>, id: u32) -> Option<NodeKind> {
+            if let Some(&(live, kind)) = diff.get(&id) {
+                return live.then_some(kind);
+            }
+            host.node(NodeId(id)).map(|n| n.kind())
+        }
+        fn parent_of(host: &Host, parents: &HashMap<u32, u32>, id: u32) -> u32 {
+            if let Some(&p) = parents.get(&id) {
+                return p;
+            }
+            host.node(NodeId(id))
+                .map(|n| n.parent)
+                .unwrap_or(NodeId::DETACHED.0)
+        }
+        macro_rules! kind_of {
+            ($id:expr) => {
+                kind_of(host, &diff, $id)
+            };
+        }
+        macro_rules! live {
+            ($id:expr) => {
+                kind_of!($id).is_some()
+            };
+        }
+        macro_rules! parent_of {
+            ($id:expr) => {
+                parent_of(host, &parents, $id)
+            };
+        }
+
+        for op in &self.ops {
+            match op {
+                Op::Create { id, kind } => {
+                    if *id >= NodeId::DETACHED.0 || *kind > 1 {
+                        return Err(WireError::Invalid("bad id or kind in create"));
+                    }
+                    if live!(*id) {
+                        return Err(WireError::Invalid("create over live node"));
+                    }
+                    diff.insert(
+                        *id,
+                        (true, if *kind == 1 { NodeKind::TEXT } else { NodeKind::VIEW }),
+                    );
+                }
+                Op::SetText { id, .. } | Op::TextProps { id, .. } => {
+                    if kind_of!(*id) != Some(NodeKind::TEXT) {
+                        return Err(WireError::Invalid("text op on non-text node"));
+                    }
+                }
+                Op::SetStyle { id, wire_style } => {
+                    if !live!(*id) {
+                        return Err(WireError::Invalid("style on absent node"));
+                    }
+                    // NIL clears the style; a defined id is checked lazily
+                    // at layout (undefined ids resolve to the default).
+                    let _ = wire_style;
+                }
+                Op::Place {
+                    parent,
+                    child,
+                    before,
+                } => {
+                    if *child >= NodeId::DETACHED.0 {
+                        return Err(WireError::Invalid("place of sentinel"));
+                    }
+                    if !live!(*child) {
+                        return Err(WireError::Invalid("place of absent child"));
+                    }
+                    if *parent != NIL && !live!(*parent) {
+                        return Err(WireError::Invalid("place under absent parent"));
+                    }
+                    if *before != NIL && !live!(*before) {
+                        return Err(WireError::Invalid("place before absent sibling"));
+                    }
+                    // Cycle check: walking ancestors of `parent` (through
+                    // the pending overlay) must never reach `child`.
+                    let mut cur = *parent;
+                    let mut hops = 0u32;
+                    while cur != NIL && cur != NodeId::DETACHED.0 {
+                        if cur == *child {
+                            return Err(WireError::Invalid("place would create a cycle"));
+                        }
+                        cur = parent_of!(cur);
+                        hops += 1;
+                        // `diff` accounts for nodes created earlier in
+                        // this transaction that don't exist in the arena
+                        // yet.
+                        if hops > host.slot_count() as u32 + diff.len() as u32 + 1 {
+                            return Err(WireError::Invalid("corrupt parent chain"));
+                        }
+                    }
+                    parents.insert(*child, *parent);
+                }
+                Op::Detach { id } | Op::Remove { id } => {
+                    if *id >= NodeId::DETACHED.0 {
+                        return Err(WireError::Invalid("sentinel id"));
+                    }
+                    if !live!(*id) {
+                        return Err(WireError::Invalid("op on absent node"));
+                    }
+                    if matches!(op, Op::Remove { .. }) {
+                        diff.insert(*id, (false, NodeKind::EMPTY));
+                    } else {
+                        parents.insert(*id, NodeId::DETACHED.0);
+                    }
+                }
+                Op::Hidden { id, .. } => {
+                    if !live!(*id) {
+                        return Err(WireError::Invalid("hidden on absent node"));
+                    }
+                }
+                Op::ViewPaint { id, .. } => {
+                    if kind_of!(*id) != Some(NodeKind::VIEW) {
+                        return Err(WireError::Invalid("view paint on non-view node"));
+                    }
+                }
+                Op::Style { wire_id, .. } => {
+                    if *wire_id == NIL {
+                        return Err(WireError::Invalid("style definition at NIL id"));
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 }
 
@@ -900,7 +1049,7 @@ mod tests {
 
         let mut host = Host::new();
         let mut layouts = Layouts::new();
-        txn.apply(&mut host, &mut layouts);
+        txn.apply(&mut host, &mut layouts).unwrap();
 
         assert_eq!(host.len(), 3);
         assert_eq!(
@@ -923,7 +1072,7 @@ mod tests {
 
         let mut host = Host::new();
         let mut layouts = Layouts::new();
-        txn.apply(&mut host, &mut layouts);
+        txn.apply(&mut host, &mut layouts).unwrap();
 
         let node = host.node(NodeId(0)).unwrap();
         assert!(node.hidden());

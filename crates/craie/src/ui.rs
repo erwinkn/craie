@@ -13,12 +13,13 @@
 //! only when `needs_paint` says a mutation can change pixels.
 
 use parley::Layout as ParleyLayout;
+use parley::style::StyleProperty;
 
 use crate::geom::{Point, Size};
 use crate::host::{Host, NodeId, NodeKind, ROOT, StyleId};
 use crate::layout::{self, EmittedText, Layouts, MeasuredText};
 use crate::scene::{Color, Instance, Scene};
-use crate::text::TextEngine;
+use crate::text::{ParagraphSpec, TextEngine};
 use crate::wire::{self, Op, Txn, WireError};
 
 pub struct Ui {
@@ -51,15 +52,16 @@ impl Ui {
     }
 
     /// Decodes and applies one wire transaction. Returns its seq.
+    /// A transaction that fails validation changes nothing.
     pub fn apply(&mut self, buf: &[u8]) -> Result<u64, WireError> {
         let txn = wire::decode(buf)?;
-        self.apply_txn(&txn);
+        self.apply_txn(&txn)?;
         Ok(txn.seq)
     }
 
     /// Applies an already-decoded transaction.
-    pub fn apply_txn(&mut self, txn: &Txn<'_>) {
-        txn.apply(&mut self.host, &mut self.layouts);
+    pub fn apply_txn(&mut self, txn: &Txn<'_>) -> Result<(), WireError> {
+        txn.apply(&mut self.host, &mut self.layouts)?;
         // Slot reuse must drop the previous occupant's text layout.
         for op in &txn.ops {
             if let Op::Create { id, .. } | Op::Remove { id } = op {
@@ -70,6 +72,7 @@ impl Ui {
             }
         }
         self.seq = txn.seq;
+        Ok(())
     }
 
     /// True when applied mutations can change pixels.
@@ -180,7 +183,10 @@ impl Ui {
             let data = self.layouts.data(id);
             let x = ox + data.rect.origin.x;
             let y = oy + data.rect.origin.y;
-            // Children are positioned relative to this node's content box.
+            // Taffy locations are relative to the parent's BORDER box, so
+            // children accumulate (x, y) — adding the content offset here
+            // would count the parent's border+padding twice. The content
+            // offset applies only to this node's own content (text).
             let cx = x + data.content[0];
             let cy = y + data.content[1];
 
@@ -208,27 +214,70 @@ impl Ui {
                                 .push(Instance::quad(x0, y0, x1 - x0, y1 - y0, view.color));
                         }
                     }
-                    NodeKind::TEXT => self.paint_text(id, cx, cy),
+                    NodeKind::TEXT => self.paint_text(id, cx, cy, data),
                     _ => {}
                 }
             }
 
             for &child in self.host.children(id).iter().rev() {
-                stack.push((child, cx, cy));
+                stack.push((child, x, y));
             }
         }
+    }
+
+    /// Rebuilds a text node's retained Parley layout at `wrap` (logical
+    /// content width, `None` = unwrapped). Shared by the Taffy measure
+    /// path and the paint-time validation below.
+    fn relayout_text(&mut self, id: NodeId, wrap: Option<f32>) {
+        let Some(row) = self.host.text(id) else {
+            return;
+        };
+        let defaults = [StyleProperty::FontSize(row.font_size)];
+        let layout = self.text.layout_paragraph(
+            &ParagraphSpec {
+                text: &row.text,
+                defaults: &defaults,
+                spans: &[],
+            },
+            wrap,
+        );
+        let slot = id.0 as usize;
+        if slot >= self.texts.len() {
+            self.texts.resize_with(slot + 1, || None);
+        }
+        self.texts[slot] = Some(MeasuredText {
+            layout,
+            wrap_bits: wrap.map(f32::to_bits).unwrap_or(u32::MAX),
+            emitted: None,
+        });
     }
 
     /// Emits one text node: replays the cached instance batch when scale,
     /// origin and color all match — no shaping, rasterization, or cache
     /// lookups — and rewrites colors in place on a color-only change.
-    fn paint_text(&mut self, id: NodeId, cx: f32, cy: f32) {
+    ///
+    /// The retained `MeasuredText` is validated against the node's FINAL
+    /// content width: Taffy may have measured the leaf under a provisional
+    /// constraint (min/max-content probing) that never reached paint.
+    fn paint_text(&mut self, id: NodeId, cx: f32, cy: f32, data: crate::layout::LayoutData) {
         let slot = id.0 as usize;
         let Some(row) = self.host.text(id) else {
             return;
         };
         let color = row.color;
         let scale_bits = self.scale.to_bits();
+
+        // The content width Taffy wrapped this leaf at. A retained layout
+        // produced under a different constraint is stale — rewrap now.
+        let content_w = (data.rect.size.width - data.insets[0]).max(0.0);
+        let wrap_bits = content_w.to_bits();
+        let stale = match self.texts.get(slot).and_then(Option::as_ref) {
+            Some(m) => m.wrap_bits != wrap_bits,
+            None => true,
+        };
+        if stale {
+            self.relayout_text(id, Some(content_w));
+        }
         let Some(m) = self.texts.get_mut(slot).and_then(Option::as_mut) else {
             return;
         };
@@ -368,6 +417,72 @@ mod tests {
             shown_count > hidden_count,
             "unhiding node 3 must add its glyphs: {hidden_count} -> {shown_count}"
         );
+    }
+
+    /// Nested padding+border: a child's accumulated origin must include
+    /// each ancestor's insets exactly once (the layout location is
+    /// relative to the parent's content box).
+    #[test]
+    fn nested_insets_accumulate_once() {
+        let mut enc = Encoder::new();
+        let mut outer = taffy::Style::default();
+        outer.display = taffy::Display::Flex;
+        outer.padding = taffy::Rect {
+            left: taffy::LengthPercentage::length(10.0),
+            right: taffy::LengthPercentage::length(0.0),
+            top: taffy::LengthPercentage::length(20.0),
+            bottom: taffy::LengthPercentage::length(0.0),
+        };
+        outer.border = taffy::Rect {
+            left: taffy::LengthPercentage::length(3.0),
+            right: taffy::LengthPercentage::length(0.0),
+            top: taffy::LengthPercentage::length(4.0),
+            bottom: taffy::LengthPercentage::length(0.0),
+        };
+        enc.style(1, &outer);
+        let mut inner = taffy::Style::default();
+        inner.display = taffy::Display::Flex;
+        inner.padding = taffy::Rect {
+            left: taffy::LengthPercentage::length(5.0),
+            right: taffy::LengthPercentage::length(0.0),
+            top: taffy::LengthPercentage::length(7.0),
+            bottom: taffy::LengthPercentage::length(0.0),
+        };
+        enc.style(2, &inner);
+        enc.create(0, KIND_VIEW);
+        enc.set_style(0, 1);
+        enc.place(NIL, 0, NIL);
+        enc.create(1, KIND_VIEW);
+        enc.set_style(1, 2);
+        enc.place(0, 1, NIL);
+        enc.create(2, KIND_VIEW);
+        enc.view_paint(2, 0xFF00_00FF);
+        enc.place(1, 2, NIL);
+        let buf = enc.finish(1);
+
+        let mut ui = Ui::new(1.0);
+        ui.apply(&buf).unwrap();
+        ui.render(Size::new(800.0, 600.0));
+
+        // Inner's border box sits at the outer's content origin (13, 24).
+        // The leaf's border box adds inner's content offset (5, 7).
+        let leaf = ui.layouts.data(NodeId(2));
+        assert_eq!(leaf.rect.origin.x, 5.0);
+        assert_eq!(leaf.rect.origin.y, 7.0);
+        let inner_data = ui.layouts.data(NodeId(1));
+        assert_eq!(inner_data.rect.origin.x, 13.0);
+        assert_eq!(inner_data.rect.origin.y, 24.0);
+
+        // Paint-time accumulated origin: the leaf quad emits at the
+        // accumulated content origin (13+5, 24+7) = (18, 31) — insets
+        // counted exactly once.
+        let quad = ui
+            .scene()
+            .items
+            .iter()
+            .find(|i| i.flags & Instance::FLAG_SOLID != 0)
+            .expect("leaf quad emitted");
+        assert_eq!(quad.position, [18.0, 31.0]);
     }
 
     /// `display: none` must remove the subtree from layout AND paint —
