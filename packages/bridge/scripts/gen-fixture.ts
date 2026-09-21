@@ -28,8 +28,24 @@ const sid = enc.styleIdFor({
 })
 enc.setStyle(0, sid)
 enc.viewPaint(0, 0x1b1d_24ff)
+enc.paint(0, 0x1122_33ff, 6.5, { color: 0xff00_00ff, width: 2 }) // masked paint
+enc.create(2, 2)                                    // input
+enc.inputProps(2, 15, 0xffff_ffff, "type here", true)
+enc.props(2, 0x1ff, true)                           // all listeners, focusable
+enc.create(3, 3)                                    // custom
+enc.custom(3, 7, [0.25, 0.5, 0.75, 1.0], "0.1,0.4,0.9")
+enc.paint(3, 0x1b1d_24ff, 4, undefined)
+enc.label(0, "root container")                     // a11y name
+enc.label(3, "throughput chart")
+enc.label(3, "")                                    // empty clears
+enc.place(0, 3, NIL)
+enc.cmdSetInputText(2, "seed")
+enc.cmdScrollTo(0, 4, 8)
+enc.cmdFocus(2)
+enc.cmdBlur(2)
 enc.place(NIL, 0, NIL)
 enc.place(0, 1, NIL)
+enc.place(0, 2, NIL)
 enc.hidden(1, true)
 enc.hidden(1, false)
 enc.detach(1)

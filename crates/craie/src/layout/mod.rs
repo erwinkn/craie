@@ -23,6 +23,7 @@ use taffy::{
 
 use crate::geom::{Rect, Size};
 use crate::host::{Host, NodeFlags, NodeId, NodeKind, StyleId};
+use crate::input::Inputs;
 use crate::scene::{Color, Instance};
 use crate::text::parley::Layout as TextLayout;
 use crate::text::parley::style::StyleProperty;
@@ -43,6 +44,12 @@ pub struct LayoutData {
     /// Total border+padding insets (horizontal, vertical): the content
     /// box size is `rect.size - insets`.
     pub insets: [f32; 2],
+    /// Padding box relative to the border-box origin — the rect that
+    /// `overflow: clip|hidden|scroll` clips descendants to.
+    pub clip_box: Rect,
+    /// Maximum scroll offsets (x, y) in logical points, from Taffy's
+    /// scrollable overflow rect. Zero when content fits.
+    pub scroll_extent: [f32; 2],
 }
 
 /// Paint-ready instances for a text node, keyed on the inputs that change
@@ -174,6 +181,7 @@ pub fn compute(
     store: &mut Layouts,
     text: &mut TextEngine,
     texts: &mut Vec<Option<MeasuredText>>,
+    inputs: &mut Inputs,
     root: NodeId,
     available: Size,
 ) {
@@ -183,6 +191,7 @@ pub fn compute(
         store,
         text,
         texts,
+        inputs,
     };
     let space = TSize {
         width: AvailableSpace::Definite(available.width),
@@ -199,6 +208,7 @@ pub fn compute_timed(
     store: &mut Layouts,
     text: &mut TextEngine,
     texts: &mut Vec<Option<MeasuredText>>,
+    inputs: &mut Inputs,
     root: NodeId,
     available: Size,
 ) -> (f64, f64) {
@@ -208,6 +218,7 @@ pub fn compute_timed(
         store,
         text,
         texts,
+        inputs,
     };
     let space = TSize {
         width: AvailableSpace::Definite(available.width),
@@ -257,6 +268,7 @@ struct TreeView<'a> {
     store: &'a mut Layouts,
     text: &'a mut TextEngine,
     texts: &'a mut Vec<Option<MeasuredText>>,
+    inputs: &'a mut Inputs,
 }
 
 impl TreeView<'_> {
@@ -304,6 +316,19 @@ impl TreeView<'_> {
         let Some(node) = self.host.node(id) else {
             return TSize::ZERO;
         };
+        if node.kind() == NodeKind::INPUT {
+            // Inputs measure like text: the editor wraps at the definite
+            // content width; otherwise it takes its natural width.
+            let w = match available.width {
+                AvailableSpace::Definite(w) => w,
+                _ => 160.0, // unconstrained default editing width
+            };
+            let size = self.inputs.measure(self.text, id.0, w);
+            return TSize {
+                width: size.width.max(w.min(160.0)),
+                height: size.height,
+            };
+        }
         if node.kind() != NodeKind::TEXT {
             return TSize::ZERO;
         }
@@ -498,6 +523,23 @@ impl RoundTree for TreeView<'_> {
         data.insets = [
             layout.border.left + layout.border.right + layout.padding.left + layout.padding.right,
             layout.border.top + layout.border.bottom + layout.padding.top + layout.padding.bottom,
+        ];
+        // Padding box (border box minus border widths) — the rect that
+        // clips descendants under overflow clip/hidden/scroll.
+        data.clip_box = Rect::new(
+            layout.border.left,
+            layout.border.top,
+            (layout.size.width - layout.border.left - layout.border.right).max(0.0),
+            (layout.size.height - layout.border.top - layout.border.bottom).max(0.0),
+        );
+        // Taffy's scrollable overflow rect is measured from the padding-
+        // box origin; the reachable scroll extent is how far the content
+        // overflows it (clamped at zero — negative overflow is
+        // unreachable in LTR top-down).
+        let so = &layout.scrollable_overflow_rect;
+        data.scroll_extent = [
+            (so.right - data.clip_box.size.width).max(0.0),
+            (so.bottom - data.clip_box.size.height).max(0.0),
         ];
         if let Some(n) = self.host.node_mut(id) {
             n.flags.clear(NodeFlags::LAYOUT);

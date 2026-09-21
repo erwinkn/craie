@@ -37,6 +37,23 @@ function ops(buf: Uint8Array): number[] {
       case 0x06: case 0x07: at += 4; break
       case 0x08: at += 5; break
       case 0x0a: at += 8; break
+      case 0x0b: { // paint: u32 id + u8 mask + masked fields
+        at += 4
+        const m = buf[at++]
+        if (m & 1) at += 4
+        if (m & 2) at += 4
+        if (m & 4) at += 8
+        break
+      }
+      case 0x0c: at += 9; break // props: u32 id + u32 mask + u8
+      case 0x0d: at += 17; break // input_props: u32 f32 u32 u32 u8
+      case 0x0e: { // command: u32 id + u8 tag + payload
+        at += 4
+        const c = buf[at++]
+        if (c === 2) at += 4 // set_input_text: string ref
+        else if (c === 3) at += 8 // scroll_to
+        break
+      }
       case 0x09: {
         at += 4
         let mask = dv.getBigUint64(at, true); at += 8
@@ -76,11 +93,11 @@ test("render mounts a tree as wire ops", async () => {
   await new Promise(r => setTimeout(r, 0)) // let the microtask seal
   expect(t.frames.length).toBeGreaterThan(0)
   const tags = ops(t.frames[0]!)
-  // create(view) viewPaint style? create(text) setText textProps place place
+  // create(view) paint style? create(text) setText textProps place place
   expect(tags).toContain(0x01)
   expect(tags).toContain(0x02)
   expect(tags).toContain(0x05)
-  expect(tags).toContain(0x0a)
+  expect(tags).toContain(0x0b)
 })
 
 test("update emits only the changed op", async () => {
@@ -168,6 +185,7 @@ test("subtree deletion frees every node, ids recycle after ack", async () => {
   for (let i = 0; i < dv2.getUint32(16, true); i++) at += 4 + dv2.getUint32(at, true)
   const sizes: Record<number, number> = {
     0x01: 6, 0x02: 9, 0x03: 13, 0x04: 9, 0x05: 13, 0x06: 5, 0x07: 5, 0x08: 6,
+    0x0a: 9, 0x0c: 10, 0x0d: 18,
   }
   while (at < re.length) {
     const tag = re[at]

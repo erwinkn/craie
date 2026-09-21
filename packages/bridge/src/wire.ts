@@ -22,7 +22,53 @@ const enum Op {
   Hidden = 0x08,
   Style = 0x09,
   ViewPaint = 0x0a,
+  Paint = 0x0b,
+  Props = 0x0c,
+  InputProps = 0x0d,
+  Command = 0x0e,
+  Custom = 0x0f,
+  Label = 0x10,
 }
+
+// PAINT op field mask bits — mirror wire.rs `mod paint_field`.
+const PAINT_FIELD = { COLOR: 1 << 0, RADIUS: 1 << 1, BORDER: 1 << 2 } as const
+
+// COMMAND op sub-tags — mirror wire.rs `mod cmd`.
+const enum Cmd {
+  Focus = 0,
+  Blur = 1,
+  SetInputText = 2,
+  ScrollTo = 3,
+}
+
+// Outbound event kinds + listener mask bits — mirror events.rs.
+export const EVENT_KIND = {
+  pointerMove: 1,
+  pointerDown: 2,
+  pointerUp: 3,
+  pointerEnter: 4,
+  pointerLeave: 5,
+  wheel: 6,
+  keyDown: 7,
+  keyUp: 8,
+  focus: 9,
+  blur: 10,
+  change: 11,
+  submit: 12,
+  scroll: 13,
+} as const
+
+export const EVENT_MASK = {
+  pointerMove: 1 << 0,
+  pointerDown: 1 << 1,
+  pointerUp: 1 << 2,
+  pointerEnterLeave: 1 << 3,
+  wheel: 1 << 4,
+  key: 1 << 5,
+  focus: 1 << 6,
+  input: 1 << 7,
+  scroll: 1 << 8,
+} as const
 
 // Style schema — mask bit order must match wire.rs `mod field`.
 const F = {
@@ -322,6 +368,85 @@ export class Encoder {
     this.opBytes.u8(Op.ViewPaint)
     this.opBytes.u32(id)
     this.opBytes.u32(color >>> 0)
+  }
+  /** Masked paint update: fill, corner radius, border (color, width). */
+  paint(
+    id: number,
+    color?: number,
+    radius?: number,
+    border?: { color: number; width: number },
+  ) {
+    const b = this.opBytes
+    b.u8(Op.Paint)
+    b.u32(id)
+    b.u8(
+      (color !== undefined ? PAINT_FIELD.COLOR : 0) |
+        (radius !== undefined ? PAINT_FIELD.RADIUS : 0) |
+        (border !== undefined ? PAINT_FIELD.BORDER : 0),
+    )
+    if (color !== undefined) b.u32(color >>> 0)
+    if (radius !== undefined) b.f32(radius)
+    if (border !== undefined) { b.u32(border.color >>> 0); b.f32(border.width) }
+  }
+  props(id: number, listeners: number, focusable: boolean) {
+    this.opBytes.u8(Op.Props)
+    this.opBytes.u32(id)
+    this.opBytes.u32(listeners >>> 0)
+    this.opBytes.u8(focusable ? 1 : 0)
+  }
+  inputProps(
+    id: number,
+    fontSize: number,
+    color: number,
+    placeholder: string,
+    multiline: boolean,
+  ) {
+    this.opBytes.u8(Op.InputProps)
+    this.opBytes.u32(id)
+    this.opBytes.f32(fontSize)
+    this.opBytes.u32(color >>> 0)
+    this.opBytes.u32(this.strRef(placeholder))
+    this.opBytes.u8(multiline ? 1 : 0)
+  }
+  cmdFocus(id: number) {
+    this.opBytes.u8(Op.Command)
+    this.opBytes.u32(id)
+    this.opBytes.u8(Cmd.Focus)
+  }
+  cmdBlur(id: number) {
+    this.opBytes.u8(Op.Command)
+    this.opBytes.u32(id)
+    this.opBytes.u8(Cmd.Blur)
+  }
+  cmdSetInputText(id: number, text: string) {
+    this.opBytes.u8(Op.Command)
+    this.opBytes.u32(id)
+    this.opBytes.u8(Cmd.SetInputText)
+    this.opBytes.u32(this.strRef(text))
+  }
+  cmdScrollTo(id: number, x: number, y: number) {
+    this.opBytes.u8(Op.Command)
+    this.opBytes.u32(id)
+    this.opBytes.u8(Cmd.ScrollTo)
+    this.opBytes.f32(x)
+    this.opBytes.f32(y)
+  }
+  /** Custom-element payload: painter tag + 4 floats + text. */
+  custom(id: number, tag: number, data: readonly number[], text: string) {
+    const b = this.opBytes
+    b.u8(Op.Custom)
+    b.u32(id)
+    b.u32(tag >>> 0)
+    for (let i = 0; i < 4; i++) b.f32(data[i] ?? 0)
+    b.u32(this.strRef(text))
+  }
+
+  /** Accessibility name (empty string clears it). */
+  label(id: number, text: string) {
+    const b = this.opBytes
+    b.u8(Op.Label)
+    b.u32(id)
+    b.u32(this.strRef(text))
   }
 
   /** Interns a style; emits a `style` op on first sight and returns its

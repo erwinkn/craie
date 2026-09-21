@@ -15,10 +15,13 @@ wgpu.workspace = true
 parley.workspace = true
 swash.workspace = true
 etagere.workspace = true
+accesskit.workspace = true
+accesskit_winit.workspace = true
 bytemuck.workspace = true
 pollster.workspace = true
 tracing.workspace = true
-taffy = { version = "=0.14.0", default-features = false, features = ["std", "flexbox"] }
+taffy = { version = "=0.14.0", default-features = false, features = ["std", "flexbox", "content_size"] }
+arboard = "3.6.1"
 
 [dev-dependencies]
 png = "=0.18.1"

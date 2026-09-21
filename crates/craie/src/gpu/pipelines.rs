@@ -1,6 +1,6 @@
 //! Render pipeline construction. One instanced pipeline serves every
-//! drawable: solid rects (`FLAG_SOLID`) and atlas-sampled glyphs share the
-//! 40-byte instance format, so a frame is a single ordered draw call.
+//! drawable: rounded/bordered solid rects and atlas-sampled glyphs share
+//! the 76-byte instance format, so a frame is a single ordered draw call.
 
 use crate::gpu::Gpu;
 use crate::scene::Instance;
@@ -54,8 +54,12 @@ pub fn scene(
                         1 => Float32x2,  // size
                         2 => Float32x2,  // uv_min
                         3 => Float32x2,  // uv_max
-                        4 => Uint32,     // color
-                        5 => Uint16x2,   // page, flags
+                        4 => Float32x2,  // clip_min
+                        5 => Float32x2,  // clip_max
+                        6 => Uint32,     // color
+                        7 => Uint32,     // aux_color (border)
+                        8 => Float32x4,  // params (radius, border_w, clip_r, _)
+                        9 => Uint16x2,   // page, flags
                     ],
                 })],
             },

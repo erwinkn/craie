@@ -22,11 +22,23 @@ fn js_fixture_decodes() {
     let mut layouts = Layouts::new();
     txn.apply(&mut host, &mut layouts).unwrap();
 
-    // The fixture ends with remove(1): one live view remains.
-    assert_eq!(host.len(), 1);
+    // The fixture ends with remove(1): view + input + custom remain live.
+    assert_eq!(host.len(), 3);
     let root = host.node(NodeId(0)).expect("root view");
     assert_eq!(root.kind(), NodeKind::VIEW);
-    assert_eq!(host.view(NodeId(0)).unwrap().color, 0x1b1d_24ff);
+    // The masked PAINT op overwrote viewPaint's fill and added
+    // radius + border.
+    let paint = host.view(NodeId(0)).unwrap();
+    assert_eq!(paint.color, 0x1122_33ff);
+    assert_eq!(paint.radius, 6.5);
+    assert_eq!((paint.border_color, paint.border_w), (0xff00_00ff, 2.0));
+
+    // The input node: props + listeners + focusable decoded.
+    let input = host.node(NodeId(2)).expect("input node");
+    assert_eq!(input.kind(), NodeKind::INPUT);
+    let props = host.props(NodeId(2));
+    assert_eq!(props.listeners, 0x1ff);
+    assert!(props.focusable);
 
     // Style id 0 was defined by the txn and applied to the root.
     let style = layouts.style(craie::host::StyleId(root.style));
@@ -53,4 +65,22 @@ fn js_fixture_decodes() {
         op,
         Op::SetText { text, .. } if *text == "héllo — مرحبا 日本語"
     )));
+
+    // The custom node decoded its payload op.
+    assert_eq!(host.node(NodeId(3)).unwrap().kind(), NodeKind::CUSTOM);
+    assert!(txn.ops.iter().any(|op| matches!(
+        op,
+        Op::Custom { id: 3, tag: 7, data, text }
+            if *data == [0.25, 0.5, 0.75, 1.0] && *text == "0.1,0.4,0.9"
+    )));
+
+    // Accessibility labels decoded (set, then cleared).
+    assert!(txn.ops.iter().any(|op| matches!(
+        op,
+        Op::Label { id: 0, text } if *text == "root container"
+    )));
+    assert!(txn
+        .ops
+        .iter()
+        .any(|op| matches!(op, Op::Label { id: 3, text } if text.is_empty())));
 }

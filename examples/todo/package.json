@@ -1,14 +1,13 @@
 {
-  "name": "@craie/demo-js",
+  "name": "@craie/example-todo",
   "private": true,
   "type": "module",
   "scripts": {
     "build": "node build.mjs",
-    "demo": "node dist/host.mjs",
-    "smoke": "node dist/smoke.mjs"
+    "start": "node dist/host.mjs"
   },
   "dependencies": {
-    "@craie/bridge": "workspace:*",
+    "@craie/react": "workspace:*",
     "react": "^19.2.0"
   },
   "devDependencies": {

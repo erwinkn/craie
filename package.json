@@ -2,5 +2,11 @@
   "name": "craie",
   "private": true,
   "packageManager": "pnpm@11.8.0",
-  "scripts": {}
+  "scripts": {
+    "build:native": "scripts/build-addon.sh",
+    "dev:demo": "pnpm build:native && pnpm --dir examples/js build && node examples/js/dist/host.mjs",
+    "dev:todo": "pnpm build:native && pnpm --dir examples/todo build && node examples/todo/dist/host.mjs",
+    "dev:widgets": "pnpm build:native && pnpm --dir examples/widgets build && node examples/widgets/dist/host.mjs",
+    "smoke": "pnpm build:native && pnpm --dir examples/js build && node examples/js/dist/smoke.mjs"
+  }
 }

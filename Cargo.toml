@@ -15,6 +15,10 @@ wgpu = "=30.0.1"
 parley = "=0.11.1"
 swash = "=0.2.10"
 etagere = "=0.3.0"
+accesskit = "=0.25.0"
+# Vendored AccessKit winit adapter for winit 0.31 betas (upstream
+# accesskit_winit tracks stable winit only).
+accesskit_winit = { package = "martensite-accesskit-winit", version = "=0.18.0", default-features = false }
 bytemuck = "=1.25.2"
 pollster = "=1.0.1"
 tracing = "=0.1.44"

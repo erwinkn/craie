@@ -40,11 +40,29 @@ struct Inner {
     commit_bytes: usize,
     /// Applied seqs awaiting JS delivery, UI -> JS.
     acks: VecDeque<u64>,
+    /// Encoded UI -> JS event frames awaiting pickup.
+    events: VecDeque<Vec<u8>>,
     /// Platform-loop poke, installed when the window starts.
     wake: Option<Wake>,
+    /// UI -> JS poke: installed by the N-API client (`subscribe`). Called
+    /// on whichever thread posted, outside the lock; it drains
+    /// `take_out` and calls a threadsafe function.
+    notify: Option<Arc<dyn Fn() + Send + Sync>>,
     /// Reason the session ended; submission and receive both fail after.
     closed: Option<String>,
 }
+
+/// Outbox frame tags: the first byte of each `take_out` frame.
+pub mod out_tag {
+    /// `u32 count` + `count` × `u64 seq`.
+    pub const ACKS: u8 = 0;
+    /// `encode_events` output.
+    pub const EVENTS: u8 = 1;
+}
+
+/// Bound on queued event frames; past it the newest frames drop (stale
+/// UI events are worthless to a JS side that isn't draining).
+const MAX_EVENT_FRAMES: usize = 1024;
 
 impl Session {
     pub fn new() -> Arc<Session> {
@@ -86,13 +104,63 @@ impl Session {
         self.inner.lock().unwrap().wake = Some(wake);
     }
 
-    /// UI thread: records `seq` as applied and wakes any waiting
-    /// `receive` call on the JS side.
+    /// UI thread: records `seq` as applied, wakes a blocked `recv_acks`,
+    /// and pokes the subscriber (if any).
     pub fn ack(&self, seq: u64) {
-        {
-            self.inner.lock().unwrap().acks.push_back(seq);
-        }
+        let notify = {
+            let mut inner = self.inner.lock().unwrap();
+            inner.acks.push_back(seq);
+            inner.notify.clone()
+        };
         self.changed.notify_all();
+        if let Some(notify) = notify {
+            notify();
+        }
+    }
+
+    /// UI thread: queues one encoded event frame for JS.
+    pub fn post_events(&self, frame: Vec<u8>) {
+        let notify = {
+            let mut inner = self.inner.lock().unwrap();
+            if inner.closed.is_some() {
+                return;
+            }
+            if inner.events.len() >= MAX_EVENT_FRAMES {
+                inner.events.pop_front();
+            }
+            inner.events.push_back(frame);
+            inner.notify.clone()
+        };
+        if let Some(notify) = notify {
+            notify();
+        }
+    }
+
+    /// Installs the UI -> JS notifier (a TSFN pump on the N-API side).
+    /// Replaces any previous subscriber.
+    pub fn set_out_notify(&self, f: impl Fn() + Send + Sync + 'static) {
+        self.inner.lock().unwrap().notify = Some(Arc::new(f));
+    }
+
+    /// Drains pending UI -> JS output as tagged frames: one ACKS frame
+    /// covering all pending acks, then every queued event frame.
+    pub fn take_out(&self) -> Vec<Vec<u8>> {
+        let mut inner = self.inner.lock().unwrap();
+        let mut out = Vec::with_capacity(inner.events.len() + 1);
+        if !inner.acks.is_empty() {
+            let mut frame = Vec::with_capacity(5 + inner.acks.len() * 8);
+            frame.push(out_tag::ACKS);
+            frame.extend_from_slice(&(inner.acks.len() as u32).to_le_bytes());
+            for seq in inner.acks.drain(..) {
+                frame.extend_from_slice(&seq.to_le_bytes());
+            }
+            out.push(frame);
+        }
+        for mut frame in inner.events.drain(..) {
+            frame.insert(0, out_tag::EVENTS);
+            out.push(frame);
+        }
+        out
     }
 
     /// JS thread: drains pending acks without blocking.
@@ -125,6 +193,7 @@ impl Session {
                 inner.closed = Some(reason.into());
             }
             inner.commits.clear();
+            inner.notify = None;
             inner.wake.clone()
         };
         if let Some(wake) = wake {

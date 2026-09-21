@@ -9,14 +9,74 @@ import { ConcurrentRoot, DefaultEventPriority } from "react-reconciler/constants
 import { CraieHost, type HostNode, type Transport } from "./host.js"
 import type { StyleProps } from "./wire.js"
 
-export { attachApp, loadBindings, runApp, NativeTransport } from "./native.js"
-export type { Bindings, NativeClientHandle, NativeHostHandle } from "./native.js"
+export { attachApp, decodeEvents, loadBindings, runApp, NativeTransport } from "./native.js"
+export type {
+  Bindings,
+  NativeClientHandle,
+  NativeHostHandle,
+  PaintQuad,
+  PaintSpec,
+  PainterFn,
+} from "./native.js"
 export { Encoder, NIL, type StyleProps } from "./wire.js"
-export type { Transport } from "./host.js"
+export type { HostNode, Transport, UiEvent } from "./host.js"
 
-export interface ViewProps {
+/** Pointer position + target passed to pointer/wheel listeners. `x`/`y`
+ * are window-absolute logical points; `rx`/`ry` are relative to the
+ * event target's border box. Wheel listeners get `dx`/`dy` deltas. */
+export interface PointerEvt {
+  target: HostNode
+  x: number
+  y: number
+  rx?: number
+  ry?: number
+  button?: number
+  dx?: number
+  dy?: number
+  shift?: boolean
+  ctrl?: boolean
+  alt?: boolean
+  meta?: boolean
+}
+export interface KeyEvt {
+  target: HostNode
+  x: number
+  y: number
+  /** Named-key code; 0 when the press produced text instead. */
+  key: number
+  /** Printable character for unknown keys. */
+  char: string
+}
+export interface ScrollEvt {
+  target: HostNode
+  x: number
+  y: number
+}
+
+export interface ListenerProps {
+  onPointerMove?: (e: PointerEvt) => void
+  onPointerDown?: (e: PointerEvt) => void
+  onPointerUp?: (e: PointerEvt) => void
+  onPointerEnter?: (e: PointerEvt) => void
+  onPointerLeave?: (e: PointerEvt) => void
+  onWheel?: (e: PointerEvt) => void
+  onKeyDown?: (e: KeyEvt) => void
+  onKeyUp?: (e: KeyEvt) => void
+  onFocus?: (e: { target: HostNode }) => void
+  onBlur?: (e: { target: HostNode }) => void
+  onScroll?: (e: ScrollEvt) => void
+}
+
+export interface ViewProps extends ListenerProps {
   style?: StyleProps
   backgroundColor?: string | number
+  borderRadius?: number
+  borderColor?: string | number
+  borderWidth?: number
+  /** Participates in Tab traversal. */
+  focusable?: boolean
+  /** Accessibility name announced by assistive technology. */
+  accessibilityLabel?: string
   hidden?: boolean
   children?: ReactNode
 }
@@ -24,9 +84,48 @@ export interface TextProps {
   style?: StyleProps
   fontSize?: number
   color?: string | number
+  /** Accessibility name; defaults to the text content. */
+  accessibilityLabel?: string
   hidden?: boolean
   children?: ReactNode // strings land on the wire as text
   text?: string
+}
+export interface CustomProps extends ListenerProps {
+  style?: StyleProps
+  backgroundColor?: string | number
+  borderRadius?: number
+  borderColor?: string | number
+  borderWidth?: number
+  /** Which registered painter renders this node (see
+   *  `NativeHost.registerPainter` / `runApp` `painters`). */
+  tag: number
+  /** Up to 4 floats of author data for the painter. */
+  data?: number[]
+  /** String payload for the painter. */
+  text?: string
+  /** Accessibility name announced by assistive technology. */
+  accessibilityLabel?: string
+  hidden?: boolean
+}
+export interface TextInputProps extends ListenerProps {
+  style?: StyleProps
+  backgroundColor?: string | number
+  borderRadius?: number
+  borderColor?: string | number
+  borderWidth?: number
+  fontSize?: number
+  color?: string | number
+  placeholder?: string
+  multiline?: boolean
+  focusable?: boolean
+  /** Accessibility name announced by assistive technology. */
+  accessibilityLabel?: string
+  /** Controlled value; native sends `onChangeText` for edits and accepts
+   * external replacement when the prop actually changes. */
+  value?: string
+  onChangeText?: (text: string) => void
+  onSubmit?: (text: string) => void
+  hidden?: boolean
 }
 
 export function View(props: ViewProps) {
@@ -45,6 +144,23 @@ export function Text(props: TextProps) {
     return createElement("text", { ...props, text: flattenText(children), children: undefined })
   }
   return createElement("text", props)
+}
+
+export function Custom(props: CustomProps) {
+  return createElement("custom", props)
+}
+
+export function ScrollView(props: ViewProps) {
+  return createElement("view", {
+    ...props,
+    style: { overflow: "scroll", ...props.style },
+  })
+}
+
+export function TextInput(props: TextInputProps) {
+  // focusable by default; a Tab ring that skips the only editable field
+  // would surprise.
+  return createElement("input", { focusable: true, ...props })
 }
 
 function flattenText(children: ReactNode): string | undefined {

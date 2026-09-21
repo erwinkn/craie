@@ -8,14 +8,23 @@
 //! calls `submit`/`receive`/`close`.
 
 use std::cell::Cell;
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use craie::app::HostApp;
 use craie::bridge::{Session, Sessions};
-use craie::geom::Size;
-use napi::bindgen_prelude::{AsyncTask, Uint8Array};
-use napi::{Env, Error, Result};
+use craie::custom::{CustomData, Painter, Quad};
+use craie::geom::{Rect, Size};
+use napi::bindgen_prelude::{FunctionRef, Uint8Array};
+use napi::threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode};
+use napi::{Env, Error, Result, Status};
 use napi_derive::napi;
+
+/// UI -> JS callback channel: `CalleeHandled` off (the callback receives
+/// the frame directly, not `(err, value)`), strong (an attached client
+/// keeps the worker's event loop alive; `Session::close` clears the
+/// notify callback, which drops and releases the function), and a bounded
+/// queue so a stalled JS side cannot grow memory without limit.
+type OutFn = ThreadsafeFunction<Uint8Array, (), Uint8Array, Status, false, false, 1024>;
 
 static SESSIONS: OnceLock<Sessions> = OnceLock::new();
 
@@ -59,6 +68,65 @@ pub struct HostOptions {
     pub height: Option<f64>,
 }
 
+/// The argument a registered painter receives for each custom node:
+/// the wire payload plus the node's logical content rect.
+#[napi(object)]
+pub struct PaintSpec {
+    pub tag: u32,
+    pub data: Vec<f64>,
+    pub text: String,
+    pub x: f64,
+    pub y: f64,
+    pub w: f64,
+    pub h: f64,
+}
+
+/// One filled rect a painter emits, in logical points relative to the
+/// window (same space `PaintSpec` reports). Maps to `Instance::rect`.
+#[napi(object)]
+pub struct PaintQuad {
+    pub x: f64,
+    pub y: f64,
+    pub w: f64,
+    pub h: f64,
+    /// Fill, 0xRRGGBBAA.
+    pub color: u32,
+    pub radius: Option<f64>,
+    pub border_w: Option<f64>,
+    pub border_color: Option<u32>,
+}
+
+/// Wraps a JS paint function into the native `Painter` signature. Runs
+/// on the UI thread during paint — a throwing or missing callback paints
+/// nothing for that node.
+fn js_painter(env: Env, fref: FunctionRef<PaintSpec, Vec<PaintQuad>>) -> Painter {
+    Box::new(move |data: &CustomData, rect: Rect, out: &mut Vec<Quad>| {
+        let Ok(func) = fref.borrow_back(&env) else { return };
+        let spec = PaintSpec {
+            tag: data.tag,
+            data: data.data.iter().map(|&v| v as f64).collect(),
+            text: data.text.clone(),
+            x: rect.origin.x as f64,
+            y: rect.origin.y as f64,
+            w: rect.size.width as f64,
+            h: rect.size.height as f64,
+        };
+        match func.call(spec) {
+            Ok(quads) => out.extend(quads.into_iter().map(|q| Quad {
+                x: q.x as f32,
+                y: q.y as f32,
+                w: q.w as f32,
+                h: q.h as f32,
+                color: q.color,
+                radius: q.radius.unwrap_or(0.0) as f32,
+                border_w: q.border_w.unwrap_or(0.0) as f32,
+                border_color: q.border_color.unwrap_or(0),
+            })),
+            Err(e) => eprintln!("[craie-node] painter {} failed: {e}", data.tag),
+        }
+    })
+}
+
 #[napi]
 pub struct NativeHost {
     id: u32,
@@ -66,6 +134,9 @@ pub struct NativeHost {
     title: String,
     width: f64,
     height: f64,
+    /// JS painters registered before `run`; drained into the `Ui` when
+    /// the event loop starts. Main-thread only.
+    painters: Mutex<Vec<(u32, Env, FunctionRef<PaintSpec, Vec<PaintQuad>>)>>,
 }
 
 #[napi]
@@ -99,6 +170,7 @@ impl NativeHost {
             title: options.title.unwrap_or_else(|| "Craie".into()),
             width: width as f64,
             height: height as f64,
+            painters: Mutex::new(Vec::new()),
         })
     }
 
@@ -108,16 +180,34 @@ impl NativeHost {
         self.id
     }
 
+    /// Registers a JS painter for `<Custom>` elements with payload `tag`.
+    /// Called on the UI thread during paint with a `PaintSpec`; returns
+    /// an array of `PaintQuad`s in logical points. Must be called before
+    /// `run`.
+    #[napi]
+    pub fn register_painter(
+        &self,
+        env: Env,
+        tag: u32,
+        callback: FunctionRef<PaintSpec, Vec<PaintQuad>>,
+    ) {
+        self.painters.lock().unwrap().push((tag, env, callback));
+    }
+
     /// Runs the platform event loop on this thread until the window
     /// closes or the session ends. Returns the close reason.
     #[napi]
     pub fn run(&self) -> Result<String> {
         RUNNING.with(|r| r.set(true));
         let session = self.session.clone();
+        let mut app = HostApp::new(session.clone());
+        for (tag, env, fref) in self.painters.lock().unwrap().drain(..) {
+            app.register_painter(tag, js_painter(env, fref));
+        }
         craie::platform::run(
             &self.title,
             Size::new(self.width as f32, self.height as f32),
-            HostApp::new(session.clone()),
+            app,
         );
         RUNNING.with(|r| r.set(false));
         sessions().remove(self.id);
@@ -174,32 +264,32 @@ impl NativeClient {
         self.session.submit(bytes.to_vec()).map_err(Error::from_reason)
     }
 
-    /// Resolves with the seqs applied since the last call; rejects (via
-    /// empty batch semantics) once the session closes. Only one
-    /// outstanding `receive` at a time — the JS side loops on it.
+    /// Subscribes to UI -> JS output: `callback(frame)` fires on this
+    /// worker's event loop with a tagged binary frame — tag 0 is an ack
+    /// batch (`u32 count` + `u64 seq`s), tag 1 an event batch (see
+    /// `events::encode_events`).
     #[napi]
-    pub fn receive(&self) -> AsyncTask<Receive> {
-        AsyncTask::new(Receive(self.session.clone()))
+    pub fn subscribe(&self, callback: OutFn) -> Result<()> {
+        let tsfn = Arc::new(callback);
+        let session = self.session.clone();
+        let weak = Arc::downgrade(&session);
+        let pump_tsfn = tsfn.clone();
+        session.set_out_notify(move || {
+            let Some(s) = weak.upgrade() else { return };
+            for frame in s.take_out() {
+                pump_tsfn.call(frame.into(), ThreadsafeFunctionCallMode::NonBlocking);
+            }
+        });
+        // Drain anything queued before the subscription landed.
+        for frame in session.take_out() {
+            tsfn.call(frame.into(), ThreadsafeFunctionCallMode::NonBlocking);
+        }
+        Ok(())
     }
 
     #[napi]
     pub fn close(&self, reason: String) {
         self.session.close(reason);
-    }
-}
-
-pub struct Receive(Arc<Session>);
-
-impl napi::Task for Receive {
-    type Output = Vec<f64>;
-    type JsValue = Vec<f64>;
-
-    fn compute(&mut self) -> Result<Self::Output> {
-        Ok(self.0.recv_acks().iter().map(|s| *s as f64).collect())
-    }
-
-    fn resolve(&mut self, _: Env, output: Self::Output) -> Result<Self::JsValue> {
-        Ok(output)
     }
 }
 

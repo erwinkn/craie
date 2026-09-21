@@ -39,6 +39,14 @@ impl NodeKind {
     pub const VIEW: NodeKind = NodeKind(0);
     /// A text leaf: owns a row in the host's text side table.
     pub const TEXT: NodeKind = NodeKind(1);
+    /// A text input: editing state lives in `Ui::inputs` (it needs the
+    /// text engine for every operation, so it is not a plain side-table
+    /// row); paint data lives in `paints` like a view.
+    pub const INPUT: NodeKind = NodeKind(2);
+    /// A custom element: payload lives in `Ui::custom`; a registered
+    /// painter (tag -> fn) emits its scene instances. Paint data lives
+    /// in `views` like a view.
+    pub const CUSTOM: NodeKind = NodeKind(3);
 }
 
 /// Content of a TEXT-kind node. Lives in `Host::texts`, addressed by the
@@ -67,12 +75,30 @@ impl TextRow {
 const DEFAULT_FONT_SIZE: f32 = 14.0;
 const DEFAULT_COLOR: u32 = 0xFFFF_FFFF;
 
-/// Content of a VIEW-kind node: paint data only. Layout inputs live in
-/// the wire-addressed style; the flex result lives in `Layouts`.
+/// Paint data for a VIEW-kind (or INPUT-kind) node: a filled, optionally
+/// rounded and bordered rect. Layout inputs live in the wire-addressed
+/// style; the flex result lives in `Layouts`.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct ViewRow {
     /// Background fill, 0xRRGGBBAA. Alpha 0 paints nothing.
     pub color: u32,
+    /// Corner radius, logical points.
+    pub radius: f32,
+    /// Border ring color, 0xRRGGBBAA.
+    pub border_color: u32,
+    /// Border ring width, logical points.
+    pub border_w: f32,
+}
+
+/// Which platform events a node subscribes to. Stored sparsely in
+/// `Host::props` — most nodes listen to nothing. Bits mirror
+/// `packages/bridge` EVENT_MASK.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct NodeProps {
+    /// Event subscription mask (pointer/key/focus event bits).
+    pub listeners: u32,
+    /// Participates in Tab focus traversal and accepts click focus.
+    pub focusable: bool,
 }
 
 /// Per-node dirty bits.
@@ -176,9 +202,13 @@ pub struct Host {
     /// recycled through `free_texts` when nodes are removed.
     texts: Vec<TextRow>,
     free_texts: Vec<u32>,
-    /// Side table for VIEW-kind nodes, indexed by `header.aux`.
+    /// Side table for VIEW-kind and INPUT-kind nodes, indexed by
+    /// `header.aux`.
     views: Vec<ViewRow>,
     free_views: Vec<u32>,
+    /// Sparse per-node props (listener mask, focusable). Keyed by node
+    /// id — most nodes have no entry.
+    props: std::collections::HashMap<u32, NodeProps>,
     /// Nodes needing layout invalidation, in mark order. Pushed by
     /// `mark_dirty` when a node's LAYOUT flag goes 0->1, drained by the
     /// layout pass — no whole-arena dirty scan anywhere.
@@ -199,6 +229,7 @@ impl Host {
             free_texts: Vec::new(),
             views: Vec::new(),
             free_views: Vec::new(),
+            props: std::collections::HashMap::new(),
             layout_dirty: Vec::new(),
             paint_dirty: false,
         }
@@ -246,7 +277,7 @@ impl Host {
                 }
             };
             node.aux = row;
-        } else if kind == NodeKind::VIEW {
+        } else if matches!(kind, NodeKind::VIEW | NodeKind::INPUT | NodeKind::CUSTOM) {
             let row = match self.free_views.pop() {
                 Some(row) => {
                     self.views[row as usize] = ViewRow::default();
@@ -327,10 +358,13 @@ impl Host {
         if node.aux != u32::MAX {
             match node.kind() {
                 NodeKind::TEXT => self.free_texts.push(node.aux),
-                NodeKind::VIEW => self.free_views.push(node.aux),
+                NodeKind::VIEW | NodeKind::INPUT | NodeKind::CUSTOM => {
+                    self.free_views.push(node.aux)
+                }
                 _ => {}
             }
         }
+        self.props.remove(&id.0);
         let generation = node.generation.wrapping_add(1);
         *node = NodeHeader {
             generation,
@@ -416,24 +450,71 @@ impl Host {
         }
     }
 
-    /// View row of a VIEW-kind node.
+    /// Paint row of a VIEW-, INPUT-, or CUSTOM-kind node.
     pub fn view(&self, id: NodeId) -> Option<&ViewRow> {
-        let node = self.node(id).filter(|n| n.kind() == NodeKind::VIEW)?;
+        let node = self
+            .node(id)
+            .filter(|n| matches!(n.kind(), NodeKind::VIEW | NodeKind::INPUT | NodeKind::CUSTOM))?;
         self.views.get(node.aux as usize)
+    }
+
+    fn view_mut(&mut self, id: NodeId) -> Option<&mut ViewRow> {
+        let aux = self
+            .node(id)
+            .filter(|n| {
+                matches!(n.kind(), NodeKind::VIEW | NodeKind::INPUT | NodeKind::CUSTOM)
+            })?
+            .aux;
+        self.views.get_mut(aux as usize)
     }
 
     /// Sets a view's background color (0xRRGGBBAA).
     pub fn set_view_paint(&mut self, id: NodeId, color: u32) {
-        let Some(node) = self.node(id) else { return };
-        if node.kind() != NodeKind::VIEW {
+        if let Some(row) = self.view_mut(id) {
+            row.color = color;
+            self.paint_dirty = true;
+        }
+    }
+
+    /// Sets the full paint record for a view/input node: fill color,
+    /// corner radius, border. `None` fields keep their value.
+    pub fn set_paint(
+        &mut self,
+        id: NodeId,
+        color: Option<u32>,
+        radius: Option<f32>,
+        border: Option<(u32, f32)>,
+    ) {
+        if let Some(row) = self.view_mut(id) {
+            if let Some(color) = color {
+                row.color = color;
+            }
+            if let Some(radius) = radius {
+                row.radius = radius.max(0.0);
+            }
+            if let Some((bc, bw)) = border {
+                row.border_color = bc;
+                row.border_w = bw.max(0.0);
+            }
+            self.paint_dirty = true;
+        }
+    }
+
+    /// Per-node props (listener mask, focusable); absent = defaults.
+    pub fn props(&self, id: NodeId) -> NodeProps {
+        self.props.get(&id.0).copied().unwrap_or_default()
+    }
+
+    /// Sets a node's event listener mask and flags.
+    pub fn set_props(&mut self, id: NodeId, listeners: u32, focusable: bool) {
+        if self.node(id).is_none() {
             return;
         }
-        let aux = node.aux;
-        if aux == u32::MAX {
-            return;
+        if listeners == 0 && !focusable {
+            self.props.remove(&id.0);
+        } else {
+            self.props.insert(id.0, NodeProps { listeners, focusable });
         }
-        self.views[aux as usize].color = color;
-        self.paint_dirty = true;
     }
 
     /// Sets the wire style id on a node (`u32::MAX` clears it).

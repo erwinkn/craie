@@ -3,6 +3,43 @@
 Findings per milestone. Each entry is a decision or measurement with the
 reason it landed.
 
+## Pass 3 — interaction, extension, accessibility
+
+Decisions that shaped the interactive layer:
+
+- **One TSFN return channel.** `subscribe(cb)` delivers `ack | events`
+  frames — no blocking receive task, no polling. Gotchas that cost
+  real debugging: napi's `CalleeHandled` default makes the callback
+  `(error, frame)` not `(frame)`, and `Weak` TSFNs don't keep a Node
+  worker's event loop alive (worker exits mid-attach). Strong TSFN,
+  released on `Session::close`.
+- **Node, not Bun, for apps.** Bun hangs requiring N-API addons inside
+  `worker_thread`s. Examples bundle via esbuild and run under Node;
+  `attachApp` rebinds console to direct fds because Node pipes worker
+  stdout through the (blocked) main thread.
+- **Listener-relative pointer coordinates.** Coordinates are computed
+  per listener on the propagation path, not once for the deepest hit —
+  otherwise a slider track receiving a knob's event reads
+  knob-relative x. Pointer capture holds the drag on the pressed node.
+- **PlainEditor per INPUT.** Parley 0.11's editor gives caret,
+  selection, IME composition, and AccessKit hooks for free; Craie adds
+  undo rings, arboard clipboard, and the wire commands.
+- **Custom = payload + painter, not a framework.** A CUSTOM node is a
+  tag + f32x4 + text; registered painters emit quads into the same
+  clipped scene. JS painters call back synchronously during paint.
+  Extension without a second retained tree.
+- **martensite-accesskit-winit 0.18.** accesskit_winit 0.34 targets
+  winit 0.30; the martensite fork is patched for 0.31-beta.3. The
+  semantic tree is projected from retained state on change (full
+  `TreeUpdate` — trees are small); AT actions queue through the wake
+  channel onto the UI thread.
+- **Atlas LRU + page cap.** Bounded residency: allocation failure
+  evicts least-recently-used etagere allocations and marks cache
+  entries absent for re-rasterization.
+
+Pass-3 bench deltas (same 5k-row scene): paint+emit cold 2.39 ms, warm
+0.05 ms; 500-dirty relayout 19.3 ms. See `docs/PASS3.md`.
+
 ## 5,000-row benchmark (`examples/bench`, release build)
 
 A root column with 5,000 rows, each a styled view containing one text

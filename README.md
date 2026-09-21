@@ -2,7 +2,8 @@
 
 A React-driven native desktop renderer, in Rust. React owns composition;
 native code owns a compact retained tree, Taffy flex layout, Parley/Swash
-text, an etagere glyph atlas, and a wgpu renderer.
+text, an etagere glyph atlas, a wgpu renderer, input/focus/scroll/text
+input, and an AccessKit semantic tree.
 
 This is an experiment: does a purpose-built retained host beat translating
 React mutations into a general retained-mode framework? See
@@ -11,14 +12,17 @@ React mutations into a general retained-mode framework? See
 ## Run it
 
 ```sh
-pnpm install   # workspace deps for packages/bridge + examples/js
+pnpm install        # workspace deps (bridge, react facade, examples)
+pnpm build:native   # cargo build -p craie-node + codesign -> craie-node.node
+
+# React apps — esbuild-bundled, run under Node (Bun cannot require
+# N-API addons inside worker_threads)
+pnpm dev:todo       # todo list: TextInput, ScrollView, persistence
+pnpm dev:widgets    # slider behavior + sparkline custom element
+pnpm --dir examples/js build && node examples/js/dist/host.mjs  # counter demo
 
 # native window fed by a local submitter thread (no JS needed)
 cargo run --example app
-
-# React app in-process: native window on the main thread, React in a worker
-cargo build -p craie-node && cp target/debug/libcraie_node.dylib craie-node.node
-bun examples/js/host.ts
 
 # headless renders
 cargo run --example text -- --screenshot /tmp/text.png   # direct demo
@@ -41,14 +45,15 @@ and presence-masked positional style records — and submits them in-process
 through `craie-node` (N-API): the main thread owns the winit event loop
 and the retained `Ui`; the React app runs in a `worker_thread` and calls
 `NativeClient.submit(bytes)`, which queues one copied transaction and
-wakes the loop. Applied seqs are acked back so the JS side can recycle
-node ids safely.
+wakes the loop. Applied seqs and outbound UI events return over one
+`subscribe` callback (N-API threadsafe function), so the JS side can
+recycle node ids safely and React props like `onPointerDown` fire.
 
 ```tsx
 // app.tsx (runs in the worker)
-import { attachApp, loadBindings, View, Text } from "@craie/bridge"
+import { attachApp, View, Text } from "@craie/react"
 
-const root = attachApp(loadBindings())
+const root = attachApp()
 root.render(
   <View backgroundColor="#141518" style={{ padding: 32, gap: 8 }}>
     <Text fontSize={20} color="#ececf0">hello</Text>
@@ -58,17 +63,24 @@ root.render(
 
 ```ts
 // host.ts (main thread)
-import { loadBindings, runApp } from "@craie/bridge"
-await runApp(loadBindings(), new URL("./app.tsx", import.meta.url),
+import { runApp } from "@craie/react"
+await runApp(new URL("./app.tsx", import.meta.url),
   { title: "craie", width: 900, height: 640 })
 ```
 
 ### Elements
 
-- `<View>` — flex container. Props: `style`, `backgroundColor`,
-  `hidden`, `children`.
-- `<Text>` — text leaf. Props: `text` (or a string child), `fontSize`,
-  `color`, `style`, `hidden`.
+- `<View>` — flex container, scrollable via `overflow: "scroll"`.
+- `<Text>` — text leaf (string child or `text` prop).
+- `<TextInput>` — editable text: caret, selection, clipboard, undo, IME.
+- `<ScrollView>` — `View` alias for `overflow: "scroll"`.
+- `<Custom>` — payload node painted by a `runApp(..., { painters })`
+  callback, for content the host doesn't ship.
+
+Event props (`onPointerDown/Move/Up`, `onKeyDown/Up`, `onFocus/Blur`,
+`onChangeText`, `onSubmit`, `onScroll`) attach per node; pointer events
+carry coordinates relative to the listening node. `focusable` and
+`accessibilityLabel` feed focus traversal and the AccessKit tree.
 
 `style` is an RN-ish object (`flexDirection`, `padding`, `gap`,
 `alignItems`, `justifyContent`, `width`/`height` as `number | "50%" |

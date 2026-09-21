@@ -194,7 +194,11 @@ impl TextEngine {
                         continue;
                     };
                     self.cache.stats.rasters += 1;
-                    let entry = Self::insert_into_atlas(&mut self.atlas, &rastered);
+                    let Some(entry) =
+                        Self::insert_into_atlas(&mut self.atlas, &mut self.cache, &rastered)
+                    else {
+                        continue;
+                    };
                     self.cache.insert(key, entry);
                     entry
                 }
@@ -220,21 +224,32 @@ impl TextEngine {
                     (entry.x + entry.w) as f32 / atlas_size,
                     (entry.y + entry.h) as f32 / atlas_size,
                 ],
+                // The painter stamps the effective clip on every instance.
+                clip_min: [f32::MIN, f32::MIN],
+                clip_max: [f32::MAX, f32::MAX],
                 color: color.0,
+                aux_color: 0,
+                params: [0.0; 4],
                 page: entry.page,
                 flags,
             });
         }
     }
 
+    /// Writes one rasterized glyph into the atlas. At the page cap the
+    /// least-recently-used cache entries of the same set are evicted
+    /// until the write lands; `None` means the glyph can't fit at all.
+    /// Associated fn: `self.raster` may be borrowed by a live scaler.
     fn insert_into_atlas(
         atlas: &mut GlyphAtlas,
+        cache: &mut GlyphCache,
         rastered: &raster::Rastered,
-    ) -> cache::CachedGlyph {
+    ) -> Option<cache::CachedGlyph> {
         let p = &rastered.image.placement;
         let (w, h) = (p.width, p.height);
         if w == 0 || h == 0 {
-            return cache::CachedGlyph {
+            return Some(cache::CachedGlyph {
+                alloc: None,
                 page: 0,
                 color: false,
                 x: 0,
@@ -243,24 +258,37 @@ impl TextEngine {
                 h: 0,
                 left: 0,
                 top: 0,
+            });
+        }
+        let color = rastered.color;
+        let data = &rastered.image.data;
+        let mut slot = if color {
+            atlas.write_color(w, h, data)
+        } else {
+            atlas.write_alpha(w, h, data)
+        };
+        while slot.is_none() {
+            if !cache.evict_oldest(atlas, color) {
+                return None;
+            }
+            slot = if color {
+                atlas.write_color(w, h, data)
+            } else {
+                atlas.write_alpha(w, h, data)
             };
         }
-        let slot = if rastered.color {
-            atlas.write_color(w, h, &rastered.image.data)
-        } else {
-            atlas.write_alpha(w, h, &rastered.image.data)
-        };
-        let slot = slot.expect("atlas allocation failed");
-        cache::CachedGlyph {
+        let slot = slot.unwrap();
+        Some(cache::CachedGlyph {
+            alloc: Some(slot.alloc),
             page: slot.page,
-            color: rastered.color,
+            color,
             x: slot.x,
             y: slot.y,
             w: w as u16,
             h: h as u16,
             left: p.left as i16,
             top: p.top as i16,
-        }
+        })
     }
 }
 

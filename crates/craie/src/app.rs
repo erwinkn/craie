@@ -7,7 +7,9 @@
 
 use std::sync::Arc;
 
+use crate::a11y::A11yShared;
 use crate::bridge::Session;
+use crate::events::{self, Event};
 use crate::geom::Size;
 use crate::gpu::{Gpu, Renderer, WindowSurface};
 use crate::platform::{App, Wake, Window};
@@ -16,6 +18,11 @@ use crate::ui::Ui;
 /// A `platform::App` that renders a `Session`-fed `Ui` into one window.
 pub struct HostApp {
     session: Arc<Session>,
+    /// Custom painters registered before `ready` — moved into the `Ui`
+    /// when it exists.
+    painters: Vec<(u32, crate::custom::Painter)>,
+    /// Accessibility handoff shared with the platform adapter.
+    a11y: Arc<A11yShared>,
     inner: Option<Inner>,
 }
 
@@ -30,12 +37,27 @@ impl HostApp {
     pub fn new(session: Arc<Session>) -> HostApp {
         HostApp {
             session,
+            painters: Vec::new(),
+            a11y: A11yShared::new(),
             inner: None,
         }
     }
 
+    /// The shared accessibility state (latest tree + pending actions).
+    pub fn a11y(&self) -> &Arc<A11yShared> {
+        &self.a11y
+    }
+
     pub fn session(&self) -> &Arc<Session> {
         &self.session
+    }
+
+    /// Registers a custom-element painter. Safe before or after `ready`.
+    pub fn register_painter(&mut self, tag: u32, painter: crate::custom::Painter) {
+        match &mut self.inner {
+            Some(inner) => inner.ui.register_painter(tag, painter),
+            None => self.painters.push((tag, painter)),
+        }
     }
 
     /// Borrows the retained UI (for boot content applied before `run`).
@@ -74,6 +96,28 @@ impl Inner {
         self.renderer.sync_atlas(&self.gpu, &mut self.ui.text.atlas);
         window.request_redraw();
     }
+
+    /// Publishes a fresh semantic tree when a11y-observable state
+    /// changed — independent of paint (labels and focus don't dirty).
+    fn publish_a11y(ui: &mut Ui, window: &Window, shared: &A11yShared) {
+        if !ui.take_a11y_stale() {
+            return;
+        }
+        let tree = ui.a11y_tree(window.logical_size());
+        *shared.latest.lock().unwrap() = Some(tree.clone());
+        window.update_a11y(tree);
+    }
+
+    /// Pushes queued UI events to the JS side, and keeps the platform
+    /// IME pointed at the focused input's caret. Associated fn so the
+    /// caller can pass `&mut inner.ui` while `inner` is borrowed.
+    fn flush_out(ui: &mut Ui, window: &Window, session: &Session) {
+        let events = ui.take_events();
+        if !events.is_empty() {
+            session.post_events(events::encode_events(&events));
+        }
+        window.set_ime(ui.ime_wanted(), ui.ime_area());
+    }
 }
 
 impl App for HostApp {
@@ -82,7 +126,10 @@ impl App for HostApp {
         let (gpu, surface) = Gpu::for_window(window.surface_target());
         let surface = WindowSurface::new(&gpu, surface, w, h);
         let renderer = Renderer::new(&gpu, surface.config.format);
-        let ui = Ui::new(window.scale_factor() as f32);
+        let mut ui = Ui::new(window.scale_factor() as f32);
+        for (tag, painter) in self.painters.drain(..) {
+            ui.register_painter(tag, painter);
+        }
         self.session.install_wake(wake.clone());
         let mut inner = Inner {
             gpu,
@@ -91,6 +138,7 @@ impl App for HostApp {
             ui,
         };
         inner.sync(window, &self.session, true);
+        Inner::publish_a11y(&mut inner.ui, window, &self.a11y);
         self.inner = Some(inner);
     }
 
@@ -100,6 +148,15 @@ impl App for HostApp {
         }
         if let Some(inner) = &mut self.inner {
             inner.sync(window, &self.session, true);
+            // Assistive-tech action requests arrive through the shared
+            // queue; drain them on the UI thread like input events.
+            let actions: Vec<accesskit::ActionRequest> =
+                std::mem::take(&mut *self.a11y.actions.lock().unwrap());
+            for req in &actions {
+                inner.ui.a11y_action(req);
+            }
+            Inner::flush_out(&mut inner.ui, window, &self.session);
+            Inner::publish_a11y(&mut inner.ui, window, &self.a11y);
         }
         false
     }
@@ -119,6 +176,20 @@ impl App for HostApp {
         if !occluded {
             window.request_redraw();
         }
+    }
+
+    fn event(&mut self, window: &Window, event: &Event) {
+        let Some(inner) = &mut self.inner else { return };
+        inner.ui.dispatch(event);
+        Inner::flush_out(&mut inner.ui, window, &self.session);
+        Inner::publish_a11y(&mut inner.ui, window, &self.a11y);
+        if inner.ui.needs_paint() {
+            window.request_redraw();
+        }
+    }
+
+    fn a11y_shared(&self) -> Option<Arc<A11yShared>> {
+        Some(self.a11y.clone())
     }
 
     fn redraw(&mut self, window: &Window) {

@@ -7,6 +7,10 @@
 
 use std::collections::HashMap;
 
+use etagere::AllocId;
+
+use crate::text::atlas::{AtlasSlot, GlyphAtlas};
+
 /// Quarter-pixel subpixel quantization. Each axis uses 2 bits.
 pub const SUBPIXEL_BITS: u32 = 2;
 pub const SUBPIXEL_STEPS: u32 = 1 << SUBPIXEL_BITS;
@@ -29,6 +33,8 @@ pub struct GlyphKey {
 /// Where a rasterized glyph lives in the atlas, plus how to place it.
 #[derive(Clone, Copy, Debug)]
 pub struct CachedGlyph {
+    /// etagere allocation id — `None` for zero-area glyphs (spaces).
+    pub alloc: Option<AllocId>,
     /// Atlas page index (within the alpha or color page set).
     pub page: u16,
     /// True when the glyph is a 32-bit color bitmap (emoji etc.).
@@ -40,6 +46,14 @@ pub struct CachedGlyph {
     /// Swash placement: bitmap offset relative to the glyph origin.
     pub left: i16,
     pub top: i16,
+}
+
+/// A cached glyph plus the frame it was last emitted on — the LRU
+/// signal the atlas eviction pass uses.
+#[derive(Clone, Copy, Debug)]
+struct Entry {
+    glyph: CachedGlyph,
+    last_used: u32,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -56,7 +70,9 @@ pub struct GlyphCache {
     /// Interned (normalized coords, embolden, skew) rows. The table is
     /// tiny — a linear scan beats a per-lookup `Box<[i16]>` key alloc.
     coords: Vec<CoordsRow>,
-    map: HashMap<GlyphKey, CachedGlyph>,
+    map: HashMap<GlyphKey, Entry>,
+    /// Frame counter for LRU stamping — bumped by `begin_frame`.
+    tick: u32,
     pub stats: CacheStats,
 }
 
@@ -72,8 +88,14 @@ impl GlyphCache {
             fonts: HashMap::new(),
             coords: Vec::new(),
             map: HashMap::new(),
+            tick: 0,
             stats: CacheStats::default(),
         }
+    }
+
+    /// Advances the LRU clock. Called once per paint pass.
+    pub fn begin_frame(&mut self) {
+        self.tick = self.tick.wrapping_add(1);
     }
 
     /// Interns a font identity to a u16 slot. One map lookup per glyph run.
@@ -102,10 +124,11 @@ impl GlyphCache {
     }
 
     pub fn get(&mut self, key: &GlyphKey) -> Option<CachedGlyph> {
-        match self.map.get(key) {
+        match self.map.get_mut(key) {
             Some(entry) => {
                 self.stats.hits += 1;
-                Some(*entry)
+                entry.last_used = self.tick;
+                Some(entry.glyph)
             }
             None => {
                 self.stats.misses += 1;
@@ -115,7 +138,43 @@ impl GlyphCache {
     }
 
     pub fn insert(&mut self, key: GlyphKey, entry: CachedGlyph) {
-        self.map.insert(key, entry);
+        self.map.insert(
+            key,
+            Entry {
+                glyph: entry,
+                last_used: self.tick,
+            },
+        );
+    }
+
+    /// Evicts the least-recently-used entry in `color`'s page set and
+    /// frees its atlas slot. Entries used on the current frame are
+    /// ineligible. Returns false when nothing evictable remains.
+    pub fn evict_oldest(
+        &mut self,
+        atlas: &mut GlyphAtlas,
+        color: bool,
+    ) -> bool {
+        let victim = self
+            .map
+            .iter()
+            .filter(|(_, e)| e.glyph.color == color && e.last_used < self.tick)
+            .min_by_key(|(_, e)| e.last_used)
+            .map(|(k, _)| *k);
+        let Some(key) = victim else { return false };
+        let entry = self.map.remove(&key).unwrap();
+        if let Some(alloc) = entry.glyph.alloc {
+            atlas.free(
+                color,
+                AtlasSlot {
+                    alloc,
+                    page: entry.glyph.page,
+                    x: entry.glyph.x,
+                    y: entry.glyph.y,
+                },
+            );
+        }
+        true
     }
 
     pub fn len(&self) -> usize {

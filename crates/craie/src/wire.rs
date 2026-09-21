@@ -41,6 +41,36 @@ mod op {
     pub const HIDDEN: u8 = 0x08;
     pub const STYLE: u8 = 0x09;
     pub const VIEW_PAINT: u8 = 0x0A;
+    /// Masked paint record: fill/radius/border for views and inputs.
+    pub const PAINT: u8 = 0x0B;
+    /// Event listener mask + flags (focusable).
+    pub const PROPS: u8 = 0x0C;
+    /// Text-input configuration for INPUT-kind nodes.
+    pub const INPUT_PROPS: u8 = 0x0D;
+    /// UI command: focus, blur, set input text, scroll to.
+    pub const COMMAND: u8 = 0x0E;
+    /// Custom-element payload: painter tag + data for CUSTOM-kind nodes.
+    pub const CUSTOM: u8 = 0x0F;
+    /// Accessibility name for a node (string ref; empty clears).
+    pub const LABEL: u8 = 0x10;
+}
+
+/// PAINT op field mask bits.
+mod paint_field {
+    pub const COLOR: u8 = 1 << 0;
+    pub const RADIUS: u8 = 1 << 1;
+    /// border_color u32 + border_w f32, written together.
+    pub const BORDER: u8 = 1 << 2;
+}
+
+/// COMMAND op sub-tags.
+mod cmd {
+    pub const FOCUS: u8 = 0;
+    pub const BLUR: u8 = 1;
+    /// Followed by a string ref: replace the input's text.
+    pub const SET_TEXT: u8 = 2;
+    /// Followed by two f32s: set the scroll offset (logical).
+    pub const SCROLL_TO: u8 = 3;
 }
 
 // Style schema, in mask order. Every field is written as a fixed tag byte
@@ -309,6 +339,118 @@ impl Encoder {
         self.ops.extend_from_slice(&color.to_le_bytes());
     }
 
+    /// Masked paint update: color (0xRRGGBBAA), corner radius, border.
+    pub fn paint(
+        &mut self,
+        id: u32,
+        color: Option<u32>,
+        radius: Option<f32>,
+        border: Option<(u32, f32)>,
+    ) {
+        self.ops.push(op::PAINT);
+        self.ops.extend_from_slice(&id.to_le_bytes());
+        let mut mask = 0u8;
+        if color.is_some() {
+            mask |= paint_field::COLOR;
+        }
+        if radius.is_some() {
+            mask |= paint_field::RADIUS;
+        }
+        if border.is_some() {
+            mask |= paint_field::BORDER;
+        }
+        self.ops.push(mask);
+        if let Some(c) = color {
+            self.ops.extend_from_slice(&c.to_le_bytes());
+        }
+        if let Some(r) = radius {
+            self.ops.extend_from_slice(&r.to_le_bytes());
+        }
+        if let Some((bc, bw)) = border {
+            self.ops.extend_from_slice(&bc.to_le_bytes());
+            self.ops.extend_from_slice(&bw.to_le_bytes());
+        }
+    }
+
+    /// Event listener mask + focusable flag for a node.
+    pub fn props(&mut self, id: u32, listeners: u32, focusable: bool) {
+        self.ops.push(op::PROPS);
+        self.ops.extend_from_slice(&id.to_le_bytes());
+        self.ops.extend_from_slice(&listeners.to_le_bytes());
+        self.ops.push(focusable as u8);
+    }
+
+    /// Text-input configuration.
+    pub fn input_props(
+        &mut self,
+        id: u32,
+        font_size: f32,
+        color: u32,
+        placeholder: &str,
+        multiline: bool,
+    ) {
+        let s = self.str_ref(placeholder);
+        self.ops.push(op::INPUT_PROPS);
+        self.ops.extend_from_slice(&id.to_le_bytes());
+        self.ops.extend_from_slice(&font_size.to_le_bytes());
+        self.ops.extend_from_slice(&color.to_le_bytes());
+        self.ops.extend_from_slice(&s.to_le_bytes());
+        self.ops.push(multiline as u8);
+    }
+
+    /// Accessibility name for a node (empty string clears it).
+    pub fn label(&mut self, id: u32, text: &str) {
+        let s = self.str_ref(text);
+        self.ops.push(op::LABEL);
+        self.ops.extend_from_slice(&id.to_le_bytes());
+        self.ops.extend_from_slice(&s.to_le_bytes());
+    }
+
+    /// Focus a node.
+    pub fn cmd_focus(&mut self, id: u32) {
+        self.ops.push(op::COMMAND);
+        self.ops.extend_from_slice(&id.to_le_bytes());
+        self.ops.push(cmd::FOCUS);
+    }
+
+    /// Blur a node.
+    pub fn cmd_blur(&mut self, id: u32) {
+        self.ops.push(op::COMMAND);
+        self.ops.extend_from_slice(&id.to_le_bytes());
+        self.ops.push(cmd::BLUR);
+    }
+
+    /// Replace an input node's text.
+    pub fn cmd_set_input_text(&mut self, id: u32, text: &str) {
+        let s = self.str_ref(text);
+        self.ops.push(op::COMMAND);
+        self.ops.extend_from_slice(&id.to_le_bytes());
+        self.ops.push(cmd::SET_TEXT);
+        self.ops.extend_from_slice(&s.to_le_bytes());
+    }
+
+    /// Set a node's scroll offset (logical points).
+    pub fn cmd_scroll_to(&mut self, id: u32, x: f32, y: f32) {
+        self.ops.push(op::COMMAND);
+        self.ops.extend_from_slice(&id.to_le_bytes());
+        self.ops.push(cmd::SCROLL_TO);
+        self.ops.extend_from_slice(&x.to_le_bytes());
+        self.ops.extend_from_slice(&y.to_le_bytes());
+    }
+
+    /// Custom-element payload for a CUSTOM-kind node: painter tag, four
+    /// floats, and a string.
+    pub fn custom(&mut self, id: u32, tag: u32, data: [f32; 4], text: &str) {
+        let s = self.str_ref(text);
+        self.ops.push(op::CUSTOM);
+        self.ops.extend_from_slice(&id.to_le_bytes());
+        self.ops.extend_from_slice(&tag.to_le_bytes());
+        for v in data {
+            self.ops.extend_from_slice(&v.to_le_bytes());
+        }
+        self.ops.extend_from_slice(&s.to_le_bytes());
+    }
+
     /// Defines wire style `wire_id`. Writes a full record (mask = ALL);
     /// sparse updates are a format-compatible extension.
     pub fn style(&mut self, wire_id: u32, s: &Style) {
@@ -489,6 +631,48 @@ pub enum Op<'a> {
         wire_id: u32,
         style: Box<Style>,
     },
+    Paint {
+        id: u32,
+        color: Option<u32>,
+        radius: Option<f32>,
+        border: Option<(u32, f32)>,
+    },
+    Props {
+        id: u32,
+        listeners: u32,
+        focusable: bool,
+    },
+    InputProps {
+        id: u32,
+        font_size: f32,
+        color: u32,
+        placeholder: &'a str,
+        multiline: bool,
+    },
+    Command {
+        id: u32,
+        cmd: Command<'a>,
+    },
+    Custom {
+        id: u32,
+        tag: u32,
+        data: [f32; 4],
+        text: &'a str,
+    },
+    /// Accessibility name for a node (empty string clears it).
+    Label {
+        id: u32,
+        text: &'a str,
+    },
+}
+
+/// UI command payloads (COMMAND op).
+#[derive(Debug)]
+pub enum Command<'a> {
+    Focus,
+    Blur,
+    SetInputText(&'a str),
+    ScrollTo(f32, f32),
 }
 
 struct Reader<'a> {
@@ -738,6 +922,78 @@ pub fn decode(buf: &[u8]) -> Result<Txn<'_>, WireError> {
                     style: Box::new(r.style(mask)?),
                 }
             }
+            op::PAINT => {
+                let id = r.u32()?;
+                let mask = r.u8()?;
+                let color = if mask & paint_field::COLOR != 0 {
+                    Some(r.u32()?)
+                } else {
+                    None
+                };
+                let radius = if mask & paint_field::RADIUS != 0 {
+                    Some(r.f32()?)
+                } else {
+                    None
+                };
+                let border = if mask & paint_field::BORDER != 0 {
+                    Some((r.u32()?, r.f32()?))
+                } else {
+                    None
+                };
+                Op::Paint {
+                    id,
+                    color,
+                    radius,
+                    border,
+                }
+            }
+            op::PROPS => Op::Props {
+                id: r.u32()?,
+                listeners: r.u32()?,
+                focusable: r.u8()? != 0,
+            },
+            op::INPUT_PROPS => Op::InputProps {
+                id: r.u32()?,
+                font_size: r.f32()?,
+                color: r.u32()?,
+                placeholder: strings
+                    .get(r.u32()? as usize)
+                    .copied()
+                    .ok_or(WireError::Truncated)?,
+                multiline: r.u8()? != 0,
+            },
+            op::COMMAND => {
+                let id = r.u32()?;
+                let cmd = match r.u8()? {
+                    cmd::FOCUS => Command::Focus,
+                    cmd::BLUR => Command::Blur,
+                    cmd::SET_TEXT => Command::SetInputText(
+                        strings
+                            .get(r.u32()? as usize)
+                            .copied()
+                            .ok_or(WireError::Truncated)?,
+                    ),
+                    cmd::SCROLL_TO => Command::ScrollTo(r.f32()?, r.f32()?),
+                    other => return Err(WireError::BadOp(other)),
+                };
+                Op::Command { id, cmd }
+            }
+            op::CUSTOM => Op::Custom {
+                id: r.u32()?,
+                tag: r.u32()?,
+                data: [r.f32()?, r.f32()?, r.f32()?, r.f32()?],
+                text: strings
+                    .get(r.u32()? as usize)
+                    .copied()
+                    .ok_or(WireError::Truncated)?,
+            },
+            op::LABEL => Op::Label {
+                id: r.u32()?,
+                text: strings
+                    .get(r.u32()? as usize)
+                    .copied()
+                    .ok_or(WireError::Truncated)?,
+            },
             _ => return Err(WireError::BadOp(tag)),
         };
         ops.push(op);
@@ -767,6 +1023,8 @@ impl Txn<'_> {
                         NodeId(*id),
                         match kind {
                             1 => NodeKind::TEXT,
+                            2 => NodeKind::INPUT,
+                            3 => NodeKind::CUSTOM,
                             _ => NodeKind::VIEW,
                         },
                     );
@@ -810,6 +1068,24 @@ impl Txn<'_> {
                         layouts.clear_all_caches(host.slot_count());
                     }
                 }
+                Op::Paint {
+                    id,
+                    color,
+                    radius,
+                    border,
+                } => host.set_paint(NodeId(*id), *color, *radius, *border),
+                Op::Props {
+                    id,
+                    listeners,
+                    focusable,
+                } => host.set_props(NodeId(*id), *listeners, *focusable),
+                // Input state, custom payloads, labels, and commands are
+                // UI-level: `Ui::apply_txn` handles them after the host
+                // pass.
+                Op::InputProps { .. }
+                | Op::Command { .. }
+                | Op::Custom { .. }
+                | Op::Label { .. } => {}
             }
         }
     }
@@ -857,16 +1133,19 @@ impl Txn<'_> {
         for op in &self.ops {
             match op {
                 Op::Create { id, kind } => {
-                    if *id >= NodeId::DETACHED.0 || *kind > 1 {
+                    if *id >= NodeId::DETACHED.0 || *kind > 3 {
                         return Err(WireError::Invalid("bad id or kind in create"));
                     }
                     if live!(*id) {
                         return Err(WireError::Invalid("create over live node"));
                     }
-                    diff.insert(
-                        *id,
-                        (true, if *kind == 1 { NodeKind::TEXT } else { NodeKind::VIEW }),
-                    );
+                    let kind = match kind {
+                        1 => NodeKind::TEXT,
+                        2 => NodeKind::INPUT,
+                        3 => NodeKind::CUSTOM,
+                        _ => NodeKind::VIEW,
+                    };
+                    diff.insert(*id, (true, kind));
                 }
                 Op::SetText { id, .. } | Op::TextProps { id, .. } => {
                     if kind_of!(*id) != Some(NodeKind::TEXT) {
@@ -935,9 +1214,32 @@ impl Txn<'_> {
                         return Err(WireError::Invalid("hidden on absent node"));
                     }
                 }
-                Op::ViewPaint { id, .. } => {
-                    if kind_of!(*id) != Some(NodeKind::VIEW) {
-                        return Err(WireError::Invalid("view paint on non-view node"));
+                Op::ViewPaint { id, .. } | Op::Paint { id, .. } => {
+                    if !matches!(
+                        kind_of!(*id),
+                        Some(NodeKind::VIEW | NodeKind::INPUT | NodeKind::CUSTOM)
+                    ) {
+                        return Err(WireError::Invalid("paint on non-view node"));
+                    }
+                }
+                Op::Props { id, .. } | Op::Command { id, .. } => {
+                    if !live!(*id) {
+                        return Err(WireError::Invalid("props/command on absent node"));
+                    }
+                }
+                Op::InputProps { id, .. } => {
+                    if kind_of!(*id) != Some(NodeKind::INPUT) {
+                        return Err(WireError::Invalid("input props on non-input node"));
+                    }
+                }
+                Op::Custom { id, .. } => {
+                    if kind_of!(*id) != Some(NodeKind::CUSTOM) {
+                        return Err(WireError::Invalid("custom props on non-custom node"));
+                    }
+                }
+                Op::Label { id, .. } => {
+                    if !live!(*id) {
+                        return Err(WireError::Invalid("label on absent node"));
                     }
                 }
                 Op::Style { wire_id, .. } => {
