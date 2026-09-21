@@ -49,6 +49,14 @@ impl Window {
         self.inner.request_redraw();
     }
 
+    /// Notify the windowing system that a frame is about to be presented.
+    /// Call after recording GPU work, before `Queue::present`. On Wayland
+    /// this schedules the frame callback that throttles `RedrawRequested`;
+    /// elsewhere it is a no-op.
+    pub fn pre_present_notify(&self) {
+        self.inner.pre_present_notify();
+    }
+
     pub fn scale_factor(&self) -> f64 {
         self.inner.scale_factor()
     }
@@ -77,10 +85,19 @@ pub trait App: 'static {
     fn ready(&mut self, window: &Window, wake: &Wake);
 
     /// A background thread called `Wake::wake`. Drain your queues here.
-    fn woke(&mut self, _window: &Window) {}
+    /// Return true to exit the event loop.
+    fn woke(&mut self, _window: &Window) -> bool {
+        false
+    }
 
     /// Physical size or scale factor changed.
     fn resized(&mut self, window: &Window);
+
+    /// The window became fully hidden (`true`) or visible again
+    /// (`false`) per macOS occlusion state. While occluded, surface
+    /// acquisition fails and presents are wasted; on becoming visible a
+    /// repaint should be requested.
+    fn occluded(&mut self, _window: &Window, _occluded: bool) {}
 
     /// The OS or the app requested a frame.
     fn redraw(&mut self, window: &Window);
@@ -91,7 +108,8 @@ pub trait App: 'static {
     }
 }
 
-/// Opens one window and runs the event loop. Never returns.
-pub fn run(title: &str, logical_size: Size, app: impl App) -> ! {
+/// Opens one window and runs the event loop. Returns when the loop
+/// exits (window closed, or `App::woke`/`close_requested` requested it).
+pub fn run(title: &str, logical_size: Size, app: impl App) {
     winit::run(title, logical_size, app)
 }

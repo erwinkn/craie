@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/craie"]
+members = ["crates/craie", "crates/node"]
 default-members = ["crates/craie"]
 
 [workspace.package]

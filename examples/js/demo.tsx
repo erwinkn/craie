@@ -1,11 +1,11 @@
-// Marbre-like demo: an agent-desktop-style chat UI rendered by React over
-// the Craie wire — sidebar, message list, composer, ticking session state.
+// Marbre-like demo: an agent-desktop-style chat UI rendered by React
+// through the in-process Craie bridge — sidebar, message list, composer,
+// ticking session state. This file runs in the application worker.
 //
-//   cargo run --example app &
-//   bun examples/js/demo.tsx
+//   bun examples/js/host.ts
 
 import React, { useEffect, useState } from "react"
-import { createRoot, connect, View, Text } from "@craie/bridge"
+import { attachApp, loadBindings, View, Text } from "@craie/bridge"
 
 const ACCENT = "#6dc7ff"
 const DIM = "#9aa0ae"
@@ -104,9 +104,6 @@ function App() {
   )
 }
 
-const port = Number(process.env.CRAIE_PORT ?? 9470)
-const transport = await connect(port)
-const root = createRoot(transport)
+const root = attachApp(loadBindings())
 root.render(<App />)
-console.log(`[demo] connected on ${port}; ticking`)
-setTimeout(() => process.exit(0), 60_000)
+console.log("[demo] attached; ticking")

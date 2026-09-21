@@ -65,7 +65,7 @@ fn instance() -> Instance {
 }
 
 fn request_device(adapter: &Adapter) -> (Device, Queue) {
-    pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+    let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
         label: Some("craie"),
         required_features: wgpu::Features::empty(),
         required_limits: wgpu::Limits::default(),
@@ -73,7 +73,13 @@ fn request_device(adapter: &Adapter) -> (Device, Queue) {
         memory_hints: wgpu::MemoryHints::Performance,
         trace: wgpu::Trace::Off,
     }))
-    .expect("failed to request device")
+    .expect("failed to request device");
+    // No logger is installed in examples; surface validation errors
+    // directly instead of letting them vanish into `log`.
+    device.on_uncaptured_error(std::sync::Arc::new(|e| {
+        eprintln!("[wgpu] {e}");
+    }));
+    (device, queue)
 }
 
 /// A configured surface ready to present frames.

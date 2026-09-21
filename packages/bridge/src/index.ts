@@ -1,8 +1,7 @@
-// React entry point: reconciler config + connect() transport.
+// React entry point: reconciler config + native in-process transport.
 //
-//   import { createRoot, connect, View, Text } from "@craie/bridge"
-//   const root = createRoot(await connect(9470))
-//   root.render(<View ...>...</View>)
+//   host.ts:   runApp(bindings, new URL("./app.tsx", import.meta.url))
+//   app.tsx:   const root = attachApp(bindings); root.render(<View ...>...</View>)
 
 import React, { createContext, createElement, type ReactNode } from "react"
 import ReactReconciler from "react-reconciler"
@@ -10,7 +9,8 @@ import { ConcurrentRoot, DefaultEventPriority } from "react-reconciler/constants
 import { CraieHost, type HostNode, type Transport } from "./host.js"
 import type { StyleProps } from "./wire.js"
 
-export { connect, TcpTransport } from "./client.js"
+export { attachApp, loadBindings, runApp, NativeTransport } from "./native.js"
+export type { Bindings, NativeClientHandle, NativeHostHandle } from "./native.js"
 export { Encoder, NIL, type StyleProps } from "./wire.js"
 export type { Transport } from "./host.js"
 

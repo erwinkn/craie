@@ -7,6 +7,7 @@
 //! The hot path is deliberately data-oriented: compact IDs, arenas, side
 //! tables, and bit flags instead of per-node heap objects.
 
+pub mod app;
 pub mod bridge;
 pub mod geom;
 pub mod gpu;

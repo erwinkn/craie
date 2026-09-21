@@ -12,7 +12,7 @@ use winit::window::{WindowAttributes, WindowId};
 use crate::geom::Size;
 use crate::platform::{App, Wake, Window};
 
-pub fn run<A: App>(title: &str, logical_size: Size, app: A) -> ! {
+pub fn run<A: App>(title: &str, logical_size: Size, app: A) {
     let event_loop = EventLoop::new().expect("failed to create event loop");
     event_loop.set_control_flow(ControlFlow::Wait);
     let driver = Driver {
@@ -31,7 +31,6 @@ pub fn run<A: App>(title: &str, logical_size: Size, app: A) -> ! {
             )),
     };
     event_loop.run_app(driver).expect("event loop error");
-    std::process::exit(0)
 }
 
 struct Driver<A: App> {
@@ -57,9 +56,11 @@ impl<A: App> ApplicationHandler for Driver<A> {
 
     /// A `Wake::wake` arrived from another thread. The payload is implicit:
     /// the app drains whatever queues it owns.
-    fn proxy_wake_up(&mut self, _event_loop: &dyn ActiveEventLoop) {
-        if let Some(window) = &self.window {
-            self.app.woke(window);
+    fn proxy_wake_up(&mut self, event_loop: &dyn ActiveEventLoop) {
+        if let Some(window) = &self.window
+            && self.app.woke(window)
+        {
+            event_loop.exit();
         }
     }
 
@@ -79,6 +80,7 @@ impl<A: App> ApplicationHandler for Driver<A> {
             WindowEvent::SurfaceResized(_) | WindowEvent::ScaleFactorChanged { .. } => {
                 self.app.resized(window);
             }
+            WindowEvent::Occluded(occluded) => self.app.occluded(window, occluded),
             WindowEvent::RedrawRequested => self.app.redraw(window),
             _ => {}
         }

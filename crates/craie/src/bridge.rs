@@ -1,117 +1,206 @@
-//! Process boundary between the JS driver and the native app.
+//! In-process bridge between the JS/React thread and the native UI thread.
 //!
-//! Transport is a localhost TCP socket carrying length-prefixed wire
-//! transactions (`u32` byte length + `wire::decode`-compatible payload).
-//! A reader thread per connection blocks on the socket, pushes frames into
-//! a channel, and pokes the event loop through `Wake` — the main thread
-//! drains the inbox in `App::woke`, applies transactions, and repaints
-//! once. The socket thread never touches host state.
+//! React encodes one transaction per commit and hands it to `submit` from
+//! its own thread. `submit` pushes the bytes into the shared queue and
+//! wakes the event loop; the UI thread drains in `App::woke`, applies
+//! atomically, and pushes the applied seq into `acks`. Acks gate id
+//! recycling on the JS side — reuse can never race native apply.
 //!
-//! Acknowledgements flow back on the same socket as bare `u64` seqs
-//! (`AckSink::ack`). The JS side holds removed ids until the transaction
-//! that removed them is acknowledged, then recycles them — the gpui-react
-//! contract, which keeps id reuse strictly ordered behind native apply.
-//!
-//! This is deliberately dumb. The gpui-react bridge moved bytes over a
-//! napi shared buffer; TCP preserves the same properties that matter here
-//! (opaque bytes, wake-based delivery, no JS on the main thread) without
-//! a native-addon toolchain.
+//! Modeled on the gpui-react session: a bounded `VecDeque` behind a mutex,
+//! a condvar for the JS-side `receive`, and a wake for the UI loop — not
+//! a shared-memory ring. One copied commit per React transaction; measure
+//! before reaching for anything fancier.
 
-use std::io::{self, Read, Write};
-use std::net::{TcpListener, TcpStream};
-use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
-use std::sync::{Arc, Mutex};
-use std::thread;
+use std::collections::{HashMap, VecDeque};
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::{Arc, Condvar, Mutex, Weak};
 
 use crate::platform::Wake;
 
-/// Receives wire transaction buffers from connected drivers.
-pub struct Inbox {
-    rx: Receiver<Vec<u8>>,
-    /// Local port the listener is bound to.
-    pub port: u16,
-    /// Acks applied seqs back to the most recent connection.
-    pub acks: AckSink,
+const MAX_TRANSACTIONS: usize = 256;
+const MAX_BYTES: usize = 4 * 1024 * 1024;
+
+/// One live connection between a React runtime and a native UI.
+///
+/// The host (UI thread) holds an `Arc<Session>` and drains `commits`;
+/// the client (JS thread) holds another and calls `submit`. `Wake` is
+/// installed once the platform loop exists; submits before then still
+/// queue and are drained by the app's initial sync.
+#[derive(Default)]
+pub struct Session {
+    inner: Mutex<Inner>,
+    /// Signaled when `acks` gains entries or the session closes.
+    changed: Condvar,
 }
 
-impl Inbox {
-    /// Drains all pending frames.
-    pub fn drain(&self) -> impl Iterator<Item = Vec<u8>> + '_ {
-        self.rx.try_iter()
+#[derive(Default)]
+struct Inner {
+    /// Encoded transactions awaiting apply, JS -> UI.
+    commits: VecDeque<Vec<u8>>,
+    commit_bytes: usize,
+    /// Applied seqs awaiting JS delivery, UI -> JS.
+    acks: VecDeque<u64>,
+    /// Platform-loop poke, installed when the window starts.
+    wake: Option<Wake>,
+    /// Reason the session ended; submission and receive both fail after.
+    closed: Option<String>,
+}
+
+impl Session {
+    pub fn new() -> Arc<Session> {
+        Arc::new(Session::default())
     }
-}
 
-/// Writes `u64` seq acknowledgements on the live connection, if any.
-/// Replaced on each new connection; a lost connection just drops acks.
-#[derive(Clone, Default)]
-pub struct AckSink {
-    writer: Arc<Mutex<Option<TcpStream>>>,
-}
+    /// Queues one encoded transaction and wakes the UI loop.
+    /// The copy happened on the caller's side; this is the only hop.
+    pub fn submit(&self, txn: Vec<u8>) -> Result<(), String> {
+        let wake = {
+            let mut inner = self.inner.lock().unwrap();
+            if let Some(reason) = &inner.closed {
+                return Err(reason.clone());
+            }
+            if inner.commits.len() >= MAX_TRANSACTIONS
+                || inner.commit_bytes + txn.len() > MAX_BYTES
+            {
+                return Err("commit queue is full".to_string());
+            }
+            inner.commit_bytes += txn.len();
+            inner.commits.push_back(txn);
+            inner.wake.clone()
+        };
+        if let Some(wake) = wake {
+            wake.wake();
+        }
+        Ok(())
+    }
 
-impl AckSink {
+    /// UI thread: takes every queued transaction. One lock per wake.
+    pub fn take_commits(&self) -> VecDeque<Vec<u8>> {
+        let mut inner = self.inner.lock().unwrap();
+        inner.commit_bytes = 0;
+        std::mem::take(&mut inner.commits)
+    }
+
+    /// Installed by the platform glue once the event loop exists.
+    pub fn install_wake(&self, wake: Wake) {
+        self.inner.lock().unwrap().wake = Some(wake);
+    }
+
+    /// UI thread: records `seq` as applied and wakes any waiting
+    /// `receive` call on the JS side.
     pub fn ack(&self, seq: u64) {
-        if let Some(s) = self.writer.lock().unwrap().as_mut() {
-            let _ = s.write_all(&seq.to_le_bytes());
+        {
+            self.inner.lock().unwrap().acks.push_back(seq);
+        }
+        self.changed.notify_all();
+    }
+
+    /// JS thread: drains pending acks without blocking.
+    pub fn take_acks(&self) -> Vec<u64> {
+        self.inner.lock().unwrap().acks.drain(..).collect()
+    }
+
+    /// JS thread: blocks until acks are pending or the session closes,
+    /// then returns them (empty on close). Never call on the UI thread.
+    pub fn recv_acks(&self) -> Vec<u64> {
+        let mut inner = self.inner.lock().unwrap();
+        loop {
+            if !inner.acks.is_empty() {
+                return inner.acks.drain(..).collect();
+            }
+            if inner.closed.is_some() {
+                return Vec::new();
+            }
+            inner = self.changed.wait(inner).unwrap();
         }
     }
-}
 
-/// Binds `addr` (e.g. `127.0.0.1:0`) and spawns the accept thread.
-/// Every accepted connection gets a reader thread that frames
-/// `u32 len | payload` messages into the shared inbox and wakes the loop.
-pub fn listen(addr: &str, wake: Wake) -> io::Result<Inbox> {
-    let listener = TcpListener::bind(addr)?;
-    let port = listener.local_addr()?.port();
-    let (tx, rx) = sync_channel::<Vec<u8>>(256);
-    let acks = AckSink::default();
-    let acks2 = acks.clone();
-    thread::Builder::new()
-        .name("craie-accept".into())
-        .spawn(move || {
-            for stream in listener.incoming() {
-                match stream {
-                    Ok(s) => spawn_reader(s, tx.clone(), wake.clone(), acks2.clone()),
-                    Err(_) => break,
-                }
+    /// Ends the session; pending commits are dropped, `submit` and
+    /// `recv_acks` both fail/return empty, and the UI loop wakes so it
+    /// can observe the close.
+    pub fn close(&self, reason: impl Into<String>) {
+        let wake = {
+            let mut inner = self.inner.lock().unwrap();
+            if inner.closed.is_none() {
+                inner.closed = Some(reason.into());
             }
-        })?;
-    Ok(Inbox { rx, port, acks })
-}
-
-fn spawn_reader(stream: TcpStream, tx: SyncSender<Vec<u8>>, wake: Wake, acks: AckSink) {
-    let _ = stream.set_nodelay(true);
-    if let Ok(w) = stream.try_clone() {
-        *acks.writer.lock().unwrap() = Some(w);
+            inner.commits.clear();
+            inner.wake.clone()
+        };
+        if let Some(wake) = wake {
+            wake.wake();
+        }
+        self.changed.notify_all();
     }
-    thread::Builder::new()
-        .name("craie-bridge-rx".into())
-        .spawn(move || {
-            let mut stream = stream;
-            let mut len_buf = [0u8; 4];
-            loop {
-                if stream.read_exact(&mut len_buf).is_err() {
-                    break;
-                }
-                let len = u32::from_le_bytes(len_buf) as usize;
-                if len > 64 * 1024 * 1024 {
-                    break; // absurd frame; drop the connection
-                }
-                let mut buf = vec![0u8; len];
-                if stream.read_exact(&mut buf).is_err() {
-                    break;
-                }
-                if tx.send(buf).is_err() {
-                    break; // app gone
-                }
-                wake.wake();
-            }
-            // Connection closed: stop acking it.
-            let mut guard = acks.writer.lock().unwrap();
-            if let Some(w) = guard.as_ref()
-                && w.peer_addr().ok() == stream.peer_addr().ok()
-            {
-                *guard = None;
-            }
-        })
-        .ok();
+
+    pub fn closed_reason(&self) -> Option<String> {
+        self.inner.lock().unwrap().closed.clone()
+    }
+
+    pub fn is_closed(&self) -> bool {
+        self.inner.lock().unwrap().closed.is_some()
+    }
+}
+
+/// Registry of live sessions by id, so a JS worker can attach to the
+/// session its host created (`NativeHost` hands the id through
+/// `workerData`; `NativeClient` upgrades it here).
+#[derive(Default)]
+pub struct Sessions {
+    map: Mutex<HashMap<u32, Weak<Session>>>,
+    next: AtomicU32,
+}
+
+impl Sessions {
+    pub fn new() -> Sessions {
+        Sessions::default()
+    }
+
+    pub fn insert(&self, session: &Arc<Session>) -> u32 {
+        let id = self.next.fetch_add(1, Ordering::Relaxed) + 1;
+        self.map
+            .lock()
+            .unwrap()
+            .insert(id, Arc::downgrade(session));
+        id
+    }
+
+    pub fn get(&self, id: u32) -> Option<Arc<Session>> {
+        self.map.lock().unwrap().get(&id).and_then(Weak::upgrade)
+    }
+
+    pub fn remove(&self, id: u32) {
+        self.map.lock().unwrap().remove(&id);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn submit_queues_and_acks_round_trip() {
+        let s = Session::new();
+        s.submit(b"txn1".to_vec()).unwrap();
+        s.submit(b"txn2".to_vec()).unwrap();
+        let commits = s.take_commits();
+        assert_eq!(commits.len(), 2);
+        assert_eq!(commits[0], b"txn1");
+        assert!(s.take_commits().is_empty());
+
+        s.ack(41);
+        s.ack(42);
+        assert_eq!(s.recv_acks(), vec![41, 42]);
+    }
+
+    #[test]
+    fn close_rejects_submit_and_unblocks_recv() {
+        let s = Session::new();
+        let s2 = s.clone();
+        let t = std::thread::spawn(move || s2.recv_acks());
+        s.submit(b"x".to_vec()).unwrap();
+        s.close("done");
+        assert!(t.join().unwrap().is_empty());
+        assert!(s.submit(b"y".to_vec()).is_err());
+    }
 }

@@ -16,9 +16,10 @@ hot representation compact enough that its cost is obvious.
 
 ```
 React reconciler  (packages/bridge — JS, react-reconciler mutation mode)
-       |  binary transactions over a localhost TCP socket
+       |  binary transactions submitted in-process (worker thread)
        v
-bridge.rs         socket reader thread -> mpsc -> EventLoopProxy wake
+crates/node       N-API: NativeClient.submit -> Session queue -> wake
+bridge.rs         bounded commit queue + ack queue (Session)
 wire.rs           flat op stream decode, applied to the host
 ui.rs             facade: apply -> layout -> paint, one scene
 host/             retained tree: 40-byte node headers in a Vec<NodeHeader>
@@ -27,6 +28,7 @@ scene.rs          flat paint data: Vec<QuadInstance>, Vec<GlyphInstance>
 text/             Parley layout -> Swash raster -> glyph cache -> atlas
 gpu/              wgpu: 2 instanced pipelines, growable buffers, atlas arrays
 platform/         winit window, Wait control flow, redraw on request
+app.rs            the shared host app: session -> ui -> surface -> present
 ```
 
 Data flows down. Nothing above `scene.rs` names wgpu; nothing above
@@ -111,21 +113,21 @@ rects; GPU upload writes only dirty regions.
 One device, two instanced pipelines, growable vertex buffers, atlas
 texture arrays. Two draw calls per frame regardless of node count.
 
-## Platform (`platform/`) and bridge (`bridge.rs`)
+## Platform (`platform/`), bridge (`bridge.rs`), and node (`crates/node`)
 
 winit 0.31 is confined to `platform/winit.rs`. The event loop runs
 `ControlFlow::Wait`; frames are produced only in `RedrawRequested`.
 `Wake` wraps `EventLoopProxy::wake_up` (payload-less in 0.31 — apps pair
 it with their own channel, delivered to `App::woke`).
 
-`bridge::listen` binds a localhost TCP socket; a reader thread per
-connection frames `u32 len | txn` payloads into an mpsc channel and
-wakes the loop. The main thread drains the inbox in `woke`, applies
-transactions, repaints once, and writes a bare `u64` seq back per
-applied transaction (`AckSink`). The socket thread never touches host
-state. TCP stands in for the napi shared buffer — same properties that
-matter (opaque bytes, wake-based delivery, no JS on the main thread),
-zero toolchain.
+The runtime is one process: the main thread owns the winit event loop
+(via `app.rs`'s `HostApp`), and React runs in a `worker_thread`.
+`NativeClient.submit(bytes)` copies the encoded transaction into the
+`Session`'s bounded commit queue and wakes the loop; `woke` drains,
+applies each transaction atomically, acks its seq, and repaints once if
+needed. Acks return to the worker through a blocking `receive` N-API
+task over the session's condvar. No sockets, no shared memory — one
+copied commit per React transaction.
 
 Acks close the loop for id ownership: JS holds removed ids until the
 transaction that removed them is acknowledged, then recycles them.
@@ -141,7 +143,9 @@ after the frame is confirmed.
 - `index.ts`: react-reconciler 0.33 mutation-mode config; `<View>` and
   `<Text>` components; `shouldSetTextContent` absorbs string children
   into the text prop.
-- `client.ts`: `u32 len | payload` TCP transport with ack parsing.
+- `native.ts`: `NativeTransport` over `NativeClient` (submit + ack
+  pump), `runApp` (main thread: host + worker + event loop) and
+  `attachApp` (worker side).
 
 ## What is deliberately not here
 

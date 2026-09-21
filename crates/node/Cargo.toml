@@ -1,0 +1,19 @@
+[package]
+name = "craie-node"
+description = "N-API bridge: React worker -> Craie native UI thread"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+craie = { path = "../craie" }
+napi = { version = "3", features = ["napi8"] }
+napi-derive = "3"
+libc = "0.2"
+
+[build-dependencies]
+napi-build = "2"

@@ -263,6 +263,10 @@ impl platform::App for Demo {
 
     fn redraw(&mut self, window: &Window) {
         let Some(inner) = &mut self.inner else { return };
+        let (w, h) = window.size();
+        if w == 0 || h == 0 {
+            return; // minimized / zero-sized surface
+        }
         let frame = match inner.surface.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(frame)
             | wgpu::CurrentSurfaceTexture::Suboptimal(frame) => frame,
@@ -270,14 +274,14 @@ impl platform::App for Demo {
                 inner.rebuild(window);
                 return;
             }
+            // Occluded/Timeout: skip; un-occlusion requests a repaint.
             _ => return,
         };
         let view = frame.texture.create_view(&Default::default());
-        let (w, h) = window.size();
         inner.renderer.draw(&inner.gpu, &view, w, h, &inner.scene);
-        drop(frame); // presents
+        window.pre_present_notify();
+        inner.gpu.queue.present(frame);
         inner.frames += 1;
-        eprintln!("[craie] frame {} presented", inner.frames);
     }
 }
 
