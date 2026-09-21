@@ -20,7 +20,7 @@ use parley::{Alignment, AlignmentOptions, FontContext, LayoutContext};
 use swash::zeno::Vector;
 
 use crate::geom::Point;
-use crate::scene::{Color, GlyphInstance};
+use crate::scene::{Color, Instance};
 
 pub use parley;
 pub use swash;
@@ -32,14 +32,14 @@ pub struct TextSpan {
     pub style: StyleProperty<'static, Color>,
 }
 
-/// Inputs for laying out one paragraph. This is the shape the host bridge
-/// will eventually produce; for milestone 0 the example builds it directly.
+/// Inputs for laying out one paragraph. Borrowed throughout — laying out
+/// a paragraph allocates nothing on the spec itself.
 pub struct ParagraphSpec<'a> {
     pub text: &'a str,
     /// Default styles for the whole paragraph.
-    pub defaults: Vec<StyleProperty<'static, Color>>,
+    pub defaults: &'a [StyleProperty<'static, Color>],
     /// Ranged style overrides.
-    pub spans: Vec<TextSpan>,
+    pub spans: &'a [TextSpan],
 }
 
 pub struct TextEngine {
@@ -70,24 +70,24 @@ impl TextEngine {
         }
     }
 
-    /// Lays out one paragraph. `scale` is the display scale factor (2.0 on
-    /// Retina); `max_width` is the wrap width in *physical* pixels.
+    /// Lays out one paragraph in logical units — the display scale does
+    /// not participate in layout, so a monitor-scale change never reshapes.
+    /// `max_width` is the wrap width in logical units.
     ///
     /// The returned layout borrows nothing — it owns its shaped data and can
     /// be retained across frames.
     pub fn layout_paragraph(
         &mut self,
         spec: &ParagraphSpec,
-        scale: f32,
         max_width: Option<f32>,
     ) -> Layout<Color> {
         let mut builder = self
             .layout_cx
-            .ranged_builder(&mut self.font_cx, spec.text, scale, true);
-        for default in &spec.defaults {
+            .ranged_builder(&mut self.font_cx, spec.text, 1.0, false);
+        for default in spec.defaults {
             builder.push_default(default.clone());
         }
-        for span in &spec.spans {
+        for span in spec.spans {
             builder.push(span.style.clone(), span.range.clone());
         }
         let mut layout: Layout<Color> = builder.build(spec.text);
@@ -97,13 +97,17 @@ impl TextEngine {
     }
 
     /// Walks a laid-out paragraph and appends glyph instances positioned at
-    /// `origin` (physical pixels). Rasterizes and atlas-allocates only cache
-    /// misses, so re-emitting an unchanged paragraph performs no Swash work.
+    /// `origin` (logical units), scaled to physical pixels by `scale`.
+    /// `brush`, when set, overrides the run color for alpha glyphs.
+    /// Rasterizes and atlas-allocates only cache misses, so re-emitting an
+    /// unchanged paragraph performs no Swash work.
     pub fn emit(
         &mut self,
         layout: &Layout<Color>,
         origin: Point,
-        out: &mut Vec<GlyphInstance>,
+        scale: f32,
+        brush: Option<Color>,
+        out: &mut Vec<Instance>,
     ) -> EmitStats {
         let mut stats = EmitStats {
             cache_hits_before: self.cache.stats.hits,
@@ -114,7 +118,7 @@ impl TextEngine {
             for item in line.items() {
                 if let PositionedLayoutItem::GlyphRun(glyph_run) = item {
                     stats.glyph_runs += 1;
-                    self.emit_run(&glyph_run, origin, out, &mut stats);
+                    self.emit_run(&glyph_run, origin, scale, brush, out, &mut stats);
                 }
             }
         }
@@ -125,12 +129,15 @@ impl TextEngine {
         &mut self,
         glyph_run: &GlyphRun<'_, Color>,
         origin: Point,
-        out: &mut Vec<GlyphInstance>,
+        scale: f32,
+        brush: Option<Color>,
+        out: &mut Vec<Instance>,
         stats: &mut EmitStats,
     ) {
         let run = glyph_run.run();
         let font = run.font();
-        let font_size = run.font_size();
+        // Layout is logical; the rasterizer sees physical pixel size.
+        let font_size = run.font_size() * scale;
         let coords = run.normalized_coords();
         let synthesis = run.synthesis();
         let skew_q = (synthesis.skew().unwrap_or(0.0) * 64.0) as i16;
@@ -138,21 +145,22 @@ impl TextEngine {
         let font_slot = self.cache.font_slot(font.data.id(), font.index);
         let coords_slot = self.cache.coords_slot(coords, synthesis.embolden(), skew_q);
 
-        let color = glyph_run.style().brush;
-        let baseline = origin.y + glyph_run.baseline();
-        let mut run_x = origin.x + glyph_run.offset();
+        let color = brush.unwrap_or(glyph_run.style().brush);
+        let baseline = (origin.y + glyph_run.baseline()) * scale;
+        let mut run_x = (origin.x + glyph_run.offset()) * scale;
 
         let embolden = if synthesis.embolden() {
             font_size * 0.02
         } else {
             0.0
         };
-        let mut scaler = self.raster.scaler(font, font_size, coords);
+        // Lazy: a run whose glyphs all hit the cache never builds a scaler.
+        let mut scaler = None;
 
         for glyph in glyph_run.glyphs() {
-            let gx = run_x + glyph.x;
-            let gy = baseline + glyph.y;
-            run_x += glyph.advance;
+            let gx = run_x + glyph.x * scale;
+            let gy = baseline + glyph.y * scale;
+            run_x += glyph.advance * scale;
             stats.glyphs += 1;
 
             let (ix, sx) = cache::quantize_subpixel(gx);
@@ -169,6 +177,9 @@ impl TextEngine {
             let entry = match self.cache.get(&key) {
                 Some(entry) => entry,
                 None => {
+                    if scaler.is_none() {
+                        scaler = self.raster.scaler(font, font_size, coords);
+                    }
                     let Some(scaler) = scaler.as_mut() else {
                         continue;
                     };
@@ -192,11 +203,11 @@ impl TextEngine {
             }
             let atlas_size = ATLAS_PAGE_SIZE as f32;
             let flags = if entry.color {
-                GlyphInstance::FLAG_COLOR
+                Instance::FLAG_COLOR
             } else {
                 0
             };
-            out.push(GlyphInstance {
+            out.push(Instance {
                 position: [
                     (ix + entry.left as i32) as f32,
                     (iy - entry.top as i32) as f32,

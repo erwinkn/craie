@@ -54,6 +54,11 @@ fn vs_main(in: VsIn, @builtin(vertex_index) vi: u32) -> VsOut {
 
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
+    if (in.flags & 2u) != 0u {
+        // Solid rect: no atlas fetch.
+        let c = in.color;
+        return vec4<f32>(c.rgb * c.a, c.a);
+    }
     if (in.flags & 1u) != 0u {
         // Color bitmap glyph (emoji): RGBA straight alpha -> premultiply.
         let t = textureSample(atlas_color, atlas_sampler, in.uv, i32(in.page));

@@ -16,8 +16,8 @@ use parley::Layout as ParleyLayout;
 
 use crate::geom::{Point, Size};
 use crate::host::{Host, NodeId, NodeKind, ROOT, StyleId};
-use crate::layout::{self, Layouts, MeasuredText};
-use crate::scene::{Color, QuadInstance, Scene};
+use crate::layout::{self, EmittedText, Layouts, MeasuredText};
+use crate::scene::{Color, Instance, Scene};
 use crate::text::TextEngine;
 use crate::wire::{self, Op, Txn, WireError};
 
@@ -84,33 +84,39 @@ impl Ui {
         self.host.force_paint();
     }
 
-    /// Recomputes layout for every root at `size` (physical pixels) and
+    /// Recomputes layout for every root at `size` (logical units) and
     /// rebuilds the flat scene. Cheap on a clean tree — Taffy caches skip
     /// untouched subtrees — but callers should still gate on
     /// `needs_paint`.
     pub fn render(&mut self, size: Size) -> &Scene {
-        let mut root = self.host.first_child(ROOT);
-        while !root.is_nil() {
-            // Read the next sibling before compute borrows the host.
-            let next = self
-                .host
-                .node(root)
-                .map(|n| NodeId(n.next_sibling))
-                .unwrap_or(NodeId::NIL);
+        self.layout(size);
+        self.paint(size);
+        self.host.clear_paint_dirty();
+        &self.scene
+    }
+
+    /// Layout phase only: Taffy over the host at `size` (logical units).
+    /// Exposed so benchmarks time layout independently of paint.
+    pub fn layout(&mut self, size: Size) {
+        // Layout never mutates topology, so indexed iteration is safe.
+        for i in 0..self.host.child_count(ROOT) {
+            let root = self.host.child_at(ROOT, i);
             layout::compute(
                 &mut self.host,
                 &mut self.layouts,
                 &mut self.text,
                 &mut self.texts,
-                self.scale,
                 root,
                 size,
             );
-            root = next;
         }
-        self.paint();
+    }
+
+    /// Paint phase only: rebuilds the flat scene at the current layout.
+    /// `viewport` is the logical viewport for culling.
+    pub fn paint(&mut self, viewport: Size) {
+        self.paint_impl(viewport);
         self.host.clear_paint_dirty();
-        &self.scene
     }
 
     pub fn scene(&self) -> &Scene {
@@ -125,35 +131,26 @@ impl Ui {
             .map(|m| &m.layout)
     }
 
-    /// Depth-first paint pass: quads for views, glyph instances for text.
-    /// Origins accumulate through each parent's content box so node rects
-    /// stay relative.
-    fn paint(&mut self) {
-        self.scene.quads.clear();
-        self.scene.glyphs.clear();
+    /// Depth-first paint pass: one ordered instance stream. Origins
+    /// accumulate through each parent's content box (logical units) and
+    /// convert to physical pixels at emission.
+    fn paint_impl(&mut self, viewport: Size) {
+        self.scene.items.clear();
         self.scene.clear = Some(Color(self.clear));
 
-        // (node, parent content-box origin in absolute px). A node's next
-        // sibling shares its parent origin; its first child gets the node's
-        // own content origin. Sibling-then-child keeps pre-order with no
-        // per-node allocation.
+        // (node, parent content-box origin, logical). Children are pushed
+        // in reverse so pops yield document pre-order — which is also
+        // painter order.
         let mut stack: Vec<(NodeId, f32, f32)> = Vec::new();
-        let first_root = self.host.first_child(ROOT);
-        if !first_root.is_nil() {
-            stack.push((first_root, 0.0, 0.0));
+        for &root in self.host.children(ROOT).iter().rev() {
+            stack.push((root, 0.0, 0.0));
         }
 
+        let scale = self.scale;
         while let Some((id, ox, oy)) = stack.pop() {
             let Some(node) = self.host.node(id) else {
                 continue;
             };
-            // Siblings share this node's parent origin — push the next one
-            // before the hidden check so a hidden node doesn't truncate
-            // the list.
-            let next = NodeId(node.next_sibling);
-            if !next.is_nil() {
-                stack.push((next, ox, oy));
-            }
             // `display: none` collapses layout but wouldn't stop paint on
             // its own — treat it like the hidden bit here too.
             let styled_away = self.layouts.style(StyleId(node.style)).display
@@ -168,32 +165,87 @@ impl Ui {
             let cx = x + data.content[0];
             let cy = y + data.content[1];
 
-            match node.kind() {
-                NodeKind::VIEW => {
-                    if let Some(view) = self.host.view(id)
-                        && view.color & 0xFF != 0
-                    {
-                        self.scene.quads.push(QuadInstance {
-                            position: [x, y],
-                            size: [data.rect.size.width, data.rect.size.height],
-                            color: view.color,
-                        });
+            // Viewport culling: the node's own paint is skipped when its
+            // border box misses the viewport (logical units). Children are
+            // still visited — visible overflow can paint outside.
+            let visible = x + data.rect.size.width > 0.0
+                && y + data.rect.size.height > 0.0
+                && x < viewport.width
+                && y < viewport.height;
+            if visible {
+                match node.kind() {
+                    NodeKind::VIEW => {
+                        if let Some(view) = self.host.view(id)
+                            && view.color & 0xFF != 0
+                        {
+                            // Round edges on the physical grid so the fill
+                            // lands crisp at any scale.
+                            let x0 = (x * scale).round();
+                            let y0 = (y * scale).round();
+                            let x1 = ((x + data.rect.size.width) * scale).round();
+                            let y1 = ((y + data.rect.size.height) * scale).round();
+                            self.scene
+                                .items
+                                .push(Instance::quad(x0, y0, x1 - x0, y1 - y0, view.color));
+                        }
                     }
+                    NodeKind::TEXT => self.paint_text(id, cx, cy),
+                    _ => {}
                 }
-                NodeKind::TEXT => {
-                    if let Some(m) = self.texts.get(id.0 as usize).and_then(|m| m.as_ref()) {
-                        self.text
-                            .emit(&m.layout, Point::new(cx, cy), &mut self.scene.glyphs);
-                    }
-                }
-                _ => {}
             }
 
-            let first = self.host.first_child(id);
-            if !first.is_nil() {
-                stack.push((first, cx, cy));
+            for &child in self.host.children(id).iter().rev() {
+                stack.push((child, cx, cy));
             }
         }
+    }
+
+    /// Emits one text node: replays the cached instance batch when scale,
+    /// origin and color all match — no shaping, rasterization, or cache
+    /// lookups — and rewrites colors in place on a color-only change.
+    fn paint_text(&mut self, id: NodeId, cx: f32, cy: f32) {
+        let slot = id.0 as usize;
+        let Some(row) = self.host.text(id) else {
+            return;
+        };
+        let color = row.color;
+        let scale_bits = self.scale.to_bits();
+        let Some(m) = self.texts.get_mut(slot).and_then(Option::as_mut) else {
+            return;
+        };
+
+        if let Some(e) = &mut m.emitted {
+            if e.scale_bits == scale_bits && e.origin == [cx, cy] {
+                if e.color != color {
+                    for inst in &mut e.instances {
+                        if inst.flags & Instance::FLAG_COLOR == 0 {
+                            inst.color = color;
+                        }
+                    }
+                    e.color = color;
+                }
+                self.scene.items.extend_from_slice(&e.instances);
+                return;
+            }
+        }
+
+        // Cold emit: produce physical-pixel instances, then retain a copy
+        // keyed on (scale, origin, color) for the next repaint.
+        let start = self.scene.items.len();
+        self.text.emit(
+            &m.layout,
+            Point::new(cx, cy),
+            self.scale,
+            Some(Color(color)),
+            &mut self.scene.items,
+        );
+        let instances = self.scene.items[start..].to_vec();
+        m.emitted = Some(EmittedText {
+            scale_bits,
+            origin: [cx, cy],
+            color,
+            instances,
+        });
     }
 }
 
@@ -205,6 +257,16 @@ mod tests {
     const KIND_VIEW: u8 = 0;
     const KIND_TEXT: u8 = 1;
     const NIL: u32 = u32::MAX;
+
+    /// Glyph instances in the unified stream (everything that isn't a
+    /// solid rect).
+    fn glyphs(scene: &Scene) -> usize {
+        scene
+            .items
+            .iter()
+            .filter(|i| i.flags & Instance::FLAG_SOLID == 0)
+            .count()
+    }
 
     fn txn() -> Vec<u8> {
         let mut enc = Encoder::new();
@@ -275,14 +337,14 @@ mod tests {
         let buf = enc.finish(1);
         let mut ui = Ui::new(1.0);
         ui.apply(&buf).unwrap();
-        let hidden_count = ui.render(Size::new(800.0, 600.0)).glyphs.len();
+        let hidden_count = glyphs(ui.render(Size::new(800.0, 600.0)));
         assert!(hidden_count > 0);
 
         let mut enc = Encoder::new();
         enc.hidden(3, false);
         let buf = enc.finish(2);
         ui.apply(&buf).unwrap();
-        let shown_count = ui.render(Size::new(800.0, 600.0)).glyphs.len();
+        let shown_count = glyphs(ui.render(Size::new(800.0, 600.0)));
         assert!(
             shown_count > hidden_count,
             "unhiding node 3 must add its glyphs: {hidden_count} -> {shown_count}"
@@ -321,8 +383,9 @@ mod tests {
         let mut ui = Ui::new(1.0);
         ui.apply(&buf).unwrap();
         let scene = ui.render(Size::new(800.0, 600.0));
-        assert!(scene.glyphs.len() > 0);
+        let n = glyphs(scene);
+        assert!(n > 0);
         // "invisible" (9 chars) must not emit; "visible" (7) does.
-        assert!(scene.glyphs.len() < 10, "{} glyphs", scene.glyphs.len());
+        assert!(n < 10, "{n} glyphs");
     }
 }

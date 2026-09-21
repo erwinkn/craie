@@ -11,5 +11,5 @@
 mod node;
 mod style;
 
-pub use node::{Host, NodeFlags, NodeHeader, NodeId, NodeKind, ROOT, Siblings, TextRow, ViewRow};
+pub use node::{Host, NodeFlags, NodeHeader, NodeId, NodeKind, ROOT, TextRow, ViewRow};
 pub use style::StyleId;

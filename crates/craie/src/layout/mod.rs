@@ -7,8 +7,9 @@
 //! cache key covers only its own inputs, not its children, so a mutation
 //! clears the cache on the node and every ancestor up to the root.
 //!
-//! Units: everything in this module is physical pixels. Style values
-//! written by the bridge/demo are already scaled.
+//! Units: everything in this module is logical (DPI-independent). The
+//! display scale enters only at emit time, when text origins and raster
+//! sizes convert to physical pixels.
 //!
 //! Taffy features are restricted to `flexbox`; block/grid/float/calc are
 //! compiled out until Craie needs them.
@@ -21,14 +22,14 @@ use taffy::{
 };
 
 use crate::geom::{Rect, Size};
-use crate::host::{Host, NodeFlags, NodeId, NodeKind, Siblings, StyleId};
-use crate::scene::Color;
+use crate::host::{Host, NodeFlags, NodeId, NodeKind, StyleId};
+use crate::scene::{Color, Instance};
 use crate::text::parley::Layout as TextLayout;
 use crate::text::parley::style::StyleProperty;
 use crate::text::{ParagraphSpec, TextEngine};
 
 /// Computed border box for a node, relative to its parent's content box,
-/// in physical pixels. Written by `round_layout`, read by paint and
+/// in logical units. Written by `round_layout`, read by paint and
 /// hit-testing (which accumulate offsets during traversal).
 ///
 /// `content` is the node's content-box origin relative to its border box:
@@ -39,6 +40,19 @@ pub struct LayoutData {
     pub content: [f32; 2],
 }
 
+/// Paint-ready instances for a text node, keyed on the inputs that change
+/// them: display scale, absolute content origin, and color. A hit replays
+/// with zero shaping, rasterization, or glyph-cache lookups.
+pub struct EmittedText {
+    pub scale_bits: u32,
+    /// Logical content-box origin the batch was emitted for.
+    pub origin: [f32; 2],
+    /// Color baked into `instances` (alpha glyphs only).
+    pub color: u32,
+    /// Physical-pixel instances, ready to append to the scene.
+    pub instances: Vec<Instance>,
+}
+
 /// A text leaf's retained Parley layout, plus the wrap width it was
 /// produced for (`u32::MAX` bits = unwrapped). Rebuilt only when the text
 /// row is dirty or the wrap width changes; `emit` against a retained
@@ -46,18 +60,19 @@ pub struct LayoutData {
 pub struct MeasuredText {
     pub layout: TextLayout<Color>,
     wrap_bits: u32,
+    /// Cached emit output; `None` until first paint after a (re)layout.
+    pub emitted: Option<EmittedText>,
 }
 
-/// Per-node layout state plus the interned style table.
+/// Per-node layout state plus the style table.
 ///
 /// `cache`, `unrounded` and `rects` are indexed by node id and grow with
-/// the host arena. `styles` is a deduplicated table: a `StyleId` on a node
-/// header is an index into it, and slot 0 is always `Style::DEFAULT`.
+/// the host arena. `styles` holds wire styles verbatim: the JS side already
+/// deduplicates styles and assigns dense ids, so `StyleId` on a node header
+/// IS the wire id — no second interning pass here.
 pub struct Layouts {
-    styles: Vec<Style>,
-    /// Wire style id -> index into `styles`. Wire ids are JS-assigned and
-    /// dense; slots hold `u32::MAX` until defined.
-    wire_styles: Vec<u32>,
+    styles: Vec<Option<Style>>,
+    default: Style,
     cache: Vec<Cache>,
     unrounded: Vec<Layout>,
     rects: Vec<LayoutData>,
@@ -73,22 +88,12 @@ fn row_mut<T: Default + Clone>(rows: &mut Vec<T>, i: usize) -> &mut T {
 impl Layouts {
     pub fn new() -> Layouts {
         Layouts {
-            styles: vec![Style::DEFAULT],
-            wire_styles: Vec::new(),
+            styles: Vec::new(),
+            default: Style::default(),
             cache: Vec::new(),
             unrounded: Vec::new(),
             rects: Vec::new(),
         }
-    }
-
-    /// Interns a style and returns its id. `Style::DEFAULT` maps to id 0,
-    /// so unstyled nodes cost nothing.
-    pub fn intern(&mut self, style: Style) -> StyleId {
-        if let Some(i) = self.styles.iter().position(|s| *s == style) {
-            return StyleId(i as u32);
-        }
-        self.styles.push(style);
-        StyleId((self.styles.len() - 1) as u32)
     }
 
     /// Final relative rect for a node, or ZERO if never laid out.
@@ -104,37 +109,24 @@ impl Layouts {
         self.rects.get(id.0 as usize).copied().unwrap_or_default()
     }
 
+    /// The style behind a `StyleId` (a wire id); undefined ids get the
+    /// default style.
     pub fn style(&self, id: StyleId) -> &Style {
-        let i = if id == StyleId::NIL { 0 } else { id.0 as usize };
-        self.styles.get(i).unwrap_or(&self.styles[0])
-    }
-
-    pub fn style_count(&self) -> usize {
-        self.styles.len()
+        self.styles
+            .get(id.0 as usize)
+            .and_then(Option::as_ref)
+            .unwrap_or(&self.default)
     }
 
     /// Defines or redefines a wire style id.
     pub fn define_style(&mut self, wire_id: u32, style: Style) {
-        let i = self.intern(style);
-        let slot = wire_id as usize;
-        if slot >= self.wire_styles.len() {
-            self.wire_styles.resize(slot + 1, u32::MAX);
-        }
-        self.wire_styles[slot] = i.0;
+        *row_mut(&mut self.styles, wire_id as usize) = Some(style);
     }
 
     pub fn wire_style_defined(&self, wire_id: u32) -> bool {
-        self.wire_styles
+        self.styles
             .get(wire_id as usize)
-            .is_some_and(|&s| s != u32::MAX)
-    }
-
-    /// Interned style for a wire style id; NIL when undefined.
-    pub fn style_id_for_wire(&self, wire_id: u32) -> StyleId {
-        match self.wire_styles.get(wire_id as usize) {
-            Some(&s) if s != u32::MAX => StyleId(s),
-            _ => StyleId::NIL,
-        }
+            .is_some_and(Option::is_some)
     }
 
     /// Drops every per-node layout cache (used when a redefined style
@@ -164,16 +156,14 @@ fn from_taffy(id: TaffyId) -> NodeId {
 }
 
 /// Recomputes layout for the tree rooted at `root` (a real node — wrap
-/// multiple roots in a View). Clears dirty caches first, runs Taffy, then
-/// rounds to the pixel grid. TEXT leaves are measured through `text` and
-/// retained in `texts` (indexed by node id) for paint.
-#[allow(clippy::too_many_arguments)]
+/// multiple roots in a View). Drains the dirty queue first, runs Taffy,
+/// then rounds to the pixel grid. TEXT leaves are measured through `text`
+/// and retained in `texts` (indexed by node id) for paint.
 pub fn compute(
     host: &mut Host,
     store: &mut Layouts,
     text: &mut TextEngine,
     texts: &mut Vec<Option<MeasuredText>>,
-    scale: f32,
     root: NodeId,
     available: Size,
 ) {
@@ -183,7 +173,6 @@ pub fn compute(
         store,
         text,
         texts,
-        scale,
     };
     let space = TSize {
         width: AvailableSpace::Definite(available.width),
@@ -193,19 +182,12 @@ pub fn compute(
     round_layout(&mut view, to_taffy(root));
 }
 
-/// Clears the Taffy cache for every node flagged LAYOUT and all of its
-/// ancestors, then clears the flags. Child changes invalidate the path to
-/// the root because a node's cache key does not include its children.
+/// Clears the Taffy cache for every node in the host's dirty queue and all
+/// of its ancestors, then clears the flags. Child changes invalidate the
+/// path to the root because a node's cache key does not include its
+/// children.
 fn invalidate(host: &mut Host, store: &mut Layouts) {
-    for i in 0..host.slot_count() {
-        let id = NodeId(i as u32);
-        let dirty = host
-            .node(id)
-            .map(|n| n.flags.contains(NodeFlags::LAYOUT))
-            .unwrap_or(false);
-        if !dirty {
-            continue;
-        }
+    for id in host.take_layout_dirty() {
         let mut cur = id;
         loop {
             *row_mut(&mut store.cache, cur.0 as usize) = Cache::default();
@@ -228,7 +210,6 @@ struct TreeView<'a> {
     store: &'a mut Layouts,
     text: &'a mut TextEngine,
     texts: &'a mut Vec<Option<MeasuredText>>,
-    scale: f32,
 }
 
 impl TreeView<'_> {
@@ -281,23 +262,26 @@ impl TreeView<'_> {
         let Some(row) = self.host.text(id) else {
             return TSize::ZERO;
         };
+        // No brush default: the row color is applied at emit time, so a
+        // color-only change never reshapes or re-lays-out.
+        let defaults = [StyleProperty::FontSize(row.font_size)];
         let layout = self.text.layout_paragraph(
             &ParagraphSpec {
                 text: &row.text,
-                defaults: vec![
-                    StyleProperty::Brush(Color(row.color)),
-                    StyleProperty::FontSize(row.font_size),
-                ],
-                spans: vec![],
+                defaults: &defaults,
+                spans: &[],
             },
-            self.scale,
             wrap,
         );
         let size = TSize {
             width: layout.width(),
             height: layout.height(),
         };
-        self.texts[slot] = Some(MeasuredText { layout, wrap_bits });
+        self.texts[slot] = Some(MeasuredText {
+            layout,
+            wrap_bits,
+            emitted: None,
+        });
         if let Some(n) = self.host.node_mut(id) {
             n.flags.clear(NodeFlags::TEXT);
         }
@@ -307,26 +291,29 @@ impl TreeView<'_> {
 
 impl TraversePartialTree for TreeView<'_> {
     type ChildIter<'a>
-        = std::iter::Map<Siblings<'a>, fn(NodeId) -> TaffyId>
+        = std::iter::Map<std::iter::Copied<std::slice::Iter<'a, NodeId>>, fn(NodeId) -> TaffyId>
     where
         Self: 'a;
 
     fn child_ids(&self, parent: TaffyId) -> Self::ChildIter<'_> {
-        let first = self.host.first_child(from_taffy(parent));
-        self.host.siblings(first).map(to_taffy)
+        self.host
+            .children(from_taffy(parent))
+            .iter()
+            .copied()
+            .map(to_taffy)
     }
 
     fn child_count(&self, parent: TaffyId) -> usize {
-        self.host
-            .node(from_taffy(parent))
-            .map(|n| n.child_count as usize)
-            .unwrap_or(0)
+        self.host.child_count(from_taffy(parent))
     }
 
     fn get_child_id(&self, parent: TaffyId, index: usize) -> TaffyId {
-        self.child_ids(parent)
-            .nth(index)
-            .unwrap_or_else(|| TaffyId::new(u64::MAX))
+        let id = self.host.child_at(from_taffy(parent), index);
+        if id.is_nil() {
+            TaffyId::new(u64::MAX)
+        } else {
+            to_taffy(id)
+        }
     }
 }
 
@@ -360,12 +347,7 @@ impl LayoutPartialTree for TreeView<'_> {
             if hidden || style.display == taffy::Display::None {
                 return compute_hidden_layout(tree, node_id);
             }
-            if tree
-                .host
-                .node(id)
-                .map(|n| n.child_count > 0)
-                .unwrap_or(false)
-            {
+            if tree.host.child_count(id) > 0 {
                 // Every container is flex for now.
                 compute_flexbox_layout(tree, node_id, inputs)
             } else {

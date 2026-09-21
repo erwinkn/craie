@@ -139,10 +139,9 @@ fn main() {
     let scene = ui.render(Size::new(WIDTH, HEIGHT)).clone();
     report("layout+paint cold", t, a0, b0);
     eprintln!(
-        "{:>22}: {} quads, {} glyphs, {} rasters",
+        "{:>22}: {} instances, {} rasters",
         "scene",
-        scene.quads.len(),
-        scene.glyphs.len(),
+        scene.items.len(),
         ui.text.cache.stats.rasters
     );
 
@@ -153,9 +152,9 @@ fn main() {
     let scene2 = ui.render(Size::new(WIDTH, HEIGHT)).clone();
     report("layout+paint warm", t, a0, b0);
     eprintln!(
-        "{:>22}: clean={clean}, {} glyphs, {} rasters",
+        "{:>22}: clean={clean}, {} instances, {} rasters",
         "warm render",
-        scene2.glyphs.len(),
+        scene2.items.len(),
         ui.text.cache.stats.rasters
     );
 
@@ -173,9 +172,9 @@ fn main() {
     let rasters = ui.text.cache.stats.rasters;
     report("layout+paint 500", t, a0, b0);
     eprintln!(
-        "{:>22}: {} glyphs, {} total rasters, {} glyph cache entries",
+        "{:>22}: {} instances, {} total rasters, {} glyph cache entries",
         "after update",
-        scene3.glyphs.len(),
+        scene3.items.len(),
         rasters,
         ui.text.cache.len()
     );

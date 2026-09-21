@@ -222,12 +222,12 @@ fn run_screenshot(path: &str, w: u32, h: u32, scale: f32) {
     let mut renderer = Renderer::new(&gpu, format);
     let mut ui = Ui::new(scale);
     ui.apply(&demo_txn()).expect("demo txn");
-    let (quads, glyphs) = {
-        let scene = ui.render(Size::new(w as f32, h as f32));
-        (scene.quads.len(), scene.glyphs.len())
+    let items = {
+        let scene = ui.render(Size::new(w as f32 / scale, h as f32 / scale));
+        scene.items.len()
     };
     let nodes = ui.host.len();
-    eprintln!("[craie] wire render — {quads} quads, {glyphs} glyphs, {nodes} nodes");
+    eprintln!("[craie] wire render — {items} instances, {nodes} nodes");
     renderer.sync_atlas(&gpu, &mut ui.text.atlas);
     eprintln!("[craie] atlas upload: {} bytes", renderer.atlas_upload_bytes);
     let scene = ui.scene();

@@ -66,8 +66,11 @@ impl Inner {
         if w == 0 || h == 0 {
             return; // minimized; the resize/occluded path repaints
         }
-        self.ui.scale = window.scale_factor() as f32;
-        self.ui.render(Size::new(w as f32, h as f32));
+        let scale = window.scale_factor() as f32;
+        self.ui.scale = scale;
+        // Layout and the scene viewport are logical; the surface is physical.
+        self.ui
+            .render(Size::new(w as f32 / scale, h as f32 / scale));
         self.renderer.sync_atlas(&self.gpu, &mut self.ui.text.atlas);
         window.request_redraw();
     }

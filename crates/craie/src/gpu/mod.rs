@@ -1,8 +1,8 @@
-//! wgpu renderer: pipelines, atlas textures, instance buffers, frames.
+//! wgpu renderer: one pipeline, atlas textures, one instance buffer.
 //!
-//! Execution shape: a `Scene` (flat `Vec`s of instances) is uploaded to a
-//! small number of growable GPU buffers and drawn in two draw calls —
-//! one for quads, one for glyphs — regardless of node count.
+//! Execution shape: a `Scene` (one ordered `Vec` of instances — quads and
+//! glyphs share the format) is uploaded to a growable GPU buffer and drawn
+//! in a single draw call, in document order, regardless of node count.
 
 pub mod context;
 
@@ -50,17 +50,14 @@ struct AtlasGpu {
 }
 
 pub struct Renderer {
-    quad_pipeline: wgpu::RenderPipeline,
-    glyph_pipeline: wgpu::RenderPipeline,
+    pipeline: wgpu::RenderPipeline,
     viewport_buf: Buffer,
     viewport_bg: wgpu::BindGroup,
     atlas_layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
     atlas: Option<AtlasGpu>,
-    quad_buf: Option<Buffer>,
-    quad_cap: u64,
-    glyph_buf: Option<Buffer>,
-    glyph_cap: u64,
+    inst_buf: Option<Buffer>,
+    inst_cap: u64,
     /// Bytes uploaded to atlas textures this session (diagnostics).
     pub atlas_upload_bytes: u64,
 }
@@ -121,21 +118,17 @@ impl Renderer {
             ..Default::default()
         });
 
-        let quad_pipeline = pipelines::quad(gpu, &viewport_bgl, surface_format);
-        let glyph_pipeline = pipelines::glyph(gpu, &viewport_bgl, &atlas_layout, surface_format);
+        let pipeline = pipelines::scene(gpu, &viewport_bgl, &atlas_layout, surface_format);
 
         Renderer {
-            quad_pipeline,
-            glyph_pipeline,
+            pipeline,
             viewport_buf,
             viewport_bg,
             atlas_layout,
             sampler,
             atlas: None,
-            quad_buf: None,
-            quad_cap: 0,
-            glyph_buf: None,
-            glyph_cap: 0,
+            inst_buf: None,
+            inst_cap: 0,
             atlas_upload_bytes: 0,
         }
     }
@@ -303,25 +296,17 @@ impl Renderer {
         (row_pitch as u64) * h as u64
     }
 
-    /// Uploads instance data and draws the scene in two draw calls.
+    /// Uploads instance data and draws the scene in one draw call.
     /// `view` is the frame's render target; `size` is in physical pixels.
     pub fn draw(&mut self, gpu: &Gpu, view: &TextureView, width: u32, height: u32, scene: &Scene) {
         self.set_viewport(gpu, width as f32, height as f32);
-        self.quad_buf = write_instances(
+        self.inst_buf = write_instances(
             &gpu.device,
             &gpu.queue,
-            self.quad_buf.take(),
-            &mut self.quad_cap,
-            &scene.quads,
-            "quads",
-        );
-        self.glyph_buf = write_instances(
-            &gpu.device,
-            &gpu.queue,
-            self.glyph_buf.take(),
-            &mut self.glyph_cap,
-            &scene.glyphs,
-            "glyphs",
+            self.inst_buf.take(),
+            &mut self.inst_cap,
+            &scene.items,
+            "instances",
         );
 
         let mut encoder = gpu
@@ -352,19 +337,13 @@ impl Renderer {
                 timestamp_writes: None,
                 multiview_mask: None,
             });
-            if !scene.quads.is_empty() {
-                pass.set_pipeline(&self.quad_pipeline);
-                pass.set_bind_group(0, &self.viewport_bg, &[]);
-                pass.set_vertex_buffer(0, self.quad_buf.as_ref().unwrap().slice(..));
-                pass.draw(0..4, 0..scene.quads.len() as u32);
-            }
-            if !scene.glyphs.is_empty() {
-                let atlas = self.atlas.as_ref().expect("glyphs drawn before atlas sync");
-                pass.set_pipeline(&self.glyph_pipeline);
+            if !scene.items.is_empty() {
+                let atlas = self.atlas.as_ref().expect("scene drawn before atlas sync");
+                pass.set_pipeline(&self.pipeline);
                 pass.set_bind_group(0, &self.viewport_bg, &[]);
                 pass.set_bind_group(1, &atlas.bind_group, &[]);
-                pass.set_vertex_buffer(0, self.glyph_buf.as_ref().unwrap().slice(..));
-                pass.draw(0..4, 0..scene.glyphs.len() as u32);
+                pass.set_vertex_buffer(0, self.inst_buf.as_ref().unwrap().slice(..));
+                pass.draw(0..4, 0..scene.items.len() as u32);
             }
         }
         gpu.queue.submit([encoder.finish()]);

@@ -4,6 +4,11 @@
 //!
 //! One node must never imply one GPU resource or one draw call. Everything
 //! here is a row in a `Vec` destined for a shared instance buffer.
+//!
+//! `Scene::items` is a single instance stream in strict document order, so
+//! painter ordering falls out of the data and the frame draws in ONE call.
+//! Quads and glyphs share the 40-byte instance format; `FLAG_SOLID` marks a
+//! plain rect (no atlas fetch), `FLAG_COLOR` a color bitmap glyph.
 
 use bytemuck::{Pod, Zeroable};
 
@@ -27,24 +32,15 @@ impl Color {
     }
 }
 
-/// One filled axis-aligned rectangle, in physical pixels.
-#[repr(C)]
-#[derive(Clone, Copy, Debug, Pod, Zeroable)]
-pub struct QuadInstance {
-    pub position: [f32; 2],
-    pub size: [f32; 2],
-    pub color: u32,
-}
-
-/// One glyph bitmap blit, in physical pixels.
+/// One drawable instance, in physical pixels: a filled rect or a glyph
+/// bitmap blit, depending on `flags`.
 ///
-/// `position` is the top-left of the glyph bitmap (origin + placement).
-/// `page` indexes into the alpha or color atlas texture array; `flags` bit 0
-/// selects the color atlas (32-bit RGBA bitmap glyphs) instead of the R8
-/// alpha atlas.
+/// `position` is the top-left corner. For glyphs, `uv_min`/`uv_max` address
+/// the atlas page in `page`; `flags` bit 0 selects the 32-bit RGBA color
+/// atlas over the R8 alpha atlas, bit 1 marks a solid rect (color only).
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
-pub struct GlyphInstance {
+pub struct Instance {
     pub position: [f32; 2],
     pub size: [f32; 2],
     pub uv_min: [f32; 2],
@@ -54,17 +50,31 @@ pub struct GlyphInstance {
     pub flags: u16,
 }
 
-impl GlyphInstance {
+impl Instance {
     pub const FLAG_COLOR: u16 = 1;
+    pub const FLAG_SOLID: u16 = 2;
+
+    /// A solid filled rectangle.
+    pub fn quad(x: f32, y: f32, w: f32, h: f32, color: u32) -> Instance {
+        Instance {
+            position: [x, y],
+            size: [w, h],
+            uv_min: [0.0; 2],
+            uv_max: [0.0; 2],
+            color,
+            page: 0,
+            flags: Instance::FLAG_SOLID,
+        }
+    }
 }
 
 /// Flat display data for one frame's worth of retained content.
 ///
-/// Rebuilt only when paint data is dirty; the GPU upload of each buffer is
+/// Rebuilt only when paint data is dirty; the GPU upload of the buffer is
 /// tracked separately so an unchanged scene uploads nothing.
 #[derive(Clone, Default)]
 pub struct Scene {
     pub clear: Option<Color>,
-    pub quads: Vec<QuadInstance>,
-    pub glyphs: Vec<GlyphInstance>,
+    /// Instances in document order — paint order IS vector order.
+    pub items: Vec<Instance>,
 }

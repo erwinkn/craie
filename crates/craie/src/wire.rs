@@ -765,12 +765,9 @@ impl Txn<'_> {
                     color,
                 } => host.set_text_props(NodeId(*id), *font_size, *color),
                 Op::SetStyle { id, wire_style } => {
-                    let sid = if *wire_style == NIL {
-                        u32::MAX
-                    } else {
-                        layouts.style_id_for_wire(*wire_style).0
-                    };
-                    host.set_style(NodeId(*id), sid);
+                    // The header stores the wire id verbatim; NIL means
+                    // "no style".
+                    host.set_style(NodeId(*id), *wire_style);
                 }
                 Op::Place {
                     parent,
@@ -907,8 +904,7 @@ mod tests {
 
         assert_eq!(host.len(), 3);
         assert_eq!(
-            host.siblings(host.first_child(NodeId(0)))
-                .collect::<Vec<_>>(),
+            host.children(NodeId(0)).to_vec(),
             vec![NodeId(1), NodeId(2)]
         );
         assert_eq!(host.text(NodeId(1)).unwrap().text, "first");

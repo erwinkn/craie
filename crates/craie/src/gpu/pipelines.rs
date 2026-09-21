@@ -1,8 +1,9 @@
-//! Render pipeline construction. Two instanced pipelines serve all of
-//! milestone 0: quads (filled rects) and glyphs (atlas blits).
+//! Render pipeline construction. One instanced pipeline serves every
+//! drawable: solid rects (`FLAG_SOLID`) and atlas-sampled glyphs share the
+//! 40-byte instance format, so a frame is a single ordered draw call.
 
 use crate::gpu::Gpu;
-use crate::scene::{GlyphInstance, QuadInstance};
+use crate::scene::Instance;
 
 fn shader(device: &wgpu::Device, src: &str, label: &str) -> wgpu::ShaderModule {
     device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -23,79 +24,30 @@ fn primitive() -> wgpu::PrimitiveState {
     }
 }
 
-pub fn quad(
-    gpu: &Gpu,
-    viewport_bgl: &wgpu::BindGroupLayout,
-    format: wgpu::TextureFormat,
-) -> wgpu::RenderPipeline {
-    let module = shader(&gpu.device, include_str!("shaders/quad.wgsl"), "quad");
-    let layout = gpu
-        .device
-        .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("quad"),
-            bind_group_layouts: &[Some(viewport_bgl)],
-            immediate_size: 0,
-        });
-    gpu.device
-        .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("quad"),
-            layout: Some(&layout),
-            vertex: wgpu::VertexState {
-                module: &module,
-                entry_point: Some("vs_main"),
-                compilation_options: Default::default(),
-                buffers: &[Some(wgpu::VertexBufferLayout {
-                    array_stride: size_of::<QuadInstance>() as u64,
-                    step_mode: wgpu::VertexStepMode::Instance,
-                    attributes: &wgpu::vertex_attr_array![
-                        0 => Float32x2, // position
-                        1 => Float32x2, // size
-                        2 => Uint32,    // color
-                    ],
-                })],
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &module,
-                entry_point: Some("fs_main"),
-                compilation_options: Default::default(),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format,
-                    blend: Some(blend()),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-            }),
-            primitive: primitive(),
-            depth_stencil: None,
-            multisample: Default::default(),
-            multiview_mask: None,
-            cache: None,
-        })
-}
-
-pub fn glyph(
+pub fn scene(
     gpu: &Gpu,
     viewport_bgl: &wgpu::BindGroupLayout,
     atlas_bgl: &wgpu::BindGroupLayout,
     format: wgpu::TextureFormat,
 ) -> wgpu::RenderPipeline {
-    let module = shader(&gpu.device, include_str!("shaders/glyph.wgsl"), "glyph");
+    let module = shader(&gpu.device, include_str!("shaders/scene.wgsl"), "scene");
     let layout = gpu
         .device
         .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("glyph"),
+            label: Some("scene"),
             bind_group_layouts: &[Some(viewport_bgl), Some(atlas_bgl)],
             immediate_size: 0,
         });
     gpu.device
         .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("glyph"),
+            label: Some("scene"),
             layout: Some(&layout),
             vertex: wgpu::VertexState {
                 module: &module,
                 entry_point: Some("vs_main"),
                 compilation_options: Default::default(),
                 buffers: &[Some(wgpu::VertexBufferLayout {
-                    array_stride: size_of::<GlyphInstance>() as u64,
+                    array_stride: size_of::<Instance>() as u64,
                     step_mode: wgpu::VertexStepMode::Instance,
                     attributes: &wgpu::vertex_attr_array![
                         0 => Float32x2,  // position

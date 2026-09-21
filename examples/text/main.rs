@@ -11,7 +11,7 @@
 use craie::geom::{Point, Size};
 use craie::gpu::{Gpu, Renderer, WindowSurface};
 use craie::platform::{self, Window};
-use craie::scene::{Color, QuadInstance, Scene};
+use craie::scene::{Color, Instance, Scene};
 use craie::text::parley::style::{FontStyle, FontWeight, GenericFamily, LineHeight, StyleProperty};
 use craie::text::{ParagraphSpec, TextEngine, TextSpan};
 
@@ -148,46 +148,48 @@ fn paragraphs() -> Vec<Para> {
     out
 }
 
-/// Lays out every paragraph at the current width and emits the flat scene.
+/// Lays out every paragraph at the current logical width and emits the
+/// flat scene (physical pixels via `scale` at emit time).
 /// Returns (scene, runs, glyph instances, rasters performed this pass).
 fn build_scene(
     text: &mut TextEngine,
     paras: &[Para],
-    width_px: f32,
+    width: f32,
     scale: f32,
 ) -> (Scene, u32, u32, u64) {
-    let wrap = width_px - 2.0 * MARGIN * scale;
+    let wrap = width - 2.0 * MARGIN;
     let mut scene = Scene {
         clear: Some(BG),
-        quads: Vec::new(),
-        glyphs: Vec::new(),
+        items: Vec::new(),
     };
     let rasters_before = text.cache.stats.rasters;
     let mut runs = 0;
-    let mut y = MARGIN * scale;
+    let mut y = MARGIN;
     for para in paras {
         let layout = text.layout_paragraph(
             &ParagraphSpec {
                 text: &para.text,
-                defaults: para.defaults.clone(),
-                spans: para.spans.clone(),
+                defaults: &para.defaults,
+                spans: &para.spans,
             },
-            scale,
             Some(wrap),
         );
-        let emitted = text.emit(&layout, Point::new(MARGIN * scale, y), &mut scene.glyphs);
-        runs += emitted.glyph_runs;
+        // The backing rect paints under this paragraph's glyphs.
         if para.backing {
-            scene.quads.push(QuadInstance {
-                position: [MARGIN * scale - 8.0 * scale, y - 4.0 * scale],
-                size: [layout.width() + 16.0 * scale, layout.height() + 8.0 * scale],
-                color: CODE_BG.0,
-            });
+            scene.items.push(Instance::quad(
+                (MARGIN - 8.0) * scale,
+                (y - 4.0) * scale,
+                (layout.width() + 16.0) * scale,
+                (layout.height() + 8.0) * scale,
+                CODE_BG.0,
+            ));
         }
-        y += layout.height() + GAP * scale;
+        let emitted = text.emit(&layout, Point::new(MARGIN, y), scale, None, &mut scene.items);
+        runs += emitted.glyph_runs;
+        y += layout.height() + GAP;
     }
     let rasters = text.cache.stats.rasters - rasters_before;
-    let glyphs = scene.glyphs.len() as u32;
+    let glyphs = scene.items.len() as u32;
     (scene, runs, glyphs, rasters)
 }
 
@@ -217,7 +219,7 @@ impl Inner {
         let scale = window.scale_factor() as f32;
         self.surface.resize(&self.gpu, w, h);
         let (scene, runs, glyphs, rasters) =
-            build_scene(&mut self.text, &self.paras, w as f32, scale);
+            build_scene(&mut self.text, &self.paras, w as f32 / scale, scale);
         self.scene = scene;
         self.renderer.sync_atlas(&self.gpu, &mut self.text.atlas);
         eprintln!(
@@ -238,7 +240,8 @@ impl platform::App for Demo {
         let mut text = TextEngine::new();
         let paras = paragraphs();
         let scale = window.scale_factor() as f32;
-        let (scene, runs, glyphs, rasters) = build_scene(&mut text, &paras, w as f32, scale);
+        let (scene, runs, glyphs, rasters) =
+            build_scene(&mut text, &paras, w as f32 / scale, scale);
         let mut inner = Inner {
             gpu,
             surface,
@@ -293,7 +296,8 @@ fn run_screenshot(path: &str, w: u32, h: u32, scale: f32) {
     let mut renderer = Renderer::new(&gpu, format);
     let mut text = TextEngine::new();
     let paras = paragraphs();
-    let (scene, runs, glyphs, rasters) = build_scene(&mut text, &paras, w as f32, scale);
+    let (scene, runs, glyphs, rasters) =
+        build_scene(&mut text, &paras, w as f32 / scale, scale);
     eprintln!(
         "[craie] headless {w}x{h} @{scale}x — {runs} runs, {glyphs} glyph instances, {rasters} rasters"
     );

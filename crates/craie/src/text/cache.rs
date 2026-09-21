@@ -53,17 +53,24 @@ pub struct CacheStats {
 pub struct GlyphCache {
     /// (blob id, face index) -> compact font slot.
     fonts: HashMap<(u64, u32), u16>,
-    /// (normalized coords, embolden, skew) -> compact coords slot.
-    coords: HashMap<(Box<[i16]>, bool, i16), u16>,
+    /// Interned (normalized coords, embolden, skew) rows. The table is
+    /// tiny — a linear scan beats a per-lookup `Box<[i16]>` key alloc.
+    coords: Vec<CoordsRow>,
     map: HashMap<GlyphKey, CachedGlyph>,
     pub stats: CacheStats,
+}
+
+struct CoordsRow {
+    coords: Box<[i16]>,
+    embolden: bool,
+    skew: i16,
 }
 
 impl GlyphCache {
     pub fn new() -> GlyphCache {
         GlyphCache {
             fonts: HashMap::new(),
-            coords: HashMap::new(),
+            coords: Vec::new(),
             map: HashMap::new(),
             stats: CacheStats::default(),
         }
@@ -78,11 +85,20 @@ impl GlyphCache {
     /// Interns variation coords + synthesis to a u16 slot.
     /// `synthesis` is (embolden, skew_degrees quantized to i16*64).
     pub fn coords_slot(&mut self, coords: &[i16], embolden: bool, skew: i16) -> u16 {
-        let next = self.coords.len() as u16;
-        *self
+        if let Some(i) = self
             .coords
-            .entry((coords.into(), embolden, skew))
-            .or_insert(next)
+            .iter()
+            .position(|r| r.embolden == embolden && r.skew == skew && r.coords.as_ref() == coords)
+        {
+            return i as u16;
+        }
+        let slot = self.coords.len() as u16;
+        self.coords.push(CoordsRow {
+            coords: coords.into(),
+            embolden,
+            skew,
+        });
+        slot
     }
 
     pub fn get(&mut self, key: &GlyphKey) -> Option<CachedGlyph> {

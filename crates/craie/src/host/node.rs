@@ -72,8 +72,8 @@ pub struct NodeFlags(pub u8);
 impl NodeFlags {
     pub const NONE: NodeFlags = NodeFlags(0);
     pub const LAYOUT: NodeFlags = NodeFlags(1 << 0);
+    /// Text content or metrics changed — the retained Parley layout is stale.
     pub const TEXT: NodeFlags = NodeFlags(1 << 1);
-    pub const PAINT: NodeFlags = NodeFlags(1 << 2);
 
     pub fn contains(self, other: NodeFlags) -> bool {
         self.0 & other.0 != 0
@@ -95,22 +95,18 @@ impl std::ops::BitOr for NodeFlags {
     }
 }
 
-/// Fixed-size record for every retained node: 40 bytes.
+/// Fixed-size record for every retained node: 20 bytes.
 ///
-/// Children are a doubly-linked sibling list so insertion and removal are
-/// O(1) with no per-node allocation. `aux` is the node's row index in its
-/// kind's side table (text content, scroll state, ...). `generation` is
-/// bumped on slot reuse so a stale (id, generation) reference — e.g. an
-/// event listener captured before removal — can never reach the new node.
+/// Topology lives outside the header: `Host::children` holds each node's
+/// ordered children (indexed access, no links) and `parent` is the only
+/// upward edge. `aux` is the node's row index in its kind's side table
+/// (text content, scroll state, ...). `generation` is bumped on slot
+/// reuse so a stale (id, generation) reference — e.g. an event listener
+/// captured before removal — can never reach the new node.
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
 pub struct NodeHeader {
     pub parent: u32,
-    pub first_child: u32,
-    pub last_child: u32,
-    pub next_sibling: u32,
-    pub prev_sibling: u32,
-    pub child_count: u32,
     /// Row in this kind's side table. `u32::MAX` when the kind stores no row.
     pub aux: u32,
     /// Interned style handle; `u32::MAX` when unstyled.
@@ -125,11 +121,6 @@ pub struct NodeHeader {
 impl NodeHeader {
     const EMPTY: NodeHeader = NodeHeader {
         parent: NodeId::DETACHED.0,
-        first_child: NodeId::NIL.0,
-        last_child: NodeId::NIL.0,
-        next_sibling: NodeId::NIL.0,
-        prev_sibling: NodeId::NIL.0,
-        child_count: 0,
         aux: u32::MAX,
         style: u32::MAX,
         kind: EMPTY_KIND,
@@ -162,13 +153,14 @@ impl NodeHeader {
 ///
 /// The React side allocates and recycles ids; natively `NodeId` indexes the
 /// vector, empty slots are marked `EMPTY_KIND`, and `generation` makes stale
-/// ids safe to touch. Root siblings are linked as children of `ROOT` on a
-/// dedicated head/tail pair owned by the host.
+/// ids safe to touch. Children live in `children`, a side table of ordered
+/// `Vec<NodeId>` parallel to the arena (empty vecs allocate nothing), with
+/// `roots` holding the NIL-parented top level.
 pub struct Host {
     nodes: Vec<NodeHeader>,
+    children: Vec<Vec<NodeId>>,
+    roots: Vec<NodeId>,
     live: usize,
-    first_root: u32,
-    last_root: u32,
     /// Side table for TEXT-kind nodes, indexed by `header.aux`. Rows are
     /// recycled through `free_texts` when nodes are removed.
     texts: Vec<TextRow>,
@@ -176,6 +168,10 @@ pub struct Host {
     /// Side table for VIEW-kind nodes, indexed by `header.aux`.
     views: Vec<ViewRow>,
     free_views: Vec<u32>,
+    /// Nodes needing layout invalidation, in mark order. Pushed by
+    /// `mark_dirty` when a node's LAYOUT flag goes 0->1, drained by the
+    /// layout pass — no whole-arena dirty scan anywhere.
+    layout_dirty: Vec<NodeId>,
     /// Coarse repaint signal: set by any mutation that can change pixels.
     /// Paint clears it. Fine-grained damage regions come later.
     paint_dirty: bool,
@@ -185,13 +181,14 @@ impl Host {
     pub fn new() -> Host {
         Host {
             nodes: Vec::new(),
+            children: Vec::new(),
+            roots: Vec::new(),
             live: 0,
-            first_root: NodeId::NIL.0,
-            last_root: NodeId::NIL.0,
             texts: Vec::new(),
             free_texts: Vec::new(),
             views: Vec::new(),
             free_views: Vec::new(),
+            layout_dirty: Vec::new(),
             paint_dirty: false,
         }
     }
@@ -209,6 +206,7 @@ impl Host {
         let index = id.index();
         if index >= self.nodes.len() {
             self.nodes.resize(index + 1, NodeHeader::EMPTY);
+            self.children.resize_with(index + 1, Vec::new);
         }
         let node = &mut self.nodes[index];
         if !node.is_empty() {
@@ -241,6 +239,36 @@ impl Host {
         Some(node)
     }
 
+    /// Ordered children of `parent`; ROOT yields the top-level list.
+    pub fn children(&self, parent: NodeId) -> &[NodeId] {
+        if parent.is_nil() {
+            return &self.roots;
+        }
+        self.children
+            .get(parent.index())
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
+    }
+
+    pub fn child_count(&self, parent: NodeId) -> usize {
+        self.children(parent).len()
+    }
+
+    /// The `index`-th child of `parent`, O(1). NIL when out of range.
+    pub fn child_at(&self, parent: NodeId, index: usize) -> NodeId {
+        self.children(parent)
+            .get(index)
+            .copied()
+            .unwrap_or(NodeId::NIL)
+    }
+
+    fn children_mut(&mut self, parent: NodeId) -> &mut Vec<NodeId> {
+        if parent.is_nil() {
+            return &mut self.roots;
+        }
+        &mut self.children[parent.index()]
+    }
+
     /// Appends `child` at the end of `parent`'s child list. `parent` of NIL
     /// appends to the root list.
     pub fn append_child(&mut self, parent: NodeId, child: NodeId) {
@@ -250,30 +278,15 @@ impl Host {
     /// Inserts `child` before `before`; NIL `before` appends.
     pub fn insert_before(&mut self, parent: NodeId, child: NodeId, before: NodeId) {
         self.detach(child);
-        let prev = if before.is_nil() {
-            self.tail_of(parent)
+        let list = self.children_mut(parent);
+        let pos = if before.is_nil() {
+            list.len()
         } else {
-            NodeId(self.nodes[before.index()].prev_sibling)
+            list.iter().position(|&c| c == before).unwrap_or(list.len())
         };
-        {
-            let c = &mut self.nodes[child.index()];
-            c.parent = parent.0;
-            c.prev_sibling = prev.0;
-            c.next_sibling = before.0;
-            c.flags.set(NodeFlags::LAYOUT | NodeFlags::PAINT);
-        }
-        if !prev.is_nil() {
-            self.nodes[prev.index()].next_sibling = child.0;
-        } else {
-            self.set_head(parent, child);
-        }
-        if !before.is_nil() {
-            self.nodes[before.index()].prev_sibling = child.0;
-        } else {
-            self.set_tail(parent, child);
-        }
-        self.bump_child_count(parent, 1);
-        self.paint_dirty = true;
+        list.insert(pos, child);
+        self.nodes[child.index()].parent = parent.0;
+        self.mark_dirty(child, NodeFlags::LAYOUT);
     }
 
     /// Detaches `id` and marks its slot empty. The bridge sends explicit
@@ -281,7 +294,9 @@ impl Host {
     /// remove ops; here we only free this node's side-table row.
     pub fn remove(&mut self, id: NodeId) {
         self.detach(id);
-        let node = &mut self.nodes[id.index()];
+        let index = id.index();
+        self.children[index] = Vec::new();
+        let node = &mut self.nodes[index];
         if node.aux != u32::MAX {
             match node.kind() {
                 NodeKind::TEXT => self.free_texts.push(node.aux),
@@ -299,82 +314,18 @@ impl Host {
 
     /// Unlinks `id` from its parent without freeing the slot.
     pub fn detach(&mut self, id: NodeId) {
-        let (parent, prev, next) = {
-            let n = &self.nodes[id.index()];
-            (n.parent, n.prev_sibling, n.next_sibling)
-        };
+        let parent = self.nodes[id.index()].parent;
         if parent == NodeId::DETACHED.0 {
             return;
         }
-        if prev != NodeId::NIL.0 {
-            self.nodes[prev as usize].next_sibling = next;
-        } else {
-            self.set_head(NodeId(parent), NodeId(next));
+        let list = self.children_mut(NodeId(parent));
+        if let Some(pos) = list.iter().position(|&c| c == id) {
+            list.remove(pos);
         }
-        if next != NodeId::NIL.0 {
-            self.nodes[next as usize].prev_sibling = prev;
-        } else {
-            self.set_tail(NodeId(parent), NodeId(prev));
-        }
-        self.bump_child_count(NodeId(parent), -1);
         let n = &mut self.nodes[id.index()];
         n.parent = NodeId::DETACHED.0;
-        n.prev_sibling = NodeId::NIL.0;
-        n.next_sibling = NodeId::NIL.0;
-        self.paint_dirty = true;
-    }
-
-    fn head(&self, parent: NodeId) -> u32 {
-        if parent.is_nil() {
-            self.first_root
-        } else {
-            self.nodes[parent.index()].first_child
-        }
-    }
-
-    fn tail_of(&self, parent: NodeId) -> NodeId {
-        NodeId(if parent.is_nil() {
-            self.last_root
-        } else {
-            self.nodes[parent.index()].last_child
-        })
-    }
-
-    fn set_head(&mut self, parent: NodeId, head: NodeId) {
-        if parent.is_nil() {
-            self.first_root = head.0;
-        } else {
-            self.nodes[parent.index()].first_child = head.0;
-        }
-    }
-
-    fn set_tail(&mut self, parent: NodeId, tail: NodeId) {
-        if parent.is_nil() {
-            self.last_root = tail.0;
-        } else {
-            self.nodes[parent.index()].last_child = tail.0;
-        }
-    }
-
-    fn bump_child_count(&mut self, parent: NodeId, delta: i32) {
-        if parent.is_nil() {
-            return;
-        }
-        let n = &mut self.nodes[parent.index()];
-        n.child_count = n.child_count.wrapping_add_signed(delta);
-    }
-
-    /// Iterates the sibling list starting at `first` (inclusive).
-    pub fn siblings(&self, first: NodeId) -> Siblings<'_> {
-        Siblings {
-            host: self,
-            next: first.0,
-        }
-    }
-
-    /// First child of `parent` (or first root for NIL).
-    pub fn first_child(&self, parent: NodeId) -> NodeId {
-        NodeId(self.head(parent))
+        // The parent's layout output depended on this child.
+        self.mark_dirty(NodeId(parent), NodeFlags::LAYOUT);
     }
 
     /// Number of slots ever allocated, including empty ones. For sweeps.
@@ -407,10 +358,12 @@ impl Host {
         }
         self.texts[aux as usize].text.clear();
         self.texts[aux as usize].text.push_str(text);
-        self.mark_dirty(id, NodeFlags::LAYOUT | NodeFlags::PAINT | NodeFlags::TEXT);
+        self.mark_dirty(id, NodeFlags::LAYOUT | NodeFlags::TEXT);
     }
 
     /// Sets a text node's font size (logical points) and color (0xRRGGBBAA).
+    /// Font size invalidates layout; a color-only change repaints without
+    /// touching layout or the retained Parley layout.
     pub fn set_text_props(&mut self, id: NodeId, font_size: f32, color: u32) {
         let Some(node) = self.node(id) else { return };
         if node.kind() != NodeKind::TEXT {
@@ -420,9 +373,16 @@ impl Host {
         if aux == u32::MAX {
             return;
         }
-        self.texts[aux as usize].font_size = font_size;
-        self.texts[aux as usize].color = color;
-        self.mark_dirty(id, NodeFlags::LAYOUT | NodeFlags::PAINT | NodeFlags::TEXT);
+        let row = &mut self.texts[aux as usize];
+        let size_changed = row.font_size != font_size;
+        row.font_size = font_size;
+        row.color = color;
+        if size_changed {
+            self.mark_dirty(id, NodeFlags::LAYOUT | NodeFlags::TEXT);
+        } else {
+            // Color lives in the emitted instances, not the layout.
+            self.paint_dirty = true;
+        }
     }
 
     /// View row of a VIEW-kind node.
@@ -442,33 +402,45 @@ impl Host {
             return;
         }
         self.views[aux as usize].color = color;
-        self.mark_dirty(id, NodeFlags::PAINT);
+        self.paint_dirty = true;
     }
 
-    /// Sets the interned style on a node (`u32::MAX` clears it).
+    /// Sets the wire style id on a node (`u32::MAX` clears it).
     pub fn set_style(&mut self, id: NodeId, style: u32) {
         if let Some(node) = self.node_mut(id) {
             node.style = style;
-            node.flags.set(NodeFlags::LAYOUT | NodeFlags::PAINT);
-            self.paint_dirty = true;
         }
+        self.mark_dirty(id, NodeFlags::LAYOUT);
     }
 
     /// Sets or clears the hidden bit.
     pub fn set_hidden(&mut self, id: NodeId, hidden: bool) {
         if let Some(node) = self.node_mut(id) {
             node.set_hidden(hidden);
-            node.flags.set(NodeFlags::LAYOUT | NodeFlags::PAINT);
-            self.paint_dirty = true;
         }
+        self.mark_dirty(id, NodeFlags::LAYOUT);
     }
 
-    /// Marks a node dirty and notes the repaint.
+    /// Marks a node dirty and notes the repaint. LAYOUT transitions enqueue
+    /// the node once — the layout pass drains `layout_dirty` instead of
+    /// scanning the arena.
     pub fn mark_dirty(&mut self, id: NodeId, flags: NodeFlags) {
-        if let Some(node) = self.node_mut(id) {
+        if let Some(node) = self
+            .nodes
+            .get_mut(id.index())
+            .filter(|n| !n.is_empty())
+        {
+            if flags.contains(NodeFlags::LAYOUT) && !node.flags.contains(NodeFlags::LAYOUT) {
+                self.layout_dirty.push(id);
+            }
             node.flags.set(flags);
         }
         self.paint_dirty = true;
+    }
+
+    /// Drains the layout-dirty queue. Called once per layout pass.
+    pub fn take_layout_dirty(&mut self) -> Vec<NodeId> {
+        std::mem::take(&mut self.layout_dirty)
     }
 
     /// True when any mutation since the last `clear_paint_dirty` can change
@@ -484,9 +456,6 @@ impl Host {
 
     pub fn clear_paint_dirty(&mut self) {
         self.paint_dirty = false;
-        for n in self.nodes.iter_mut() {
-            n.flags.clear(NodeFlags::PAINT);
-        }
     }
 
     pub fn len(&self) -> usize {
@@ -504,35 +473,12 @@ impl Default for Host {
     }
 }
 
-/// Sibling-list cursor. Returned by `Host::siblings`.
-pub struct Siblings<'a> {
-    host: &'a Host,
-    next: u32,
-}
-
-impl Iterator for Siblings<'_> {
-    type Item = NodeId;
-
-    fn next(&mut self) -> Option<NodeId> {
-        if self.next == NodeId::NIL.0 {
-            return None;
-        }
-        let id = NodeId(self.next);
-        self.next = self.host.nodes[id.index()].next_sibling;
-        Some(id)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     const VIEW: NodeKind = NodeKind(0);
     const TEXT: NodeKind = NodeKind(1);
-
-    fn children(host: &Host, parent: NodeId) -> Vec<NodeId> {
-        host.siblings(host.first_child(parent)).collect()
-    }
 
     #[test]
     fn create_and_index() {
@@ -556,10 +502,10 @@ mod tests {
             host.append_child(NodeId(0), NodeId(i));
         }
         assert_eq!(
-            children(&host, NodeId(0)),
+            host.children(NodeId(0)),
             vec![NodeId(1), NodeId(2), NodeId(3)]
         );
-        assert_eq!(host.node(NodeId(0)).unwrap().child_count, 3);
+        assert_eq!(host.child_count(NodeId(0)), 3);
         assert_eq!(host.node(NodeId(2)).unwrap().parent, 0);
     }
 
@@ -574,7 +520,7 @@ mod tests {
         host.create(NodeId(9), TEXT).unwrap();
         host.insert_before(NodeId(0), NodeId(9), NodeId(2));
         assert_eq!(
-            children(&host, NodeId(0)),
+            host.children(NodeId(0)),
             vec![NodeId(1), NodeId(9), NodeId(2), NodeId(3)]
         );
     }
@@ -589,10 +535,10 @@ mod tests {
         }
         host.append_child(NodeId(0), NodeId(1));
         assert_eq!(
-            children(&host, NodeId(0)),
+            host.children(NodeId(0)),
             vec![NodeId(2), NodeId(3), NodeId(1)]
         );
-        assert_eq!(host.node(NodeId(0)).unwrap().child_count, 3);
+        assert_eq!(host.child_count(NodeId(0)), 3);
     }
 
     #[test]
@@ -605,8 +551,7 @@ mod tests {
         host.remove(NodeId(1));
         assert_eq!(host.len(), 1);
         assert!(host.node(NodeId(1)).is_none());
-        assert_eq!(children(&host, NodeId(0)), vec![]);
-        assert_eq!(host.node(NodeId(0)).unwrap().child_count, 0);
+        assert_eq!(host.children(NodeId(0)), vec![]);
         // Reuse of the same id carries the bumped generation, so a stale
         // (id, generation) pair can never reach the new node.
         let node = host.create(NodeId(1), TEXT).unwrap();
@@ -620,9 +565,9 @@ mod tests {
         host.create(NodeId(1), VIEW).unwrap();
         host.append_child(ROOT, NodeId(0));
         host.append_child(ROOT, NodeId(1));
-        assert_eq!(children(&host, ROOT), vec![NodeId(0), NodeId(1)]);
+        assert_eq!(host.children(ROOT), vec![NodeId(0), NodeId(1)]);
         host.remove(NodeId(0));
-        assert_eq!(children(&host, ROOT), vec![NodeId(1)]);
+        assert_eq!(host.children(ROOT), vec![NodeId(1)]);
     }
 
     #[test]
@@ -637,6 +582,6 @@ mod tests {
 
     #[test]
     fn header_stays_compact() {
-        assert_eq!(std::mem::size_of::<NodeHeader>(), 40);
+        assert_eq!(std::mem::size_of::<NodeHeader>(), 20);
     }
 }
