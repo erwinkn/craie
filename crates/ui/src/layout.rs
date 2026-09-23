@@ -469,8 +469,7 @@ impl TreeView<'_> {
             },
         };
         let gap = style.gap().height;
-        let style_for_leaf = style.to_taffy();
-        let mut out = compute_leaf_layout(inputs, &style_for_leaf, no_calc, |known, available| {
+        let mut out = compute_leaf_layout(inputs, style, no_calc, |known, available| {
             // The content-box width: Taffy resolves padding, border,
             // min/max, and percentages into the available width. (A
             // known width in a size probe is the border box.)
