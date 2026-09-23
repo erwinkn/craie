@@ -9,7 +9,7 @@
 
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
-use winit::event::{ElementState, Ime, MouseScrollDelta, WindowEvent};
+use winit::event::{ElementState, Ime, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{Key as WKey, NamedKey};
 use winit::window::{WindowAttributes, WindowId};
@@ -20,9 +20,11 @@ use craie_ui::events::{Button, Event, Key, KeyInput, Mods};
 use crate::{App, Wake, Window};
 
 pub fn run<A: App>(title: &str, logical_size: Size, app: A) {
-    let event_loop = EventLoop::new().expect("failed to create event loop");
+    let event_loop = EventLoop::<()>::with_user_event()
+        .build()
+        .expect("failed to create event loop");
     event_loop.set_control_flow(ControlFlow::Wait);
-    let driver = Driver {
+    let mut driver = Driver {
         app,
         window: None,
         wake: Wake {
@@ -34,14 +36,14 @@ pub fn run<A: App>(title: &str, logical_size: Size, app: A) {
             .with_active(false)
             // The AccessKit adapter must exist before first show.
             .with_visible(false)
-            .with_surface_size(LogicalSize::new(
+            .with_inner_size(LogicalSize::new(
                 logical_size.width as f64,
                 logical_size.height as f64,
             )),
         mods: Mods::default(),
         pointer: (0.0, 0.0),
     };
-    event_loop.run_app(driver).expect("event loop error");
+    event_loop.run_app(&mut driver).expect("event loop error");
 }
 
 struct Driver<A: App> {
@@ -99,7 +101,7 @@ impl<A: App> Driver<A> {
 }
 
 impl<A: App> ApplicationHandler for Driver<A> {
-    fn can_create_surfaces(&mut self, event_loop: &dyn ActiveEventLoop) {
+    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.window.is_some() {
             return;
         }
@@ -109,7 +111,7 @@ impl<A: App> ApplicationHandler for Driver<A> {
         let a11y = self.app.a11y_shared().map(|shared| {
             accesskit_winit::Adapter::with_direct_handlers(
                 event_loop,
-                &*window,
+                &window,
                 craie_ui::a11y::Activation {
                     shared: shared.clone(),
                 },
@@ -130,7 +132,7 @@ impl<A: App> ApplicationHandler for Driver<A> {
 
     /// A `Wake::wake` arrived from another thread. The payload is implicit:
     /// the app drains whatever queues it owns.
-    fn proxy_wake_up(&mut self, event_loop: &dyn ActiveEventLoop) {
+    fn user_event(&mut self, event_loop: &ActiveEventLoop, (): ()) {
         if let Some(window) = &self.window
             && self.app.woke(window)
         {
@@ -140,7 +142,7 @@ impl<A: App> ApplicationHandler for Driver<A> {
 
     fn window_event(
         &mut self,
-        event_loop: &dyn ActiveEventLoop,
+        event_loop: &ActiveEventLoop,
         _window_id: WindowId,
         event: WindowEvent,
     ) {
@@ -155,7 +157,7 @@ impl<A: App> ApplicationHandler for Driver<A> {
                     event_loop.exit();
                 }
             }
-            WindowEvent::SurfaceResized(_) | WindowEvent::ScaleFactorChanged { .. } => {
+            WindowEvent::Resized(_) | WindowEvent::ScaleFactorChanged { .. } => {
                 self.app.resized(window);
             }
             WindowEvent::Occluded(occluded) => self.app.occluded(window, occluded),
@@ -167,30 +169,25 @@ impl<A: App> ApplicationHandler for Driver<A> {
                     shift: s.shift_key(),
                     ctrl: s.control_key(),
                     alt: s.alt_key(),
-                    meta: s.meta_key(),
+                    meta: s.super_key(),
                 };
             }
-            WindowEvent::PointerMoved { position, .. } => {
+            WindowEvent::CursorMoved { position, .. } => {
                 let (x, y) = logical(position.x, position.y);
                 self.pointer = (x, y);
                 self.app.event(window, &Event::PointerMove { x, y });
             }
-            WindowEvent::PointerButton {
-                state,
-                position,
-                button,
-                ..
-            } => {
-                let (x, y) = logical(position.x, position.y);
-                self.pointer = (x, y);
+            WindowEvent::MouseInput { state, button, .. } => {
+                // Buttons carry no position in winit 0.30; the last
+                // cursor position is where the press happened.
+                let (x, y) = self.pointer;
                 let button = match button {
-                    winit::event::ButtonSource::Mouse(b) => match b {
-                        winit::event::MouseButton::Left => Button::Primary,
-                        winit::event::MouseButton::Right => Button::Secondary,
-                        winit::event::MouseButton::Middle => Button::Middle,
-                        other => Button::Other(other as u16),
-                    },
-                    _ => Button::Primary,
+                    MouseButton::Left => Button::Primary,
+                    MouseButton::Right => Button::Secondary,
+                    MouseButton::Middle => Button::Middle,
+                    MouseButton::Back => Button::Other(4),
+                    MouseButton::Forward => Button::Other(5),
+                    MouseButton::Other(b) => Button::Other(b),
                 };
                 let ev = match state {
                     ElementState::Pressed => Event::PointerDown {
@@ -203,14 +200,11 @@ impl<A: App> ApplicationHandler for Driver<A> {
                 };
                 self.app.event(window, &ev);
             }
-            WindowEvent::PointerLeft { position, .. } => {
+            WindowEvent::CursorLeft { .. } => {
                 // The pointer left the surface; report a move outside so
                 // hover/leave synthesis runs.
-                if let Some(p) = position {
-                    let (x, y) = logical(p.x, p.y);
-                    self.pointer = (x, y);
-                    self.app.event(window, &Event::PointerMove { x, y });
-                }
+                self.pointer = (-1.0, -1.0);
+                self.app.event(window, &Event::PointerMove { x: -1.0, y: -1.0 });
             }
             WindowEvent::MouseWheel { delta, .. } => {
                 let (dx, dy) = match delta {
@@ -221,7 +215,6 @@ impl<A: App> ApplicationHandler for Driver<A> {
                     ),
                     // Line deltas: ~32pt per line, a common convention.
                     MouseScrollDelta::LineDelta(x, y) => (x * 32.0, y * 32.0),
-                    _ => return,
                 };
                 // Winit deltas are positive when the content moves
                 // down/right (revealing earlier content); Craie offsets
@@ -248,17 +241,10 @@ impl<A: App> ApplicationHandler for Driver<A> {
             WindowEvent::Ime(ime) => match ime {
                 Ime::Enabled => {}
                 Ime::Preedit(text, cursor) => {
-                    self.app.event(
-                        window,
-                        &Event::ImePreedit {
-                            text,
-                            cursor,
-                        },
-                    );
+                    self.app.event(window, &Event::ImePreedit { text, cursor });
                 }
                 Ime::Commit(text) => self.app.event(window, &Event::ImeCommit(text)),
                 Ime::Disabled => self.app.event(window, &Event::ImeDone),
-                _ => {}
             },
             _ => {}
         }

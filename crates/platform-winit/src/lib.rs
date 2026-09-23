@@ -3,10 +3,9 @@
 //!
 //! Platform boundary.
 //!
-//! Everything above this module (host, text, scene, gpu) consumes
-//! Craie-level events only; winit is confined to `platform::winit`. The
-//! trait surface is intentionally minimal — a window that can report its
-//! size/scale, ask for a redraw, and receive input-method requests.
+//! Everything above this crate (host, text, scene, render) consumes
+//! Craie-level events only; winit is confined here. `Window` implements
+//! `craie_ui::platform::PlatformWindow`, the contract the runtime sees.
 
 pub mod a11y;
 pub mod app;
@@ -18,18 +17,20 @@ use std::sync::{Arc, Mutex};
 use craie_core::{Rect, Size};
 use craie_ui::a11y::A11yShared;
 use craie_ui::events::Event;
+use craie_ui::platform::{PlatformWindow, WindowId};
 
 /// Cross-thread wake handle for the event loop. Clone it freely; `wake`
 /// pokes a `Wait`-state loop so the main thread can drain work queues
 /// (e.g. transactions submitted to the bridge `Session`).
 #[derive(Clone)]
 pub struct Wake {
-    pub(crate) proxy: ::winit::event_loop::EventLoopProxy,
+    pub(crate) proxy: ::winit::event_loop::EventLoopProxy<()>,
 }
 
 impl Wake {
     pub fn wake(&self) {
-        self.proxy.wake_up();
+        // Fails only once the loop has exited; nothing is left to wake.
+        let _ = self.proxy.send_event(());
     }
 }
 
@@ -37,7 +38,8 @@ impl Wake {
 /// needs; the GPU layer receives the raw handle through `surface_target`
 /// without naming winit itself.
 pub struct Window {
-    inner: Arc<dyn ::winit::window::Window>,
+    inner: Arc<::winit::window::Window>,
+    id: WindowId,
     /// AccessKit adapter, present when the app exposes `a11y_shared`.
     /// Mutex because both the driver (`process_event`) and the app
     /// (`update_a11y`) touch it through `&Window`.
@@ -46,11 +48,12 @@ pub struct Window {
 
 impl Window {
     pub(crate) fn new(
-        inner: Box<dyn ::winit::window::Window>,
+        inner: ::winit::window::Window,
         a11y: Option<accesskit_winit::Adapter>,
     ) -> Window {
         Window {
-            inner: Arc::from(inner),
+            id: WindowId(u64::from(inner.id())),
+            inner: Arc::new(inner),
             a11y: Mutex::new(a11y),
         }
     }
@@ -58,7 +61,7 @@ impl Window {
     /// Forwards a window event to the AccessKit adapter (no-op without one).
     pub(crate) fn process_a11y_event(&self, event: &::winit::event::WindowEvent) {
         if let Some(a) = self.a11y.lock().unwrap().as_mut() {
-            a.process_event(&*self.inner, event);
+            a.process_event(&self.inner, event);
         }
     }
 
@@ -69,9 +72,9 @@ impl Window {
         }
     }
 
-    /// Handle for `Gpu::for_window`. `Arc<dyn winit Window>` satisfies
-    /// wgpu's `WindowHandle` bound without exposing the type generically.
-    pub fn surface_target(&self) -> Arc<dyn ::winit::window::Window> {
+    /// Handle for `Gpu::for_window`. `Arc<winit Window>` satisfies wgpu's
+    /// `WindowHandle` bound without exposing the type generically.
+    pub fn surface_target(&self) -> Arc<::winit::window::Window> {
         self.inner.clone()
     }
 
@@ -93,15 +96,13 @@ impl Window {
 
     /// Surface size in physical pixels.
     pub fn size(&self) -> (u32, u32) {
-        let s = self.inner.surface_size();
+        let s = self.inner.inner_size();
         (s.width, s.height)
     }
 
     /// Surface size in logical points.
     pub fn logical_size(&self) -> Size {
-        let (w, h) = self.size();
-        let scale = self.scale_factor() as f32;
-        Size::new(w as f32 / scale, h as f32 / scale)
+        PlatformWindow::logical_size(self)
     }
 
     /// Enables or disables the platform input method. While enabled the
@@ -109,60 +110,51 @@ impl Window {
     /// composing text. `caret_area` (logical points, window-relative)
     /// anchors the candidate window near the text being composed.
     pub fn set_ime(&self, active: bool, caret_area: Option<Rect>) {
-        use ::winit::window::{
-            ImeCapabilities, ImeEnableRequest, ImeHint, ImePurpose, ImeRequest, ImeRequestData,
-        };
-        let request = if active {
-            let scale = self.scale_factor();
-            let data = caret_area.map(|r| {
-                ImeRequestData::default()
-                    .with_hint_and_purpose(ImeHint::NONE, ImePurpose::Normal)
-                    .with_cursor_area(
-                        ::winit::dpi::Position::Physical(
-                            ::winit::dpi::PhysicalPosition::new(
-                                (r.origin.x as f64 * scale) as i32,
-                                (r.origin.y as f64 * scale) as i32,
-                            ),
-                        ),
-                        ::winit::dpi::Size::Physical(::winit::dpi::PhysicalSize::new(
-                            (r.size.width as f64 * scale) as u32,
-                            (r.size.height as f64 * scale).max(1.0) as u32,
-                        )),
-                    )
-            });
-            let Some(data) = data else {
-                // Enable without an area only after the first caret
-                // update arrives; nothing sensible to send yet.
-                return;
-            };
-            let caps = ImeCapabilities::new().with_hint_and_purpose().with_cursor_area();
-            let Some(req) = ImeEnableRequest::new(caps, data) else {
-                return;
-            };
-            ImeRequest::Enable(req)
-        } else {
-            ImeRequest::Disable
-        };
-        let _ = self.inner.request_ime_update(request);
+        self.inner.set_ime_allowed(active);
+        if !active {
+            return;
+        }
+        if let Some(r) = caret_area {
+            self.set_ime_area(r);
+        }
     }
 
     /// Points the IME candidate window at the text being composed
     /// (logical points; the request is issued in physical pixels).
     pub fn set_ime_area(&self, rect: Rect) {
         let scale = self.scale_factor();
-        let data = ::winit::window::ImeRequestData::default().with_cursor_area(
-            ::winit::dpi::Position::Physical(::winit::dpi::PhysicalPosition::new(
+        self.inner.set_ime_cursor_area(
+            ::winit::dpi::PhysicalPosition::new(
                 (rect.origin.x as f64 * scale) as i32,
                 (rect.origin.y as f64 * scale) as i32,
-            )),
-            ::winit::dpi::Size::Physical(::winit::dpi::PhysicalSize::new(
+            ),
+            ::winit::dpi::PhysicalSize::new(
                 (rect.size.width as f64 * scale) as u32,
                 (rect.size.height as f64 * scale).max(1.0) as u32,
-            )),
+            ),
         );
-        let _ = self
-            .inner
-            .request_ime_update(::winit::window::ImeRequest::Update(data));
+    }
+}
+
+impl PlatformWindow for Window {
+    fn id(&self) -> WindowId {
+        self.id
+    }
+
+    fn surface_size(&self) -> (u32, u32) {
+        self.size()
+    }
+
+    fn scale_factor(&self) -> f64 {
+        self.inner.scale_factor()
+    }
+
+    fn request_frame(&self) {
+        self.inner.request_redraw();
+    }
+
+    fn set_text_input(&self, active: bool, caret: Option<Rect>) {
+        self.set_ime(active, caret);
     }
 }
 

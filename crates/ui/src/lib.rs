@@ -15,6 +15,7 @@ pub mod events;
 pub mod host;
 pub mod input;
 pub mod layout;
+pub mod platform;
 pub mod ui;
 pub mod wire;
 
