@@ -618,11 +618,15 @@ container:
 
 ## 8. Scene
 
-**Current.** As targeted, except images, paths, meshes, and group
-opacity by multiply-through (only isolated layers exist). One chunk per
-node (id = node id) in `RectInstance` (40 B) and `GlyphInstance` (20 B)
-pools plus a paint pool, with up to four same-kind segments in paint
-order. A placement table (offset, transform record, clip) positions
+**Current.** As targeted, except images and group opacity by
+multiply-through (only isolated layers exist). One chunk per node (id =
+node id) in `RectInstance` (40 B) and `GlyphInstance` (20 B) pools, a
+paint pool, and path mesh pools (`PathVertex`, 16 B: chunk-local
+position, paint, chunk; and triangle indices), with up to four
+same-kind segments in paint order (step 5a). A gradient paint is a run
+of words in the paint pool (kind and stop count, geometry, the
+chunk-local to gradient affine, then offset and color per stop), so
+meshes need no second paint table. A placement table (offset, transform record, clip) positions
 each chunk. Transform records exist for the window root, scroll
 content, and transformed subtrees; all other nodes draw in their
 nearest record's space at an offset. The draw order, layer table,
@@ -695,8 +699,13 @@ Scene
 
 ## 9. Vectors and SVG
 
-**Current.** None. Custom content is a `CUSTOM` node with a tag, four
-f32s, a text payload, and a registered painter that emits quads.
+**Current.** Step 5a: `craie-vector` builds paths (lines, quadratic
+and cubic Béziers, subpaths) and tessellates fills (nonzero, even-odd)
+and strokes (miter, round, bevel joins with a miter limit; butt, round,
+square caps) with lyon into meshes at a caller-chosen tolerance; paints
+are solid colors and linear and radial gradients (pad spread). The
+scene draws meshes and never sees lyon (layer map test). Surfaces
+(step 1) remain for native painters that emit quads.
 
 **Target.** Paths, fills, strokes, joins, caps, gradients, affine
 transforms, clips, group opacity. Two preparation strategies stay
@@ -757,9 +766,14 @@ in-flight bytes separately. Budgets are runtime configuration.
 
 **Current.** wgpu 30. Storage-buffer mirrors of the scene pools and
 tables (rects, glyphs, paints, placements, worlds, clips, raster
-residency) take dirty-range uploads; an unchanged frame uploads zero
-bytes. One pipeline draws both kinds (instance-index bit 31 selects the
-pool) with one draw per merged run. Opacity layers render into pooled
+residency, path vertices and indices) take dirty-range uploads; an
+unchanged frame uploads zero bytes. One pipeline draws rects and
+glyphs (instance-index bit 31 selects the pool) with one draw per
+merged run; a path pipeline pulls mesh triangles through the index
+pool (vertex index -> index -> vertex) from the same tables. A frame
+whose draw list has meshes renders at 4x MSAA (the window and its layer
+targets, resolved at the end of each pass); other frames stay
+single-sampled. Opacity layers render into pooled
 offscreen targets and composite with their opacity. Clips test in
 their own space in the fragment stage. Colors decode from sRGB to
 linear in the shader; blending happens in linear.
@@ -778,6 +792,16 @@ and render target so a host can embed it.
 **Decisions.**
 - wgpu is the production backend. No Metal/Vulkan/D3D rewrite without a
   concrete limitation.
+- Paths anti-alias by 4x MSAA, only in frames that draw them (2026-09-23,
+  step 5a). Tessellated triangles have hard edges; rects and glyphs
+  already anti-alias analytically and render the same either way.
+  Frames without paths keep their cost (no multisampled target exists
+  until a path draws). The multisampled attachment is stored, not
+  transient: a layer's composite reopens its parent's pass, which must
+  load the samples. Cost: a window-sized target at four samples (about
+  33 MB at 1920x1080 in RGBA8) while paths are on screen. Alternatives
+  measured in E07 (coverage/strip preparation) can replace it behind
+  `PathRecord`.
 
 ## 12. Animation
 

@@ -14,7 +14,7 @@ use craie_core::span::SpanPool;
 
 use crate::atlas::{RasterAtlas, RasterId};
 use crate::chunk::{Chunk, ChunkWriter, PaintSlot, Placement};
-use crate::prim::{Color, GlyphInstance, NO_PAINT, RectInstance, SegKind};
+use crate::prim::{Color, GlyphInstance, NO_PAINT, PathVertex, RectInstance, SegKind};
 use crate::space::{Clips, NONE, Transforms};
 
 /// One entry of the draw order.
@@ -33,6 +33,8 @@ pub enum DrawCmd {
     Rects { start: u32, count: u32 },
     /// Instances `start..start + count` of the glyph pool.
     Glyphs { start: u32, count: u32 },
+    /// Path mesh indices `start..start + count` (whole triangles).
+    Paths { start: u32, count: u32 },
     /// Redirect drawing into a transparent offscreen target covering
     /// `bounds` (device px: x0, y0, x1, y1).
     BeginLayer { opacity: f32, bounds: [i32; 4] },
@@ -46,12 +48,17 @@ pub struct DrawList {
     /// Chunks with at least one drawn segment, in draw order.
     pub visible: Vec<u32>,
     pub viewport: Size,
+    /// The list draws path meshes: the frame renders multisampled (edges
+    /// of tessellated triangles need it; rects and glyphs do not).
+    pub paths: bool,
 }
 
 pub struct Scene {
     pub rects: SpanPool<RectInstance>,
     pub glyphs: SpanPool<GlyphInstance>,
     pub paints: SpanPool<u32>,
+    pub path_vertices: SpanPool<PathVertex>,
+    pub path_indices: SpanPool<u32>,
     chunks: Vec<Chunk>,
     placements: Vec<Placement>,
     placement_dirty: DirtyRanges,
@@ -87,6 +94,8 @@ impl Scene {
             rects: SpanPool::with_dirty_tracking(RectInstance::default()),
             glyphs: SpanPool::with_dirty_tracking(GlyphInstance::default()),
             paints: SpanPool::with_dirty_tracking(0),
+            path_vertices: SpanPool::with_dirty_tracking(PathVertex::default()),
+            path_indices: SpanPool::with_dirty_tracking(0),
             chunks: Vec::new(),
             placements: Vec::new(),
             placement_dirty: DirtyRanges::default(),
@@ -149,8 +158,19 @@ impl Scene {
             g.paint += base;
             g.chunk = id;
         }
+        for v in &mut w.path_vertices {
+            v.paint += base;
+            v.info = (v.info & PathVertex::GRADIENT) | id;
+        }
         self.rects.set(&mut c.rects, &w.rects);
         self.glyphs.set(&mut c.glyphs, &w.glyphs);
+        self.path_vertices
+            .set(&mut c.path_vertices, &w.path_vertices);
+        let vbase = c.path_vertices.start() as u32;
+        for i in &mut w.path_indices {
+            *i += vbase;
+        }
+        self.path_indices.set(&mut c.path_indices, &w.path_indices);
         c.segments = [None; crate::chunk::MAX_SEGMENTS];
         for (i, s) in w.segments.iter().enumerate() {
             c.segments[i] = Some(*s);
@@ -175,6 +195,8 @@ impl Scene {
         self.rects.free(&mut c.rects);
         self.glyphs.free(&mut c.glyphs);
         self.paints.free(&mut c.paints);
+        self.path_vertices.free(&mut c.path_vertices);
+        self.path_indices.free(&mut c.path_indices);
         self.chunks[id as usize] = Chunk::default();
         self.list_valid = false;
     }
@@ -302,6 +324,7 @@ impl Scene {
         let mut visible = std::mem::take(&mut self.list.visible);
         cmds.clear();
         visible.clear();
+        let mut paths = false;
         // Clip world bounds, once per clip. `None` bounds nothing (a clip
         // chain with only open-axis records).
         let mut clip_bounds = std::mem::take(&mut self.clip_bounds);
@@ -362,7 +385,7 @@ impl Scene {
                     let Some(c) = self.chunks.get(id as usize).filter(|c| c.live) else {
                         continue;
                     };
-                    if c.rects.is_empty() && c.glyphs.is_empty() {
+                    if c.rects.is_empty() && c.glyphs.is_empty() && c.path_indices.is_empty() {
                         continue;
                     }
                     let mut b = self.chunk_world_bounds(id);
@@ -380,31 +403,36 @@ impl Scene {
                         l.1 = Some(l.1.map_or(b, |p| p.union(&b)));
                     }
                     for s in c.segments() {
-                        let (base, kind) = match s.kind {
-                            SegKind::Rects => (c.rects.start() as u32, 0),
-                            SegKind::Glyphs => (c.glyphs.start() as u32, 1),
-                        };
+                        let base = match s.kind {
+                            SegKind::Rects => c.rects.start(),
+                            SegKind::Glyphs => c.glyphs.start(),
+                            SegKind::Paths => c.path_indices.start(),
+                        } as u32;
                         let start = base + s.start;
                         // Merge with the previous draw when contiguous.
-                        match (kind, cmds.last_mut()) {
-                            (0, Some(DrawCmd::Rects { start: s0, count }))
+                        match (s.kind, cmds.last_mut()) {
+                            (SegKind::Rects, Some(DrawCmd::Rects { start: s0, count }))
+                            | (SegKind::Glyphs, Some(DrawCmd::Glyphs { start: s0, count }))
+                            | (SegKind::Paths, Some(DrawCmd::Paths { start: s0, count }))
                                 if *s0 + *count == start =>
                             {
                                 *count += s.len
                             }
-                            (1, Some(DrawCmd::Glyphs { start: s0, count }))
-                                if *s0 + *count == start =>
-                            {
-                                *count += s.len
+                            (SegKind::Rects, _) => cmds.push(DrawCmd::Rects {
+                                start,
+                                count: s.len,
+                            }),
+                            (SegKind::Glyphs, _) => cmds.push(DrawCmd::Glyphs {
+                                start,
+                                count: s.len,
+                            }),
+                            (SegKind::Paths, _) => {
+                                paths = true;
+                                cmds.push(DrawCmd::Paths {
+                                    start,
+                                    count: s.len,
+                                })
                             }
-                            (0, _) => cmds.push(DrawCmd::Rects {
-                                start,
-                                count: s.len,
-                            }),
-                            _ => cmds.push(DrawCmd::Glyphs {
-                                start,
-                                count: s.len,
-                            }),
                         }
                     }
                 }
@@ -416,6 +444,7 @@ impl Scene {
         self.list.cmds = cmds;
         self.list.visible = visible;
         self.list.viewport = viewport;
+        self.list.paths = paths;
     }
 
     /// Items waiting for upload across the pools and the placement
@@ -425,6 +454,8 @@ impl Scene {
         self.rects.dirty_items()
             + self.glyphs.dirty_items()
             + self.paints.dirty_items()
+            + self.path_vertices.dirty_items()
+            + self.path_indices.dirty_items()
             + self.placement_dirty.items_upper()
     }
 
@@ -543,6 +574,41 @@ impl Scene {
                                     });
                                 }
                             }
+                            SegKind::Paths => {
+                                // One entry per segment: its device-space
+                                // bounds (every vertex it indexes), its
+                                // first paint word, and its geometry as
+                                // a key (index count, vertex positions).
+                                let is = &self.path_indices.get(c.path_indices)
+                                    [s.start as usize..(s.start + s.len) as usize];
+                                let vs = self.path_vertices.backing();
+                                let (mut lo, mut hi) = ([f32::INFINITY; 2], [f32::NEG_INFINITY; 2]);
+                                let mut key = is.len() as u64;
+                                for &i in is {
+                                    let v = vs[i as usize];
+                                    let p =
+                                        w.apply(craie_core::geom::Point::new(v.pos[0], v.pos[1]));
+                                    lo = [lo[0].min(p.x), lo[1].min(p.y)];
+                                    hi = [hi[0].max(p.x), hi[1].max(p.y)];
+                                    key = key.wrapping_mul(0x100_0000_01B3)
+                                        ^ (v.pos[0].to_bits() as u64) << 32
+                                        ^ v.pos[1].to_bits() as u64
+                                        ^ (self.paints.backing()[v.paint as usize] as u64)
+                                            .rotate_left(17);
+                                }
+                                let first = is.first().map(|&i| vs[i as usize]);
+                                out.push(Resolved {
+                                    kind: 2,
+                                    bounds: Rect::new(lo[0], lo[1], hi[0] - lo[0], hi[1] - lo[1]),
+                                    color: first
+                                        .map_or(0, |v| self.paints.backing()[v.paint as usize]),
+                                    aux: key,
+                                    params: [0.0; 2],
+                                    opacity: o,
+                                    clip,
+                                    clip_radius,
+                                });
+                            }
                             SegKind::Glyphs => {
                                 let gs = &self.glyphs.get(c.glyphs)
                                     [s.start as usize..(s.start + s.len) as usize];
@@ -577,7 +643,7 @@ impl Scene {
 /// One primitive in world space (device px), for equivalence checks.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Resolved {
-    /// 0 rect, 1 glyph.
+    /// 0 rect, 1 glyph, 2 path mesh segment.
     pub kind: u8,
     pub bounds: Rect,
     pub color: u32,
@@ -618,6 +684,7 @@ impl Resolved {
 mod tests {
     use super::*;
     use crate::chunk::ChunkWriter;
+    use crate::prim::PathVertex;
     use craie_core::geom::Affine;
 
     fn scene_with(n: u32) -> Scene {
@@ -704,6 +771,82 @@ mod tests {
         assert_eq!(s.paints.take_dirty().len(), 1);
         assert_eq!(s.paint(0, PaintSlot(0)), Some(0x00FF_00FF));
         assert_eq!(s.counters.paints_patched, 1);
+    }
+
+    /// Meshes commit with indices rebased onto the vertex pool and
+    /// paints onto the paint pool; contiguous mesh segments merge into
+    /// one draw and flag the list; freed chunks draw nothing.
+    #[test]
+    fn meshes_commit_merge_and_free() {
+        let mut s = scene_with(0);
+        let root = 0;
+        let tri = [[0.0, 0.0], [10.0, 0.0], [0.0, 10.0]];
+        let mut w = ChunkWriter::new();
+        for id in 0..2u32 {
+            let red = w.paint(0xFF00_00FF);
+            w.mesh(&tri, &[0, 1, 2], red, false);
+            let g = w.gradient(&crate::chunk::GradientPaint {
+                kind: crate::prim::gradient::LINEAR,
+                geometry: [0.0, 0.0, 1.0, 0.0],
+                to_gradient: [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+                stops: vec![(0.0, 1), (1.0, 2)],
+            });
+            w.mesh(&tri, &[2, 1, 0], g, true);
+            s.commit_chunk(id, &mut w);
+            s.set_placement(
+                id,
+                Placement {
+                    offset: [0.0, id as f32 * 20.0],
+                    transform: root,
+                    clip: NONE,
+                },
+            );
+        }
+        s.set_order(vec![OrderItem::Chunk(0), OrderItem::Chunk(1)], vec![]);
+        let c1 = *s.chunk(1).unwrap();
+        // Chunk 1's indices point at its own vertices in the pool; each
+        // gradient vertex points at its record's first word.
+        let v = c1.path_vertices.start() as u32;
+        assert!(v >= 6);
+        assert_eq!(
+            s.path_indices.get(c1.path_indices),
+            [v, v + 1, v + 2, v + 5, v + 4, v + 3]
+        );
+        let vs = s.path_vertices.get(c1.path_vertices);
+        assert_eq!(vs[0].info, 1);
+        assert_eq!(vs[3].info, 1 | PathVertex::GRADIENT);
+        let paints = s.paints.get(c1.paints);
+        let first = c1.paints.start() as u32;
+        assert_eq!(vs[0].paint, first);
+        assert_eq!(vs[3].paint, first + 1);
+        assert_eq!(paints[1], crate::prim::gradient::LINEAR | 2 << 16);
+        assert_eq!(paints.len(), 1 + crate::prim::gradient::HEADER_WORDS + 4);
+        let mut missing = Vec::new();
+        let list = s.prepare(Size::new(100.0, 100.0), &mut missing);
+        // Index spans are contiguous only when the pool packed them so:
+        // either one merged draw or one per chunk, 12 indices in all.
+        let counted: u32 = list
+            .cmds
+            .iter()
+            .map(|c| match c {
+                DrawCmd::Paths { count, .. } => *count,
+                _ => panic!("{c:?}"),
+            })
+            .sum();
+        assert_eq!(counted, 12);
+        assert!(list.paths);
+        let drawn = s.resolve(&|_| 0);
+        assert_eq!(drawn.len(), 2);
+        assert_eq!(
+            (drawn[1].kind, drawn[1].bounds),
+            (2, Rect::new(0.0, 20.0, 10.0, 10.0))
+        );
+        assert_eq!(drawn[1].color, 0xFF00_00FF);
+        s.free_chunk(0);
+        s.free_chunk(1);
+        let list = s.prepare(Size::new(100.0, 100.0), &mut missing);
+        assert!(list.cmds.is_empty() && !list.paths);
+        assert!(s.chunk(0).is_none() && s.chunk(1).is_none());
     }
 
     #[test]

@@ -118,6 +118,33 @@ fn layer_map_holds() {
         !deps("craie-text").iter().any(|n| n == "taffy"),
         "craie-text depends on taffy"
     );
+    // Tessellation lives behind craie-vector's `PathRecord` boundary: the
+    // scene and renderer draw meshes and never see lyon (§9); the vector
+    // crate knows nothing of GPUs, layout, or text.
+    for krate in ["craie-scene", "craie-render"] {
+        assert!(
+            !deps(krate).iter().any(|n| n.starts_with("lyon")),
+            "{krate} depends on lyon"
+        );
+    }
+    let vector = deps("craie-vector");
+    for bad in [
+        "wgpu",
+        "winit",
+        "taffy",
+        "craie-text",
+        "craie-scene",
+        "usvg",
+    ] {
+        assert!(
+            !vector.iter().any(|n| n == bad),
+            "craie-vector depends on {bad}"
+        );
+    }
+    assert!(
+        vector.iter().any(|n| n == "lyon_tessellation"),
+        "negative control: craie-vector reaches lyon"
+    );
     // Font discovery is the platform's (fontique behind `FontSource`);
     // text and ui never reach it, nor Parley.
     for krate in ["craie-text", "craie-ui"] {

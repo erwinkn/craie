@@ -1,6 +1,8 @@
 // Scene pipeline: rects and glyphs read from the scene's primitive pools
 // through storage buffers. The instance index selects the primitive:
 // bit 31 = kind (0 rect, 1 glyph), bits 0..31 = index in its pool.
+// The path pipeline (`vs_path`) draws mesh triangles: the vertex index
+// selects an entry of the path index pool, which names a path vertex.
 // Placement -> world matrix -> device px; the chunk origin snaps to the
 // device-pixel grid under axis-aligned transforms, so text stays crisp
 // and a moved chunk reuses every raster.
@@ -13,6 +15,7 @@ struct PlacementI { ox: f32, oy: f32, transform: u32, clip: u32 };
 struct WorldI { a: f32, b: f32, c: f32, d: f32, e: f32, f: f32, flags: u32, _pad: u32 };
 struct ClipI { ia: f32, ib: f32, ic: f32, id: f32, ie: f32, if_: f32, x0: f32, y0: f32, x1: f32, y1: f32, radius: f32, parent: u32, flags: u32 };
 struct RasterI { xy: u32, wh: u32, page: u32, quad: u32 };
+struct PathV { x: f32, y: f32, paint: u32, info: u32 };
 
 @group(0) @binding(0) var<uniform> vp: Viewport;
 @group(0) @binding(1) var<storage, read> rects: array<RectI>;
@@ -22,6 +25,8 @@ struct RasterI { xy: u32, wh: u32, page: u32, quad: u32 };
 @group(0) @binding(5) var<storage, read> worlds: array<WorldI>;
 @group(0) @binding(6) var<storage, read> clips: array<ClipI>;
 @group(0) @binding(7) var<storage, read> rasters: array<RasterI>;
+@group(0) @binding(8) var<storage, read> path_vertices: array<PathV>;
+@group(0) @binding(9) var<storage, read> path_indices: array<u32>;
 @group(1) @binding(0) var atlas_alpha: texture_2d_array<f32>;
 @group(1) @binding(1) var atlas_color: texture_2d_array<f32>;
 @group(1) @binding(2) var atlas_sampler: sampler;
@@ -29,7 +34,7 @@ struct RasterI { xy: u32, wh: u32, page: u32, quad: u32 };
 struct VsOut {
     @builtin(position) pos: vec4<f32>,
     // Rect: fragment position relative to the rect center, rect-space px.
-    // Glyph: atlas uv.
+    // Glyph: atlas uv. Path: chunk-local position (gradient input).
     @location(0) local: vec2<f32>,
     @location(1) @interpolate(flat) half: vec2<f32>,
     // Rect: radius px, border px.
@@ -37,6 +42,7 @@ struct VsOut {
     @location(3) @interpolate(flat) color: vec4<f32>,
     @location(4) @interpolate(flat) aux: vec4<f32>,
     // kind, clip, page, flags (rect: has border; glyph: color bitmap).
+    // Path: kind 2, clip, gradient record (paint index), is gradient.
     @location(5) @interpolate(flat) info: vec4<u32>,
 };
 
@@ -153,6 +159,85 @@ fn vs_main(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> 
     return out;
 }
 
+@vertex
+fn vs_path(@builtin(vertex_index) vi: u32) -> VsOut {
+    let v = path_vertices[path_indices[vi]];
+    let chunk = v.info & 0x7fffffffu;
+    let p = placements[chunk];
+    let w = worlds[p.transform];
+    let dev = chunk_origin(w, p) + linear(w, vec2<f32>(v.x, v.y));
+    var out: VsOut;
+    out.pos = to_ndc(dev);
+    out.local = vec2<f32>(v.x, v.y);
+    let gradient = v.info >> 31u;
+    if (gradient == 0u) {
+        out.color = unpack(paints[v.paint]);
+    }
+    out.info = vec4<u32>(2u, p.clip, v.paint, gradient);
+    return out;
+}
+
+fn pf(i: u32) -> f32 {
+    return bitcast<f32>(paints[i]);
+}
+
+// Raw sRGB channels (not decoded), for gradient interpolation.
+fn unpack_raw(c: u32) -> vec4<f32> {
+    return vec4<f32>(
+        f32((c >> 24u) & 0xffu),
+        f32((c >> 16u) & 0xffu),
+        f32((c >> 8u) & 0xffu),
+        f32(c & 0xffu),
+    ) / 255.0;
+}
+
+// A gradient record (prim.rs `gradient`) at chunk-local `local`: pad
+// spread; stops interpolate premultiplied in sRGB, as browsers do; the
+// result decodes to linear like every authored color.
+fn gradient_color(at: u32, local: vec2<f32>) -> vec4<f32> {
+    let head = paints[at];
+    let kind = head & 0xffffu;
+    let n = head >> 16u;
+    let gp = vec2<f32>(
+        pf(at + 5u) * local.x + pf(at + 7u) * local.y + pf(at + 9u),
+        pf(at + 6u) * local.x + pf(at + 8u) * local.y + pf(at + 10u),
+    );
+    let g = vec4<f32>(pf(at + 1u), pf(at + 2u), pf(at + 3u), pf(at + 4u));
+    var t: f32;
+    if (kind == 0u) {
+        let d = g.zw - g.xy;
+        t = dot(gp - g.xy, d) / max(dot(d, d), 1e-12);
+    } else {
+        t = length(gp - g.xy) / max(g.z, 1e-12);
+    }
+    t = clamp(t, 0.0, 1.0);
+    let stops = at + 11u;
+    var c = unpack_raw(paints[stops + 1u]);
+    var prev_o = pf(stops);
+    var prev = vec4<f32>(c.rgb * c.a, c.a);
+    var out = prev;
+    if (t > prev_o) {
+        for (var i = 1u; i < n; i = i + 1u) {
+            let o = pf(stops + 2u * i);
+            let ci = unpack_raw(paints[stops + 2u * i + 1u]);
+            let cur = vec4<f32>(ci.rgb * ci.a, ci.a);
+            if (t <= o) {
+                let k = select(0.0, (t - prev_o) / (o - prev_o), o > prev_o);
+                out = mix(prev, cur, k);
+                break;
+            }
+            prev_o = o;
+            prev = cur;
+            out = cur;
+        }
+    }
+    var rgb = vec3<f32>(0.0);
+    if (out.a > 0.0) {
+        rgb = out.rgb / out.a;
+    }
+    return vec4<f32>(srgb_decode(rgb.r), srgb_decode(rgb.g), srgb_decode(rgb.b), out.a);
+}
+
 // Coverage of the clip chain at a device-px position: each clip tests in
 // its own space, so rotated and scaled clips stay exact.
 fn clip_coverage(dev: vec2<f32>, first: u32) -> f32 {
@@ -198,7 +283,14 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         }
     }
     var out: vec4<f32>;
-    if (in.info.x == 0u) {
+    if (in.info.x == 2u) {
+        // Path: coverage comes from multisampling.
+        var c = in.color;
+        if (in.info.w != 0u) {
+            c = gradient_color(in.info.z, in.local);
+        }
+        out = vec4<f32>(c.rgb * c.a, c.a);
+    } else if (in.info.x == 0u) {
         let d = sd_rect(in.local, in.half, in.params.x);
         if (in.info.w != 0u) {
             // Border ring occupies the outer params.y px of the rect.

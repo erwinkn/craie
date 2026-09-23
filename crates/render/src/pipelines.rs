@@ -1,15 +1,22 @@
 //! Pipeline and bind-group-layout construction.
 //!
-//! One scene pipeline serves every primitive kind: the instance index
+//! One scene pipeline serves rects and glyphs: the instance index
 //! selects a rect or a glyph from the storage-buffer pools, so a run of
-//! draws never switches pipelines. A second pipeline composites opacity
-//! layers.
+//! draws never switches pipelines. The path pipeline draws mesh
+//! triangles from the same tables. A third pipeline composites opacity
+//! layers. Each exists single-sampled and at `MSAA` samples: a frame
+//! that draws paths renders multisampled.
+
+/// Samples of a frame that draws paths.
+pub const MSAA: u32 = 4;
 
 use crate::Gpu;
 
+/// Pipelines indexed by `[single, multisampled]`.
 pub struct Pipelines {
-    pub scene: wgpu::RenderPipeline,
-    pub composite: wgpu::RenderPipeline,
+    pub scene: [wgpu::RenderPipeline; 2],
+    pub path: [wgpu::RenderPipeline; 2],
+    pub composite: [wgpu::RenderPipeline; 2],
     pub scene_bgl: wgpu::BindGroupLayout,
     pub atlas_bgl: wgpu::BindGroupLayout,
     pub composite_bgl: wgpu::BindGroupLayout,
@@ -71,12 +78,16 @@ fn sampler_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn pipeline(
     gpu: &Gpu,
     label: &str,
     module: &wgpu::ShaderModule,
+    vs: &str,
+    topology: wgpu::PrimitiveTopology,
     layouts: &[Option<&wgpu::BindGroupLayout>],
     format: wgpu::TextureFormat,
+    samples: u32,
 ) -> wgpu::RenderPipeline {
     let layout = gpu
         .device
@@ -91,7 +102,7 @@ fn pipeline(
             layout: Some(&layout),
             vertex: wgpu::VertexState {
                 module,
-                entry_point: Some("vs_main"),
+                entry_point: Some(vs),
                 compilation_options: Default::default(),
                 buffers: &[],
             },
@@ -107,11 +118,14 @@ fn pipeline(
                 })],
             }),
             primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleStrip,
+                topology,
                 ..Default::default()
             },
             depth_stencil: None,
-            multisample: Default::default(),
+            multisample: wgpu::MultisampleState {
+                count: samples,
+                ..Default::default()
+            },
             multiview_mask: None,
             cache: None,
         })
@@ -128,11 +142,14 @@ pub fn build(gpu: &Gpu, format: wgpu::TextureFormat) -> Pipelines {
                 viewport_entry(vf),
                 storage_entry(1, S::VERTEX),
                 storage_entry(2, S::VERTEX),
-                storage_entry(3, S::VERTEX),
+                // Paints: fragments read gradient records.
+                storage_entry(3, vf),
                 storage_entry(4, S::VERTEX),
                 storage_entry(5, S::VERTEX),
                 storage_entry(6, S::FRAGMENT),
                 storage_entry(7, S::VERTEX),
+                storage_entry(8, S::VERTEX),
+                storage_entry(9, S::VERTEX),
             ],
         });
     let atlas_bgl = gpu
@@ -161,20 +178,36 @@ pub fn build(gpu: &Gpu, format: wgpu::TextureFormat) -> Pipelines {
         include_str!("shaders/composite.wgsl"),
         "composite",
     );
+    use wgpu::PrimitiveTopology::{TriangleList, TriangleStrip};
+    let both = |label: &str,
+                module: &wgpu::ShaderModule,
+                vs: &str,
+                topology,
+                layouts: &[Option<&wgpu::BindGroupLayout>]| {
+        [1, MSAA].map(|n| pipeline(gpu, label, module, vs, topology, layouts, format, n))
+    };
+    let scene_layouts = [Some(&scene_bgl), Some(&atlas_bgl)];
     Pipelines {
-        scene: pipeline(
-            gpu,
+        scene: both(
             "scene",
             &scene_module,
-            &[Some(&scene_bgl), Some(&atlas_bgl)],
-            format,
+            "vs_main",
+            TriangleStrip,
+            &scene_layouts,
         ),
-        composite: pipeline(
-            gpu,
+        path: both(
+            "path",
+            &scene_module,
+            "vs_path",
+            TriangleList,
+            &scene_layouts,
+        ),
+        composite: both(
             "composite",
             &composite_module,
+            "vs_main",
+            TriangleStrip,
             &[Some(&composite_bgl)],
-            format,
         ),
         scene_bgl,
         atlas_bgl,

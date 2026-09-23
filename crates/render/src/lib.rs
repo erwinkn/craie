@@ -124,7 +124,10 @@ struct AtlasGpu {
 struct LayerTarget {
     w: u32,
     h: u32,
+    /// The composite samples this (the resolve target when multisampled).
     view: TextureView,
+    /// The multisampled attachment of a layer in a frame that draws paths.
+    msaa: Option<TextureView>,
     /// Composites this target; rebuilt when the uniform buffer is.
     composite: wgpu::BindGroup,
 }
@@ -147,14 +150,18 @@ pub struct RenderStats {
     pub draw_calls: u32,
     pub passes: u32,
     pub layers: u32,
+    /// The last frame rendered multisampled (it drew paths).
+    pub msaa: bool,
     /// Bytes uploaded by the last `prepare`.
     pub upload_bytes: u64,
 }
 
 pub struct Renderer {
     format: wgpu::TextureFormat,
-    scene_pipeline: wgpu::RenderPipeline,
-    composite_pipeline: wgpu::RenderPipeline,
+    /// `[single, multisampled]` (`pipelines::MSAA`).
+    scene_pipeline: [wgpu::RenderPipeline; 2],
+    path_pipeline: [wgpu::RenderPipeline; 2],
+    composite_pipeline: [wgpu::RenderPipeline; 2],
     scene_bgl: wgpu::BindGroupLayout,
     atlas_bgl: wgpu::BindGroupLayout,
     composite_bgl: wgpu::BindGroupLayout,
@@ -169,6 +176,13 @@ pub struct Renderer {
     worlds: Mirror,
     clips: Mirror,
     rasters: Mirror,
+    path_vertices: Mirror,
+    path_indices: Mirror,
+    /// The window-sized multisampled attachment (w, h, view), made on
+    /// the first frame that draws paths at that size.
+    msaa_target: Option<(u32, u32, TextureView)>,
+    /// The planned frame: its size and whether it is multisampled.
+    frame: (u32, u32, bool),
     scene_bg: Option<wgpu::BindGroup>,
     atlas: Option<AtlasGpu>,
     layer_pool: Vec<LayerTarget>,
@@ -176,8 +190,9 @@ pub struct Renderer {
     viewport_bytes: Vec<u8>,
     scratch: DrawScratch,
     /// Dirty ranges per table (rects, glyphs, paints, placements,
-    /// worlds, clips, rasters), collected by `collect` (kept buffers).
-    ranges: [Vec<Range<usize>>; 7],
+    /// worlds, clips, rasters, path vertices, path indices), collected
+    /// by `collect` (kept buffers).
+    ranges: [Vec<Range<usize>>; 9],
     pub stats: RenderStats,
     /// Bytes uploaded to atlas textures this session (diagnostics).
     pub atlas_upload_bytes: u64,
@@ -209,6 +224,7 @@ impl Renderer {
         Renderer {
             format,
             scene_pipeline: p.scene,
+            path_pipeline: p.path,
             composite_pipeline: p.composite,
             scene_bgl: p.scene_bgl,
             atlas_bgl: p.atlas_bgl,
@@ -224,6 +240,10 @@ impl Renderer {
             worlds: Mirror::new("worlds"),
             clips: Mirror::new("clips"),
             rasters: Mirror::new("rasters"),
+            path_vertices: Mirror::new("path vertices"),
+            path_indices: Mirror::new("path indices"),
+            msaa_target: None,
+            frame: (0, 0, false),
             scene_bg: None,
             atlas: None,
             layer_pool: Vec::new(),
@@ -246,7 +266,19 @@ impl Renderer {
     /// Craie's share of `prepare`: moves each table's dirty ranges into
     /// a kept buffer. Once warm it allocates nothing.
     pub fn collect(&mut self, scene: &mut Scene) {
-        let [rects, glyphs, paints, placements, worlds, clips, rasters] = &mut self.ranges;
+        let [
+            rects,
+            glyphs,
+            paints,
+            placements,
+            worlds,
+            clips,
+            rasters,
+            path_vertices,
+            path_indices,
+        ] = &mut self.ranges;
+        scene.path_vertices.take_dirty_into(path_vertices);
+        scene.path_indices.take_dirty_into(path_indices);
         scene.rects.take_dirty_into(rects);
         scene.glyphs.take_dirty_into(glyphs);
         scene.paints.take_dirty_into(paints);
@@ -265,7 +297,23 @@ impl Renderer {
             bytes += b;
             recreated |= r;
         };
-        let [rects, glyphs, paints, placements, worlds, clips, rasters] = &self.ranges;
+        let [
+            rects,
+            glyphs,
+            paints,
+            placements,
+            worlds,
+            clips,
+            rasters,
+            path_vertices,
+            path_indices,
+        ] = &self.ranges;
+        add(self
+            .path_vertices
+            .sync(gpu, scene.path_vertices.backing(), path_vertices));
+        add(self
+            .path_indices
+            .sync(gpu, scene.path_indices.backing(), path_indices));
         add(self.rects.sync(gpu, scene.rects.backing(), rects));
         add(self.glyphs.sync(gpu, scene.glyphs.backing(), glyphs));
         add(self.paints.sync(gpu, scene.paints.backing(), paints));
@@ -356,13 +404,14 @@ impl Renderer {
     }
 
     /// A pooled layer target of at least `w` x `h` that no enclosing
-    /// layer is using. Sizes round up so nearby layers share targets
-    /// across frames.
-    fn layer_target(&mut self, gpu: &Gpu, w: u32, h: u32, busy: &[usize]) -> usize {
+    /// layer is using, with a multisampled attachment when `msaa`. Sizes
+    /// round up so nearby layers share targets across frames.
+    fn layer_target(&mut self, gpu: &Gpu, w: u32, h: u32, busy: &[usize], msaa: bool) -> usize {
         let (w, h) = (w.div_ceil(128) * 128, h.div_ceil(128) * 128);
-        if let Some(i) = (0..self.layer_pool.len())
-            .find(|&i| self.layer_pool[i].w == w && self.layer_pool[i].h == h && !busy.contains(&i))
-        {
+        if let Some(i) = (0..self.layer_pool.len()).find(|&i| {
+            let t = &self.layer_pool[i];
+            t.w == w && t.h == h && t.msaa.is_some() == msaa && !busy.contains(&i)
+        }) {
             return i;
         }
         let tex = gpu.device.create_texture(&wgpu::TextureDescriptor {
@@ -381,13 +430,36 @@ impl Renderer {
         });
         let view = tex.create_view(&Default::default());
         let composite = self.composite_bind_group(gpu, &view);
+        let msaa = msaa.then(|| self.msaa_view(gpu, w, h));
         self.layer_pool.push(LayerTarget {
             w,
             h,
             view,
+            msaa,
             composite,
         });
         self.layer_pool.len() - 1
+    }
+
+    /// A multisampled color attachment of `w` x `h` (resolved at the end
+    /// of each pass; stored, since a layer's composite reopens the pass).
+    fn msaa_view(&self, gpu: &Gpu, w: u32, h: u32) -> TextureView {
+        gpu.device
+            .create_texture(&wgpu::TextureDescriptor {
+                label: Some("msaa"),
+                size: wgpu::Extent3d {
+                    width: w,
+                    height: h,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: pipelines::MSAA,
+                dimension: wgpu::TextureDimension::D2,
+                format: self.format,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                view_formats: &[],
+            })
+            .create_view(&Default::default())
     }
 
     fn composite_bind_group(&self, gpu: &Gpu, view: &TextureView) -> wgpu::BindGroup {
@@ -436,6 +508,8 @@ impl Renderer {
     pub fn plan_frame(&mut self, gpu: &Gpu, width: u32, height: u32, scene: &mut Scene) {
         let mut uniform_bytes = 0u64;
         let cmds = &scene.draw_list().cmds;
+        let msaa = scene.draw_list().paths;
+        self.frame = (width, height, msaa);
         let page = scene.atlas.page_size() as f32;
         let base = Viewport {
             size: [width as f32, height as f32],
@@ -469,7 +543,7 @@ impl Renderer {
                     let w = (bounds[2] - bounds[0]).max(1) as u32;
                     let h = (bounds[3] - bounds[1]).max(1) as u32;
                     // A target is busy while an enclosing layer draws to it.
-                    let t = self.layer_target(gpu, w, h, in_use);
+                    let t = self.layer_target(gpu, w, h, in_use, msaa);
                     in_use.push(t);
                     let (tw, th) = (self.layer_pool[t].w as f32, self.layer_pool[t].h as f32);
                     let vp = vps.len();
@@ -532,6 +606,10 @@ impl Renderer {
             uniform_bytes += bytes.len() as u64;
             std::mem::swap(bytes, &mut self.viewport_bytes);
         }
+        if msaa && !matches!(self.msaa_target, Some((w, h, _)) if w == width && h == height) {
+            let view = self.msaa_view(gpu, width.max(1), height.max(1));
+            self.msaa_target = Some((width, height, view));
+        }
         self.scratch = sc;
         scene.counters.upload_bytes += uniform_bytes;
     }
@@ -543,6 +621,13 @@ impl Renderer {
         self.stats.draw_calls = 0;
         self.stats.passes = 0;
         self.stats.layers = 0;
+        let msaa = self.frame.2;
+        self.stats.msaa = msaa;
+        let window_msaa = if msaa {
+            self.msaa_target.as_ref().map(|t| t.2.clone())
+        } else {
+            None
+        };
         let sc = std::mem::take(&mut self.scratch);
         let cmds = &scene.draw_list().cmds;
         let mut encoder = gpu
@@ -562,7 +647,7 @@ impl Renderer {
             &mut encoder,
             cmds,
             &mut 0,
-            view,
+            (view, window_msaa.as_ref()),
             0,
             wgpu::LoadOp::Clear(clear),
             &sc.plan,
@@ -616,79 +701,97 @@ impl Renderer {
                     binding: 7,
                     resource: self.rasters.binding(),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 8,
+                    resource: self.path_vertices.binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 9,
+                    resource: self.path_indices.binding(),
+                },
             ],
         }));
     }
 
     /// Encodes commands from `*i` into `target` until the matching
     /// `EndLayer` (or the end). Each layer becomes its own pass, then a
-    /// composite into the reopened parent pass.
+    /// composite into the reopened parent pass. `target` is (the view
+    /// drawn to or resolved into, its multisampled attachment in a frame
+    /// that draws paths).
     #[allow(clippy::too_many_arguments)]
     fn encode(
         &mut self,
         encoder: &mut wgpu::CommandEncoder,
         cmds: &[DrawCmd],
         i: &mut usize,
-        target: &TextureView,
+        target: (&TextureView, Option<&TextureView>),
         vp: usize,
         mut load: wgpu::LoadOp<wgpu::Color>,
         plan: &[(usize, usize, usize)],
         layer_ix: &mut usize,
     ) {
+        let ms = target.1.is_some() as usize;
+        let attachment = |load| wgpu::RenderPassColorAttachment {
+            view: target.1.unwrap_or(target.0),
+            resolve_target: target.1.map(|_| target.0),
+            depth_slice: None,
+            ops: wgpu::Operations {
+                load,
+                store: wgpu::StoreOp::Store,
+            },
+        };
         loop {
             // One pass on `target`, until a layer boundary.
             let mut boundary: Option<DrawCmd> = None;
             {
                 let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                     label: Some("craie"),
-                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                        view: target,
-                        resolve_target: None,
-                        depth_slice: None,
-                        ops: wgpu::Operations {
-                            load,
-                            store: wgpu::StoreOp::Store,
-                        },
-                    })],
+                    color_attachments: &[Some(attachment(load))],
                     depth_stencil_attachment: None,
                     occlusion_query_set: None,
                     timestamp_writes: None,
                     multiview_mask: None,
                 });
                 self.stats.passes += 1;
-                let mut bound = false;
+                // 0: nothing bound, 1: scene pipeline, 2: path pipeline.
+                let mut bound = 0u8;
                 while *i < cmds.len() {
                     let cmd = cmds[*i];
-                    match cmd {
-                        DrawCmd::Rects { start, count } | DrawCmd::Glyphs { start, count } => {
-                            if !bound {
-                                pass.set_pipeline(&self.scene_pipeline);
-                                pass.set_bind_group(
-                                    0,
-                                    self.scene_bg.as_ref().unwrap(),
-                                    &[(vp as u64 * VIEWPORT_STRIDE) as u32],
-                                );
-                                pass.set_bind_group(
-                                    1,
-                                    &self.atlas.as_ref().unwrap().bind_group,
-                                    &[],
-                                );
-                                bound = true;
-                            }
-                            let kind = if matches!(cmd, DrawCmd::Glyphs { .. }) {
-                                1u32 << 31
-                            } else {
-                                0
-                            };
-                            pass.draw(0..4, (kind | start)..(kind | (start + count)));
-                            self.stats.draw_calls += 1;
-                            *i += 1;
-                        }
+                    let want = match cmd {
+                        DrawCmd::Rects { .. } | DrawCmd::Glyphs { .. } => 1,
+                        DrawCmd::Paths { .. } => 2,
                         DrawCmd::BeginLayer { .. } | DrawCmd::EndLayer => {
                             boundary = Some(cmd);
                             break;
                         }
+                    };
+                    if bound != want {
+                        if want == 1 {
+                            pass.set_pipeline(&self.scene_pipeline[ms]);
+                        } else {
+                            pass.set_pipeline(&self.path_pipeline[ms]);
+                        }
+                        if bound == 0 {
+                            pass.set_bind_group(
+                                0,
+                                self.scene_bg.as_ref().unwrap(),
+                                &[(vp as u64 * VIEWPORT_STRIDE) as u32],
+                            );
+                            pass.set_bind_group(1, &self.atlas.as_ref().unwrap().bind_group, &[]);
+                        }
+                        bound = want;
                     }
+                    match cmd {
+                        DrawCmd::Rects { start, count } => pass.draw(0..4, start..start + count),
+                        DrawCmd::Glyphs { start, count } => {
+                            let kind = 1u32 << 31;
+                            pass.draw(0..4, (kind | start)..(kind | (start + count)))
+                        }
+                        DrawCmd::Paths { start, count } => pass.draw(start..start + count, 0..1),
+                        _ => unreachable!(),
+                    }
+                    self.stats.draw_calls += 1;
+                    *i += 1;
                 }
             }
             match boundary {
@@ -705,11 +808,12 @@ impl Renderer {
                     self.stats.layers += 1;
                     let (t, layer_vp, comp_vp) = plan[l];
                     let view = self.layer_pool[t].view.clone();
+                    let layer_msaa = self.layer_pool[t].msaa.clone();
                     self.encode(
                         encoder,
                         cmds,
                         i,
-                        &view,
+                        (&view, layer_msaa.as_ref()),
                         layer_vp,
                         wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
                         plan,
@@ -717,22 +821,14 @@ impl Renderer {
                     );
                     let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                         label: Some("composite"),
-                        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                            view: target,
-                            resolve_target: None,
-                            depth_slice: None,
-                            ops: wgpu::Operations {
-                                load: wgpu::LoadOp::Load,
-                                store: wgpu::StoreOp::Store,
-                            },
-                        })],
+                        color_attachments: &[Some(attachment(wgpu::LoadOp::Load))],
                         depth_stencil_attachment: None,
                         occlusion_query_set: None,
                         timestamp_writes: None,
                         multiview_mask: None,
                     });
                     self.stats.passes += 1;
-                    pass.set_pipeline(&self.composite_pipeline);
+                    pass.set_pipeline(&self.composite_pipeline[ms]);
                     pass.set_bind_group(
                         0,
                         &self.layer_pool[t].composite,

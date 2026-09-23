@@ -5,6 +5,7 @@ members = [
     "crates/scene",
     "crates/render",
     "crates/text",
+    "crates/vector",
     "crates/ui",
     "crates/platform-winit",
     "crates/node",
@@ -17,6 +18,7 @@ default-members = [
     "crates/scene",
     "crates/render",
     "crates/text",
+    "crates/vector",
     "crates/ui",
     "crates/platform-winit",
     "harness/invariants",
@@ -34,6 +36,7 @@ craie-scene = { path = "crates/scene" }
 craie-render = { path = "crates/render" }
 craie-text = { path = "crates/text" }
 craie-ui = { path = "crates/ui" }
+craie-vector = { path = "crates/vector" }
 craie-platform-winit = { path = "crates/platform-winit" }
 taffy = { version = "=0.14.0", default-features = false, features = ["std", "flexbox", "content_size"] }
 arboard = "3.6.1"
@@ -51,6 +54,7 @@ unicode-segmentation = "=1.13.3"
 unicode-script = "=0.5.8"
 unicode-properties = { version = "=0.1.4", default-features = false, features = ["emoji"] }
 etagere = "=0.3.0"
+lyon_tessellation = "=1.0.22"
 accesskit = "=0.25.0"
 accesskit_winit = "=0.34.0"
 bytemuck = { version = "=1.25.2", features = ["derive"] }

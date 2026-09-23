@@ -443,6 +443,23 @@ gone with it.
   1.3 to 2.7, 0.06 to 0.34 ms). The driver's idle cost is one emptiness
   check per render and one per paint decision.
 
+### Step 5a: path meshes in the scene and renderer
+
+- `craie-vector` tessellation (lyon 1.0, `lyon_tessellation` 1.0.22):
+  a 10 x 10 square fills 100 (exactly), a square with a same-wound hole
+  fills 100 under nonzero and 84 under even-odd, a circle of radius 50
+  at tolerance 0.05 is within 0.5% of pi r^2; a 10-long stroke 2 wide
+  covers 20 (butt), 24 (square caps), and a round-capped one loses less
+  than perimeter x tolerance against 20 + pi.
+- GPU (headless, `crates/render/tests/paths.rs`): a filled circle is
+  solid inside, clear outside, and blends along its edge (partial
+  coverage from 4x MSAA; with multisampling forced off the test fails);
+  its edges are symmetric; a frame of rects only stays single-sampled;
+  linear and radial gradients pad past their ends and interpolate
+  premultiplied in sRGB (the midpoint of red to blue at t = 0.49 is
+  (130, 0, 125)); a mesh inside a 0.5 opacity layer composites to 188
+  (white over black in sRGB).
+
 ### E14: layout-aware virtualization, list versus a plain column (step 2)
 
 `cargo run --release -p craie-harness --example e14_lists`: a scroller

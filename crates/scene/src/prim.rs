@@ -73,11 +73,47 @@ pub struct GlyphInstance {
     pub chunk: u32,
 }
 
+/// One vertex of a path mesh (a tessellated fill or stroke). 16 bytes.
+///
+/// Meshes draw as indexed triangles: the path index pool lists vertex
+/// indices (absolute, written on commit), three per triangle. `paint`
+/// indexes the paint pool (absolute); with `GRADIENT` set in `info` it
+/// is the first word of a gradient record there (`GradientPaint`).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Pod, Zeroable)]
+pub struct PathVertex {
+    /// Chunk-local logical units.
+    pub pos: [f32; 2],
+    pub paint: u32,
+    /// Chunk index (low 31 bits) | `GRADIENT`.
+    pub info: u32,
+}
+
+impl PathVertex {
+    pub const GRADIENT: u32 = 1 << 31;
+}
+
+/// Gradient kinds and the paint-pool layout of a gradient record: word
+/// 0 = kind | stop count << 16; words 1..5 = geometry (linear: x0, y0,
+/// x1, y1; radial: cx, cy, r, 0) in gradient space; words 5..11 = the
+/// affine from chunk-local space to gradient space; then per stop its
+/// offset (f32 bits) and color (0xRRGGBBAA). Pad spread; offsets
+/// ascending in [0, 1].
+pub mod gradient {
+    pub const LINEAR: u32 = 0;
+    pub const RADIAL: u32 = 1;
+    pub const HEADER_WORDS: usize = 11;
+    /// Stops a record may hold.
+    pub const MAX_STOPS: usize = 64;
+}
+
 /// Primitive kind of a chunk segment.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SegKind {
     Rects,
     Glyphs,
+    /// Path mesh indices.
+    Paths,
 }
 
 /// A run of same-kind primitives inside a chunk, in paint order.

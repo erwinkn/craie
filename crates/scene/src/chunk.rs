@@ -12,7 +12,7 @@ use craie_core::geom::Rect;
 use craie_core::span::Span;
 
 use crate::atlas::RasterId;
-use crate::prim::{GlyphInstance, NO_PAINT, RectInstance, SegKind, Segment};
+use crate::prim::{GlyphInstance, NO_PAINT, PathVertex, RectInstance, SegKind, Segment, gradient};
 use crate::space::NONE;
 
 pub const MAX_SEGMENTS: usize = 4;
@@ -22,6 +22,9 @@ pub struct Chunk {
     pub rects: Span,
     pub glyphs: Span,
     pub paints: Span,
+    /// Path mesh vertices and indices (three per triangle).
+    pub path_vertices: Span,
+    pub path_indices: Span,
     pub segments: [Option<Segment>; MAX_SEGMENTS],
     /// Local bounds of every primitive (logical units).
     pub bounds: Rect,
@@ -55,6 +58,19 @@ impl Default for Placement {
     }
 }
 
+/// A linear or radial gradient paint (`prim::gradient` layout).
+#[derive(Clone, Debug, PartialEq)]
+pub struct GradientPaint {
+    /// `gradient::LINEAR` or `gradient::RADIAL`.
+    pub kind: u32,
+    /// Linear: x0, y0, x1, y1; radial: cx, cy, r, 0 (gradient space).
+    pub geometry: [f32; 4],
+    /// Chunk-local space to gradient space.
+    pub to_gradient: [f32; 6],
+    /// (offset in [0, 1], 0xRRGGBBAA), offsets ascending.
+    pub stops: Vec<(f32, u32)>,
+}
+
 /// A paint slot local to the chunk being written. Also the text brush:
 /// a shaped run carries its slot, so a color change patches the paint
 /// record and touches no glyph.
@@ -68,6 +84,9 @@ pub struct ChunkWriter {
     pub(crate) rects: Vec<RectInstance>,
     pub(crate) glyphs: Vec<GlyphInstance>,
     pub(crate) paints: Vec<u32>,
+    pub(crate) path_vertices: Vec<PathVertex>,
+    /// Chunk-local vertex indices (rebased on commit).
+    pub(crate) path_indices: Vec<u32>,
     pub(crate) segments: Vec<Segment>,
     pub(crate) bounds: Option<Rect>,
 }
@@ -81,6 +100,8 @@ impl ChunkWriter {
         self.rects.clear();
         self.glyphs.clear();
         self.paints.clear();
+        self.path_vertices.clear();
+        self.path_indices.clear();
         self.segments.clear();
         self.bounds = None;
     }
@@ -91,13 +112,77 @@ impl ChunkWriter {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.rects.is_empty() && self.glyphs.is_empty()
+        self.rects.is_empty() && self.glyphs.is_empty() && self.path_indices.is_empty()
     }
 
     /// Adds a paint record (0xRRGGBBAA) and returns its slot.
     pub fn paint(&mut self, color: u32) -> PaintSlot {
         self.paints.push(color);
         PaintSlot(self.paints.len() as u32 - 1)
+    }
+
+    /// Adds a gradient paint record and returns its slot (for
+    /// `mesh`'s `gradient` flag). Stops beyond `gradient::MAX_STOPS`
+    /// are dropped.
+    pub fn gradient(&mut self, g: &GradientPaint) -> PaintSlot {
+        let slot = PaintSlot(self.paints.len() as u32);
+        let stops = &g.stops[..g.stops.len().min(gradient::MAX_STOPS)];
+        self.paints.push(g.kind | (stops.len() as u32) << 16);
+        self.paints.extend(g.geometry.map(f32::to_bits));
+        self.paints.extend(g.to_gradient.map(f32::to_bits));
+        for &(offset, color) in stops {
+            self.paints.push(offset.to_bits());
+            self.paints.push(color);
+        }
+        slot
+    }
+
+    /// A triangle mesh in chunk-local logical units: `indices` (three
+    /// per triangle) index `vertices`. `gradient` says the slot is a
+    /// gradient record. Its bounds are the vertices' bounds.
+    pub fn mesh(
+        &mut self,
+        vertices: &[[f32; 2]],
+        indices: &[u32],
+        paint: PaintSlot,
+        gradient: bool,
+    ) {
+        if indices.is_empty() || vertices.is_empty() {
+            return;
+        }
+        let base = self.path_vertices.len() as u32;
+        let info = if gradient { PathVertex::GRADIENT } else { 0 };
+        let (mut lo, mut hi) = ([f32::INFINITY; 2], [f32::NEG_INFINITY; 2]);
+        for &[x, y] in vertices {
+            lo = [lo[0].min(x), lo[1].min(y)];
+            hi = [hi[0].max(x), hi[1].max(y)];
+            self.path_vertices.push(PathVertex {
+                pos: [x, y],
+                paint: paint.0,
+                info,
+            });
+        }
+        let start = self.path_indices.len() as u32;
+        self.path_indices.extend(indices.iter().map(|&i| base + i));
+        let bounds = Rect::new(lo[0], lo[1], hi[0] - lo[0], hi[1] - lo[1]);
+        match self.segments.last_mut() {
+            Some(s) if s.kind == SegKind::Paths => s.len += indices.len() as u32,
+            _ => {
+                assert!(
+                    self.segments.len() < MAX_SEGMENTS,
+                    "too many chunk segments"
+                );
+                self.segments.push(Segment {
+                    kind: SegKind::Paths,
+                    start,
+                    len: indices.len() as u32,
+                });
+            }
+        }
+        self.bounds = Some(match self.bounds {
+            Some(b) => b.union(&bounds),
+            None => bounds,
+        });
     }
 
     fn extend(&mut self, kind: SegKind, bounds: Rect) {
@@ -107,6 +192,7 @@ impl ChunkWriter {
                 let start = match kind {
                     SegKind::Rects => self.rects.len() as u32 - 1,
                     SegKind::Glyphs => self.glyphs.len() as u32 - 1,
+                    SegKind::Paths => unreachable!("meshes extend in `mesh`"),
                 };
                 assert!(
                     self.segments.len() < MAX_SEGMENTS,

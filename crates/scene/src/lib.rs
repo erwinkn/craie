@@ -12,7 +12,9 @@ pub mod scene;
 pub mod space;
 
 pub use atlas::{ATLAS_PAGE_SIZE, AtlasStats, RasterAtlas, RasterGpu, RasterId, Residency};
-pub use chunk::{Chunk, ChunkWriter, MAX_SEGMENTS, PaintSlot, Placement};
-pub use prim::{Color, GlyphInstance, NO_PAINT, RectInstance, SegKind, Segment};
+pub use chunk::{Chunk, ChunkWriter, GradientPaint, MAX_SEGMENTS, PaintSlot, Placement};
+pub use prim::{
+    Color, GlyphInstance, NO_PAINT, PathVertex, RectInstance, SegKind, Segment, gradient,
+};
 pub use scene::{DrawCmd, DrawList, OrderItem, Resolved, Scene};
 pub use space::{ClipGpu, ClipRecord, Clips, NONE, TransformRecord, Transforms, WorldGpu};
