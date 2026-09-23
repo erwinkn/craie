@@ -1,9 +1,10 @@
 import { test, expect } from "bun:test"
-import { createElement } from "react"
+import { Activity, createElement } from "react"
 import { createRoot, View, Text, TextInput, ScrollView, Pressable, Bars, List, ROLE } from "../src/index.js"
 import { CraieHost } from "../src/host.js"
 import type { Transport, UiEvent } from "../src/host.js"
 import { readFrame } from "./crw2.js"
+import { decodeEvents } from "../src/native.js"
 
 class FakeTransport implements Transport {
   frames: Uint8Array[] = []
@@ -550,4 +551,76 @@ test("span starts follow the encoded text around surrogates", async () => {
       if (s.start < bytes.length) expect(bytes[s.start]! & 0xc0).not.toBe(0x80)
     }
   }
+})
+
+// S3C-13: a text root mounted hidden (Activity) sends its text; hiding
+// is display: none natively, so revealing needs no paragraph. Updates
+// while hidden reach it too.
+test("a text root mounted hidden keeps its text", async () => {
+  const t = new FakeTransport()
+  const root = createRoot(t)
+  function App({ mode, word }: { mode: "hidden" | "visible"; word: string }) {
+    return createElement(View, null,
+      createElement(Activity, { mode, children: createElement(Text, null, "content ", word) }))
+  }
+  root.renderSync(createElement(App, { mode: "hidden", word: "one" }))
+  await tick()
+  const all = () => t.frames.splice(0).flatMap(f => readFrame(f).ops)
+  let ops = all()
+  const id = ops.find(o => o.tag === 0x40)!.id // the only text node
+  const text = (list: typeof ops) => list.filter(o => o.tag === 0x40 && o.id === id).map(o => o.s).at(-1)
+  expect(text(ops)).toBe("content one")
+  root.renderSync(createElement(App, { mode: "hidden", word: "two" }))
+  await tick()
+  expect(text(all())).toBe("content two")
+  root.renderSync(createElement(App, { mode: "visible", word: "two" }))
+  await tick()
+  ops = all()
+  expect(text(ops)).toBe(undefined) // unchanged: not resent
+  expect(ops.some(o => o.tag === 0x10 && o.id === id)).toBe(true) // layout: shown
+})
+
+// S3C-15: the revision does not repeat while an old event is pending:
+// after 256 owner replacements, an event from the first table still
+// reaches the root.
+test("a span event survives 256 owner replacements as stale", async () => {
+  const t = new FakeTransport()
+  const root = createRoot(t)
+  const hits: string[] = []
+  function App({ k }: { k: number }) {
+    return createElement(Text, { onPress: () => hits.push("outer") },
+      "tap ",
+      createElement(Text, { key: k, onPress: () => hits.push(`k${k}`) }, "here"))
+  }
+  root.renderSync(createElement(App, { k: 0 }))
+  await tick()
+  const id = t.ops(0).find(o => o.tag === 0x01)!.id
+  for (let k = 1; k <= 256; k++) {
+    root.renderSync(createElement(App, { k }))
+    await tick()
+  }
+  const up = (revision: number): UiEvent => ({
+    kind: 3, node: id, generation: 0, revision, x: 0, y: 0, a: 0, b: 0,
+    key: (1 << 8) | (2 << 16), text: "",
+  })
+  t.eventCb!(up(1)) // from the first table
+  t.eventCb!(up(257)) // current
+  expect(hits).toEqual(["outer", "k256"])
+})
+
+// Event records are 36 bytes: the revision is a u32 after the key.
+test("event records decode the 32-bit revision", () => {
+  const buf = new Uint8Array(4 + 36 + 2)
+  const v = new DataView(buf.buffer)
+  v.setUint32(0, 1, true)
+  v.setUint8(4, 3)
+  v.setUint16(6, 9, true)
+  v.setUint32(8, 42, true)
+  v.setUint32(28, 7 << 16, true)
+  v.setUint32(32, 0x0102_0304, true)
+  v.setUint32(36, 2, true)
+  buf.set([0x68, 0x69], 40)
+  const [e] = decodeEvents(buf)
+  expect([e!.kind, e!.generation, e!.node, e!.key, e!.revision, e!.text])
+    .toEqual([3, 9, 42, 7 << 16, 0x0102_0304, "hi"])
 })

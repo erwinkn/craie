@@ -597,7 +597,10 @@ impl Ui {
                 let p = &mut self.host.paragraphs[node.index()];
                 p.revision = p.revision.wrapping_add(1);
                 let text_changed = p.text != *text;
+                // Fonts not resolved yet (a fresh node): resolve now,
+                // even when text and spans equal the defaults.
                 let metrics_changed = text_changed
+                    || p.fonts.len() != spans.len()
                     || p.spans.len() != spans.len()
                     || p.spans.iter().zip(spans).any(|(a, b)| !a.same_metrics(b));
                 let colors_changed = p.spans.iter().zip(spans).any(|(a, b)| a.color != b.color);

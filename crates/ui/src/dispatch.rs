@@ -393,10 +393,16 @@ impl Ui {
             self.input_changed(id);
         }
         // Text selection: a primary press outside inputs starts one in its
-        // selectable domain, or clears one.
+        // selectable domain, or clears one; a press in an input clears it
+        // (the input keeps its own selection).
         let in_input = hit.is_some_and(|h| self.host.kind(h) == Some(NodeKind::Input));
-        if button == crate::events::Button::Primary && !in_input {
-            self.selecting = self.selection_press(hit, x, y, mods.shift);
+        if button == crate::events::Button::Primary {
+            if in_input {
+                self.selecting = false;
+                self.set_text_selection(None);
+            } else {
+                self.selecting = self.selection_press(hit, x, y, mods.shift);
+            }
         }
         if let Some(hit) = hit {
             self.emit_pointer(hit, out_kind::POINTER_DOWN, x, y, button, mods);

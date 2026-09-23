@@ -388,6 +388,12 @@ gone with it.
   advance, and a line 1.61 pt short at 60 pt): the test asserts that
   difference, and passes against Parley's glyph sums. The case is not
   in the general list, so E01 timing tables are unchanged.
+- Review round 2 (Astra): the paragraph revision is a u32 in a
+  36-byte event record (an 8-bit one repeated after 256 owner
+  replacements, and a queued event reached the last owner); a reused
+  text slot resolves fonts at its first paragraph op; a hidden text
+  root keeps its text (React `Activity`). Each fix has a regression test
+  that fails with the fix removed.
 - The E01 font check compared `include_bytes` addresses; release
   builds hold a second copy of the bytes in the harness, so four E01
   tests failed in release only. It now compares by content.

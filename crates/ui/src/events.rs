@@ -155,7 +155,7 @@ pub struct UiEvent {
     pub generation: u16,
     /// A text node's paragraph revision (`host::Paragraph::revision`)
     /// on pointer events that carry a span; 0 otherwise.
-    pub revision: u8,
+    pub revision: u32,
     pub x: f32,
     pub y: f32,
     pub a: f32,
@@ -213,19 +213,20 @@ pub fn mask_for(kind: u8) -> u32 {
 
 /// Serializes events into one outbox frame. Record layout (LE):
 /// `kind u8 | pad u8 | generation u16 | node u32 | x f32 | y f32 | a f32
-/// | b f32 | key u32 | text_len u32 | text utf8`. The frame starts with
+/// | b f32 | key u32 | revision u32 | text_len u32 | text utf8`. The frame starts with
 /// a u32 record count.
 pub fn encode_events(events: &[UiEvent]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(events.len() * 28);
+    let mut out = Vec::with_capacity(4 + events.len() * 36);
     out.extend_from_slice(&(events.len() as u32).to_le_bytes());
     for e in events {
-        out.extend_from_slice(&[e.kind, e.revision]);
+        out.extend_from_slice(&[e.kind, 0]);
         out.extend_from_slice(&e.generation.to_le_bytes());
         out.extend_from_slice(&e.node.to_le_bytes());
         for f in [e.x, e.y, e.a, e.b] {
             out.extend_from_slice(&f.to_le_bytes());
         }
         out.extend_from_slice(&e.key.to_le_bytes());
+        out.extend_from_slice(&e.revision.to_le_bytes());
         out.extend_from_slice(&(e.text.len() as u32).to_le_bytes());
         out.extend_from_slice(e.text.as_bytes());
     }

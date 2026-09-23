@@ -796,20 +796,22 @@ capture holds a drag on the pressed node. Tab traverses focusable nodes
 in tree order. Clipboard via arboard. IME with cursor-area tracking.
 A pointer event on a text node carries the span under the pointer (key
 bits 16 and up, so at most 65,535 spans per paragraph), found from the
-placements, and the paragraph's revision (paragraph ops applied,
-wrapping at 256, in the event record's second byte). JS routes the
+placements, and the paragraph's revision (paragraph ops applied, a
+u32 in the 36-byte event record; runtime protocol 3). JS routes the
 event to the nested Text that owns the span when the revision is the
 one it last sent, else to the root: a nested Text replaced since does
 not get an event hit-tested against the old span table (step 3c).
 Read-only text selection (`selection.rs`): a `selectable` node makes
 its text descendants one domain; a primary press starts a selection in
-the text under the pointer, else in the text nearest it (both axes, in
-window space); a drag moves its focus, shift extends; Cmd/Ctrl+A
-selects the domain, Cmd/Ctrl+C copies the selected text in tree order
-(one line per paragraph), Escape or a press outside clears. The
-selection holds its nodes with their generations: a removed or reused
-endpoint, a domain no longer selectable, or an endpoint no longer a
-displayed text of the domain drops it. After every transaction and
+the text under the pointer, else in the text nearest it (the distance
+to its transformed content box in window space); a drag moves its
+focus, shift extends; Cmd/Ctrl+A selects the domain, Cmd/Ctrl+C copies
+the selected text in tree order (one line per paragraph of the
+interval, empty ones included), Escape or a press outside (an input
+too) clears. The selection holds its nodes with their generations: a
+removed or reused endpoint, a domain no longer selectable, hidden, or
+detached (itself or an ancestor), or an endpoint no longer a displayed
+text of the domain drops it. After every transaction and
 before paint (list rows change natively), the highlighted ranges are
 recomputed from the tree; each selected paragraph draws its highlight
 from its placements in its own chunk, and only the chunks whose range

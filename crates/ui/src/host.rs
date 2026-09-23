@@ -194,10 +194,10 @@ pub struct Paragraph {
     /// Each span's primary font, resolved from its family and style once,
     /// when the span was applied.
     pub fonts: Vec<Option<crate::text::fonts::FontInstanceId>>,
-    /// Paragraph ops applied to this node, wrapping: pointer events
+    /// Paragraph ops applied to this node, wrapping at 2^32: pointer events
     /// carry it with their span, so JS routes a span by the span table
     /// it came from (a nested Text replaced since routes to the root).
-    pub revision: u8,
+    pub revision: u32,
 }
 
 /// Which events a node subscribes to, whether it takes focus, and what
@@ -433,6 +433,8 @@ impl Host {
         let p = &mut self.paragraphs[i];
         p.text.clear();
         p.spans.clear();
+        // Fonts resolve at the first paragraph op (`executor`).
+        p.fonts.clear();
         p.revision = 0;
         if kind == NodeKind::Text {
             p.spans.push(TextSpan::default());

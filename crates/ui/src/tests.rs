@@ -2332,9 +2332,9 @@ fn text_pointer_events_carry_the_span() {
     assert_eq!(down(line.x + line.advance + 5.0), 0, "past the text");
 
     // Span events carry the paragraph revision (paragraph ops applied,
-    // wrapping), so JS routes a span by the table it came from. Every
+    // wrapping at 2^32), so JS routes a span by the table it came from. Every
     // paragraph op counts, an unchanged one too.
-    let revision = |ui: &mut Ui| -> u8 {
+    let revision = |ui: &mut Ui| -> u32 {
         ui.take_events();
         ui.dispatch(&Event::PointerDown {
             x: line.x + 1.0,
@@ -2354,10 +2354,13 @@ fn text_pointer_events_carry_the_span() {
     ui.render(Size::new(400.0, 300.0));
     assert_eq!(revision(&mut ui), 2);
     let encoded = crate::events::encode_events(&[crate::events::UiEvent {
-        revision: 7,
+        revision: 0x0102_0304,
         ..crate::events::UiEvent::new(out_kind::POINTER_DOWN, 0)
     }]);
-    assert_eq!(encoded[4 + 1], 7, "the record's second byte");
+    // After the count: 28 bytes, then the revision (u32), then the text
+    // length.
+    assert_eq!(encoded.len(), 4 + 36);
+    assert_eq!(encoded[4 + 28..4 + 32], 0x0102_0304u32.to_le_bytes());
 }
 
 /// Pointer events carry `span + 1` in 16 key bits: a paragraph holds at
@@ -2712,6 +2715,202 @@ fn selection_position_uses_both_axes() {
     assert_eq!(ui.hit_test(to.0, to.1), Some(NodeId(3)));
     drag(&mut ui, from, to);
     assert_eq!(ui.selected_text(), "Right\nOv");
+}
+
+/// The domain must be shown (S3C-16): hiding or detaching an ancestor
+/// above it drops the selection.
+#[test]
+fn selection_drops_when_an_ancestor_hides_or_detaches() {
+    let hidden = taffy::Style {
+        display: taffy::Display::None,
+        ..taffy::Style::default()
+    };
+    for detach in [false, true] {
+        let mut ui = selection_ui();
+        let (a, b) = (text_point(&ui, 1, 6), text_point(&ui, 3, 6));
+        drag(&mut ui, a, b);
+        assert_eq!(ui.selected_text(), "world\nSecond");
+        let mut t = Transaction::new(2);
+        if detach {
+            t.detach(10);
+        } else {
+            t.layout(10, &hidden);
+        }
+        ui.apply_txn(&t).unwrap();
+        assert_eq!(ui.text_selection(), None, "detach {detach}");
+        assert_eq!(ui.selected_text(), "");
+    }
+}
+
+/// A primary press in an input clears the read-only selection (S3C-17).
+#[test]
+fn selection_clears_on_a_press_in_an_input() {
+    let mut ui = selection_ui();
+    let mut t = Transaction::new(2);
+    let boxed = taffy::Style {
+        size: taffy::Size {
+            width: taffy::Dimension::length(200.0),
+            height: taffy::Dimension::length(24.0),
+        },
+        ..taffy::Style::default()
+    };
+    t.create(6, NodeKind::Input)
+        .layout(6, &boxed)
+        .place(10, 6, NIL);
+    ui.apply_txn(&t).unwrap();
+    ui.render(Size::new(400.0, 300.0));
+    let (a, b) = (text_point(&ui, 1, 0), text_point(&ui, 1, 5));
+    drag(&mut ui, a, b);
+    assert_eq!(ui.selected_text(), "Hello");
+    let r = ui.layouts.data(NodeId(6)).rect;
+    let at = ui
+        .node_to_window(NodeId(6))
+        .apply(craie_core::geom::Point::new(
+            r.size.width * 0.5,
+            r.size.height * 0.5,
+        ));
+    assert_eq!(ui.hit_test(at.x, at.y), Some(NodeId(6)));
+    ui.dispatch(&Event::PointerDown {
+        x: at.x,
+        y: at.y,
+        button: Button::Primary,
+        mods: Mods::default(),
+    });
+    assert_eq!(ui.text_selection(), None);
+    assert_eq!(ui.focus, Some(NodeId(6)));
+}
+
+/// Copy keeps empty paragraphs of the interval as empty lines (S3C-18);
+/// highlights skip them.
+#[test]
+fn selection_copy_keeps_empty_paragraphs() {
+    let mut ui = Ui::new(1.0);
+    let mut t = Transaction::new(1);
+    t.create(0, NodeKind::View)
+        .interaction_flags(0, 0, false, true)
+        .place(NIL, 0, NIL);
+    for (id, text) in [(1, "A"), (2, ""), (3, "B")] {
+        t.create(id, NodeKind::Text)
+            .text(id, text, 16.0, 0xFFFF_FFFF)
+            .place(0, id, NIL);
+    }
+    ui.apply_txn(&t).unwrap();
+    ui.render(Size::new(400.0, 300.0));
+    ui.set_text_selection(Some(crate::selection::TextSelection {
+        domain: NodeId(0),
+        anchor: crate::selection::TextPoint {
+            node: NodeId(1),
+            offset: 0,
+        },
+        focus: crate::selection::TextPoint {
+            node: NodeId(3),
+            offset: 1,
+        },
+    }));
+    assert_eq!(ui.selected_text(), "A\n\nB");
+    assert_eq!(
+        ui.selection_ranges(),
+        [(NodeId(1), 0..1), (NodeId(3), 0..1)]
+    );
+}
+
+/// The nearest-text distance is the true window-space distance to the
+/// transformed content box (S3C-19): under shear it matches a dense
+/// sampling of the box's edges.
+#[test]
+fn selection_distance_is_exact_under_shear() {
+    let mut ui = Ui::new(1.0);
+    let mut t = Transaction::new(1);
+    let boxed = taffy::Style {
+        size: taffy::Size {
+            width: taffy::Dimension::length(100.0),
+            height: taffy::Dimension::length(40.0),
+        },
+        ..taffy::Style::default()
+    };
+    t.create(0, NodeKind::Text)
+        .layout(0, &boxed)
+        .text(0, "sheared", 16.0, 0xFFFF_FFFF)
+        .transform(0, craie_core::geom::Affine([1.0, 0.0, 1.0, 1.0, 0.0, 0.0]))
+        .place(NIL, 0, NIL);
+    ui.apply_txn(&t).unwrap();
+    ui.render(Size::new(400.0, 300.0));
+    let m = ui.node_to_window(NodeId(0));
+    let edge = |u: f32, v: f32| m.apply(craie_core::geom::Point::new(u, v));
+    let sampled = |x: f32, y: f32| {
+        let mut best = f32::INFINITY;
+        for k in 0..=4000 {
+            let s = k as f32 / 4000.0;
+            for p in [
+                edge(s * 100.0, 0.0),
+                edge(s * 100.0, 40.0),
+                edge(0.0, s * 40.0),
+                edge(100.0, s * 40.0),
+            ] {
+                best = best.min((p.x - x).hypot(p.y - y));
+            }
+        }
+        best
+    };
+    let c = edge(50.0, 20.0);
+    for (dx, dy) in [
+        (-90.0, 0.0),
+        (90.0, 0.0),
+        (0.0, -35.0),
+        (-60.0, 30.0),
+        (70.0, -40.0),
+    ] {
+        let (x, y) = (c.x + dx, c.y + dy);
+        let (ours, want) = (ui.window_distance(NodeId(0), x, y), sampled(x, y));
+        assert!((ours - want).abs() < 0.05, "({dx}, {dy}): {ours} vs {want}");
+    }
+    assert_eq!(ui.window_distance(NodeId(0), c.x, c.y), 0.0);
+}
+
+/// A reused slot resolves its paragraph's fonts afresh (S3C-14): a Text
+/// created where one with another family was removed lays out as a clean
+/// build does, also with a default (empty) paragraph.
+#[test]
+fn reused_text_slot_resolves_fonts_afresh() {
+    let make = |t: &mut Transaction<'static>| {
+        t.create(0, NodeKind::Text)
+            .paragraph(0, "", &[TextSpan::default()])
+            .place(NIL, 0, NIL);
+    };
+    let mut ui = Ui::new(1.0);
+    let mut t = Transaction::new(1);
+    let hebrew = t.family("Noto Sans Hebrew");
+    t.create(0, NodeKind::Text)
+        .paragraph(
+            0,
+            "",
+            &[TextSpan {
+                family: hebrew,
+                font_size: 40.0,
+                ..TextSpan::default()
+            }],
+        )
+        .place(NIL, 0, NIL);
+    ui.apply_txn(&t).unwrap();
+    ui.render(Size::new(400.0, 300.0));
+    let mut t = Transaction::new(2);
+    t.remove(0);
+    make(&mut t);
+    ui.apply_txn(&t).unwrap();
+    ui.render(Size::new(400.0, 300.0));
+    let mut clean = Ui::new(1.0);
+    let mut t = Transaction::new(1);
+    make(&mut t);
+    clean.apply_txn(&t).unwrap();
+    clean.render(Size::new(400.0, 300.0));
+    // Font ids are per engine: each is its own engine's default.
+    let fonts = |ui: &Ui| ui.host.paragraph(NodeId(0)).unwrap().fonts.clone();
+    assert_eq!(fonts(&ui), [ui.text.font("", 400, false)]);
+    assert_eq!(fonts(&clean), [clean.text.font("", 400, false)]);
+    assert_eq!(
+        ui.layouts.data(NodeId(0)).rect,
+        clean.layouts.data(NodeId(0)).rect
+    );
 }
 
 /// A selected paragraph that shrinks keeps a valid selection (clamped

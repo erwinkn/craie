@@ -30,6 +30,9 @@ pub struct TextSelection {
     pub focus: TextPoint,
 }
 
+/// An interval end: (index among the domain's texts, byte offset).
+type Endpoint = (usize, u32);
+
 /// The highlight fill (as inputs'): rgba(53,132,228,0.48).
 pub const SELECTION_COLOR: u32 = 0x3584_E47A;
 
@@ -90,23 +93,31 @@ impl Ui {
         })
     }
 
-    /// Distance in window space from (x, y) to text `t`'s content box:
-    /// the point is clamped onto the box in the text's own frame and
-    /// mapped back, so transforms are honored.
-    fn window_distance(&self, t: NodeId, x: f32, y: f32) -> f32 {
+    /// Distance in window space from (x, y) to text `t`'s content box
+    /// as drawn: 0 inside it, else to the nearest edge of the
+    /// transformed box (a parallelogram), so shear and non-uniform scale
+    /// measure true distances.
+    pub(crate) fn window_distance(&self, t: NodeId, x: f32, y: f32) -> f32 {
         let data = self.layouts.data(t);
         let w = (data.rect.size.width - data.insets[0]).max(0.0);
         let h = (data.rect.size.height - data.insets[1]).max(0.0);
         let (lx, ly) = self.to_content(t, x, y);
-        if lx.is_nan() || ly.is_nan() {
-            return f32::INFINITY;
+        if (0.0..=w).contains(&lx) && (0.0..=h).contains(&ly) {
+            return 0.0;
         }
-        let near = Point::new(
-            lx.clamp(0.0, w) + data.content[0],
-            ly.clamp(0.0, h) + data.content[1],
-        );
-        let p = self.node_to_window(t).apply(near);
-        (p.x - x).hypot(p.y - y)
+        let m = self.node_to_window(t);
+        let [cx, cy] = data.content;
+        let corner = |u: f32, v: f32| m.apply(Point::new(cx + u, cy + v));
+        let q = [
+            corner(0.0, 0.0),
+            corner(w, 0.0),
+            corner(w, h),
+            corner(0.0, h),
+        ];
+        let p = Point::new(x, y);
+        (0..4)
+            .map(|k| segment_distance(p, q[k], q[(k + 1) % 4]))
+            .fold(f32::INFINITY, f32::min)
     }
 
     /// The highlighted range of text node `id`, clamped onto its text.
@@ -129,18 +140,14 @@ impl Ui {
         (!r.is_empty()).then_some(r)
     }
 
-    /// The selected range of each text node (non-empty ones), in tree
-    /// order. Offsets past a paragraph's text (it changed) are clamped
-    /// onto character boundaries.
-    pub fn selection_ranges(&self) -> Vec<(NodeId, Range<u32>)> {
-        let Some(sel) = self.text_selection else {
-            return Vec::new();
-        };
+    /// The selection as a tree interval: the domain's texts, and the
+    /// (index, offset) of its start and end. Offsets past a paragraph's
+    /// text (it changed) are clamped onto character boundaries.
+    fn selection_interval(&self) -> Option<(Vec<NodeId>, Endpoint, Endpoint)> {
+        let sel = self.text_selection?;
         let texts = self.domain_texts(sel.domain);
         let index = |p: &TextPoint| texts.iter().position(|&t| t == p.node);
-        let (Some(ia), Some(ifo)) = (index(&sel.anchor), index(&sel.focus)) else {
-            return Vec::new();
-        };
+        let (ia, ifo) = (index(&sel.anchor)?, index(&sel.focus)?);
         let clamp = |p: &TextPoint| {
             let text = self.host.paragraph(p.node).map_or("", |q| q.text.as_str());
             let mut i = (p.offset as usize).min(text.len());
@@ -151,22 +158,38 @@ impl Ui {
         };
         let (a, f) = ((ia, clamp(&sel.anchor)), (ifo, clamp(&sel.focus)));
         let (start, end) = if a <= f { (a, f) } else { (f, a) };
+        Some((texts, start, end))
+    }
+
+    /// Each text node of the interval with its selected range (possibly
+    /// empty), in tree order.
+    fn selection_pieces(&self) -> Vec<(NodeId, Range<u32>)> {
+        let Some((texts, start, end)) = self.selection_interval() else {
+            return Vec::new();
+        };
         let mut out = Vec::new();
         for (k, &t) in texts.iter().enumerate().take(end.0 + 1).skip(start.0) {
             let len = self.host.paragraph(t).map_or(0, |p| p.text.len() as u32);
             let from = if k == start.0 { start.1 } else { 0 };
             let to = if k == end.0 { end.1 } else { len };
-            if from < to {
-                out.push((t, from..to));
-            }
+            out.push((t, from..to.max(from)));
         }
         out
     }
 
-    /// The selected text in tree order, one line per paragraph.
+    /// The selected range of each text node (non-empty ones), in tree
+    /// order: what highlights draw.
+    pub fn selection_ranges(&self) -> Vec<(NodeId, Range<u32>)> {
+        let mut out = self.selection_pieces();
+        out.retain(|(_, r)| !r.is_empty());
+        out
+    }
+
+    /// The selected text in tree order, one line per paragraph of the
+    /// interval (an empty paragraph is an empty line).
     pub fn selected_text(&self) -> String {
         let mut out = String::new();
-        for (k, (t, r)) in self.selection_ranges().into_iter().enumerate() {
+        for (k, (t, r)) in self.selection_pieces().into_iter().enumerate() {
             if k > 0 {
                 out.push('\n');
             }
@@ -234,8 +257,9 @@ impl Ui {
     }
 
     /// The selection's nodes are the ones it was made on (same
-    /// generation), its domain is selectable, and both endpoints are
-    /// displayed texts of the domain.
+    /// generation), its domain is selectable and shown (attached, no
+    /// hidden ancestor), and both endpoints are displayed texts of the
+    /// domain.
     fn selection_valid(&self, sel: TextSelection) -> bool {
         let nodes = [sel.domain, sel.anchor.node, sel.focus.node];
         let same = nodes
@@ -244,6 +268,22 @@ impl Ui {
             .all(|(&n, g)| self.host.node(n).is_some_and(|h| h.generation == g));
         if !same || !self.host.interaction(sel.domain).selectable {
             return false;
+        }
+        // The domain reaches the root level through displayed ancestors
+        // (not detached, not under `display: none`).
+        let mut cur = sel.domain;
+        loop {
+            if self.host.display_none(cur) {
+                return false;
+            }
+            let parent = self.host.parent(cur);
+            if parent == NodeId::DETACHED {
+                return false;
+            }
+            if !parent.is_node() {
+                break;
+            }
+            cur = parent;
         }
         let texts = self.domain_texts(sel.domain);
         texts.contains(&sel.anchor.node) && texts.contains(&sel.focus.node)
@@ -313,4 +353,16 @@ impl Ui {
             },
         }));
     }
+}
+
+/// Distance from `p` to the segment `a`..`b`.
+fn segment_distance(p: Point, a: Point, b: Point) -> f32 {
+    let (dx, dy) = (b.x - a.x, b.y - a.y);
+    let len2 = dx * dx + dy * dy;
+    let t = if len2 > 0.0 {
+        (((p.x - a.x) * dx + (p.y - a.y) * dy) / len2).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    (p.x - (a.x + t * dx)).hypot(p.y - (a.y + t * dy))
 }

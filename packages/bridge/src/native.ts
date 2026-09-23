@@ -38,7 +38,6 @@ export function decodeEvents(buf: Uint8Array, at = 0): import("./host.js").UiEve
   const text = new TextDecoder()
   for (let i = 0; i < count; i++) {
     const kind = view.getUint8(pos)
-    const revision = view.getUint8(pos + 1)
     const generation = view.getUint16(pos + 2, true)
     const node = view.getUint32(pos + 4, true)
     const x = view.getFloat32(pos + 8, true)
@@ -46,8 +45,9 @@ export function decodeEvents(buf: Uint8Array, at = 0): import("./host.js").UiEve
     const a = view.getFloat32(pos + 16, true)
     const b = view.getFloat32(pos + 20, true)
     const key = view.getUint32(pos + 24, true)
-    const len = view.getUint32(pos + 28, true)
-    pos += 32
+    const revision = view.getUint32(pos + 28, true)
+    const len = view.getUint32(pos + 32, true)
+    pos += 36
     const s = len ? text.decode(buf.subarray(at + pos, at + pos + len)) : ""
     pos += len
     out.push({ kind, node, generation, revision, x, y, a, b, key, text: s })
@@ -68,7 +68,7 @@ export function loadBindings(path?: string): Bindings {
     process.env.CRAIE_NODE ??
     fileURLToPath(new URL("../../../craie-node.node", import.meta.url))
   const bindings = require(resolved) as Bindings
-  if (bindings.craieRuntimeVersion() !== 2) throw Error("Craie native bridge protocol mismatch")
+  if (bindings.craieRuntimeVersion() !== 3) throw Error("Craie native bridge protocol mismatch")
   return bindings
 }
 

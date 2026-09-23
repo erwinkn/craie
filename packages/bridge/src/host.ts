@@ -87,7 +87,7 @@ export interface HostNode {
   spanOwners?: HostNode[]
   sentParagraph?: string
   sentInteraction?: string
-  /** Paragraph ops sent for this node, wrapping at 256 (mirrors native
+  /** Paragraph ops sent for this node, wrapping at 2^32 (mirrors native
    * `Paragraph::revision`): a span event from another revision was
    * hit-tested against an older span table. */
   paragraphRev?: number
@@ -353,7 +353,9 @@ export class CraieHost {
     let mask = 0
     const walk = (n: HostNode, style: TextSpanIn) => {
       mask |= listenerMask(n.props)
-      if (n.suspended || n.props.hidden) return
+      // A hidden root is `display: none` natively and keeps its text, so
+      // revealing it needs no recomposition; hidden nested Text drops out.
+      if (n !== r && (n.suspended || n.props.hidden)) return
       const own = textOf(n.props)
       if (own) {
         // A piece that opens with the low half of a pair the text before
@@ -393,7 +395,7 @@ export class CraieHost {
     const key = JSON.stringify([text, spans])
     if (key !== r.sentParagraph || ownersChanged) {
       r.sentParagraph = key
-      r.paragraphRev = ((r.paragraphRev ?? 0) + 1) & 0xff
+      r.paragraphRev = ((r.paragraphRev ?? 0) + 1) >>> 0
       this.encoder.paragraph(r.id, text, spans)
     }
     const interaction = `${mask},${!!r.props.focusable},${!!r.props.selectable}`

@@ -121,3 +121,8 @@ Reviewer minors and nitpicks not fixed yet.
   text moves, ligature spacing, span routing revisions, intern keys,
   selection in the rebuild oracle) and S3C-09, S3C-11, S3C-12 (surrogate
   offsets, span limit, span flag bits): fixed in step 3c round 1.
+- S3C-13..16 (hidden text roots keep their text, reused slots resolve
+  fonts afresh, u32 paragraph revisions, hidden or detached domain
+  ancestors) and S3C-17..19 (a press in an input clears, copy keeps
+  empty paragraphs, exact distance under shear): fixed in step 3c
+  round 2.

@@ -215,8 +215,8 @@ impl NativeClient {
 }
 
 #[napi]
-/// Bridge protocol version: 2 = CRW2 transactions, generation-stamped
-/// events.
+/// Bridge protocol version: 3 = CRW2 transactions, generation-stamped
+/// events with a paragraph revision (36-byte records).
 pub fn craie_runtime_version() -> u32 {
-    2
+    3
 }
