@@ -160,3 +160,7 @@ Reviewer minors and nitpicks not fixed yet.
 - S4-11 (a resume racing a stalling pump) and S4-12 (`auto` targets of
   list rows): fixed after step 4 round 3, not reviewed again (three
   rounds run).
+- S5A-01..06 (rect coverage in multisampled frames, snapped cull and
+  layer bounds, gradients without stops, mesh entries in the rebuild
+  oracle, malformed meshes, non-finite tessellation output): fixed in
+  step 5a round 1.

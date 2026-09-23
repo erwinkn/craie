@@ -249,3 +249,84 @@ fn paths_in_layers_composite() {
     assert!((c[0] as i32 - 188).abs() <= 2, "{c:?}");
     assert_eq!(px(&img, 2, 2), [0, 0, 0, 255]);
 }
+
+/// S5A-01: a rect's anti-aliased edge is the same in a multisampled
+/// frame (a path elsewhere) as in a single-sampled one: its quad covers
+/// every pixel its edge touches, so multisampling adds no coverage of
+/// its own.
+#[test]
+fn rect_edges_match_across_sample_counts() {
+    let Some((gpu, mut r)) = gpu() else {
+        eprintln!("no GPU adapter: skipped");
+        return;
+    };
+    let frame = |r: &mut Renderer, with_path: bool| {
+        let mut s = scene();
+        // Unsnapped: the rect's edges sit at quarter pixels.
+        s.transforms.set_snap(0, false);
+        let mut w = ChunkWriter::new();
+        let white = w.paint(0xFFFF_FFFF);
+        w.rect(Rect::new(8.25, 8.25, 16.0, 16.0), 0.0, white);
+        s.commit_chunk(0, &mut w);
+        place(&mut s, 0);
+        let mut order = vec![OrderItem::Chunk(0)];
+        if with_path {
+            let dot = fill(&Path::circle(56.0, 56.0, 4.0), FillRule::NonZero, 0.1).unwrap();
+            mesh(&mut w, &dot, 0xFF00_00FF);
+            s.commit_chunk(1, &mut w);
+            place(&mut s, 1);
+            order.push(OrderItem::Chunk(1));
+        }
+        s.set_order(order, vec![]);
+        let img = render(&gpu, r, &mut s);
+        assert_eq!(r.stats.msaa, with_path);
+        img
+    };
+    let (plain, ms) = (frame(&mut r, false), frame(&mut r, true));
+    for (x, y) in [
+        (8, 16),
+        (16, 8),
+        (24, 16),
+        (16, 24),
+        (8, 8),
+        (24, 24),
+        (16, 16),
+    ] {
+        let (a, b) = (px(&plain, x, y), px(&ms, x, y));
+        assert!(
+            (a[0] as i32 - b[0] as i32).abs() <= 1,
+            "({x}, {y}): {a:?} vs {b:?}"
+        );
+    }
+    // The edge pixel is partly covered (0.75 of it), not cut.
+    let edge = px(&plain, 8, 16)[0];
+    assert!(edge > 200 && edge < 250, "{edge}");
+}
+
+/// S5A-03: a gradient with no stops draws nothing (the words after it
+/// are not stops).
+#[test]
+fn gradients_without_stops_draw_nothing() {
+    let Some((gpu, mut r)) = gpu() else {
+        eprintln!("no GPU adapter: skipped");
+        return;
+    };
+    let mut s = scene();
+    let mut w = ChunkWriter::new();
+    let square = fill(&Path::rect(0.0, 0.0, 64.0, 64.0), FillRule::NonZero, 0.1).unwrap();
+    let slot = w.gradient(&GradientPaint {
+        kind: gradient::LINEAR,
+        geometry: [0.0, 0.0, 64.0, 0.0],
+        to_gradient: [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+        stops: vec![],
+    });
+    // Words that would read as a red stop.
+    w.paint(0);
+    w.paint(0xFF00_00FF);
+    w.mesh(&square.vertices, &square.indices, slot, true);
+    s.commit_chunk(0, &mut w);
+    place(&mut s, 0);
+    s.set_order(vec![OrderItem::Chunk(0)], vec![]);
+    let img = render(&gpu, &mut r, &mut s);
+    assert_eq!(px(&img, 32, 32), [0, 0, 0, 255]);
+}

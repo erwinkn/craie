@@ -266,6 +266,19 @@ pub fn fill(path: &Path, rule: FillRule, tolerance: f32) -> Result<Mesh, TessErr
             &mut BuffersBuilder::new(&mut out, |v: FillVertex| v.position().to_array()),
         )
         .map_err(|_| TessError)?;
+    finite_mesh(out)
+}
+
+/// A mesh whose vertices are all finite (huge finite input can overflow
+/// inside the tessellator).
+fn finite_mesh(out: VertexBuffers<[f32; 2], u32>) -> Result<Mesh, TessError> {
+    if out
+        .vertices
+        .iter()
+        .any(|v| !(v[0].is_finite() && v[1].is_finite()))
+    {
+        return Err(TessError);
+    }
     Ok(Mesh {
         vertices: out.vertices,
         indices: out.indices,
@@ -298,10 +311,7 @@ pub fn stroke(path: &Path, s: &Stroke, tolerance: f32) -> Result<Mesh, TessError
             &mut BuffersBuilder::new(&mut out, |v: StrokeVertex| v.position().to_array()),
         )
         .map_err(|_| TessError)?;
-    Ok(Mesh {
-        vertices: out.vertices,
-        indices: out.indices,
-    })
+    finite_mesh(out)
 }
 
 /// A gradient's color stops: (offset in [0, 1], 0xRRGGBBAA), ascending.
@@ -390,6 +400,14 @@ mod tests {
             )
             .is_err()
         );
+        // Finite input that overflows inside the tessellator (S5A-06).
+        let mut huge = Path::new();
+        huge.move_to(0.0, 3e38).line_to(10.0, 3e38);
+        let wide = Stroke {
+            width: 2e38,
+            ..Stroke::default()
+        };
+        assert!(stroke(&huge, &wide, 0.1).is_err());
         // Nothing to fill is an empty mesh, not an error.
         assert!(
             fill(&Path::new(), FillRule::NonZero, 0.1)

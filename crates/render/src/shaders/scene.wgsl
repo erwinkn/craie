@@ -121,13 +121,19 @@ fn vs_main(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> 
             }
             let lo = min(p0, p1);
             let hi = max(p0, p1);
-            dev = mix(lo, hi, corner);
+            // The quad reaches 1 px past the rect: every pixel its edge
+            // touches runs the fragment with full sample coverage, so the
+            // analytic coverage alone decides, single-sampled or not.
+            dev = mix(lo - vec2<f32>(1.0), hi + vec2<f32>(1.0), corner);
             out.half = (hi - lo) * 0.5;
             out.local = dev - (lo + hi) * 0.5;
         } else {
-            dev = origin + linear(w, vec2<f32>(r.x, r.y) + corner * vec2<f32>(r.w, r.h));
+            // 1 device px of margin in rect units, as above.
+            let m = 1.0 / max(s, 1e-6);
+            let size = vec2<f32>(r.w, r.h) + vec2<f32>(2.0 * m);
+            dev = origin + linear(w, vec2<f32>(r.x - m, r.y - m) + corner * size);
             out.half = vec2<f32>(r.w, r.h) * 0.5 * s;
-            out.local = (corner - vec2<f32>(0.5, 0.5)) * vec2<f32>(r.w, r.h) * s;
+            out.local = (corner - vec2<f32>(0.5, 0.5)) * size * s;
         }
         out.pos = to_ndc(dev);
         out.params = vec2<f32>(r.radius * s, r.border_width * s);
@@ -211,6 +217,9 @@ fn gradient_color(at: u32, local: vec2<f32>) -> vec4<f32> {
         t = length(gp - g.xy) / max(g.z, 1e-12);
     }
     t = clamp(t, 0.0, 1.0);
+    if (n == 0u) {
+        return vec4<f32>(0.0);
+    }
     let stops = at + 11u;
     var c = unpack_raw(paints[stops + 1u]);
     var prev_o = pf(stops);

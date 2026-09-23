@@ -271,18 +271,30 @@ impl Scene {
         self.atlas.begin_epoch();
     }
 
-    /// World-space bounds of a chunk in device pixels.
+    /// World-space bounds of a chunk in device pixels, as drawn: from
+    /// the origin the shader uses (snapped to the pixel grid in a space
+    /// that snaps), with 1 px of margin for anti-aliased edges (a rect's
+    /// quad reaches 1 px past it).
     pub fn chunk_world_bounds(&self, id: u32) -> Rect {
         let c = &self.chunks[id as usize];
         let p = self.placements[id as usize];
-        let w = self.transforms.world(p.transform);
-        let local = Rect::new(
-            c.bounds.origin.x + p.offset[0],
-            c.bounds.origin.y + p.offset[1],
-            c.bounds.size.width,
-            c.bounds.size.height,
-        );
-        w.map_rect(&local)
+        let mut w = self.transforms.world(p.transform);
+        let mut origin = w.apply(craie_core::geom::Point::new(p.offset[0], p.offset[1]));
+        if w.is_axis_aligned() && self.transforms.snaps(p.transform) {
+            origin = craie_core::geom::Point::new(
+                origin.x.round_ties_even(),
+                origin.y.round_ties_even(),
+            );
+        }
+        w.0[4] = origin.x;
+        w.0[5] = origin.y;
+        let b = w.map_rect(&c.bounds);
+        Rect::new(
+            b.origin.x - 1.0,
+            b.origin.y - 1.0,
+            b.size.width + 2.0,
+            b.size.height + 2.0,
+        )
     }
 
     /// Derives world matrices and clip rows, then (re)builds the draw
@@ -571,42 +583,68 @@ impl Scene {
                                         opacity: o,
                                         clip,
                                         clip_radius,
+                                        geometry: Vec::new(),
                                     });
                                 }
                             }
                             SegKind::Paths => {
                                 // One entry per segment: its device-space
-                                // bounds (every vertex it indexes), its
-                                // first paint word, and its geometry as
-                                // a key (index count, vertex positions).
+                                // bounds; in `geometry`, every indexed
+                                // vertex in device space (index order),
+                                // then each paint's float words (gradient
+                                // geometry and mapping); in `aux`, its
+                                // integer paint words (kinds, colors,
+                                // stop offsets) and index count.
                                 let is = &self.path_indices.get(c.path_indices)
                                     [s.start as usize..(s.start + s.len) as usize];
                                 let vs = self.path_vertices.backing();
+                                let words = self.paints.backing();
                                 let (mut lo, mut hi) = ([f32::INFINITY; 2], [f32::NEG_INFINITY; 2]);
-                                let mut key = is.len() as u64;
+                                let mut geometry = Vec::with_capacity(is.len() * 2);
+                                let mut aux = is.len() as u64;
+                                let mut mix = |v: u64| aux = aux.wrapping_mul(0x100_0000_01B3) ^ v;
+                                let mut last_paint = None;
                                 for &i in is {
                                     let v = vs[i as usize];
                                     let p =
                                         w.apply(craie_core::geom::Point::new(v.pos[0], v.pos[1]));
                                     lo = [lo[0].min(p.x), lo[1].min(p.y)];
                                     hi = [hi[0].max(p.x), hi[1].max(p.y)];
-                                    key = key.wrapping_mul(0x100_0000_01B3)
-                                        ^ (v.pos[0].to_bits() as u64) << 32
-                                        ^ v.pos[1].to_bits() as u64
-                                        ^ (self.paints.backing()[v.paint as usize] as u64)
-                                            .rotate_left(17);
+                                    geometry.extend([p.x, p.y]);
+                                    if last_paint == Some((v.paint, v.info >> 31)) {
+                                        continue;
+                                    }
+                                    last_paint = Some((v.paint, v.info >> 31));
+                                    let at = v.paint as usize;
+                                    if v.info & PathVertex::GRADIENT == 0 {
+                                        mix(words[at] as u64);
+                                        continue;
+                                    }
+                                    let head = words[at];
+                                    mix(head as u64 | 1 << 40);
+                                    let n = (head >> 16) as usize;
+                                    geometry.extend(
+                                        words[at + 1..at + crate::prim::gradient::HEADER_WORDS]
+                                            .iter()
+                                            .map(|&b| f32::from_bits(b)),
+                                    );
+                                    let stops = at + crate::prim::gradient::HEADER_WORDS;
+                                    for k in 0..n {
+                                        mix(words[stops + 2 * k] as u64);
+                                        mix(words[stops + 2 * k + 1] as u64);
+                                    }
                                 }
                                 let first = is.first().map(|&i| vs[i as usize]);
                                 out.push(Resolved {
                                     kind: 2,
                                     bounds: Rect::new(lo[0], lo[1], hi[0] - lo[0], hi[1] - lo[1]),
-                                    color: first
-                                        .map_or(0, |v| self.paints.backing()[v.paint as usize]),
-                                    aux: key,
+                                    color: first.map_or(0, |v| words[v.paint as usize]),
+                                    aux,
                                     params: [0.0; 2],
                                     opacity: o,
                                     clip,
                                     clip_radius,
+                                    geometry,
                                 });
                             }
                             SegKind::Glyphs => {
@@ -628,6 +666,7 @@ impl Scene {
                                         opacity: o,
                                         clip,
                                         clip_radius,
+                                        geometry: Vec::new(),
                                     });
                                 }
                             }
@@ -654,6 +693,9 @@ pub struct Resolved {
     pub clip: Option<Rect>,
     /// Corner radius of the innermost clip.
     pub clip_radius: f32,
+    /// Path mesh segments: device-space vertices (index order), then
+    /// gradient float words; empty for rects and glyphs.
+    pub geometry: Vec<f32>,
 }
 
 impl Resolved {
@@ -672,6 +714,12 @@ impl Resolved {
             && (self.opacity - o.opacity).abs() <= 1e-6
             && self.clip_radius == o.clip_radius
             && near(self.bounds, o.bounds)
+            && self.geometry.len() == o.geometry.len()
+            && self
+                .geometry
+                .iter()
+                .zip(&o.geometry)
+                .all(|(a, b)| (a - b).abs() <= tol)
             && match (self.clip, o.clip) {
                 (None, None) => true,
                 (Some(a), Some(b)) => near(a, b),
@@ -749,7 +797,9 @@ mod tests {
             .clone();
         assert_eq!(cmds.len(), 5);
         assert!(
-            matches!(cmds[1], DrawCmd::BeginLayer { opacity, bounds: [0, 20, 10, 30] } if opacity == 0.5)
+            // The chunk's rect plus 1 px of anti-aliasing margin,
+            // clipped to the screen.
+            matches!(cmds[1], DrawCmd::BeginLayer { opacity, bounds: [0, 19, 11, 31] } if opacity == 0.5)
         );
         assert_eq!(cmds[3], DrawCmd::EndLayer);
         // Zero opacity skips the subtree entirely.
@@ -847,6 +897,123 @@ mod tests {
         let list = s.prepare(Size::new(100.0, 100.0), &mut missing);
         assert!(list.cmds.is_empty() && !list.paths);
         assert!(s.chunk(0).is_none() && s.chunk(1).is_none());
+    }
+
+    fn one_mesh(paint: Option<crate::chunk::GradientPaint>, world: Affine, offset: f32) -> Scene {
+        let mut s = Scene::new();
+        let root = s.transforms.alloc(world, NONE);
+        s.transforms.set_order(vec![root]);
+        let mut w = ChunkWriter::new();
+        let tri = [[0.0, 0.0], [0.4, 8.0], [0.0, 16.0]];
+        match paint {
+            Some(g) => {
+                let slot = w.gradient(&g);
+                assert!(w.mesh(&tri, &[0, 1, 2], slot, true));
+            }
+            None => {
+                let red = w.paint(0xFF00_00FF);
+                assert!(w.mesh(&tri, &[0, 1, 2], red, false));
+            }
+        }
+        s.commit_chunk(0, &mut w);
+        s.set_placement(
+            0,
+            Placement {
+                offset: [offset, 8.0],
+                transform: root,
+                clip: NONE,
+            },
+        );
+        s.set_order(vec![OrderItem::Chunk(0)], vec![]);
+        // World matrices, as `prepare` derives them.
+        s.transforms.derive();
+        s
+    }
+
+    /// S5A-02: culling uses the origin the shader draws at (snapped): a
+    /// thin mesh placed at -0.49 draws at 0, on screen.
+    #[test]
+    fn meshes_cull_at_their_snapped_origin() {
+        let mut s = one_mesh(None, Affine::IDENTITY, -0.49);
+        let mut missing = Vec::new();
+        assert_eq!(
+            s.prepare(Size::new(100.0, 100.0), &mut missing).visible,
+            [0]
+        );
+        // The bounds start at the snapped origin (0), less the 1 px
+        // anti-aliasing margin.
+        let b = s.chunk_world_bounds(0);
+        assert_eq!((b.origin.x, b.origin.y), (-1.0, 7.0));
+        assert!((b.size.width - 2.4).abs() < 1e-6);
+        // Far off screen: culled.
+        let mut s = one_mesh(None, Affine::IDENTITY, -5.0);
+        assert!(
+            s.prepare(Size::new(100.0, 100.0), &mut missing)
+                .visible
+                .is_empty()
+        );
+    }
+
+    /// S5A-04: the rebuild oracle's view tells meshes apart by their
+    /// transformed vertices and their whole paint records.
+    #[test]
+    fn mesh_resolve_sees_gradients_and_transforms() {
+        let g = |c0: u32, c1: u32| crate::chunk::GradientPaint {
+            kind: crate::prim::gradient::LINEAR,
+            geometry: [0.0, 0.0, 16.0, 0.0],
+            to_gradient: [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+            stops: vec![(0.0, c0), (1.0, c1)],
+        };
+        let view = |s: &Scene| s.resolve(&|_| 0);
+        let same = |a: &Scene, b: &Scene| {
+            let (a, b) = (view(a), view(b));
+            a.len() == b.len() && a.iter().zip(&b).all(|(x, y)| x.close_to(y, 0.01))
+        };
+        let base = one_mesh(Some(g(0xFF00_00FF, 0x0000_FFFF)), Affine::IDENTITY, 20.0);
+        let twin = one_mesh(Some(g(0xFF00_00FF, 0x0000_FFFF)), Affine::IDENTITY, 20.0);
+        assert!(same(&base, &twin));
+        let recolored = one_mesh(Some(g(0x00FF_00FF, 0xFFFF_FFFF)), Affine::IDENTITY, 20.0);
+        assert!(!same(&base, &recolored), "another gradient");
+        let mut moved = g(0xFF00_00FF, 0x0000_FFFF);
+        moved.geometry = [0.0, 0.0, 8.0, 0.0];
+        assert!(
+            !same(&base, &one_mesh(Some(moved), Affine::IDENTITY, 20.0)),
+            "another geometry"
+        );
+        // Rotated 180 degrees about the mesh's center: the same bounds,
+        // other vertices.
+        let spin = Affine::translate(20.2, 16.0)
+            .mul(&Affine::rotate(std::f32::consts::PI))
+            .mul(&Affine::translate(-20.2, -16.0));
+        let a = one_mesh(None, Affine::IDENTITY, 20.0);
+        let b = one_mesh(None, spin, 20.0);
+        let (ra, rb) = (view(&a), view(&b));
+        assert!((ra[0].bounds.origin.x - rb[0].bounds.origin.x).abs() < 0.01);
+        assert!(!same(&a, &b), "rotated");
+    }
+
+    /// S5A-05: a mesh with a partial triangle, an index out of range, or
+    /// a non-finite vertex writes nothing; the next mesh is intact.
+    #[test]
+    fn malformed_meshes_are_refused() {
+        let mut w = ChunkWriter::new();
+        let red = w.paint(0xFF00_00FF);
+        let tri = [[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]];
+        assert!(!w.mesh(&tri, &[0, 1], red, false));
+        assert!(!w.mesh(&tri, &[0, 1, 3], red, false));
+        assert!(!w.mesh(
+            &[[0.0, 0.0], [f32::NAN, 0.0], [0.0, 1.0]],
+            &[0, 1, 2],
+            red,
+            false
+        ));
+        assert!(w.is_empty());
+        assert!(w.mesh(&tri, &[0, 1, 2], red, false));
+        let mut s = Scene::new();
+        s.commit_chunk(0, &mut w);
+        let c = *s.chunk(0).unwrap();
+        let v = c.path_vertices.start() as u32;
+        assert_eq!(s.path_indices.get(c.path_indices), [v, v + 1, v + 2]);
     }
 
     #[test]

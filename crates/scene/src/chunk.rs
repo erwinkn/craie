@@ -123,15 +123,20 @@ impl ChunkWriter {
 
     /// Adds a gradient paint record and returns its slot (for
     /// `mesh`'s `gradient` flag). Stops beyond `gradient::MAX_STOPS`
-    /// are dropped.
+    /// are dropped; offsets clamp to [0, 1] and never decrease (SVG);
+    /// non-finite numbers become 0. No stops draws nothing.
     pub fn gradient(&mut self, g: &GradientPaint) -> PaintSlot {
         let slot = PaintSlot(self.paints.len() as u32);
+        let finite = |v: f32| if v.is_finite() { v } else { 0.0 };
         let stops = &g.stops[..g.stops.len().min(gradient::MAX_STOPS)];
         self.paints.push(g.kind | (stops.len() as u32) << 16);
-        self.paints.extend(g.geometry.map(f32::to_bits));
-        self.paints.extend(g.to_gradient.map(f32::to_bits));
+        self.paints.extend(g.geometry.map(|v| finite(v).to_bits()));
+        self.paints
+            .extend(g.to_gradient.map(|v| finite(v).to_bits()));
+        let mut last = 0.0f32;
         for &(offset, color) in stops {
-            self.paints.push(offset.to_bits());
+            last = finite(offset).clamp(last, 1.0);
+            self.paints.push(last.to_bits());
             self.paints.push(color);
         }
         slot
@@ -139,16 +144,24 @@ impl ChunkWriter {
 
     /// A triangle mesh in chunk-local logical units: `indices` (three
     /// per triangle) index `vertices`. `gradient` says the slot is a
-    /// gradient record. Its bounds are the vertices' bounds.
+    /// gradient record. Its bounds are the vertices' bounds. A mesh with
+    /// a partial triangle, an index out of range, or a non-finite
+    /// vertex is refused (returns false) and writes nothing.
     pub fn mesh(
         &mut self,
         vertices: &[[f32; 2]],
         indices: &[u32],
         paint: PaintSlot,
         gradient: bool,
-    ) {
-        if indices.is_empty() || vertices.is_empty() {
-            return;
+    ) -> bool {
+        if indices.is_empty()
+            || !indices.len().is_multiple_of(3)
+            || indices.iter().any(|&i| i as usize >= vertices.len())
+            || vertices
+                .iter()
+                .any(|v| !(v[0].is_finite() && v[1].is_finite()))
+        {
+            return false;
         }
         let base = self.path_vertices.len() as u32;
         let info = if gradient { PathVertex::GRADIENT } else { 0 };
@@ -183,6 +196,7 @@ impl ChunkWriter {
             Some(b) => b.union(&bounds),
             None => bounds,
         });
+        true
     }
 
     fn extend(&mut self, kind: SegKind, bounds: Rect) {
