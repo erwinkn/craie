@@ -144,6 +144,10 @@ a measurement.
   from release dependency graphs.
 - `craie-render` depends on `craie-scene`, not the reverse (2026-09-23).
   The scene is portable data; the renderer is one consumer of it.
+- A release build is per package: `cargo build --release -p craie-node`
+  (as `scripts/build-addon.sh`). A `--workspace` build unifies features
+  with the harness and turns on `pinned-fonts`; it is not a release
+  build. The harness asserts both (step 3a).
 
 ## 2. Wire and mutation executor
 
@@ -300,28 +304,38 @@ Public style API: a typed object with CSS property names in camelCase
 analysis (graphemes, UAX #14 break opportunities, bidi levels with a
 fast path when no character needs the algorithm, scripts), resolves a
 font per grapheme (the span's primary instance when it covers the
-grapheme, else fallback), splits items on level, script, font, and
-size, and shapes each item with HarfRust 0.12 through a cached shape
-plan per (instance, direction, script). skrifa gives the metrics. A
-`Paragraph` keeps runs (text range, instance, size, level, metrics),
-the glyph placement store (28 bytes per glyph: id, span index, cluster
-byte, advance, offsets, final position), lines, visual segments, and
+whole grapheme, else the first fallback candidate that does), splits
+items on level, script, font, and size, and shapes each item with
+HarfRust 0.12 through a cached shape plan per (instance, direction,
+script). skrifa gives the metrics. A cluster starts at a grapheme
+(UAX #29, with GB9c conjuncts): HarfRust keeps CR and LF apart, and a
+CRLF must be one cluster and one hard break. A `Paragraph` keeps runs
+(text range, instance, size, level, metrics), the glyph placement store
+(28 bytes per glyph: id, span index, cluster byte, advance, offsets,
+pen x, y), lines, visual segments (run, glyphs, text, L1 level), and
 one analysis byte per text byte (break opportunity, paragraph
 direction, L1 classes, cluster flags). The glyph placement store is
-the only glyph position store: emission, hit testing, carets, and
-selection rectangles all read it. The glyph cache keeps bitmap
-geometry per `GlyphKey` (instance, glyph, size bits, subpixel) and no
-positions. A glyph's span index is its paint slot, so a color change
-patches a paint record and touches no placement. `rewrap` lays an
-already shaped paragraph out at another width over engine scratch:
-Parley's greedy line breaking and line metrics, then UAX #9 L1 and L2
-per line, in place. A width change does no shaping and, once the
-stores have grown, no allocation. Measured against Parley in E01:
-line breaks, cluster maps, and glyph ids equal on every case. The one
-difference is L1 at soft line ends, which Craie applies and Parley
-does not. A retained paragraph holds 0.39 to 0.76 times Parley's bytes.
-The Text default family is `system-ui` (React Native's default; SF on
-macOS), not Parley's `sans-serif`. INPUT nodes still hold a Parley
+the only glyph position store. Emission draws at pen x + dx. Hit
+testing, carets, and selection rectangles take cluster edges from it:
+the pen x of a cluster's first placed glyph, and the pen after its
+last. No other position is kept or summed. The glyph cache keeps
+bitmap geometry per `GlyphKey` (instance, glyph, size bits, subpixel)
+and no positions. A glyph's span index is its paint slot, so a color
+change patches a paint record and touches no placement. `rewrap` lays
+an already shaped paragraph out at another width over engine scratch:
+Parley's greedy line breaking and line metrics under UAX #14 (whitespace
+hangs only where a break may follow it; no-break spaces are content),
+then UAX #9 L1 and L2 per line, in place. A segment whose L1 level has
+another direction than its run places its clusters in reverse, and the
+mapping reads that direction. A width change does no shaping and, once
+the stores have grown, no allocation. Measured against Parley in E01:
+line breaks, cluster maps, byte-to-cluster queries, and drawn glyphs
+(id, cluster, font) equal on every oracle case; the known differences,
+each with its own test, are Craie's L1 at soft line ends, GB9c
+graphemes, one break for CRLF and one after NEL, unbroken no-break
+spaces, and one font per grapheme. A retained paragraph holds 0.29 to
+0.75 times Parley's bytes. The Text default family is the engine's
+`default_family`, `system-ui` (Decisions). INPUT nodes still hold a Parley
 `PlainEditor` each until step 3b. Its contexts are made on first use,
 and its glyphs go through the same font store and glyph cache. `TextInput` is uncontrolled (`value`
 is sent once at mount; `setText` replaces the text). Editor reshapes
@@ -382,27 +396,44 @@ UTF-8 + spans -> Unicode analysis -> font resolution + fallback
 - Cross-node read-only selection lands with owned text.
 - Uncontrolled inputs only. Three copies of the input text (native,
   JS mirror, React state) is the classic desync bug.
+- The Text default family is `system-ui` (2026-09-23, step 3a), React
+  Native's default: RN draws `Text` without a `fontFamily` in the
+  platform system font (San Francisco on iOS and macOS, Roboto on
+  Android), and react-native-web in the `system-ui` stack. Parley's
+  default was `sans-serif` (Helvetica on macOS), so glyphs, widths,
+  and line breaks change against step 2. On the same font the owned
+  engine's first draw is faster than step 2 (E01); SF itself costs more
+  rasters than Helvetica. `TextEngine::default_family` sets another
+  default (framebench `--family`).
 
 ## 6. Fonts
 
 **Current.** `craie-text/src/fonts.rs` owns font identity: a
 `FontStore` interns faces (`FontFaceId`, with units per em, an ASCII
-coverage mask, and HarfRust shaping data built on first use) and
-instances (`FontInstanceId`: face, normalized variation coordinates,
-synthesis). Discovery and fallback come through the `FontSource`
-trait (`select(family, attrs)`, `fallback(char, script, attrs)`),
-which returns font bytes. `RawFonts` is the byte-only source (browser
-profiles, tests): family by name, nearest weight and italic with
-synthesis, fallback by coverage in registration order. The
-`pinned-fonts` feature embeds the harness fonts from `assets/fonts`
-(Noto Sans regular, bold, and italic, Arabic, Hebrew, Devanagari, a JP
-subset, and Symbols 2, under OFL). Tests and the harness lay text out on
-them. On desktop, `craie-platform-winit/src/fonts.rs` implements
-`FontSource` over fontique (generic families, script fallback, then a
-coverage scan as the last resort) and installs it as the default
-source at startup. The engine caches the primary instance per
-(family, attrs) and the fallback per script and per first character.
-Until step 3b, Parley (for inputs) still brings fontique into
+coverage mask, a coverage cache for other characters, and HarfRust
+shaping data built on first use) and instances (`FontInstanceId`: face,
+normalized variation coordinates, synthesis). A face's key is its byte
+identity and index: fontique blob ids from fontique's process-wide
+counter, and `RawFonts` ids from its own process-wide counter at or
+above `RAW_ID_BASE` (2^63), so a replaced source never reaches another
+source's faces. Discovery and fallback come through the `FontSource`
+trait (`select(family, attrs)`, `fallback(char, script, attrs,
+emoji)`), which returns font bytes in priority order. `RawFonts` is the
+byte-only source (browser profiles, tests): family by name, nearest
+weight and italic with synthesis, fallback by coverage in registration
+order. The `pinned-fonts` feature embeds the harness fonts from
+`assets/fonts` (Noto Sans regular, bold, and italic, Arabic, Hebrew,
+Devanagari, a JP subset, Symbols 2, and a monochrome emoji subset,
+under OFL). Tests and the harness lay text out on them. On desktop,
+`craie-platform-winit/src/fonts.rs` implements `FontSource` over
+fontique: the emoji family first for emoji-presentation clusters, then
+the script's fallback list, then a last resort in a stable order (a
+per-platform priority list, then every family by name). The platform
+installs it as the default source at startup. The engine caches the
+primary instance per (family, attrs) and the source's candidates per
+(first character, script, attrs, emoji); each cluster takes the first
+candidate that covers all of it, so the choice depends on the cluster
+alone. Until step 3b, Parley (for inputs) still brings fontique into
 craie-text's graph.
 
 **Target.** `FontFaceId` and `FontInstanceId` (face, variation coords,
@@ -875,8 +906,19 @@ advances bit-equal, positions and line metrics within a bound derived
 from the f32 additions of each value, L1 lines checked by moving
 Parley's trailing whitespace, and negative controls for each kind of
 difference; unicode-bidi's own L1 + L2 as the reference for line
-order; rewrap equals a fresh layout from every start width); a width
-change does no shapes; and the E01, E10, and E14 benches. `prepare_frame` in
+order; rewrap equals a fresh layout from every start width; drawn
+glyphs compared by id, source cluster, and font file; byte-to-cluster
+queries at every byte; breaks, emoji, fallback, and missing-glyph
+cases; each known difference asserted exactly: CRLF and NEL against
+UAX #14, no-break spaces, and one font per grapheme); owned-text unit
+tests (carets, selection, and hits equal to the placements on
+multi-glyph clusters and L1-reversed segments; line starts at UAX #14
+opportunities; fallback that depends on the cluster alone; byte
+identity across a replaced source); a width change does no shapes;
+release builds without test features (`pinned-fonts`), with the
+harness and a workspace build as negative controls; and the E01, E10,
+and E14 benches (`examples/fontcost` splits a fresh engine's font
+work). `prepare_frame` in
 platform-winit is the one frame path for commits and native input;
 accessibility bounds and the IME area publish only after it.
 The host sets the UI clock and wakes at `Ui::next_settle` to snap

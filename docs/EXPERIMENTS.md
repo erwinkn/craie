@@ -84,80 +84,119 @@ Correctness: `cargo test -p craie-harness --test e01_text`. Cost:
 `cargo run --release -p craie-harness --example e01_text`. Both sides
 get the same pinned font bytes (`assets/fonts`) and the same fallback
 order (Parley through a font stack of the pinned families; Craie
-through `RawFonts` registration order). Eight cases cover the E01
-classes. Wrapped: Latin at 120/240/480 and unbounded, and at 40/90 with
-an overflowing word. Styled: bold, italic, and 24-pt spans, and bold and
-italic Arabic and Hebrew with synthesis. Multilingual: Latin,
-Devanagari conjuncts, Japanese, ✕, and an em dash. The test asserts
-that no case draws `.notdef`. Bidi: an LTR
-paragraph with Hebrew, Arabic, and numbers; an RTL paragraph with
-English and Arabic-Indic digits; a Hebrew paragraph with newlines and
-an empty line. Editable cases are step 3b.
+through `RawFonts` registration order). Twelve cases at 33 widths.
+Wrapped: Latin at 120/240/480 and unbounded, and at 40/90 with an
+overflowing word. Styled: bold, italic, and 24-pt spans, and bold and
+italic Arabic and Hebrew with synthesis. Multilingual: Latin, Devanagari
+conjuncts, Japanese, ✕, and an em dash. Bidi: an LTR paragraph with
+Hebrew, Arabic, and numbers; an RTL paragraph with English and
+Arabic-Indic digits; a Hebrew paragraph with newlines and an empty
+line. Breaks: LF, CR, LS, and PS, at widths down to 0. Emoji: ZWJ
+sequences, a skin tone, keycaps, a flag, and VS16. Fallback: stacked
+Latin marks, Arabic shadda and keycap on a digit, a dotted circle.
+Missing: Thai and Ethiopic, which no pinned face covers (both sides
+draw `.notdef`; every other case asserts none). Editable cases are
+step 3b.
 
-Correctness per case and width (22 layouts):
+Correctness per case (every width):
 
-| case (class)             | line breaks | cluster maps | drawn glyph ids | advances   | worst position or metric / bound |
-|--------------------------|-------------|--------------|-----------------|------------|----------------------------------|
-| latin (wrapped)          | equal       | equal        | equal           | bit-equal  | 0.072                            |
-| latin-narrow (wrapped)   | equal       | equal        | equal           | bit-equal  | 0.069 (largest error 9.8e-4 pt)  |
-| styled (styled)          | equal       | equal        | equal           | bit-equal  | 0.028                            |
-| styled-synth (styled)    | equal       | equal        | equal           | bit-equal  | 0.030                            |
-| multilingual             | equal       | equal        | equal           | bit-equal  | 0.076                            |
-| bidi-ltr (bidi)          | equal       | equal        | equal but 2 L1 lines | bit-equal | 0.039                     |
-| bidi-rtl (bidi)          | equal       | equal        | equal but 3 L1 lines | bit-equal | 0.070                     |
-| hebrew-lines (bidi)      | equal       | equal        | equal           | bit-equal  | 0.064                            |
+| case (class)             | line breaks | cluster maps | drawn glyphs | advances  | worst position or metric / bound |
+|--------------------------|-------------|--------------|--------------|-----------|----------------------------------|
+| latin (wrapped)          | equal       | equal        | equal        | bit-equal | 0.072                            |
+| latin-narrow (wrapped)   | equal       | equal        | equal        | bit-equal | 0.069 (largest error 9.8e-4 pt)  |
+| styled (styled)          | equal       | equal        | equal        | bit-equal | 0.028                            |
+| styled-synth (styled)    | equal       | equal        | equal        | bit-equal | 0.128                            |
+| multilingual             | equal       | equal after 1 GB9c merge | equal | bit-equal | 0.076                  |
+| bidi-ltr (bidi)          | equal       | equal        | equal but 2 L1 lines | bit-equal | 0.054                    |
+| bidi-rtl (bidi)          | equal       | equal        | equal but 3 L1 lines | bit-equal | 0.070                    |
+| hebrew-lines (bidi)      | equal       | equal        | equal        | bit-equal | 0.064                            |
+| breaks                   | equal       | equal        | equal        | bit-equal | 0.027                            |
+| emoji                    | equal       | equal        | equal        | bit-equal | 0.067                            |
+| fallback                 | equal       | equal        | equal        | bit-equal | 0.000                            |
+| missing                  | equal       | equal        | equal        | bit-equal | 0.025                            |
 
-A cluster map is each glyph group's text range and glyph ids in
-logical order (Parley's ligature continuation clusters merge into
-their group). The bound for a position or metric is the f32 error of
-the additions that produce it on each side (2γₖ·S plus one ulp, with k
-additions and S the sum of term magnitudes). The table gives the worst
-ratio of error to bound. Differences found and kept:
+A drawn glyph is compared by glyph id, source cluster, and the pinned
+file it comes from, in visual order. A cluster map is each glyph
+group's text range and glyph ids in logical order (Parley's ligature
+continuation clusters merge into their group). `byte_to_cluster_matches_parley`
+checks the byte-to-cluster query at every byte of every case against
+Parley's `Cluster::from_byte_index`, and cluster-to-byte at each
+cluster's first and last byte. The bound for a position or metric is
+the f32 error of the additions that produce it on each side (2γₖ·S
+plus one ulp, with k additions and S the sum of term magnitudes). The
+table gives the worst ratio of error to bound.
 
-- UAX #9 L1 at soft line ends. Craie moves a line's trailing
-  whitespace to the paragraph level: to the right end in an LTR
-  paragraph, to the left end in an RTL one. Parley keeps it inside the
-  embedded run. So the visible glyphs of 5 wrapped lines differ by
-  one space advance. The test checks these lines by applying L1 to
-  Parley's line: the ids must then be equal and the positions within
-  bound. `line_order_matches_unicode_bidi` checks Craie's line order
-  against unicode-bidi's own L1 and L2, including tabs and numbers.
+Known differences. Craie follows the Unicode rule in each; each has a
+test that asserts the exact difference:
+
+- UAX #9 L1 at soft line ends. Craie moves a line's trailing whitespace
+  to the paragraph level; Parley keeps it in the embedded run, so the
+  visible glyphs of 5 wrapped lines differ by one space advance. The
+  comparison applies L1 to Parley's line: ids, clusters, and fonts must
+  then be equal and positions within bound. `line_order_matches_unicode_bidi`
+  checks Craie's order against unicode-bidi's own L1 and L2, and
+  `mapping_reads_the_placements` checks the drawn cluster order of
+  L1-reversed segments.
+- Graphemes (UAX #29 GB9c). A Craie cluster never splits a grapheme; a
+  Devanagari conjunct joined by a virama (स्ते) is one grapheme. Parley
+  splits it in two. The comparison merges Parley's clusters inside one
+  grapheme and counts them (1 in the multilingual case).
+- Hard breaks (UAX #14 LB5). Parley breaks after CR and again after LF
+  in a CRLF (an extra line that holds the LF), and does not break after
+  NEL. Craie's line starts are exactly UAX #14's mandatory breaks
+  (`hard_breaks_follow_uax14_where_parley_differs`).
+- No-break spaces (LB12). At narrow widths Parley breaks after NBSP,
+  narrow NBSP, and figure space. Craie keeps each protected phrase on
+  one line (`no_break_spaces_follow_uax14_where_parley_differs`).
+- One font per grapheme. For a dotted circle with a Hebrew point, which
+  Noto Sans covers in part, Craie draws both from Noto Sans Hebrew;
+  Parley draws the base from Noto Sans and the mark from Noto Sans
+  Hebrew (`grapheme_keeps_one_font_where_parley_splits`).
 - Selection box with negative leading. When a line mixes fonts,
   Parley's `block_min_coord` clamps the box to ascent plus descent, so
   it extends above the line box. Craie's line top and its selection
   rectangles are the line box. Line tops, heights, and baselines agree.
-- Parley's `trailing_whitespace` counts only a visual last run, so on
-  the L1 lines it reads 0 and its width includes the space.
+- Oracle metrics. Parley's `trailing_whitespace` counts only a visual
+  last run, so on L1 lines it reads 0. With emoji ZWJ ligatures,
+  Parley's `LineMetrics::advance` is not the sum of its own glyph
+  advances (1.47 pt short on a 306 pt line). The oracle takes each
+  line's advance from its glyphs and counts these lines (1 or 2 per
+  emoji width).
 
 Cost at each case's first bounded width (median of 1,001 interleaved
-calls; host load average 20 to 38 on 18 cores, so absolute times move up to
-2x between runs, but the ratios stayed stable over four runs):
+calls; host load average 30 to 85 on 18 cores during this round, so
+absolute times move up to 3x between runs; ratios, bytes, and
+allocation counts are the reliable part):
 
-| case         | text B | retained B ours / Parley | cold µs ours / Parley | cold allocs | rewrap µs   | rewrap allocs | edit µs      | edit allocs |
-|--------------|--------|--------------------------|-----------------------|-------------|-------------|---------------|--------------|-------------|
-| latin        | 386    | 13,918 / 18,336          | 78.0 / 92.5           | 11 / 27     | 4.88 / 3.75 | 2 / 2         | 80.4 / 97.2  | 13 / 30     |
-| latin-narrow | 386    | 21,982 / 32,928          | 79.5 / 95.6           | 15 / 31     | 5.38 / 5.21 | 0 / 0         | 84.8 / 103.2 | 15 / 31     |
-| styled       | 70     | 2,674 / 5,796            | 15.5 / 22.5           | 6 / 18      | 0.88 / 0.71 | 2 / 2         | 15.6 / 22.5  | 6 / 18      |
-| styled-synth | 35     | 2,135 / 3,520            | 12.6 / 15.8           | 20 / 16     | 0.42 / 0.46 | 1 / 1         | 12.8 / 16.0  | 20 / 16     |
-| multilingual | 128    | 3,656 / 7,632            | 32.2 / 43.1           | 9 / 33      | 0.62 / 0.92 | 0 / 0         | 32.5 / 43.7  | 21 / 45     |
-| bidi-ltr     | 55     | 3,355 / 6,288            | 20.7 / 25.2           | 24 / 21     | 0.58 / 0.67 | 1 / 1         | 21.8 / 26.9  | 24 / 21     |
-| bidi-rtl     | 96     | 5,900 / 12,560           | 37.2 / 42.6           | 30 / 29     | 1.04 / 1.08 | 0 / 0         | 41.5 / 47.2  | 30 / 29     |
-| hebrew-lines | 72     | 2,696 / 6,864            | 20.5 / 23.6           | 32 / 24     | 0.67 / 0.79 | 0 / 0         | 21.9 / 26.0  | 33 / 27     |
+| case         | text B | retained B ours / Parley | cold µs ours / Parley | cold allocs | rewrap µs   | rewrap allocs | edit µs     | edit allocs |
+|--------------|--------|--------------------------|-----------------------|-------------|-------------|---------------|-------------|-------------|
+| latin        | 386    | 13,662 / 18,336          | 77.6 / 85.8           | 11 / 27     | 3.88 / 2.62 | 2 / 2         | 57.6 / 61.5 | 13 / 30     |
+| latin-narrow | 386    | 20,958 / 32,928          | 51.5 / 55.5           | 15 / 31     | 6.04 / 5.17 | 0 / 0         | 79.8 / 89.1 | 15 / 31     |
+| styled       | 70     | 2,610 / 5,796            | 16.0 / 21.8           | 6 / 18      | 0.46 / 0.38 | 2 / 2         | 7.3 / 10.3  | 6 / 18      |
+| styled-synth | 35     | 2,071 / 3,520            | 5.4 / 7.1             | 20 / 16     | 0.21 / 0.21 | 1 / 1         | 5.5 / 7.2   | 20 / 16     |
+| multilingual | 128    | 3,400 / 7,632            | 32.7 / 42.8           | 9 / 33      | 0.75 / 0.92 | 0 / 0         | 32.5 / 42.6 | 9 / 45      |
+| bidi-ltr     | 55     | 3,227 / 6,288            | 9.1 / 11.5            | 24 / 21     | 0.33 / 0.33 | 1 / 1         | 9.6 / 12.3  | 24 / 21     |
+| bidi-rtl     | 96     | 5,644 / 12,560           | 36.8 / 41.4           | 30 / 29     | 1.17 / 1.04 | 0 / 0         | 37.1 / 41.7 | 30 / 29     |
+| breaks       | 39     | 1,663 / 4,016            | 3.9 / 5.5             | 7 / 17      | 0.25 / 0.25 | 0 / 0         | 4.0 / 5.6   | 7 / 17      |
+| emoji        | 98     | 3,134 / 10,704           | 8.8 / 15.1            | 9 / 27      | 0.29 / 0.42 | 0 / 0         | 19.8 / 32.5 | 9 / 27      |
+| fallback     | 22     | 1,002 / 3,216            | 7.1 / 11.5            | 6 / 16      | 0.21 / 0.25 | 0 / 0         | 7.3 / 11.8  | 6 / 16      |
+| missing      | 46     | 1,618 / 3,936            | 9.5 / 15.6            | 7 / 25      | 0.46 / 0.50 | 0 / 0         | 9.5 / 15.7  | 7 / 25      |
+| hebrew-lines | 72     | 2,568 / 6,864            | 20.0 / 23.1           | 32 / 24     | 0.38 / 0.38 | 0 / 0         | 9.9 / 11.8  | 33 / 27     |
 
 - Retained bytes: what dropping the laid-out paragraph frees.
-  `Paragraph::heap_bytes` gives the same number. Craie holds 0.39 to
-  0.76 times Parley's bytes. The 28-byte glyph row is most of it (Latin:
-  10.8 KB of 13.9 KB).
-- Cold: a new paragraph on a warm engine. Craie takes 0.69 to 0.87
+  `Paragraph::heap_bytes` gives the same number. Craie holds 0.29 to
+  0.75 times Parley's bytes. The 28-byte glyph row is most of it
+  (Latin: 10.8 KB of 13.7 KB).
+- Cold: a new paragraph on a warm engine. Craie takes 0.58 to 0.93
   times Parley's time. It makes fewer allocations except on bidi text
   (`BidiInfo` allocates its level and class tables; an LTR-only
   paragraph skips it).
 - Rewrap (a width change): no shaping on either side, and no
   allocation once the line and segment stores have grown (the 1 or 2
-  counted allocations are that growth). Craie takes 0.67 to 1.30 times
-  Parley's time. It is slower on Latin at 120 (1.30) and on the styled
-  case (1.24): Craie rebuilds its cluster scratch from the glyph store
-  on each rewrap, and Parley keeps its clusters.
+  counted allocations are that growth). Craie takes 0.69 to 1.48 times
+  Parley's time. It is slower on Latin at 120 (1.48), latin-narrow
+  (1.17), and styled (1.21): Craie rebuilds its cluster scratch from
+  the glyph store on each rewrap, and Parley keeps its clusters.
 - Edit (one character inserted in the middle): both lay the paragraph
   out again. Incremental reflow is E04.
 - Span color: Craie does no layout work (the span index is the paint
@@ -165,7 +204,8 @@ calls; host load average 20 to 38 on 18 cores, so absolute times move up to
   the brush in the layout's styles, so a new color needs a new layout
   (the cold cost).
 - A fresh engine's first multilingual layout (font parsing, shaping
-  data, plans): 0.9 to 2.6 ms for Craie, 0.6 to 1.3 ms for Parley (five runs).
+  data, plans): 0.9 to 2.6 ms for Craie, 0.6 to 2.5 ms for Parley
+  (eight runs).
 
 Changes that came from this measurement:
 - HarfRust compiled a shape plan on each `shape` call. Plans are now
@@ -176,28 +216,38 @@ Changes that came from this measurement:
   from shaping and does L1 and L2 over the line's clusters, in place.
   Rewrap allocations went from 33 to 232 down to 0 to 2.
 - Coverage checks parsed the font's cmap for each character. Each face
-  now has an ASCII coverage mask, and the primary instance is
-  resolved once per span.
+  now has an ASCII coverage mask and a coverage cache, and the primary
+  instance is resolved once per span.
 - The engine made Parley's `FontContext` (a system font scan, 15 to 47
   ms) when it was created. It now makes it when an input first needs
   it.
 
-Framebench, the same React wire dumps replayed by `f622135` and step
-3a back to back (medians of 3 repetitions, system fonts, so step 3a
-draws SF where the baseline drew Helvetica):
+First draw and the default font (review round 1, S3A-10). Step 3a
+changed the Text default from Parley's `sans-serif` (Helvetica) to
+`system-ui` (SF; ARCHITECTURE.md §5, Decisions). Framebench on the same
+React wire dumps, `f622135` and step 3a back to back, two rounds of 3
+repetitions (medians; load average 30 to 85, so ±20%):
 
-| rows  | phase     | step 2   | step 3a  |
-|-------|-----------|----------|----------|
-| 100   | firstDraw | 2.42 ms  | 5.21 ms  |
-| 1,000 | firstDraw | 19.2 ms  | 19.9 ms  |
-| 5,000 | firstDraw | 77.6 ms  | 79.4 ms  |
-| 5,000 | scrollDraw| 2.53 ms  | 2.63 ms  |
-| 5,000 | remove    | 5.21 ms  | 3.34 ms  |
-| 5,000 | first-draw live bytes | +27.7 MiB | +21.2 MiB |
+| rows  | step 2, Helvetica | 3a, Helvetica (`--family sans-serif`) | 3a, SF (default) |
+|-------|-------------------|---------------------------------------|------------------|
+| 100   | 5.69 ms           | 4.34 ms                               | 7.12 ms          |
+| 1,000 | 21.2 ms           | 18.0 ms                               | 31.2 ms          |
+| 5,000 | 93.4 ms           | 83.3 ms                               | 101.8 ms         |
+| 5,000 first-draw live bytes | +27.7 MiB | +21.0 MiB               | +21.1 MiB        |
 
-The 100-row first draw includes the one-time font work (fontique
-resolution of system-ui, and SF shaping data and plans). At 1,000 and
-5,000 rows the difference is inside the noise band.
+On the same font the owned engine draws the first frame faster than
+step 2 at every size; the increase over step 2 comes from SF.
+`examples/fontcost` splits a fresh engine's font work for the row text
+(one process per engine and family, so caches start cold). Both engines
+resolve the same faces (Helvetica, .SF NS). The owned engine's one-time
+work is small for both fonts: family resolution about 0.05 ms, HarfRust
+shaping data about 0.02 ms, plan and first shape 0.1 to 0.3 ms, and 0
+fallback queries (the ASCII row needs none). Source loading (fontique's
+system scan, 28 to 50 ms, both engines) happens in `Ui::new`, outside
+the first draw. The exact cost that SF adds is raster work: 1,000 rows
+need 110 rasterizations in SF and 71 in Helvetica, on both engines.
+Shaping and emission times for 1,000 rows moved up to 3x between runs
+under this load, so no time split is claimed for them.
 
 ### E14: layout-aware virtualization, list versus a plain column (step 2)
 
@@ -205,22 +255,27 @@ resolution of system-ui, and SF shaping data and plans). At 1,000 and
 at 480x720 @2x holding chat-like texts (2 to 60 words, 14 pt), either
 as a `List` with the harness `ListDriver` playing React, or as a plain
 column of every row. Mount is Ui creation, the item splice, and the
-first range's rows until the range is stable (warm fonts). Loaded
-machine (load average 9 to 12): times are indicative.
+first range's rows until the range is stable (warm fonts). Rerun at
+step 3a on the pinned fonts (Noto Sans; step 2 measured Parley on
+system fonts, so rows, visits, and heaps changed). Loaded machine (load
+average 20 or more): times are indicative.
 
 | items | list mount | plain mount | scroll (in range) | jump | list heap | plain heap | layout visits |
 |-------|-----------:|------------:|------------------:|-----:|----------:|-----------:|--------------:|
-| 1k    | 36.7 ms | 68.8 ms  | 0.006 ms (plain 0.013) | 2.1 ms | 5.0 MiB  | 15.0 MiB  | 64 (plain 4,001) |
-| 10k   | 21.2 ms | 387.6 ms | 0.003 ms (plain 0.217) | 1.0 ms | 5.3 MiB  | 104.3 MiB | 64 (plain 40,001) |
-| 100k  | 35.7 ms | -        | 0.003 ms               | 1.1 ms | 8.1 MiB  | -         | 64 |
-| 1M    | 90.0 ms | -        | 0.006 ms               | 2.3 ms | 33.2 MiB | -         | 64 |
+| 1k    | 5.7 ms  | 39.6 ms  | 0.003 ms (plain 0.026) | 1.12 ms | 4.5 MiB  | 11.9 MiB | 48 (plain 4,001) |
+| 10k   | 6.4 ms  | 214.6 ms | 0.003 ms (plain 0.114) | 1.43 ms | 4.8 MiB  | 77.2 MiB | 48 (plain 40,001) |
+| 100k  | 5.9 ms  | -        | 0.001 ms               | 0.53 ms | 7.6 MiB  | -        | 48 |
+| 1M    | 45.2 ms | -        | 0.001 ms               | 0.53 ms | 32.7 MiB | -        | 48 |
 
-About 5 MiB of each heap is the text engine's font data. Element bytes
-per item: `ItemDesc` 12 (`size_of`, measured), extents 13 (f32 size,
-bool measured, f64 tree node), and the sorted identity index 4: 29 in
-all. The measured live bytes per item at 1M (28.4 = (33.2 - 5.0) MiB /
-1M) include no spare capacity beyond that here; a list grown by many
-splices can hold up to 2x per vector in capacity. 27 rows render.
+About 4.5 MiB of each heap is fixed: the text engine's font data and
+the Ui. Element bytes per item: `ItemDesc` 12 (`size_of`, measured),
+extents 13 (f32 size, bool measured, f64 tree node), and the sorted
+identity index 4: 29 in all. The measured live bytes per added item,
+from the exact counts at 1k and 1M items, are (34,309,449 − 4,707,273)
+B / 999,000 = 29.63 B. The 0.63 B above the element sum is capacity
+beyond length in those vectors (not broken down further). A list grown
+by many splices can hold up to 2x per vector in capacity. 19 rows
+render.
 
 Identity index, build plus one query per id (ms), and the native path
 (one splice mounting the list, then single-item appends):
@@ -242,9 +297,11 @@ takes 57 ms. An append costs 7 µs with a fresh id above every existing
 one (the bridge's increasing ids) and 140 µs with a low id (a memmove
 of the index). Before the append path, one append to a 1M list took
 3.8 ms (a full Fenwick rebuild). Estimates against measured
-heights: mean error 2.4%, p95 25% (a wrap boundary costs a line). After
-a jump to 61% of a 100k list the top item holds its place and the item
-at the viewport bottom moves 14 pt once, when the rows measure.
+heights: mean error 2.4%, p95 25% (a wrap boundary costs a line); 2.9%
+and 25% on the pinned fonts at step 3a. After a jump to 61% of a 100k
+list the top item holds its place and the item at the viewport bottom
+moves 14 pt once, when the rows measure (0.2 pt on the pinned fonts at
+step 3a).
 
 The list incremental-equals-rebuild test found one bug on its first
 run: a list whose estimates were stale at an unchanged width summed
