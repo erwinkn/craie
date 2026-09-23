@@ -491,6 +491,14 @@ gone with it.
 - The wire fixture (JS-written bytes) carries a vector node and a
   hand-built asset that decodes natively.
 
+- Framebench, step 4 end (`0acde01`) against step 5 (`5d62baf`), 5,000
+  rows (no paths: frames stay single-sampled), the two builds
+  alternated (24 runs each). Load average 17 to 25 from other
+  applications: first draw 38.9 to 100.6 ms (step 4) and 39.1 to 106.8
+  ms (step 5), medians 80.6 and 84.5 ms, fastest runs equal. Update,
+  scroll, and empty draws: medians 0.176/0.182, 2.53/2.50, 0.203/0.142
+  ms. No change is measurable at this load.
+
 ### E14: layout-aware virtualization, list versus a plain column (step 2)
 
 `cargo run --release -p craie-harness --example e14_lists`: a scroller
