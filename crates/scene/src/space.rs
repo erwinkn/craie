@@ -184,6 +184,11 @@ impl Transforms {
         self.gpu_dirty.take()
     }
 
+    /// `take_gpu_dirty` into a reused buffer (replaced).
+    pub fn take_gpu_dirty_into(&mut self, out: &mut Vec<std::ops::Range<usize>>) {
+        self.gpu_dirty.take_into(out);
+    }
+
     pub fn len(&self) -> usize {
         self.records.len()
     }
@@ -323,6 +328,11 @@ impl Clips {
 
     pub fn take_gpu_dirty(&mut self) -> Vec<std::ops::Range<usize>> {
         self.gpu_dirty.take()
+    }
+
+    /// `take_gpu_dirty` into a reused buffer (replaced).
+    pub fn take_gpu_dirty_into(&mut self, out: &mut Vec<std::ops::Range<usize>>) {
+        self.gpu_dirty.take_into(out);
     }
 }
 

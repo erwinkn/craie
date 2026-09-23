@@ -698,6 +698,9 @@ pub fn decode(buf: &[u8]) -> Result<Transaction<'_>, WireError> {
             op::SPATIAL => {
                 let id = r.u32()?;
                 let mask = r.u8()?;
+                if mask & !(spatial_field::TRANSFORM | spatial_field::OPACITY) != 0 {
+                    return Err(WireError::BadRef("spatial mask"));
+                }
                 let transform = if mask & spatial_field::TRANSFORM != 0 {
                     let mut m = [0.0f32; 6];
                     for v in &mut m {
@@ -721,6 +724,9 @@ pub fn decode(buf: &[u8]) -> Result<Transaction<'_>, WireError> {
             op::PAINT => {
                 let id = r.u32()?;
                 let mask = r.u8()?;
+                if mask & !(paint_field::FILL | paint_field::RADIUS | paint_field::BORDER) != 0 {
+                    return Err(WireError::BadRef("paint mask"));
+                }
                 let fill = if mask & paint_field::FILL != 0 {
                     Some(r.u32()?)
                 } else {

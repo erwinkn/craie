@@ -81,7 +81,7 @@ function Row({
       />
       <View
         onPointerDown={() => onToggle(todo.id)}
-        style={{ flexGrow: 1 }}
+        style={{ flexGrow: 1, flexShrink: 1 }}
       >
         <Text fontSize={14} color={todo.done ? DONE : FG}>
           {todo.text}

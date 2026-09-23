@@ -5,7 +5,9 @@
 //! this. Owns the GPU objects and the retained `Ui`; commits arrive
 //! through the session and become at most one repaint per wake.
 
+use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use craie_core::Size;
 use craie_render::{Gpu, Renderer, WindowSurface};
@@ -27,6 +29,9 @@ pub struct HostApp {
     /// Accessibility handoff shared with the platform adapter.
     a11y: Arc<A11yShared>,
     inner: Option<Inner>,
+    /// `CRAIE_CAPTURE`: write one settled frame to this PNG, then exit.
+    capture: Option<(PathBuf, Duration)>,
+    capture_due: Option<Instant>,
 }
 
 struct Inner {
@@ -43,6 +48,14 @@ impl HostApp {
             surfaces: Vec::new(),
             a11y: A11yShared::new(),
             inner: None,
+            capture: std::env::var_os("CRAIE_CAPTURE").map(|p| {
+                let ms = std::env::var("CRAIE_CAPTURE_DELAY_MS")
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(1500);
+                (PathBuf::from(p), Duration::from_millis(ms))
+            }),
+            capture_due: None,
         }
     }
 
@@ -125,14 +138,25 @@ impl Inner {
         window.update_a11y(tree);
     }
 
-    /// Pushes queued UI events to the JS side, and keeps the platform
-    /// IME pointed at the focused input's caret. Associated fn so the
+    /// Pushes queued UI events to the JS side. Associated fn so the
     /// caller can pass `&mut inner.ui` while `inner` is borrowed.
-    fn flush_out(ui: &mut Ui, window: &Window, session: &Session) {
+    fn flush_out(ui: &mut Ui, session: &Session) {
         let events = ui.take_events();
         if !events.is_empty() {
             session.post_events(events::encode_events(&events));
         }
+    }
+
+    /// Publishes geometry-dependent platform state (accessibility bounds,
+    /// the IME caret area) only from a prepared frame: while the UI owes
+    /// a paint, layout is stale, so this requests the frame instead and
+    /// `redraw` publishes after `prepare_frame`.
+    fn publish_frame_state(ui: &mut Ui, window: &Window, shared: &A11yShared) {
+        if ui.needs_paint() {
+            window.request_redraw();
+            return;
+        }
+        Inner::publish_a11y(ui, window, shared);
         window.set_ime(ui.ime_wanted(), ui.ime_area());
     }
 }
@@ -157,8 +181,17 @@ impl App for HostApp {
             ui,
         };
         inner.sync(window, &self.session, true);
-        Inner::publish_a11y(&mut inner.ui, window, &self.a11y);
+        Inner::publish_frame_state(&mut inner.ui, window, &self.a11y);
         self.inner = Some(inner);
+        if let Some((_, delay)) = &self.capture {
+            let delay = *delay;
+            self.capture_due = Some(Instant::now() + delay);
+            let wake = wake.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(delay);
+                wake.wake();
+            });
+        }
     }
 
     fn woke(&mut self, window: &Window) -> bool {
@@ -174,10 +207,25 @@ impl App for HostApp {
             for req in &actions {
                 inner.ui.a11y_action(req);
             }
-            Inner::flush_out(&mut inner.ui, window, &self.session);
-            Inner::publish_a11y(&mut inner.ui, window, &self.a11y);
-            if inner.ui.needs_paint() {
-                window.request_redraw();
+            Inner::flush_out(&mut inner.ui, &self.session);
+            Inner::publish_frame_state(&mut inner.ui, window, &self.a11y);
+            if let (Some((path, _)), Some(due)) = (&self.capture, self.capture_due)
+                && Instant::now() >= due
+            {
+                let format = inner.surface.config.format;
+                let size = window.size();
+                match crate::capture::capture_png(
+                    &inner.gpu,
+                    &mut inner.renderer,
+                    format,
+                    &mut inner.ui,
+                    size,
+                    path,
+                ) {
+                    Ok(()) => eprintln!("[craie] captured {}", path.display()),
+                    Err(e) => eprintln!("[craie] capture failed: {e}"),
+                }
+                return true;
             }
         }
         false
@@ -190,6 +238,7 @@ impl App for HostApp {
         // Size change invalidates wrap widths: every cache goes.
         inner.ui.invalidate_layout();
         inner.sync(window, &self.session, false);
+        Inner::publish_frame_state(&mut inner.ui, window, &self.a11y);
     }
 
     fn occluded(&mut self, window: &Window, occluded: bool) {
@@ -203,11 +252,8 @@ impl App for HostApp {
     fn event(&mut self, window: &Window, event: &Event) {
         let Some(inner) = &mut self.inner else { return };
         inner.ui.dispatch(event);
-        Inner::flush_out(&mut inner.ui, window, &self.session);
-        Inner::publish_a11y(&mut inner.ui, window, &self.a11y);
-        if inner.ui.needs_paint() {
-            window.request_redraw();
-        }
+        Inner::flush_out(&mut inner.ui, &self.session);
+        Inner::publish_frame_state(&mut inner.ui, window, &self.a11y);
     }
 
     fn a11y_shared(&self) -> Option<Arc<A11yShared>> {
@@ -231,6 +277,8 @@ impl App for HostApp {
             (w, h),
             scale,
         );
+        // Layout is current now: bounds and the caret area are too.
+        Inner::publish_frame_state(&mut inner.ui, window, &self.a11y);
         let frame = match inner.surface.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(frame)
             | wgpu::CurrentSurfaceTexture::Suboptimal(frame) => frame,
@@ -306,5 +354,76 @@ mod tests {
             renderer.stats.upload_bytes,
             size_of::<craie_scene::WorldGpu>() as u64
         );
+    }
+}
+
+#[cfg(test)]
+mod publish_tests {
+    use super::*;
+    use craie_ui::events::{Button, Event, Key, KeyInput, Mods};
+    use craie_ui::host::NodeId;
+    use craie_ui::mutation::{NIL, NodeKind, Transaction};
+
+    /// Typing a newline into an auto-height multiline input moves the
+    /// node below it with no JS commit. The UI owes a paint until the
+    /// frame is prepared (so `publish_frame_state` publishes nothing
+    /// geometric early), and the tree built after `prepare_frame` carries
+    /// the new bounds.
+    #[test]
+    fn native_reflow_publishes_after_the_frame() {
+        let Some(gpu) = Gpu::try_headless() else {
+            eprintln!("no GPU adapter: skipped");
+            return;
+        };
+        let mut renderer = Renderer::new(&gpu, wgpu::TextureFormat::Rgba8UnormSrgb);
+        let mut ui = Ui::new(1.0);
+        let mut input = taffy::Style::default();
+        input.size.width = taffy::Dimension::length(200.0);
+        let mut button = taffy::Style::default();
+        button.size = taffy::Size {
+            width: taffy::Dimension::length(80.0),
+            height: taffy::Dimension::length(30.0),
+        };
+        let mut t = Transaction::new(1);
+        t.create(0, NodeKind::View).append(NIL, 0);
+        t.create(1, NodeKind::Input)
+            .layout(1, &input)
+            .input_config(1, 16.0, 0xFFFF_FFFF, "", true)
+            .append(0, 1);
+        t.create(2, NodeKind::View)
+            .layout(2, &button)
+            .role(2, craie_ui::mutation::Role::Button)
+            .append(0, 2);
+        ui.apply_txn(&t).unwrap();
+        prepare_frame(&mut ui, &mut renderer, &gpu, (400, 400), 1.0);
+        let y0 = ui.abs_rect(NodeId(2)).origin.y;
+        ui.dispatch(&Event::PointerDown {
+            x: 5.0,
+            y: 5.0,
+            button: Button::Primary,
+            mods: Mods::default(),
+        });
+        prepare_frame(&mut ui, &mut renderer, &gpu, (400, 400), 1.0);
+        ui.dispatch(&Event::KeyDown(KeyInput {
+            key: Key::Enter,
+            text: None,
+            char: None,
+            mods: Mods::default(),
+        }));
+        assert!(ui.needs_paint(), "geometry is stale until the frame");
+        prepare_frame(&mut ui, &mut renderer, &gpu, (400, 400), 1.0);
+        assert!(!ui.needs_paint());
+        let y1 = ui.abs_rect(NodeId(2)).origin.y;
+        assert!(y1 > y0, "the newline must grow the input: {y0} -> {y1}");
+        let tree = ui.a11y_tree(craie_core::Size::new(400.0, 400.0));
+        let b = tree
+            .nodes
+            .iter()
+            .find(|(n, _)| *n == craie_ui::a11y::aid(NodeId(2)))
+            .unwrap()
+            .1
+            .bounds()
+            .unwrap();
+        assert_eq!(b.y0 as f32, y1);
     }
 }

@@ -245,7 +245,8 @@ origin moved, whose size changed, and whose scroll extent changed. A
 layout pass runs only when the layout queue is non-empty or the
 viewport changed, so an unchanged frame does zero layouts. React
 Native defaults hold natively: a node with no style, a partial style,
-or a reset style is a flex column (`host::default_style`). Cold layout
+or a reset style is a flex column whose children do not shrink
+(`flexShrink: 0`; `host::default_style`). Cold layout
 of 10k nodes costs 217 to 567 ms; one streaming append costs 0.65 ms.
 
 **Target.** A Craie-owned engine over `layout_inputs[]`, the child span
@@ -259,8 +260,8 @@ the general path.
 
 Public style API: a typed object with CSS property names in camelCase
 (`display`, `flexDirection`, `gridTemplateColumns`, `padding`). A
-`View` defaults to `display: flex`, column direction, stretch, as in
-React Native. `block` and `grid` are explicit values.
+`View` defaults to `display: flex`, column direction, stretch, and
+`flexShrink: 0`, as in React Native. `block` and `grid` are explicit values.
 
 **Experiments.**
 - E05: specialized kernels versus Taffy on generated trees with
@@ -291,8 +292,13 @@ their subpixel buckets are relative to the chunk origin, which the
 renderer snaps to the device-pixel grid. Retained Parley layouts are
 the memory floor (about 27 MiB for 5k rows). INPUT nodes hold a Parley
 `PlainEditor` each; `TextInput` is uncontrolled (`value` is sent once at
-mount; `setText` replaces the text). CJK line breaking degrades (no
-ICU4X data).
+mount; `setText` replaces the text). Validation bounds font sizes to
+`MAX_FONT_SIZE` (2048 logical points). A glyph larger than an atlas
+page renders: it is rasterized at a smaller size that fits, and its
+quad draws the bitmap scaled up (softer, never missing). The cache
+keeps the raster size for re-rasterization. CJK line breaking degrades
+(no ICU4X data). No font fallback stack is configured: a symbol missing
+from the default font (the todo example's `✕`) draws as `.notdef`.
 
 **Target.** Craie owns every persistent representation:
 
@@ -450,12 +456,14 @@ Scene
   nearest record's space (2026-09-23). A scroll patches one record and
   uploads 32 bytes; a layout move patches placements of moved subtrees.
 - Snapping is a policy of the transform record (2026-09-23, revised
-  after review). The window root and scroll content snap chunk origins
-  and rect edges to device pixels, so static text is crisp and a moved
-  chunk reuses every raster. A transformed subtree's record does not
-  snap: its chunks move by fractions, so slow motion never steps.
-  Glyph subpixel buckets stay relative to the chunk origin in both
-  cases. The animation driver (step 4) may snap a record at rest.
+  after review). The window root snaps chunk origins and rect edges to
+  device pixels (ties to even, as WGSL `round` lowers), so static text
+  is crisp and a moved chunk reuses every raster. Scroll content and
+  transformed subtrees do not snap: their chunks move by fractions, so
+  scrolling and motion never step. At rest a fractional scroll offset
+  draws fractionally; snapping at rest needs a settle signal and waits
+  for the animation driver (step 4). Glyph subpixel buckets stay
+  relative to the chunk origin in all cases.
 - Chunks build on demand within half a viewport of the screen; farther
   chunks wait and build in the frame they come into range (2026-09-23).
   Cold paint then scales with what is near the screen, as it did with
@@ -496,8 +504,11 @@ pages with CPU mirrors and dirty-rect uploads. Rasters are stamped as
 chunks use them; `prepare` stamps every raster of every visible chunk
 and re-rasterizes the missing ones before drawing. Eviction takes the
 least recently used unstamped raster (a linear scan); when everything
-is stamped, pages grow past the cap (`over_budget_pages`). A raster
-larger than a page is skipped and counted (`oversized`).
+is stamped, pages grow past the cap (`over_budget_pages`). A residency
+row has a bitmap size and a quad size; they differ only for a glyph
+rasterized smaller to fit a page (`downscaled`). `insert` still
+refuses and counts a raster that fits no page (`oversized`), as a
+guard.
 
 **Target.** Stable `RasterId` with separate residency (atlas, rect,
 generation). Drawing records reference the id, never baked atlas
@@ -699,11 +710,21 @@ rebuild over seeded mutation sequences (layout, drawn scene, hit
 tests, semantics; 8 seeds x 60 steps at 1x and 2x, plus resize and
 atlas-pressure cases); the cost invariants that apply today (color
 change, translation, scroll, unchanged frame, tween, atlas
-relocation, input color), an allocation test (unchanged frame 0
-allocations, a patch at most 1) and a copied-bytes counter; real-GPU
-checks (upload bytes, a 1x and 2x pixel readback); the release-graph
+relocation, input color, typing shapes); allocation tests over the
+whole frame on a real device with separate budgets per phase (UI
+render, renderer prepare, and `plan_frame` allocate nothing on an
+unchanged frame or a warm color or transform patch; `encode_frame` is
+wgpu's own recording and submission, a fixed 56 allocations per frame
+plus 23 per extra pass on Metal, the same every frame; a buffer write
+costs wgpu 8 in prepare and 5 at submission); a copied-bytes counter
+that includes text and span lists; real-GPU checks (upload bytes, 1x
+and 2x pixel readback, half-pixel edges against the resolver, a glyph
+larger than a page); the release-graph
 and layer-map checks; and the E10 bench. `prepare_frame` in
-platform-winit is the one frame path for commits and native input. Crate tests cover the span pool,
+platform-winit is the one frame path for commits and native input;
+accessibility bounds and the IME area publish only after it.
+`CRAIE_CAPTURE=<png>` makes the host write one settled frame and exit
+(used to check the JS examples' layouts). Crate tests cover the span pool,
 scene, host, wire, executor, dispatch, editing, and a11y. `bun test`
 covers the encoder and the reconciler. Benchmarks: `examples/bench`,
 `examples/framebench`.

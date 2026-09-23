@@ -190,3 +190,128 @@ fn identity_world_renders_at_1x() {
         assert_eq!(px, [255, 0, 0, 255], "scale {scale}");
     }
 }
+
+/// At 2x, half-pixel origins and edges land where the CPU resolver says
+/// (both round half to even).
+#[test]
+fn half_pixel_edges_match_resolver() {
+    let Some(gpu) = Gpu::try_headless() else {
+        eprintln!("no GPU adapter: skipped");
+        return;
+    };
+    for x in [10.25f32, 10.75] {
+        let mut ui = Ui::new(2.0);
+        ui.clear = 0x0000_00FF;
+        let mut s = taffy::Style::default();
+        s.position = taffy::Position::Absolute;
+        s.inset.left = taffy::LengthPercentageAuto::length(x);
+        s.size = taffy::Size {
+            width: taffy::Dimension::length(20.25),
+            height: taffy::Dimension::length(20.0),
+        };
+        let mut t = Transaction::new(1);
+        t.create(0, NodeKind::View)
+            .layout(0, &{
+                let mut r = taffy::Style::default();
+                r.size = taffy::Size {
+                    width: taffy::Dimension::length(100.0),
+                    height: taffy::Dimension::length(100.0),
+                };
+                r
+            })
+            .append(NIL, 0);
+        t.create(1, NodeKind::View)
+            .layout(1, &s)
+            .fill(1, 0xFF00_00FF)
+            .append(0, 1);
+        ui.apply_txn(&t).unwrap();
+        ui.render(Size::new(100.0, 100.0));
+        let b = ui
+            .scene()
+            .resolve(&|r| r.0 as u64)
+            .into_iter()
+            .find(|p| p.color == 0xFF00_00FF)
+            .unwrap()
+            .bounds;
+        let (x0, x1) = (b.origin.x as u32, b.max_x() as u32);
+        let red = [255, 0, 0, 255];
+        let y = 10;
+        assert_eq!(
+            pixel(&gpu, &mut ui, 200, 200, (x0, y)),
+            red,
+            "x {x}: first column {x0}"
+        );
+        assert_ne!(
+            pixel(&gpu, &mut ui, 200, 200, (x0 - 1, y)),
+            red,
+            "x {x}: before {x0}"
+        );
+        assert_eq!(
+            pixel(&gpu, &mut ui, 200, 200, (x1 - 1, y)),
+            red,
+            "x {x}: last column"
+        );
+        assert_ne!(
+            pixel(&gpu, &mut ui, 200, 200, (x1, y)),
+            red,
+            "x {x}: after {x1}"
+        );
+    }
+}
+
+/// A glyph larger than an atlas page draws at its full size on the GPU
+/// (a smaller bitmap scaled up), in the place the resolver says.
+#[test]
+fn oversized_glyph_draws_full_size() {
+    let Some(gpu) = Gpu::try_headless() else {
+        eprintln!("no GPU adapter: skipped");
+        return;
+    };
+    let mut ui = Ui::new(1.0);
+    ui.clear = 0x0000_00FF;
+    ui.scene_mut().atlas = craie_scene::RasterAtlas::with_budget(256, 2, 1);
+    let mut t = Transaction::new(1);
+    t.create(0, NodeKind::View).append(NIL, 0);
+    t.create(1, NodeKind::Text)
+        .text(1, "I", 500.0, 0xFFFF_FFFF)
+        .append(0, 1);
+    ui.apply_txn(&t).unwrap();
+    ui.render(Size::new(400.0, 700.0));
+    let b = ui
+        .scene()
+        .resolve(&|r| r.0 as u64)
+        .into_iter()
+        .find(|p| p.kind == 1)
+        .unwrap()
+        .bounds;
+    assert!(b.size.height > 256.0, "taller than a page: {b:?}");
+    assert_eq!(ui.scene().atlas.stats.downscaled, 1);
+    let c = (
+        b.origin.x + b.size.width * 0.5,
+        b.origin.y + b.size.height * 0.5,
+    );
+    let at = |x: f32, y: f32| (x as u32, y as u32);
+    let white = [255, 255, 255, 255];
+    let black = [0, 0, 0, 255];
+    // The stem's center and its top and bottom thirds are covered.
+    for y in [
+        c.1,
+        b.origin.y + b.size.height / 6.0,
+        b.max_y() - b.size.height / 6.0,
+    ] {
+        assert_eq!(
+            pixel(&gpu, &mut ui, 400, 700, at(c.0, y)),
+            white,
+            "stem at y {y}"
+        );
+    }
+    // Outside the quad stays clear.
+    assert_eq!(
+        pixel(&gpu, &mut ui, 400, 700, at(c.0, b.max_y() + 8.0)),
+        black
+    );
+    assert_eq!(
+        pixel(&gpu, &mut ui, 400, 700, at(b.max_x() + 8.0, c.1)),
+        black
+    );
+}

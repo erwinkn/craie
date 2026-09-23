@@ -39,16 +39,25 @@ pub struct AtlasStats {
     pub evictions: u64,
     /// Pages allocated past the cap because the pinned set did not fit.
     pub over_budget_pages: u32,
-    /// Rasters too large for a page: never resident, drawn as nothing.
+    /// Rasters refused because they exceed a page. The text engine
+    /// rasterizes such glyphs smaller instead (`downscaled`), so this
+    /// stays zero for text.
     pub oversized: u64,
+    /// Glyphs rasterized below their drawn size to fit a page.
+    pub downscaled: u64,
 }
 
 /// Where a raster lives, plus its pixel size. Size is known even while
 /// the raster is not resident (it is a property of the bitmap).
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Residency {
+    /// Bitmap size in atlas pixels.
     pub w: u16,
     pub h: u16,
+    /// Drawn size in device pixels. Equals the bitmap size, except for a
+    /// raster made smaller to fit a page, which draws scaled up.
+    pub quad_w: u16,
+    pub quad_h: u16,
     pub color: bool,
     pub resident: bool,
     pub page: u16,
@@ -58,16 +67,18 @@ pub struct Residency {
     pub last_used: u32,
 }
 
-/// Residency row as the GPU reads it: 12 bytes.
+/// Residency row as the GPU reads it: 16 bytes.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct RasterGpu {
     /// x | y << 16, atlas pixels.
     pub xy: u32,
-    /// w | h << 16, pixels.
+    /// Bitmap w | h << 16, atlas pixels.
     pub wh: u32,
     /// page | color << 16.
     pub page: u32,
+    /// Drawn w | h << 16, device pixels.
+    pub quad: u32,
 }
 
 struct Page {
@@ -150,10 +161,25 @@ impl RasterAtlas {
 
     /// Registers a raster of `w`×`h` pixels. Not resident until `insert`.
     pub fn new_id(&mut self, w: u16, h: u16, color: bool) -> RasterId {
+        self.new_scaled_id(w, h, w, h, color)
+    }
+
+    /// Registers a `w`×`h` bitmap drawn at `quad_w`×`quad_h` device px:
+    /// a raster made smaller than its drawn size to fit a page.
+    pub fn new_scaled_id(
+        &mut self,
+        w: u16,
+        h: u16,
+        quad_w: u16,
+        quad_h: u16,
+        color: bool,
+    ) -> RasterId {
         let id = self.entries.len() as u32;
         self.entries.push(Residency {
             w,
             h,
+            quad_w,
+            quad_h,
             color,
             ..Residency::default()
         });
@@ -161,6 +187,7 @@ impl RasterAtlas {
             xy: 0,
             wh: w as u32 | (h as u32) << 16,
             page: (color as u32) << 16,
+            quad: quad_w as u32 | (quad_h as u32) << 16,
         });
         self.gpu_dirty.add(id as usize..id as usize + 1);
         RasterId(id)
@@ -200,7 +227,8 @@ impl RasterAtlas {
         }
         if !self.fits(w, h) {
             // No page can hold it: report, never panic after a
-            // transaction was accepted. Callers skip such rasters.
+            // transaction was accepted. The text engine makes such
+            // glyphs smaller first (`new_scaled_id`), so this is a guard.
             self.stats.oversized += 1;
             return;
         }
@@ -239,10 +267,12 @@ impl RasterAtlas {
         e.x = slot.2;
         e.y = slot.3;
         e.resident = true;
+        let quad = self.gpu[id.0 as usize].quad;
         self.gpu[id.0 as usize] = RasterGpu {
             xy: slot.2 as u32 | (slot.3 as u32) << 16,
             wh: w | h << 16,
             page: slot.1 as u32 | (color as u32) << 16,
+            quad,
         };
         self.gpu_dirty.add(id.0 as usize..id.0 as usize + 1);
     }
@@ -364,6 +394,11 @@ impl RasterAtlas {
     /// Residency rows changed since the last call.
     pub fn take_gpu_dirty(&mut self) -> Vec<std::ops::Range<usize>> {
         self.gpu_dirty.take()
+    }
+
+    /// `take_gpu_dirty` into a reused buffer (replaced).
+    pub fn take_gpu_dirty_into(&mut self, out: &mut Vec<std::ops::Range<usize>>) {
+        self.gpu_dirty.take_into(out);
     }
 }
 

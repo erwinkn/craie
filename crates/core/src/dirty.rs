@@ -129,6 +129,15 @@ impl DirtyRanges {
         std::mem::take(&mut self.ranges)
     }
 
+    /// `take` into `out` (replaced). Copies, so the set keeps its own
+    /// buffer and one reused `out` serves many sets without allocating.
+    pub fn take_into(&mut self, out: &mut Vec<Range<usize>>) {
+        self.normalize();
+        out.clear();
+        out.extend_from_slice(&self.ranges);
+        self.ranges.clear();
+    }
+
     /// Total items covered.
     pub fn covered(&mut self) -> usize {
         self.normalize();

@@ -63,11 +63,13 @@ impl NodeId {
 pub const ROOT: NodeId = NodeId::NIL;
 
 /// Layout inputs of a node that sends none, and the base every style
-/// decodes over: React Native defaults (flex, column, stretch), so a
-/// cross-platform kit needs no normalization (ARCHITECTURE.md §4).
+/// decodes over: React Native defaults (flex, column, stretch, no
+/// shrink), so a cross-platform kit needs no normalization
+/// (ARCHITECTURE.md §4).
 pub fn default_style() -> Style {
     Style {
         flex_direction: taffy::FlexDirection::Column,
+        flex_shrink: 0.0,
         ..Style::default()
     }
 }
@@ -256,7 +258,8 @@ pub struct Host {
     pub surfaces: HashMap<u32, SurfaceData>,
     pub revs: Revs,
     pub dirty: DirtyQueues,
-    /// Bytes copied from transactions into host stores (cost counter).
+    /// Bytes copied from transactions into host stores: paragraph text
+    /// and span lists, labels, surface payloads (cost counter).
     pub copied_bytes: u64,
 }
 

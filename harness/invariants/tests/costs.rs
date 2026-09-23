@@ -261,3 +261,43 @@ fn nonempty_input_color_change_does_no_shapes() {
     );
     assert!(c.paints_patched > 0, "{c:?}");
 }
+
+/// Positive control for the zero-shape color test: typing into an input
+/// reshapes its buffer, and the counter sees it (Parley's driver shapes
+/// inside the edit, outside `InputState::layout`).
+#[test]
+fn typing_counts_shapes() {
+    use craie_ui::events::{Button, Event, Key, KeyInput, Mods};
+    let mut ui = Ui::new(1.0);
+    let mut t = Transaction::new(1);
+    let mut s = taffy::Style::default();
+    s.size = taffy::Size {
+        width: taffy::Dimension::length(200.0),
+        height: taffy::Dimension::length(30.0),
+    };
+    t.create(0, NodeKind::Input)
+        .layout(0, &s)
+        .input_config(0, 16.0, 0xFFFF_FFFF, "", false)
+        .append(NIL, 0);
+    ui.apply_txn(&t).unwrap();
+    ui.render(VIEW);
+    ui.dispatch(&Event::PointerDown {
+        x: 5.0,
+        y: 5.0,
+        button: Button::Primary,
+        mods: Mods::default(),
+    });
+    ui.render(VIEW);
+    for (i, ch) in ["a", "b", "c"].into_iter().enumerate() {
+        let before = ui.counters();
+        ui.dispatch(&Event::KeyDown(KeyInput {
+            key: Key::Unknown,
+            text: Some(ch.into()),
+            char: Some(ch.into()),
+            mods: Mods::default(),
+        }));
+        ui.render(VIEW);
+        let c = ui.counters().since(&before);
+        assert!(c.shapes >= 1, "keystroke {i}: {c:?}");
+    }
+}

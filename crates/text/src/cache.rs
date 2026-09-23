@@ -73,6 +73,8 @@ pub struct GlyphCache {
     map: HashMap<GlyphKey, CachedGlyph>,
     /// Key per raster id, for re-rasterization.
     pub(crate) keys: Vec<Option<GlyphKey>>,
+    /// Pixel size each raster was made at, by raster id.
+    raster_sizes: Vec<f32>,
     pub stats: CacheStats,
 }
 
@@ -84,6 +86,7 @@ impl GlyphCache {
             coords: Vec::new(),
             map: HashMap::new(),
             keys: Vec::new(),
+            raster_sizes: Vec::new(),
             stats: CacheStats::default(),
         }
     }
@@ -142,6 +145,23 @@ impl GlyphCache {
             self.keys[i] = Some(key);
         }
         self.map.insert(key, glyph);
+    }
+
+    /// Records the pixel size raster `id` was made at.
+    pub fn set_raster_size(&mut self, id: RasterId, size: f32) {
+        let i = id.0 as usize;
+        if self.raster_sizes.len() <= i {
+            self.raster_sizes.resize(i + 1, f32::NAN);
+        }
+        self.raster_sizes[i] = size;
+    }
+
+    /// The pixel size raster `id` was made at.
+    pub fn raster_size(&self, id: RasterId) -> Option<f32> {
+        self.raster_sizes
+            .get(id.0 as usize)
+            .copied()
+            .filter(|s| !s.is_nan())
     }
 
     /// The key a raster id was produced from.

@@ -17,6 +17,15 @@ use crate::wire::WireError;
 /// How far past the slots in use a create may reach.
 const ID_SLACK: u32 = 4096;
 
+/// Largest accepted font size, logical points. Bounds the raster work of
+/// one glyph; a glyph larger than an atlas page still renders (the text
+/// engine rasterizes it smaller and draws it scaled up).
+pub const MAX_FONT_SIZE: f32 = 2048.0;
+
+fn font_size_ok(v: f32) -> bool {
+    finite(v) && v > 0.0 && v <= MAX_FONT_SIZE
+}
+
 fn invalid(why: &'static str) -> WireError {
     WireError::Invalid(why)
 }
@@ -41,7 +50,7 @@ fn valid_spans(text: &str, spans: &[TextSpan]) -> Result<(), WireError> {
         if s.start as usize > text.len() || !text.is_char_boundary(s.start as usize) {
             return Err(invalid("paragraph span off a char boundary"));
         }
-        if !finite(s.font_size) || s.font_size <= 0.0 || !(1..=1000).contains(&s.weight) {
+        if !font_size_ok(s.font_size) || !(1..=1000).contains(&s.weight) {
             return Err(invalid("paragraph span style out of range"));
         }
         prev = Some(s.start);
@@ -212,7 +221,7 @@ pub fn validate(host: &Host, txn: &Transaction<'_>) -> Result<(), WireError> {
                 if o.kind(*id) != Some(NodeKind::Input) {
                     return Err(invalid("input config on a non-input node"));
                 }
-                if !finite(*font_size) || *font_size <= 0.0 {
+                if !font_size_ok(*font_size) {
                     return Err(invalid("input font size out of range"));
                 }
             }
@@ -402,6 +411,7 @@ impl Ui {
                 if metrics_changed || colors_changed {
                     p.spans.clear();
                     p.spans.extend_from_slice(spans);
+                    self.host.copied_bytes += std::mem::size_of_val(spans) as u64;
                 }
                 if text_changed {
                     self.host.revs.text_content.bump();

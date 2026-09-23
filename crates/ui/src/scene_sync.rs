@@ -90,7 +90,12 @@ pub(crate) struct SceneSync {
     pub missing: Vec<RasterId>,
     /// Scale the text chunks were emitted at.
     pub scale: f32,
+    /// Reused id buffers (content queue, built chunks, paint queue): a
+    /// drain swaps buffers with its queue, so frames allocate nothing.
     pub scratch: Vec<u32>,
+    pub built: Vec<u32>,
+    pub paint_ids: Vec<u32>,
+    pub spatial_ids: Vec<u32>,
     /// Nodes whose chunk build waits until their box nears the viewport.
     pub deferred: DirtyQueue,
     /// Visibility inputs the deferred set was last checked against:
@@ -111,6 +116,9 @@ impl SceneSync {
             missing: Vec::new(),
             scale: f32::NAN,
             scratch: Vec::new(),
+            built: Vec::new(),
+            paint_ids: Vec::new(),
+            spatial_ids: Vec::new(),
             deferred: DirtyQueue::new(),
             checked: None,
         }
@@ -226,7 +234,8 @@ impl Ui {
         }
         let mut ids = std::mem::take(&mut self.sync.scratch);
         self.host.dirty.content.drain_into(&mut ids);
-        let mut built = Vec::with_capacity(ids.len());
+        let mut built = std::mem::take(&mut self.sync.built);
+        built.clear();
         for &id in &ids {
             let node = NodeId(id);
             if self.host.is_live(node) && !self.near(node, &region) {
@@ -238,15 +247,16 @@ impl Ui {
             self.build_chunk(node);
             built.push(id);
         }
-        let ids = built;
-        let mut paint_ids = Vec::new();
+        let mut paint_ids = std::mem::take(&mut self.sync.paint_ids);
         self.host.dirty.paint.drain_into(&mut paint_ids);
-        for id in paint_ids {
-            if !ids.contains(&id) {
+        for &id in &paint_ids {
+            if !built.contains(&id) {
                 self.patch_paint(NodeId(id));
             }
         }
         self.sync.scratch = ids;
+        self.sync.built = built;
+        self.sync.paint_ids = paint_ids;
 
         let mut missing = std::mem::take(&mut self.sync.missing);
         missing.clear();
@@ -394,6 +404,11 @@ impl Ui {
             if scrolls {
                 if s.content_rec == NONE {
                     s.content_rec = self.scene.transforms.alloc(Affine::IDENTITY, NONE);
+                    // Scroll content moves by fractions (wheel deltas,
+                    // commands): its placement stays fractional so the
+                    // motion never steps. There is no snap at rest: it
+                    // needs a settle signal (the animation driver).
+                    self.scene.transforms.set_snap(s.content_rec, false);
                 }
             } else if s.content_rec != NONE {
                 self.scene.transforms.free(s.content_rec);
@@ -491,8 +506,10 @@ impl Ui {
     /// Scroll, transform, and opacity changes without topology or layout
     /// changes: patch the node's records and layer in place.
     fn patch_spatial(&mut self) {
-        let ids = self.host.dirty.spatial.as_slice().to_vec();
-        for id in ids {
+        let mut ids = std::mem::take(&mut self.sync.spatial_ids);
+        ids.clear();
+        ids.extend_from_slice(self.host.dirty.spatial.as_slice());
+        for &id in &ids {
             let node = NodeId(id);
             if !self.host.is_live(node) {
                 continue;
@@ -519,6 +536,7 @@ impl Ui {
                 self.scene.set_layer_opacity(s.layer, spatial.opacity);
             }
         }
+        self.sync.spatial_ids = ids;
     }
 
     /// Whether a node's border box, in device px, intersects `region`.

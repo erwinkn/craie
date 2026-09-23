@@ -177,6 +177,14 @@ impl<T: Copy> SpanPool<T> {
             .unwrap_or_default()
     }
 
+    /// `take_dirty` into a reused buffer (replaced).
+    pub fn take_dirty_into(&mut self, out: &mut Vec<Range<usize>>) {
+        match self.dirty.as_mut() {
+            Some(d) => d.take_into(out),
+            None => out.clear(),
+        }
+    }
+
     /// Allocates a list of `len` fill values.
     pub fn alloc(&mut self, len: usize) -> Span {
         if len == 0 {

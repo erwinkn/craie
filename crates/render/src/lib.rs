@@ -125,6 +125,20 @@ struct LayerTarget {
     w: u32,
     h: u32,
     view: TextureView,
+    /// Composites this target; rebuilt when the uniform buffer is.
+    composite: wgpu::BindGroup,
+}
+
+/// Per-frame planning buffers, kept so a frame allocates nothing.
+#[derive(Default)]
+struct DrawScratch {
+    vps: Vec<Viewport>,
+    /// Per layer: (target, viewport, composite viewport).
+    plan: Vec<(usize, usize, usize)>,
+    in_use: Vec<usize>,
+    stack: Vec<usize>,
+    parents: Vec<usize>,
+    bytes: Vec<u8>,
 }
 
 /// Per-frame work counters.
@@ -160,6 +174,9 @@ pub struct Renderer {
     layer_pool: Vec<LayerTarget>,
     /// Viewport uniform bytes last written: an unchanged frame writes none.
     viewport_bytes: Vec<u8>,
+    scratch: DrawScratch,
+    /// Dirty ranges of the table being synced (reused).
+    ranges: Vec<Range<usize>>,
     pub stats: RenderStats,
     /// Bytes uploaded to atlas textures this session (diagnostics).
     pub atlas_upload_bytes: u64,
@@ -210,6 +227,8 @@ impl Renderer {
             atlas: None,
             layer_pool: Vec::new(),
             viewport_bytes: Vec::new(),
+            scratch: DrawScratch::default(),
+            ranges: Vec::new(),
             stats: RenderStats::default(),
             atlas_upload_bytes: 0,
         }
@@ -225,20 +244,23 @@ impl Renderer {
             bytes += b;
             recreated |= r;
         };
-        let r = scene.rects.take_dirty();
+        // One reused range buffer: a frame allocates nothing here.
+        let mut r = std::mem::take(&mut self.ranges);
+        scene.rects.take_dirty_into(&mut r);
         add(self.rects.sync(gpu, scene.rects.backing(), &r));
-        let r = scene.glyphs.take_dirty();
+        scene.glyphs.take_dirty_into(&mut r);
         add(self.glyphs.sync(gpu, scene.glyphs.backing(), &r));
-        let r = scene.paints.take_dirty();
+        scene.paints.take_dirty_into(&mut r);
         add(self.paints.sync(gpu, scene.paints.backing(), &r));
-        let r = scene.take_placement_dirty();
+        scene.take_placement_dirty_into(&mut r);
         add(self.placements.sync(gpu, scene.placements(), &r));
-        let r = scene.transforms.take_gpu_dirty();
+        scene.transforms.take_gpu_dirty_into(&mut r);
         add(self.worlds.sync(gpu, scene.transforms.gpu_rows(), &r));
-        let r = scene.clips.take_gpu_dirty();
+        scene.clips.take_gpu_dirty_into(&mut r);
         add(self.clips.sync(gpu, scene.clips.gpu_rows(), &r));
-        let r = scene.atlas.take_gpu_dirty();
+        scene.atlas.take_gpu_dirty_into(&mut r);
         add(self.rasters.sync(gpu, scene.atlas.gpu_rows(), &r));
+        self.ranges = r;
         if recreated || self.scene_bg.is_none() {
             self.rebind(gpu);
         }
@@ -343,8 +365,39 @@ impl Renderer {
             view_formats: &[],
         });
         let view = tex.create_view(&Default::default());
-        self.layer_pool.push(LayerTarget { w, h, view });
+        let composite = self.composite_bind_group(gpu, &view);
+        self.layer_pool.push(LayerTarget {
+            w,
+            h,
+            view,
+            composite,
+        });
         self.layer_pool.len() - 1
+    }
+
+    fn composite_bind_group(&self, gpu: &Gpu, view: &TextureView) -> wgpu::BindGroup {
+        gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("composite"),
+            layout: &self.composite_bgl,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                        buffer: &self.viewports,
+                        offset: 0,
+                        size: wgpu::BufferSize::new(size_of::<Viewport>() as u64),
+                    }),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::Sampler(&self.layer_sampler),
+                },
+            ],
+        })
     }
 
     /// Encodes and submits the scene's draw list into `view`, a target of
@@ -358,9 +411,14 @@ impl Renderer {
         height: u32,
         scene: &mut Scene,
     ) {
-        self.stats.draw_calls = 0;
-        self.stats.passes = 0;
-        self.stats.layers = 0;
+        self.plan_frame(gpu, width, height, scene);
+        self.encode_frame(gpu, view, scene);
+    }
+
+    /// Craie's share of `draw`: plans the layer targets and viewports and
+    /// writes the viewport uniform when it changed. Once warm it
+    /// allocates nothing (planning buffers are kept).
+    pub fn plan_frame(&mut self, gpu: &Gpu, width: u32, height: u32, scene: &mut Scene) {
         let mut uniform_bytes = 0u64;
         let cmds = &scene.draw_list().cmds;
         let page = scene.atlas.page_size() as f32;
@@ -374,18 +432,29 @@ impl Renderer {
         // Plan: one viewport entry for the window, and per layer one for
         // its target plus one for its composite. Layer targets come from
         // the pool; a layer nested inside another needs its own target.
-        let mut vps: Vec<Viewport> = vec![base];
-        let mut plan: Vec<(usize, usize, usize)> = Vec::new(); // (target, vp, composite vp)
-        let mut in_use: Vec<usize> = Vec::new();
-        let mut stack: Vec<usize> = Vec::new();
-        let mut parents: Vec<usize> = vec![0];
+        let mut sc = std::mem::take(&mut self.scratch);
+        let DrawScratch {
+            vps,
+            plan,
+            in_use,
+            stack,
+            parents,
+            bytes,
+        } = &mut sc;
+        vps.clear();
+        plan.clear();
+        in_use.clear();
+        stack.clear();
+        parents.clear();
+        vps.push(base);
+        parents.push(0);
         for cmd in cmds {
             match *cmd {
                 DrawCmd::BeginLayer { opacity, bounds } => {
                     let w = (bounds[2] - bounds[0]).max(1) as u32;
                     let h = (bounds[3] - bounds[1]).max(1) as u32;
                     // A target is busy while an enclosing layer draws to it.
-                    let t = self.layer_target(gpu, w, h, &in_use);
+                    let t = self.layer_target(gpu, w, h, in_use);
                     in_use.push(t);
                     let (tw, th) = (self.layer_pool[t].w as f32, self.layer_pool[t].h as f32);
                     let vp = vps.len();
@@ -429,49 +498,38 @@ impl Renderer {
                 usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
                 mapped_at_creation: false,
             });
-            // Rebuild the scene bind group against the new uniform buffer.
+            // Rebuild the bind groups against the new uniform buffer.
             self.rebind(gpu);
+            for i in 0..self.layer_pool.len() {
+                let bg = self.composite_bind_group(gpu, &self.layer_pool[i].view);
+                self.layer_pool[i].composite = bg;
+            }
         }
-        let mut bytes = vec![0u8; vps.len() * VIEWPORT_STRIDE as usize];
+        bytes.clear();
+        bytes.resize(vps.len() * VIEWPORT_STRIDE as usize, 0);
         for (i, v) in vps.iter().enumerate() {
             let at = i * VIEWPORT_STRIDE as usize;
             bytes[at..at + size_of::<Viewport>()].copy_from_slice(bytemuck::bytes_of(v));
         }
-        if bytes != self.viewport_bytes || rebound {
-            gpu.queue.write_buffer(&self.viewports, 0, &bytes);
+        if *bytes != self.viewport_bytes || rebound {
+            gpu.queue.write_buffer(&self.viewports, 0, bytes);
             self.stats.upload_bytes += bytes.len() as u64;
             uniform_bytes += bytes.len() as u64;
-            self.viewport_bytes = bytes;
+            std::mem::swap(bytes, &mut self.viewport_bytes);
         }
+        self.scratch = sc;
+        scene.counters.upload_bytes += uniform_bytes;
+    }
 
-        let composite_bgs: Vec<wgpu::BindGroup> = plan
-            .iter()
-            .map(|&(t, _, _)| {
-                gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                    label: Some("composite"),
-                    layout: &self.composite_bgl,
-                    entries: &[
-                        wgpu::BindGroupEntry {
-                            binding: 0,
-                            resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                                buffer: &self.viewports,
-                                offset: 0,
-                                size: wgpu::BufferSize::new(size_of::<Viewport>() as u64),
-                            }),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 1,
-                            resource: wgpu::BindingResource::TextureView(&self.layer_pool[t].view),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 2,
-                            resource: wgpu::BindingResource::Sampler(&self.layer_sampler),
-                        },
-                    ],
-                })
-            })
-            .collect();
-
+    /// wgpu's share of `draw`: records the passes planned by
+    /// `plan_frame` and submits them. Its allocations are wgpu's own
+    /// (encoder, passes, submission), a fixed amount per pass.
+    pub fn encode_frame(&mut self, gpu: &Gpu, view: &TextureView, scene: &Scene) {
+        self.stats.draw_calls = 0;
+        self.stats.passes = 0;
+        self.stats.layers = 0;
+        let sc = std::mem::take(&mut self.scratch);
+        let cmds = &scene.draw_list().cmds;
         let mut encoder = gpu
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -492,12 +550,11 @@ impl Renderer {
             view,
             0,
             wgpu::LoadOp::Clear(clear),
-            &plan,
-            &composite_bgs,
+            &sc.plan,
             &mut layer_ix,
         );
+        self.scratch = sc;
         gpu.queue.submit([encoder.finish()]);
-        scene.counters.upload_bytes += uniform_bytes;
     }
 
     fn rebind(&mut self, gpu: &Gpu) {
@@ -561,7 +618,6 @@ impl Renderer {
         vp: usize,
         mut load: wgpu::LoadOp<wgpu::Color>,
         plan: &[(usize, usize, usize)],
-        composites: &[wgpu::BindGroup],
         layer_ix: &mut usize,
     ) {
         loop {
@@ -642,7 +698,6 @@ impl Renderer {
                         layer_vp,
                         wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
                         plan,
-                        composites,
                         layer_ix,
                     );
                     let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -665,7 +720,7 @@ impl Renderer {
                     pass.set_pipeline(&self.composite_pipeline);
                     pass.set_bind_group(
                         0,
-                        &composites[l],
+                        &self.layer_pool[t].composite,
                         &[(comp_vp as u64 * VIEWPORT_STRIDE) as u32],
                     );
                     pass.draw(0..4, 0..1);

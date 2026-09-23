@@ -322,10 +322,8 @@ impl Inputs {
         Some(state.editor.text().to_string())
     }
 
-    /// Applies an editing/pointer action to an input. Returns true when
-    /// the buffer or selection changed enough to repaint; the caller
-    /// separately asks `take_change` whether JS needs `onChangeText`.
-    pub fn act(&mut self, text: &mut TextEngine, id: u32, action: &KeyAction) -> bool {
+    /// `act` without reshape accounting.
+    fn act_raw(&mut self, text: &mut TextEngine, id: u32, action: &KeyAction) -> bool {
         // Undo/redo replace the buffer wholesale; they need the driver
         // after `set_text`, so handle them outside the driver scope.
         if matches!(action, KeyAction::Undo | KeyAction::Redo) {
@@ -465,26 +463,80 @@ impl Inputs {
         preedit: &str,
         cursor: Option<(usize, usize)>,
     ) {
-        if let Some(state) = self.map.get_mut(&id) {
+        self.tracked(text, id, |state, text| {
             let mut drv = state.editor.driver(&mut text.font_cx, &mut text.layout_cx);
             drv.set_compose(preedit, cursor);
-        }
+        });
     }
 
     /// IME commit: inserts `text` as committed input.
     pub fn commit(&mut self, text: &mut TextEngine, id: u32, s: &str) {
-        if let Some(state) = self.map.get_mut(&id) {
+        self.tracked(text, id, |state, text| {
             state.record_undo(false);
             let mut drv = state.editor.driver(&mut text.font_cx, &mut text.layout_cx);
             drv.insert_or_replace_selection(s);
-        }
+        });
     }
 
     /// IME disabled / focus lost: drop any composing region.
     pub fn finish_compose(&mut self, text: &mut TextEngine, id: u32) {
-        if let Some(state) = self.map.get_mut(&id) {
+        self.tracked(text, id, |state, text| {
             let mut drv = state.editor.driver(&mut text.font_cx, &mut text.layout_cx);
             drv.finish_compose();
+        });
+    }
+
+    /// Applies an editing/pointer action to an input. Returns true when
+    /// the buffer or selection changed enough to repaint; the caller
+    /// separately asks `take_change` whether JS needs `onChangeText`.
+    pub fn act(&mut self, text: &mut TextEngine, id: u32, action: &KeyAction) -> bool {
+        let before = self.shape_state(id);
+        let r = self.act_raw(text, id, action);
+        self.count_reshape(text, id, before);
+        r
+    }
+
+    /// Runs one editor operation, counting a reshape if it shaped.
+    fn tracked(
+        &mut self,
+        text: &mut TextEngine,
+        id: u32,
+        f: impl FnOnce(&mut InputState, &mut TextEngine),
+    ) {
+        let before = self.shape_state(id);
+        if let Some(state) = self.map.get_mut(&id) {
+            f(state, text);
+        }
+        self.count_reshape(text, id, before);
+    }
+
+    /// (layout dirty, buffer signature) of an input, before an operation.
+    fn shape_state(&self, id: u32) -> Option<(bool, u64)> {
+        let state = self.map.get(&id)?;
+        Some((
+            state.editor.try_layout().is_none(),
+            text_signature(state.editor.raw_text()),
+        ))
+    }
+
+    /// Parley's driver reshapes inside edit operations (and refreshes a
+    /// dirty layout inside navigation), where `InputState::layout` cannot
+    /// see it. An operation shaped when its buffer changed or its dirty
+    /// layout came back clean. Counts in `TextEngine::shapes`.
+    fn count_reshape(&self, text: &mut TextEngine, id: u32, before: Option<(bool, u64)>) {
+        let (Some((dirty, sig)), Some(state)) = (before, self.map.get(&id)) else {
+            return;
+        };
+        let clean = state.editor.try_layout().is_some();
+        if clean && (dirty || text_signature(state.editor.raw_text()) != sig) {
+            text.shapes += 1;
         }
     }
+}
+
+/// FNV-1a over a buffer: detects edits without copying the text.
+fn text_signature(s: &str) -> u64 {
+    s.bytes().fold(0xcbf2_9ce4_8422_2325, |h, b| {
+        (h ^ b as u64).wrapping_mul(0x0100_0000_01b3)
+    })
 }

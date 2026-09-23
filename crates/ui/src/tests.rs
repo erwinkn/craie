@@ -1263,6 +1263,48 @@ fn views_default_to_column() {
     assert_eq!(ui.layouts.data(NodeId(2)).rect.origin.y, 20.0);
 }
 
+/// Children do not shrink by default (React Native): a fixed box in a
+/// row keeps its size next to wide text; the text shrinks and wraps
+/// only when it asks to.
+#[test]
+fn views_default_to_no_shrink() {
+    let mut ui = Ui::new(1.0);
+    let mut row = taffy::Style {
+        flex_direction: taffy::FlexDirection::Row,
+        ..sized(200.0, 100.0)
+    };
+    row.flex_shrink = 0.0;
+    let mut t = Transaction::new(1);
+    t.create(0, NodeKind::View).layout(0, &row).append(NIL, 0);
+    t.create(1, NodeKind::View)
+        .layout(1, &sized(18.0, 18.0))
+        .append(0, 1);
+    t.create(2, NodeKind::View).append(0, 2);
+    t.create(3, NodeKind::Text)
+        .text(3, WORDS, 14.0, 0xFFFF_FFFF)
+        .append(2, 3);
+    ui.apply_txn(&t).unwrap();
+    ui.render(Size::new(400.0, 300.0));
+    assert_eq!(ui.layouts.data(NodeId(1)).rect.size.width, 18.0);
+    let text_w = ui.layouts.data(NodeId(2)).rect.size.width;
+    assert!(text_w > 200.0, "no shrink: the text overflows ({text_w})");
+
+    let mut t = Transaction::new(2);
+    t.layout(
+        2,
+        &taffy::Style {
+            flex_direction: taffy::FlexDirection::Column,
+            flex_grow: 1.0,
+            flex_shrink: 1.0,
+            ..taffy::Style::default()
+        },
+    );
+    ui.apply_txn(&t).unwrap();
+    ui.render(Size::new(400.0, 300.0));
+    assert_eq!(ui.layouts.data(NodeId(1)).rect.size.width, 18.0);
+    assert_eq!(ui.layouts.data(NodeId(2)).rect.size.width, 182.0);
+}
+
 /// A transformed subtree places its chunks fractionally: slow motion
 /// moves the drawn text by fractions, not in whole-pixel steps. Chunks
 /// in untransformed space still snap.
@@ -1293,4 +1335,172 @@ fn transformed_chunks_move_fractionally() {
             "step {i}: moved {dx}, want {want}"
         );
     }
+}
+
+/// Unknown op-mask bits (paint, spatial) reject the whole transaction.
+#[test]
+fn unknown_op_mask_bits_reject() {
+    let mut ui = Ui::new(1.0);
+    let mut t = Transaction::new(1);
+    t.create(0, NodeKind::View).append(NIL, 0);
+    ui.apply_txn(&t).unwrap();
+    let seq = ui.seq;
+    let fill = ui.host.paint[0].fill;
+    for (tag_op, t) in [
+        (wire::op::PAINT, {
+            let mut t = Transaction::new(9);
+            t.fill(0, 0xFF00_00FF);
+            t
+        }),
+        (wire::op::SPATIAL, {
+            let mut t = Transaction::new(9);
+            t.opacity(0, 0.5);
+            t
+        }),
+    ] {
+        let mut buf = wire::encode(&t);
+        // Header 28 bytes, no tables: op tag, u32 id, then the mask.
+        assert_eq!(buf[28], tag_op);
+        buf[33] |= 0x80;
+        assert!(ui.apply(&buf).is_err());
+        assert_eq!(
+            (ui.seq, ui.host.paint[0].fill, ui.host.spatial[0].opacity),
+            (seq, fill, 1.0)
+        );
+    }
+}
+
+/// Scroll content moves by fractions at 1x and 2x, also under a
+/// transformed ancestor: no whole-pixel steps.
+#[test]
+fn scroll_content_moves_fractionally() {
+    for (scale, transformed) in [(1.0f32, false), (2.0, false), (2.0, true)] {
+        let mut ui = Ui::new(scale);
+        let mut s = sized(200.0, 100.0);
+        s.overflow = taffy::Point {
+            x: taffy::Overflow::Scroll,
+            y: taffy::Overflow::Scroll,
+        };
+        let mut t = Transaction::new(1);
+        t.create(0, NodeKind::View).append(NIL, 0);
+        if transformed {
+            t.transform(0, craie_core::Affine::translate(3.0, 5.0));
+        }
+        t.create(1, NodeKind::View).layout(1, &s).append(0, 1);
+        t.create(2, NodeKind::View)
+            .layout(2, &sized(200.0, 1000.0))
+            .fill(2, 0xFF00_00FF)
+            .append(1, 2);
+        ui.apply_txn(&t).unwrap();
+        ui.render(Size::new(300.0, 300.0));
+        let y = |ui: &Ui| {
+            resolved(ui.scene())
+                .into_iter()
+                .find(|p| p.color == 0xFF00_00FF)
+                .unwrap()
+                .bounds
+                .origin
+                .y
+        };
+        let y0 = y(&ui);
+        for step in 1..=4 {
+            ui.scroll_to(NodeId(1), 0.0, step as f32 * 0.05);
+            ui.render(Size::new(300.0, 300.0));
+            let dy = y0 - y(&ui);
+            let want = step as f32 * 0.05 * scale;
+            assert!(
+                (dy - want).abs() < 1e-3,
+                "scale {scale} step {step}: {dy} vs {want}"
+            );
+        }
+    }
+}
+
+/// The resolver rounds half-pixel origins to even, as the shader does.
+#[test]
+fn snapping_rounds_half_to_even() {
+    for (x, want) in [
+        (10.25f32, 20.0f32),
+        (10.75, 22.0),
+        (-10.25, -20.0),
+        (-10.75, -22.0),
+    ] {
+        let mut ui = Ui::new(2.0);
+        let mut s = sized(20.0, 20.0);
+        s.position = taffy::Position::Absolute;
+        s.inset.left = taffy::LengthPercentageAuto::length(x);
+        let mut t = Transaction::new(1);
+        t.create(0, NodeKind::View)
+            .layout(0, &sized(100.0, 100.0))
+            .append(NIL, 0);
+        t.create(1, NodeKind::View)
+            .layout(1, &s)
+            .fill(1, 0xFF00_00FF)
+            .append(0, 1);
+        ui.apply_txn(&t).unwrap();
+        ui.render(Size::new(300.0, 300.0));
+        let b = resolved(ui.scene())
+            .into_iter()
+            .find(|p| p.color == 0xFF00_00FF)
+            .unwrap()
+            .bounds;
+        assert_eq!(b.origin.x, want, "x {x}");
+    }
+}
+
+/// A glyph larger than an atlas page renders: it is rasterized smaller,
+/// stays resident, and draws at its full size. After eviction it comes
+/// back at the same raster size. Font sizes past the bound reject.
+#[test]
+fn oversized_glyph_renders() {
+    use crate::scene::RasterAtlas;
+    let mut ui = Ui::new(1.0);
+    ui.scene.atlas = RasterAtlas::with_budget(256, 1, 1);
+    let mut t = Transaction::new(1);
+    t.create(0, NodeKind::View).append(NIL, 0);
+    t.create(1, NodeKind::Text)
+        .text(1, "W", 600.0, 0xFFFF_FFFF)
+        .append(0, 1);
+    ui.apply_txn(&t).unwrap();
+    ui.render(Size::new(1000.0, 1000.0));
+    let drawn = resolved(ui.scene());
+    let g: Vec<_> = drawn.iter().filter(|p| p.kind == 1).collect();
+    assert_eq!(g.len(), 1, "the glyph draws");
+    assert!(g[0].bounds.size.width > 256.0 && g[0].bounds.size.height > 256.0);
+    let atlas = &ui.scene.atlas;
+    assert_eq!(atlas.stats.downscaled, 1);
+    assert_eq!(atlas.stats.oversized, 0);
+    let id = crate::scene::RasterId(g[0].aux as u32);
+    let e = *atlas.entry(id);
+    assert!(e.resident);
+    assert!(e.w <= 254 && e.h <= 254, "bitmap fits a page");
+    assert_eq!(
+        (e.quad_w as f32, e.quad_h as f32),
+        (g[0].bounds.size.width, g[0].bounds.size.height)
+    );
+
+    // A different glyph takes the only page and evicts the first.
+    let mut t = Transaction::new(2);
+    t.text(1, "M", 600.0, 0xFFFF_FFFF);
+    ui.apply_txn(&t).unwrap();
+    ui.render(Size::new(1000.0, 1000.0));
+    assert!(!ui.scene.atlas.entry(id).resident, "evicted");
+    // Back to the first: re-rasterized at the downscaled size.
+    let rerasters = ui.text.cache.stats.rerasters;
+    let mut t = Transaction::new(3);
+    t.text(1, "W", 600.0, 0xFFFF_FFFF);
+    ui.apply_txn(&t).unwrap();
+    ui.render(Size::new(1000.0, 1000.0));
+    assert_eq!(ui.text.cache.stats.rerasters, rerasters + 1);
+    let back = *ui.scene.atlas.entry(id);
+    assert!(back.resident);
+    assert_eq!(
+        (back.w, back.h, back.quad_w, back.quad_h),
+        (e.w, e.h, e.quad_w, e.quad_h)
+    );
+    assert_eq!(ui.scene.atlas.stats.oversized, 0);
+
+    let mut t = Transaction::new(4);
+    t.text(1, "W", crate::executor::MAX_FONT_SIZE * 2.0, 0xFFFF_FFFF);
+    assert!(ui.apply_txn(&t).is_err(), "font size past the bound");
 }

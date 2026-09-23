@@ -126,6 +126,41 @@ a per-record policy so transformed content moves by fractions. The
 allocation test measures 0 allocations for an unchanged frame and 1 for
 a color or transform patch.
 
+### Review round 2 (GPT-6 Astra)
+
+Six findings and two spec deviations, all valid, all fixed with
+regression tests:
+
+- A glyph larger than an atlas page no longer disappears: it is
+  rasterized at a smaller size and drawn scaled up (a CPU test and a
+  GPU pixel test). Font sizes above 2048 points reject.
+- Accessibility bounds and the IME area publish only after
+  `prepare_frame`, so native reflow publishes final layout.
+- The CPU resolver rounds half to even, like WGSL `round`; a GPU test
+  checks half-pixel edges at 2x.
+- Scroll content has no snap: fractional offsets move it by fractions
+  at 1x and 2x.
+- Editor operations count shapes (a text signature per operation); a
+  typing test is the positive control.
+- Unknown paint and spatial mask bits reject the transaction.
+- Allocations are measured over the whole frame on a real device, per
+  phase. Three frame-path allocations were removed: the paint and
+  spatial id lists and the built-chunk list (now reused), the renderer's
+  per-draw plan vectors and composite bind groups (now kept), and the
+  dirty-range vectors (now copied into one reused buffer). An unchanged
+  frame and a warm color or transform patch now allocate 0 times in
+  Craie code (was 1 for a patch). wgpu's own encode cost on Metal: 56
+  allocations per frame, 23 per extra pass, 8 + 5 per buffer write.
+- The copy counter includes span lists (16 bytes per span).
+
+Captures of the JS examples (`CRAIE_CAPTURE`) found one more deviation
+from §4: children shrank by default (Taffy's CSS default), so the todo
+checkbox shrank next to wrapped text. `flexShrink` now defaults to 0 as
+in React Native; the todo text column sets `flexShrink: 1`. The todo,
+widgets, and demo screens were checked by eye after the change. The
+Rust app and text screenshots are pixel-identical to the round-1
+references.
+
 ### Visual checks
 
 `cargo run --example text -- --screenshot` and `--example app` render

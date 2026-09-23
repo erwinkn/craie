@@ -229,6 +229,11 @@ impl Scene {
         self.placement_dirty.take()
     }
 
+    /// `take_placement_dirty` into a reused buffer (replaced).
+    pub fn take_placement_dirty_into(&mut self, out: &mut Vec<std::ops::Range<usize>>) {
+        self.placement_dirty.take_into(out);
+    }
+
     /// Starts a frame's residency epoch. Rasters emitted this frame are
     /// pinned as they are used; `prepare` pins every raster of every
     /// visible chunk before it re-rasterizes missing ones, so a visible
@@ -465,7 +470,12 @@ impl Scene {
                     let mut origin =
                         world.apply(craie_core::geom::Point::new(p.offset[0], p.offset[1]));
                     if snap {
-                        origin = craie_core::geom::Point::new(origin.x.round(), origin.y.round());
+                        // Ties to even, as WGSL `round` lowers on every
+                        // backend (Metal rint, SPIR-V/GLSL RoundEven).
+                        origin = craie_core::geom::Point::new(
+                            origin.x.round_ties_even(),
+                            origin.y.round_ties_even(),
+                        );
                     }
                     let mut lin = world;
                     lin.0[4] = origin.x;
@@ -475,9 +485,14 @@ impl Scene {
                         if !snap {
                             return r;
                         }
-                        let x0 = r.origin.x.round();
-                        let y0 = r.origin.y.round();
-                        Rect::new(x0, y0, r.max_x().round() - x0, r.max_y().round() - y0)
+                        let x0 = r.origin.x.round_ties_even();
+                        let y0 = r.origin.y.round_ties_even();
+                        Rect::new(
+                            x0,
+                            y0,
+                            r.max_x().round_ties_even() - x0,
+                            r.max_y().round_ties_even() - y0,
+                        )
                     };
                     let clip = if p.clip == NONE {
                         None
@@ -524,7 +539,10 @@ impl Scene {
                                     [s.start as usize..(s.start + s.len) as usize];
                                 for g in gs {
                                     let e = self.atlas.entry(RasterId(g.raster));
-                                    let size = [e.w as f32 / self.scale, e.h as f32 / self.scale];
+                                    let size = [
+                                        e.quad_w as f32 / self.scale,
+                                        e.quad_h as f32 / self.scale,
+                                    ];
                                     let local = Rect::new(g.pos[0], g.pos[1], size[0], size[1]);
                                     out.push(Resolved {
                                         kind: 1,

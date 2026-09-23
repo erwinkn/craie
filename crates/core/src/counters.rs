@@ -25,7 +25,7 @@ pub struct Counters {
     /// uniforms).
     pub upload_bytes: u64,
     /// Bytes copied from transactions into retained host state (text,
-    /// labels, payloads).
+    /// span lists, labels, payloads).
     pub copied_bytes: u64,
 }
 

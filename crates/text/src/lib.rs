@@ -189,11 +189,11 @@ impl TextEngine {
                     if scaler.is_none() {
                         scaler = self.raster.scaler(font, font_size, coords);
                     }
-                    let Some(scaler) = scaler.as_mut() else {
+                    let Some(sc) = scaler.as_mut() else {
                         continue;
                     };
                     let Some(rastered) = Rasterizer::render(
-                        scaler,
+                        sc,
                         glyph.id as u16,
                         Vector::new(cache::subpixel_offset(sx), cache::subpixel_offset(sy)),
                         embolden,
@@ -203,24 +203,69 @@ impl TextEngine {
                     };
                     self.cache.stats.rasters += 1;
                     let p = rastered.image.placement;
-                    // Zero-area glyphs draw nothing; a glyph larger than an
-                    // atlas page is skipped (counted in the atlas stats).
-                    let raster = if p.width == 0 || p.height == 0 {
-                        None
-                    } else if !atlas.fits(p.width, p.height) {
-                        atlas.stats.oversized += 1;
-                        None
-                    } else {
+                    let c = if p.width == 0 || p.height == 0 {
+                        // Zero-area glyphs draw nothing.
+                        CachedGlyph {
+                            raster: None,
+                            w: 0,
+                            h: 0,
+                            left: 0,
+                            top: 0,
+                        }
+                    } else if atlas.fits(p.width, p.height) {
                         let id = atlas.new_id(p.width as u16, p.height as u16, rastered.color);
                         atlas.insert(id, &rastered.image.data);
-                        Some(id)
-                    };
-                    let c = CachedGlyph {
-                        raster,
-                        w: p.width as u16,
-                        h: p.height as u16,
-                        left: p.left as i16,
-                        top: p.top as i16,
+                        self.cache.set_raster_size(id, font_size);
+                        CachedGlyph {
+                            raster: Some(id),
+                            w: p.width as u16,
+                            h: p.height as u16,
+                            left: p.left as i16,
+                            top: p.top as i16,
+                        }
+                    } else {
+                        // Larger than a page: rasterize smaller so it
+                        // fits, and draw the bitmap scaled up to its full
+                        // size. Softer, but the glyph renders. Drops the
+                        // run's scaler: the context builds one scaler at
+                        // a time.
+                        scaler = None;
+                        let fit = (atlas.page_size() - 4) as f32;
+                        let k = (fit / p.width as f32).min(fit / p.height as f32);
+                        let small_size = font_size * k;
+                        let Some(mut small) = self.raster.scaler(font, small_size, coords) else {
+                            continue;
+                        };
+                        let Some(r) = Rasterizer::render(
+                            &mut small,
+                            glyph.id as u16,
+                            Vector::new(0.0, 0.0),
+                            embolden * k,
+                            skew,
+                        ) else {
+                            continue;
+                        };
+                        self.cache.stats.rasters += 1;
+                        atlas.stats.downscaled += 1;
+                        let q = r.image.placement;
+                        let quad_w = (q.width as f32 / k).ceil().min(u16::MAX as f32) as u16;
+                        let quad_h = (q.height as f32 / k).ceil().min(u16::MAX as f32) as u16;
+                        let id = atlas.new_scaled_id(
+                            q.width as u16,
+                            q.height as u16,
+                            quad_w,
+                            quad_h,
+                            r.color,
+                        );
+                        atlas.insert(id, &r.image.data);
+                        self.cache.set_raster_size(id, small_size);
+                        CachedGlyph {
+                            raster: Some(id),
+                            w: quad_w,
+                            h: quad_h,
+                            left: (q.left as f32 / k).round() as i16,
+                            top: (q.top as f32 / k).round() as i16,
+                        }
                     };
                     self.cache.insert(key, c);
                     c
@@ -253,16 +298,25 @@ impl TextEngine {
             let font = self.cache.font_data[key.font as usize].clone();
             let row = &self.cache.coords[key.coords as usize];
             let coords: Vec<i16> = row.coords.to_vec();
-            let size = f32::from_bits(key.size_bits);
+            // The size the raster was made at: smaller than the key's
+            // size for a glyph downscaled to fit a page (made without a
+            // subpixel offset).
+            let key_size = f32::from_bits(key.size_bits);
+            let size = self.cache.raster_size(id).unwrap_or(key_size);
+            let downscaled = size != key_size;
             let embolden = if row.embolden { size * 0.02 } else { 0.0 };
             let skew = (row.skew != 0).then(|| row.skew as f32 / 64.0);
             let Some(mut scaler) = self.raster.scaler(&font, size, &coords) else {
                 continue;
             };
-            let offset = Vector::new(
-                cache::subpixel_offset(key.subpixel & 3),
-                cache::subpixel_offset(key.subpixel >> 2),
-            );
+            let offset = if downscaled {
+                Vector::new(0.0, 0.0)
+            } else {
+                Vector::new(
+                    cache::subpixel_offset(key.subpixel & 3),
+                    cache::subpixel_offset(key.subpixel >> 2),
+                )
+            };
             if let Some(r) = Rasterizer::render(&mut scaler, key.glyph, offset, embolden, skew) {
                 self.cache.stats.rasters += 1;
                 self.cache.stats.rerasters += 1;

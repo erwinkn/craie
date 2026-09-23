@@ -12,7 +12,7 @@ struct GlyphI { x: f32, y: f32, raster: u32, paint: u32, chunk: u32 };
 struct PlacementI { ox: f32, oy: f32, transform: u32, clip: u32 };
 struct WorldI { a: f32, b: f32, c: f32, d: f32, e: f32, f: f32, flags: u32, _pad: u32 };
 struct ClipI { ia: f32, ib: f32, ic: f32, id: f32, ie: f32, if_: f32, x0: f32, y0: f32, x1: f32, y1: f32, radius: f32, parent: u32, flags: u32 };
-struct RasterI { xy: u32, wh: u32, page: u32 };
+struct RasterI { xy: u32, wh: u32, page: u32, quad: u32 };
 
 @group(0) @binding(0) var<uniform> vp: Viewport;
 @group(0) @binding(1) var<storage, read> rects: array<RectI>;
@@ -77,6 +77,7 @@ fn linear(w: WorldI, v: vec2<f32>) -> vec2<f32> {
 
 // Snap to the device-pixel grid: an axis-aligned world whose space
 // snaps (bit 1). Spaces that move by fractions keep fractional origins.
+// WGSL `round` rounds half to even; the CPU resolver matches it.
 fn snaps(w: WorldI) -> bool {
     return (w.flags & 3u) == 3u;
 }
@@ -137,11 +138,13 @@ fn vs_main(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> 
         let w = worlds[p.transform];
         let ras = rasters[g.raster];
         let size = vec2<f32>(f32(ras.wh & 0xffffu), f32(ras.wh >> 16u));
+        let quad = vec2<f32>(f32(ras.quad & 0xffffu), f32(ras.quad >> 16u));
         let xy = vec2<f32>(f32(ras.xy & 0xffffu), f32(ras.xy >> 16u));
         let origin = chunk_origin(w, p);
         // Bitmaps are rasterized at the display scale: at an unscaled
-        // world their pixels map 1:1 to device pixels.
-        let dev = origin + linear(w, vec2<f32>(g.x, g.y) + corner * size / vp.scale);
+        // world a quad pixel is a device pixel. A bitmap made smaller to
+        // fit a page draws scaled up to its quad.
+        let dev = origin + linear(w, vec2<f32>(g.x, g.y) + corner * quad / vp.scale);
         out.pos = to_ndc(dev);
         out.local = (xy + corner * size) / vp.page;
         out.color = unpack(paints[g.paint]);
