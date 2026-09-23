@@ -92,7 +92,7 @@ pub mod span_flag {
 
 // Style schema, in mask order. Every field is written as a fixed tag byte
 // plus payload where the encoding has a payload.
-mod field {
+pub(crate) mod field {
     pub const DISPLAY: u64 = 1 << 0; // u8: 0 flex, 1 none
     pub const POSITION: u64 = 1 << 1; // u8: 0 relative, 1 absolute
     pub const FLEX_DIRECTION: u64 = 1 << 2; // u8: 0 row 1 col 2 row_rev 3 col_rev
@@ -504,6 +504,14 @@ pub fn encode(txn: &Transaction<'_>) -> Vec<u8> {
     }
     out.extend_from_slice(&ops);
     out
+}
+
+/// Writes a style record with only the fields in `mask`, as the JS
+/// encoder sends partial styles. Test support for the Rust side.
+#[cfg(test)]
+pub(crate) fn put_style_masked(out: &mut Vec<u8>, s: &Style, mask: u64) {
+    out.extend_from_slice(&mask.to_le_bytes());
+    put_style_fields(out, s, mask);
 }
 
 /// Serializes the fields selected by `mask` in schema order.

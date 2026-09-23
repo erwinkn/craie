@@ -1305,6 +1305,104 @@ fn views_default_to_no_shrink() {
     assert_eq!(ui.layouts.data(NodeId(2)).rect.size.width, 182.0);
 }
 
+/// React Native flex defaults (no grow, no shrink, auto basis) hold for
+/// every way a node gets its style: none sent, a partial wire style
+/// (only the fields the app set, as the JS encoder sends), and a reset
+/// to NIL after explicit values. Checked on the stored style and on
+/// layout: each child holds an 80-wide box, so its auto basis is 80; in
+/// a row too narrow for all three none shrinks, in a wide row none
+/// grows.
+#[test]
+fn rn_flex_defaults_matrix() {
+    use crate::wire::field;
+    let flex = |s: &taffy::Style| (s.flex_grow, s.flex_shrink, s.flex_basis);
+    let rn = (0.0, 0.0, taffy::Dimension::auto());
+    let row = |w: f32| taffy::Style {
+        flex_direction: taffy::FlexDirection::Row,
+        ..sized(w, 40.0)
+    };
+    let child = sized(80.0, 20.0);
+
+    // Mount: a row; node 1 sends no style, 2 a partial style (size
+    // only), 3 explicit flex values that are reset to NIL below.
+    let mut t = Transaction::new(1);
+    t.create(0, NodeKind::View)
+        .layout(0, &row(100.0))
+        .append(NIL, 0);
+    t.create(1, NodeKind::View).append(0, 1);
+
+    let partial = t.style(&child);
+    t.create(2, NodeKind::View)
+        .push(Mutation::Layout {
+            id: 2,
+            style: partial,
+        })
+        .append(0, 2);
+    t.create(3, NodeKind::View)
+        .layout(
+            3,
+            &taffy::Style {
+                flex_grow: 1.0,
+                flex_shrink: 1.0,
+                flex_basis: taffy::Dimension::length(10.0),
+                ..child.clone()
+            },
+        )
+        .append(0, 3);
+    // An 80-wide box inside each of 1 and 3 (a distinct style row).
+    for (id, parent) in [(4, 1), (5, 3)] {
+        t.create(id, NodeKind::View)
+            .layout(id, &sized(80.0, 10.0))
+            .append(parent, id);
+    }
+    let mut buf = wire::encode(&t);
+    // Replace the full style record of `partial` with a size-only one.
+    let at = 28
+        + (0..partial as usize)
+            .map(|i| {
+                let mut v = Vec::new();
+                wire::put_style(&mut v, &t.styles[i]);
+                v.len()
+            })
+            .sum::<usize>();
+    let mut full = Vec::new();
+    wire::put_style(&mut full, &child);
+    let mut part = Vec::new();
+    wire::put_style_masked(&mut part, &child, field::SIZE);
+    buf.splice(at..at + full.len(), part);
+    let mut ui = Ui::new(1.0);
+    ui.apply(&buf).unwrap();
+    assert_eq!(flex(&ui.host.layout[1]), rn, "omitted");
+    assert_eq!(flex(&ui.host.layout[2]), rn, "partial");
+    assert_eq!(
+        ui.host.layout[2].size, child.size,
+        "partial keeps its fields"
+    );
+    assert_ne!(flex(&ui.host.layout[3]), rn, "explicit");
+
+    let mut t = Transaction::new(2);
+    t.push(Mutation::Layout { id: 3, style: NIL });
+    ui.apply_txn(&t).unwrap();
+    assert_eq!(flex(&ui.host.layout[3]), rn, "reset");
+
+    ui.render(Size::new(400.0, 300.0));
+    let w = |ui: &Ui, id: u32| ui.layouts.data(NodeId(id)).rect.size.width;
+    assert_eq!(
+        (w(&ui, 1), w(&ui, 2), w(&ui, 3)),
+        (80.0, 80.0, 80.0),
+        "no shrink"
+    );
+    let mut t = Transaction::new(3);
+    t.layout(0, &row(400.0));
+    ui.apply_txn(&t).unwrap();
+    ui.render(Size::new(400.0, 300.0));
+    assert_eq!(
+        (w(&ui, 1), w(&ui, 2), w(&ui, 3)),
+        (80.0, 80.0, 80.0),
+        "no grow"
+    );
+}
+
 /// A transformed subtree places its chunks fractionally: slow motion
 /// moves the drawn text by fractions, not in whole-pixel steps. Chunks
 /// in untransformed space still snap.
