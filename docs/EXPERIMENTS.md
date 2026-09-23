@@ -380,14 +380,18 @@ gone with it.
   inserted and a growing paragraph, removed and reused endpoints, a
   domain made not selectable, side-by-side texts, and overlapping texts.
 - Letter spacing splits shaping items, as Parley does: a ligature does
-  not straddle a spacing change. `spaced_ligatures_match_parley_glyphs`
-  (office with spacing from its second f, affix and waffle): clusters,
-  glyph ids, and positions equal Parley's. Parley's line advance and
-  width disagree with its own glyphs there (its clusters add spacing to
-  ligature continuations, its glyphs do not: +2.0 and +3.0 pt of run
-  advance, and a line 1.61 pt short at 60 pt): the test asserts that
-  difference, and passes against Parley's glyph sums. The case is not
-  in the general list, so E01 timing tables are unchanged.
+  not straddle a spacing change. Since the step 4 opening, a spaced run
+  also shapes without optional ligatures (CSS Text; ARCHITECTURE.md
+  section 5). `spaced_runs_drop_optional_ligatures` (office with
+  spacing from its second f, affix and waffle): exactly office's fi
+  and affix's ffi split into letters where Parley keeps them, every
+  other cluster equals Parley's (glyphs and advances), each spaced
+  letter takes its spacing, spaced Arabic keeps its glyphs, and the
+  text unspaced equals Parley. (Before the decision, with Parley's
+  rule, Parley's line advance disagreed with its own glyphs for spaced
+  ligatures: its clusters spaced ligature continuations, its glyphs did
+  not.) The case is not in the general list, so E01 timing tables are
+  unchanged.
 - Review round 2 (Astra): the paragraph revision is a u32 in a
   36-byte event record (an 8-bit one repeated after 256 owner
   replacements, and a queued event reached the last owner); a reused

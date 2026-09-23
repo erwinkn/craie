@@ -270,17 +270,13 @@ pub fn cases() -> Vec<Case> {
 }
 
 /// Letter spacing that starts inside a ligature (office's ffi) and
-/// covers whole ones (affix). Not in `cases`: Parley's line advance
-/// disagrees with its own glyphs here (its clusters space ligature
-/// continuations, its glyphs do not), so its own test compares the
-/// glyphs exactly and asserts that difference.
+/// covers whole ones (affix). Not in `cases`: spaced runs drop optional
+/// ligatures (CSS), Parley keeps them; its own test asserts exactly that
+/// difference.
 pub fn spaced_ligatures() -> Case {
     Case {
         name: "spacing-ligatures",
         class: "ligature",
-        // Letter spacing that starts inside a ligature (office's ffi)
-        // and covers whole ones (affix): items split where spacing
-        // changes, so each side shapes on its own (as Parley).
         text: "office fine affix waffle".to_string(),
         spans: {
             let t = "office fine affix waffle";

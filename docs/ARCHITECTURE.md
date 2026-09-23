@@ -439,6 +439,17 @@ UTF-8 + spans -> Unicode analysis -> font resolution + fallback
   engine's first draw is faster than step 2 (E01); SF itself costs more
   rasters than Helvetica. `TextEngine::default_family` sets another
   default (framebench `--family`).
+- Letter spacing follows CSS Text, not Parley (2026-09-23, step 4
+  opening). CSS Text Module Level 3, `letter-spacing`
+  (https://www.w3.org/TR/css-text-3/#letter-spacing-property): when the
+  effective spacing between two characters is not zero, user agents
+  should not apply optional ligatures, but must still apply required
+  ligatures. A run whose letter spacing is not zero shapes with `liga`,
+  `clig`, and `dlig` off; `rlig`, `calt`, and mark positioning stay on.
+  Each grapheme then takes the spacing once. The web and Android do the
+  same, and the kit targets the React Native text vocabulary. Parley
+  keeps the ligatures: a known difference with its own exact test
+  (`spaced_runs_drop_optional_ligatures`).
 
 ## 6. Fonts
 

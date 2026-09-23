@@ -392,76 +392,73 @@ fn marked_arabic_breaks_follow_uax14_where_parley_differs() {
     }
 }
 
-/// Letter spacing inside and over ligatures (S3C-05): items split where
-/// spacing changes, so office's ffi shapes as f + fi, and each ligature
-/// carries its span's spacing once (Parley's glyphs). Structure and
-/// glyph positions match Parley exactly. Parley's line advance does not
-/// match its own glyphs here (its clusters space ligature
-/// continuations): the raw comparison must fail on the advance alone,
-/// and pass against Parley's glyph sums (lines and paragraph width).
+/// Letter-spaced runs shape without optional ligatures (CSS Text 3,
+/// letter-spacing; ARCHITECTURE.md section 5), where Parley keeps them.
+/// A known difference, exact: office's fi (from the spaced second f) and
+/// affix's ffi split into their letters, and no other cluster differs
+/// from Parley's; unspaced ligatures (fine's fi, waffle's ffl) stay.
+/// Each spaced letter takes its span's spacing. Required forms stay:
+/// spaced Arabic keeps its unspaced glyphs. Unspaced, the same text
+/// equals Parley.
 #[test]
-fn spaced_ligatures_match_parley_glyphs() {
+fn spaced_runs_drop_optional_ligatures() {
+    use std::ops::Range;
     let case = e01::spaced_ligatures();
     let mut oracle = Oracle::new();
-    for &w in &case.widths {
-        let mut engine = e01::engine();
-        let p = e01::layout(&mut engine, &case.text, &case.spans, w);
-        let a = e01::ours(&engine, &p, &case.text);
-        let b = e01::parley(&oracle.layout(&case.text, &case.spans, w), &case.text);
-        let d = e01::compare(&a, &b, &case.text);
-        assert!(d.exact_structure() && d.position < 1e-3, "w={w:?}: {d:?}");
-        assert!(
-            !d.pass() && d.advance == 0.0 && d.metrics > 1.0,
-            "w={w:?}: {d:?}"
-        );
-        let mut m = b.clone();
-        for l in &mut m.lines {
-            l.advance = l.glyph_advance;
-        }
-        m.width = m
-            .lines
-            .iter()
-            .map(|l| l.advance - l.trailing)
-            .fold(0.0, f32::max);
-        let d = e01::compare(&a, &m, &case.text);
-        assert!(d.pass(), "w={w:?}: {d:?}");
-    }
-    // The spacing lands on the ligatures: each is its unspaced advance
-    // plus its span's spacing.
-    let unspaced: Vec<_> = case
-        .spans
-        .iter()
-        .map(|s| craie_text::paragraph::SpanStyle {
-            style: craie_text::paragraph::TextStyle {
-                letter_spacing: 0.0,
-                ..s.style
-            },
-            ..*s
-        })
-        .collect();
     let mut engine = e01::engine();
-    let spaced = e01::layout(&mut engine, &case.text, &case.spans, None);
-    let plain = e01::layout(&mut engine, &case.text, &unspaced, None);
-    let advance = |p: &craie_text::paragraph::Paragraph, text: std::ops::Range<u32>| {
-        let (t, g) = p
-            .cluster_map()
-            .into_iter()
-            .find(|(t, _)| t.start == text.start)
-            .unwrap();
-        assert_eq!(t, text, "cluster");
-        p.glyphs[g.start as usize..g.end as usize]
-            .iter()
-            .map(|g| g.advance)
-            .sum::<f32>()
+    let p = e01::layout(&mut engine, &case.text, &case.spans, None);
+    let a = e01::ours(&engine, &p, &case.text);
+    let b = e01::parley(&oracle.layout(&case.text, &case.spans, None), &case.text);
+    let texts = |s: &e01::Snapshot| -> Vec<Range<usize>> {
+        s.clusters.iter().map(|c| c.text.clone()).collect()
     };
-    // office shapes as "of" + "fi" + "ce" (the ffi ligature would
-    // straddle the spacing change); its fi carries 2.0 over fine's
-    // unspaced fi. affix's ffi carries 1.5; waffle's ffl none.
-    let fi = advance(&spaced, 2..4) - advance(&spaced, 7..9);
-    assert!((fi - 2.0).abs() < 1e-4, "fi: {fi}");
-    assert!(advance(&spaced, 1..2) > 0.0);
-    for (text, spacing) in [(13..16, 1.5), (20..23, 0.0)] {
-        let d = advance(&spaced, text.clone()) - advance(&plain, text.clone());
-        assert!((d - spacing).abs() < 1e-4, "{text:?}: {d} vs {spacing}");
+    let (ta, tb) = (texts(&a), texts(&b));
+    let only = |x: &[Range<usize>], y: &[Range<usize>]| -> Vec<Range<usize>> {
+        x.iter().filter(|r| !y.contains(r)).cloned().collect()
+    };
+    assert_eq!(only(&ta, &tb), [2..3, 3..4, 13..14, 14..15, 15..16]);
+    assert_eq!(only(&tb, &ta), [2..4, 13..16]);
+    for c in &a.clusters {
+        if let Some(d) = b.clusters.iter().find(|d| d.text == c.text) {
+            assert_eq!(c.glyphs, d.glyphs, "{:?}", c.text);
+            assert!((c.advance - d.advance).abs() < 1e-4, "{:?}", c.text);
+        }
     }
+    let advance = |r: Range<usize>| a.clusters.iter().find(|c| c.text == r).unwrap().advance;
+    // The same f glyph: unspaced (1..2), spaced 2.0 (2..3), spaced 1.5
+    // (13..14).
+    assert!((advance(2..3) - advance(1..2) - 2.0).abs() < 1e-4);
+    assert!((advance(13..14) - advance(1..2) - 1.5).abs() < 1e-4);
+
+    // One unspaced span (Parley splits runs at every span, as each has
+    // its own brush in the oracle).
+    let unspaced = [craie_text::paragraph::SpanStyle {
+        start: 0,
+        style: craie_text::paragraph::TextStyle {
+            letter_spacing: 0.0,
+            ..case.spans[0].style
+        },
+    }];
+    let p = e01::layout(&mut engine, &case.text, &unspaced, None);
+    let a = e01::ours(&engine, &p, &case.text);
+    let b = e01::parley(&oracle.layout(&case.text, &unspaced, None), &case.text);
+    let d = e01::compare(&a, &b, &case.text);
+    assert!(d.pass(), "{d:?}");
+
+    let arabic = "لا لَا بِلَا سلام";
+    let style = |letter_spacing: f32| {
+        [craie_text::paragraph::SpanStyle {
+            start: 0,
+            style: craie_text::paragraph::TextStyle {
+                size: 16.0,
+                letter_spacing,
+                ..craie_text::paragraph::TextStyle::default()
+            },
+        }]
+    };
+    let ids = |engine: &mut craie_text::TextEngine, spacing: f32| -> Vec<u16> {
+        let p = e01::layout(engine, arabic, &style(spacing), None);
+        p.glyphs.iter().map(|g| g.id).collect()
+    };
+    assert_eq!(ids(&mut engine, 2.0), ids(&mut engine, 0.0));
 }

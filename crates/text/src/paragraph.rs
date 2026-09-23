@@ -1000,9 +1000,10 @@ impl Paragraph {
 #[derive(Default)]
 pub struct Shaper {
     buffer: Option<harfrust::UnicodeBuffer>,
-    /// Plans per (instance, right-to-left, script). A plan is compiled
-    /// once; HarfRust would compile one per call without it.
-    plans: HashMap<(FontInstanceId, bool, [u8; 4]), harfrust::ShapePlan>,
+    /// Plans per (instance, right-to-left, script, letter-spaced). A
+    /// plan is compiled once; HarfRust would compile one per call
+    /// without it.
+    plans: HashMap<(FontInstanceId, bool, [u8; 4], bool), harfrust::ShapePlan>,
     /// Variation instances per font instance with coordinates.
     instances: HashMap<FontInstanceId, harfrust::ShaperInstance>,
     metrics: HashMap<(FontInstanceId, u32, u32), RunMetrics>,
@@ -1260,10 +1261,20 @@ impl Shaper {
                 harfrust::Direction::LeftToRight
             };
             let script = harfrust::Script::from_iso15924_tag(harfrust::Tag::new(&it.script.0));
+            // Letter-spaced runs shape without optional ligatures (CSS
+            // Text 3, letter-spacing; ARCHITECTURE.md section 5): liga,
+            // clig, and dlig off. Required ligatures, contextual
+            // alternates, and mark positioning stay on.
+            let spaced = spans[it.span].style.letter_spacing != 0.0;
+            let off = |tag: &[u8; 4]| harfrust::Feature::new(harfrust::Tag::new(tag), 0, ..);
+            let unligated = [off(b"liga"), off(b"clig"), off(b"dlig")];
+            let features: &[harfrust::Feature] = if spaced { &unligated } else { &[] };
             let plan = self
                 .plans
-                .entry((font, rtl, it.script.0))
-                .or_insert_with(|| harfrust::ShapePlan::new(&shaper, direction, script, None, &[]));
+                .entry((font, rtl, it.script.0, spaced))
+                .or_insert_with(|| {
+                    harfrust::ShapePlan::new(&shaper, direction, script, None, features)
+                });
             // No pre/post context, as Parley: items split only where
             // shaping cannot join anyway (script, font, level, size,
             // letter spacing).
@@ -1277,6 +1288,7 @@ impl Shaper {
                 buffer,
                 harfrust::ShapeOptions::new()
                     .plan(Some(plan))
+                    .features(features)
                     .point_size(Some(size)),
             );
             let upem = f.units_per_em as f32;
