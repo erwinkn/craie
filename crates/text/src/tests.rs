@@ -611,3 +611,35 @@ fn whitespace_before_a_hard_break_stays_on_its_line() {
         );
     }
 }
+
+/// A default-instance raster after a varied one of the same face uses the
+/// default coordinates: swash keeps its coordinate buffer across scaler
+/// builders, so the scaler must always set it (empty included).
+#[test]
+fn default_instance_raster_does_not_inherit_coords() {
+    use skrifa::MetadataProvider;
+    use swash::zeno::Vector;
+    let bytes: &[u8] = include_bytes!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../assets/fonts/NotoEmoji-Var-Test.ttf"
+    ));
+    let gid = skrifa::FontRef::new(bytes)
+        .unwrap()
+        .charmap()
+        .map('🙂')
+        .unwrap()
+        .to_u32() as u16;
+    let render = |r: &mut crate::Rasterizer, coords: &[i16]| {
+        let mut sc = r.scaler(bytes, 0, 40.0, coords).unwrap();
+        crate::Rasterizer::render(&mut sc, gid, Vector::new(0.0, 0.0), 0.0, None)
+            .unwrap()
+            .image
+            .data
+    };
+    let fresh = render(&mut crate::Rasterizer::new(), &[]);
+    let mut r = crate::Rasterizer::new();
+    // wght 700: normalized 1.0 (F2Dot14 16384).
+    let bold = render(&mut r, &[16384]);
+    assert_ne!(bold, fresh, "the axis changes the outline");
+    assert_eq!(render(&mut r, &[]), fresh);
+}

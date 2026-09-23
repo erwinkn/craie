@@ -16,6 +16,7 @@ All files are from the Noto project under the SIL Open Font License 1.1
 | NotoSansDevanagari-Regular.ttf | `fonts/NotoSansDevanagari/hinted/ttf/` |
 | NotoSansSymbols2-Regular.ttf | `fonts/NotoSansSymbols2/hinted/ttf/` (has U+2715 ✕) |
 | NotoSansJP-Subset-Regular.otf | noto-cjk `Sans/SubsetOTF/JP/NotoSansJP-Regular.otf`, subset below |
+| NotoEmoji-Var-Test.ttf | the same variable Noto Emoji, subset to 🙂 with its wght axis (300 to 700) kept: the rasterizer's variation test only, not a pinned face |
 | NotoEmoji-Subset-Regular.ttf | google/fonts `ofl/notoemoji/NotoEmoji[wght].ttf` (monochrome), instanced at wght 400 and subset below |
 
 The Japanese face is subset to keep the repository small (234 KB from
@@ -41,4 +42,11 @@ pyftsubset NotoEmoji-Regular.ttf \
   --text="😀👍🏽❤️👨‍👩‍👧🏳️‍🌈🇯🇵✅1️⃣#️⃣🙂🚀" \
   --unicodes="U+200D,U+FE0F,U+20E3,U+1F3FB-1F3FF,U+1F1E6-1F1FF" \
   --layout-features='*' --output-file=NotoEmoji-Subset-Regular.ttf
+```
+
+The variable test face (1.9 KB):
+
+```
+pyftsubset "NotoEmoji[wght].ttf" --text="🙂" --layout-features='*' \
+  --output-file=NotoEmoji-Var-Test.ttf
 ```

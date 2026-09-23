@@ -35,12 +35,17 @@ impl Rasterizer {
         coords: &[i16],
     ) -> Option<Scaler<'a>> {
         let font_ref = FontRef::from_index(bytes, index as usize)?;
-        let builder = self.cx.builder(font_ref).size(size).hint(true);
-        Some(if coords.is_empty() {
-            builder.build()
-        } else {
-            builder.normalized_coords(coords.iter().copied()).build()
-        })
+        // Always set the coordinates, empty included: swash keeps its
+        // coordinate buffer in the context across builders, so skipping
+        // this would reuse the previous scaler's variation.
+        Some(
+            self.cx
+                .builder(font_ref)
+                .size(size)
+                .hint(true)
+                .normalized_coords(coords.iter().copied())
+                .build(),
+        )
     }
 
     /// Rasterizes one glyph at a subpixel offset (fraction of a pixel,
