@@ -570,8 +570,11 @@ gone with it.
 - Allocations (`tests/flex_allocations.rs`, per-thread counting
   allocator): a relayout after content, style (display kept), and
   viewport changes allocates nothing: 2,400 warm relayouts over 400
-  generated trees, and a wrapping row whose line count grows after a
-  content change. With the pool taking the last buffer instead of the
+  generated trees, a wrapping row whose line count grows after a
+  content change, and (review round 2) rows of 129 and 200 children
+  after a one-pixel viewport change: amortized growth had taken a
+  buffer to 258 items, past the pool's limit, so buffers now grow
+  exactly. With the pool taking the last buffer instead of the
   best fit, or without the line reservation, both tests fail.
 - Cost (`examples/e05_flex.rs`): app-like trees (nested rows and
   columns, padding, gaps, some wrapping rows, text and 32 px leaves),

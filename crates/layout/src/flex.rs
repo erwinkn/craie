@@ -270,8 +270,10 @@ fn compute_preliminary(
     let scratch = tree.scratch();
     let mut items = take_best_fit(&mut scratch.items, children);
     let mut lines = take_best_fit(&mut scratch.lines, children.max(1));
-    items.reserve(children);
-    lines.reserve(children.max(1));
+    // Exact: amortized growth could pass `KEEP_ITEMS` and the pool
+    // would drop the buffer.
+    items.reserve_exact(children);
+    lines.reserve_exact(children.max(1));
 
     // 9.1: items.
     generate_anonymous_flex_items(tree, node, &constants, &mut items);

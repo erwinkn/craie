@@ -86,6 +86,63 @@ fn more_lines_after_a_content_change() {
     assert_eq!(n, 0, "allocations in the warm relayout");
 }
 
+/// S6B-06: containers under the 256-item limit must not grow a buffer
+/// past it (a buffer of 129 grown for 200 items must hold 200, not 258).
+/// A column holds two 500-wide rows of 129 and 200 1 x 1 children; the
+/// viewport widens by one pixel.
+#[test]
+fn buffers_under_the_limit_stay_in_the_pool() {
+    let px = |v: f32| Dimension::length(v);
+    let mut styles = vec![Style {
+        flex_direction: FlexDirection::Column,
+        size: Size {
+            width: Dimension::percent(1.0),
+            height: Dimension::auto(),
+        },
+        ..Style::default()
+    }];
+    let mut parents = vec![u32::MAX];
+    for count in [129usize, 200] {
+        let row = styles.len() as u32;
+        styles.push(Style {
+            flex_direction: FlexDirection::Row,
+            size: Size {
+                width: px(500.0),
+                height: px(10.0),
+            },
+            ..Style::default()
+        });
+        parents.push(0);
+        for _ in 0..count {
+            styles.push(Style {
+                size: Size {
+                    width: px(1.0),
+                    height: px(1.0),
+                },
+                ..Style::default()
+            });
+            parents.push(row);
+        }
+    }
+    let case = FlexCase {
+        measures: vec![Measure::Empty; styles.len()],
+        styles,
+        parents,
+        available: Size {
+            width: AvailableSpace::Definite(500.0),
+            height: AvailableSpace::Definite(500.0),
+        },
+    };
+    let mut tree = OwnedTree::new(&case);
+    tree.layout(case.available);
+    let wider = Size {
+        width: AvailableSpace::Definite(501.0),
+        height: AvailableSpace::Definite(500.0),
+    };
+    let n = allocs(|| tree.layout(wider));
+    assert_eq!(n, 0, "allocations after a viewport change");
+}
+
 /// Generated trees: after one layout, content and style edits (display
 /// kept, so no container is new) and viewport changes lay out again
 /// with no allocation.
