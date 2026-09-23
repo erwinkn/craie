@@ -215,7 +215,7 @@ fn main() {
         .map(String::as_str)
         .unwrap_or("/tmp/craie-framebench/wire");
     let rows: usize = args.get(2).and_then(|s| s.parse().ok()).expect(
-        "usage: framebench <dir> <rows> [--ops N] [--warmup N] [--reps N] [--json path] [--no-gpu]",
+        "usage: framebench <dir> <rows> [--ops N] [--warmup N] [--reps N] [--json path] [--no-gpu] [--family name]",
     );
     let opt = |name: &str, default: usize| -> usize {
         args.windows(2)
@@ -230,6 +230,12 @@ fn main() {
     let json_path = args
         .windows(2)
         .find(|w| w[0] == "--json")
+        .map(|w| w[1].clone());
+    // The Text default family (default: system-ui); `sans-serif` matches
+    // the Parley-era default for same-font comparisons.
+    let family = args
+        .windows(2)
+        .find(|w| w[0] == "--family")
         .map(|w| w[1].clone());
 
     let mount = load_frame(dir, "mount", rows);
@@ -246,6 +252,9 @@ fn main() {
 
     for rep in 0..reps {
         let mut ui = Ui::new(SCALE);
+        if let Some(f) = &family {
+            ui.text.default_family = f.clone();
+        }
         let mut gpu = gpu_enabled.then(GpuSide::new);
         let baseline = live();
         let baseline_histo = histo();

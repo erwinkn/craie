@@ -16,6 +16,7 @@ All files are from the Noto project under the SIL Open Font License 1.1
 | NotoSansDevanagari-Regular.ttf | `fonts/NotoSansDevanagari/hinted/ttf/` |
 | NotoSansSymbols2-Regular.ttf | `fonts/NotoSansSymbols2/hinted/ttf/` (has U+2715 ✕) |
 | NotoSansJP-Subset-Regular.otf | noto-cjk `Sans/SubsetOTF/JP/NotoSansJP-Regular.otf`, subset below |
+| NotoEmoji-Subset-Regular.ttf | google/fonts `ofl/notoemoji/NotoEmoji[wght].ttf` (monochrome), instanced at wght 400 and subset below |
 
 The Japanese face is subset to keep the repository small (234 KB from
 4.5 MB): CJK punctuation, hiragana, katakana, half- and full-width
@@ -29,3 +30,15 @@ pyftsubset NotoSansJP-Regular.otf \
 ```
 
 A test text that needs other kanji must add them to the subset here.
+
+The emoji face is the monochrome Noto Emoji, instanced at weight 400
+and subset (33 KB from 2 MB) to the E01 emoji cases: ZWJ sequences,
+skin tones, keycaps, and regional-indicator flags.
+
+```
+python -c "from fontTools.ttLib import TTFont; from fontTools.varLib.instancer import instantiateVariableFont as i; i(TTFont('NotoEmoji[wght].ttf'), {'wght': 400}).save('NotoEmoji-Regular.ttf')"
+pyftsubset NotoEmoji-Regular.ttf \
+  --text="😀👍🏽❤️👨‍👩‍👧🏳️‍🌈🇯🇵✅1️⃣#️⃣🙂🚀" \
+  --unicodes="U+200D,U+FE0F,U+20E3,U+1F3FB-1F3FF,U+1F1E6-1F1FF" \
+  --layout-features='*' --output-file=NotoEmoji-Subset-Regular.ttf
+```

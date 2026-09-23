@@ -477,8 +477,18 @@ fn main() {
     // Warm-up: the first Ui loads the system font collection.
     virtualized(100);
     plain(100);
+    let mut first_live: Option<(u32, usize)> = None;
     for n in [1_000u32, 10_000, 100_000, 1_000_000] {
         let v = virtualized(n);
+        let (n0, l0) = *first_live.get_or_insert((n, v.live));
+        if n > n0 {
+            println!(
+                "          live bytes per added item ({n0} -> {n}): {:.2} (exact: {} - {} bytes)",
+                (v.live as f64 - l0 as f64) / f64::from(n - n0),
+                v.live,
+                l0
+            );
+        }
         let p = if n <= 10_000 { Some(plain(n)) } else { None };
         let (pm, ps, pl, pv) = match &p {
             Some(p) => (

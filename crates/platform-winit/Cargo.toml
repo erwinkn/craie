@@ -45,3 +45,7 @@ path = "../../examples/bench/main.rs"
 [[example]]
 name = "framebench"
 path = "../../examples/framebench/main.rs"
+
+[[example]]
+name = "fontcost"
+path = "../../examples/fontcost/main.rs"

@@ -112,7 +112,7 @@ fn rtl_paragraph_aligns_right_and_orders_visually() {
                 .map(|g| g.x)
         })
         .collect();
-    assert!(xs.windows(2).all(|w| w[0] <= w[1] + 1e-3), "{xs:?}");
+    assert!(xs.windows(2).all(|w| w[0] <= w[1]), "{xs:?}");
 }
 
 #[test]
@@ -134,7 +134,8 @@ fn mixed_bidi_reorders_segments() {
         .iter()
         .find(|s| p.runs[s.run as usize].rtl())
         .unwrap();
-    assert!(heb.x > p.segs[0].x);
+    let x = |seg: &crate::paragraph::Seg| p.glyphs[seg.glyphs.start as usize].x;
+    assert!(x(heb) > x(&p.segs[0]));
 }
 
 #[test]
@@ -285,4 +286,284 @@ fn line_order_matches_unicode_bidi() {
             }
         }
     }
+}
+
+/// The bytes a laid-out paragraph's runs use, per run.
+fn run_bytes(e: &TextEngine, p: &Paragraph) -> Vec<usize> {
+    p.runs
+        .iter()
+        .map(|r| {
+            let store = &e.fonts.store;
+            let face = store.instance_data(r.font).face;
+            store.face_data(face).bytes.as_ref().as_ref().as_ptr() as usize
+        })
+        .collect()
+}
+
+fn reversed_pinned() -> crate::fonts::RawFonts {
+    let mut fonts = crate::fonts::RawFonts::new();
+    for bytes in crate::fonts::pinned_files().into_iter().rev() {
+        fonts.add_static(bytes);
+    }
+    fonts
+}
+
+/// A new source never reaches the old source's faces through a reused
+/// byte identity: after `set_source` with the files registered in
+/// reverse order, layout equals a fresh engine on that source.
+#[test]
+fn source_replacement_keeps_byte_identity() {
+    let text = "abc שלום ✕ नमस्ते";
+    let mut e = engine();
+    let before = layout(&mut e, text, None);
+    e.fonts.set_source(Box::new(reversed_pinned()));
+    let after = layout(&mut e, text, None);
+    let mut fresh = TextEngine::with_source(Box::new(reversed_pinned()));
+    let want = layout(&mut fresh, text, None);
+    let ids = |p: &Paragraph| p.glyphs.iter().map(|g| g.id).collect::<Vec<_>>();
+    assert_eq!(ids(&after), ids(&want));
+    assert_eq!(run_bytes(&e, &after), run_bytes(&fresh, &want));
+    assert_eq!(ids(&before), ids(&layout(&mut engine(), text, None)));
+}
+
+/// A profile whose primary (the JP subset) covers none of the test
+/// clusters, so every one goes to fallback. Registration order is the
+/// fallback order: Hebrew, Symbols 2, Arabic, Devanagari, Sans.
+fn fallback_profile() -> crate::fonts::RawFonts {
+    let f = crate::fonts::pinned_files();
+    let mut fonts = crate::fonts::RawFonts::new();
+    for k in [6, 4, 7, 3, 5, 0] {
+        fonts.add_static(f[k]);
+    }
+    fonts.set_default_family("Noto Sans JP");
+    fonts
+}
+
+/// Fallback depends on the cluster alone: each text laid out after the
+/// others, in either order, equals a fresh engine's layout. The cases:
+/// "1" then "1" + shadda (Symbols 2 covers the digit, only Arabic covers
+/// both), and "1◌" then "◌" (Symbols 2 covers both, but Hebrew comes
+/// first in the source order for ◌).
+#[test]
+fn fallback_depends_on_the_cluster_alone() {
+    let texts = [
+        "1",
+        "1\u{0651}",
+        "1\u{20E3}",
+        "1\u{25CC}",
+        "\u{25CC}",
+        "\u{25CC}\u{05B0}",
+    ];
+    let fresh: Vec<(Vec<u16>, Vec<usize>)> = texts
+        .iter()
+        .map(|t| {
+            let mut e = TextEngine::with_source(Box::new(fallback_profile()));
+            let p = layout(&mut e, t, None);
+            (p.glyphs.iter().map(|g| g.id).collect(), run_bytes(&e, &p))
+        })
+        .collect();
+    // No .notdef: some candidate covers each whole cluster.
+    for (t, (ids, _)) in texts.iter().zip(&fresh) {
+        assert!(ids.iter().all(|&g| g != 0), "{t:?}: {ids:?}");
+    }
+    let f = crate::fonts::pinned_files();
+    let ptr = |k: usize| f[k].as_ptr() as usize;
+    assert_eq!(fresh[1].1, [ptr(3)], "digit + shadda: Arabic");
+    assert_eq!(fresh[4].1, [ptr(4)], "◌: Hebrew, first in source order");
+    for order in [false, true] {
+        let mut e = TextEngine::with_source(Box::new(fallback_profile()));
+        let mut idx: Vec<usize> = (0..texts.len()).collect();
+        if order {
+            idx.reverse();
+        }
+        for k in idx {
+            let p = layout(&mut e, texts[k], None);
+            let got = (
+                p.glyphs.iter().map(|g| g.id).collect::<Vec<_>>(),
+                run_bytes(&e, &p),
+            );
+            assert_eq!(got, fresh[k], "{:?} (reverse: {order})", texts[k]);
+        }
+    }
+}
+
+/// Each hard-break form ends exactly one line; CRLF is one break (UAX #14
+/// LB5), and a caret never falls between CR and LF.
+#[test]
+fn hard_breaks_end_one_line_each() {
+    let mut e = engine();
+    for (text, lines) in [
+        ("one\r\ntwo", 2),
+        ("one\rtwo", 2),
+        ("one\ntwo", 2),
+        ("one\u{85}two", 2),
+        ("one\u{2028}two", 2),
+        ("one\u{2029}two", 2),
+        ("a\r\n\r\nb", 3),
+        ("end\r\n", 2),
+    ] {
+        let p = layout(&mut e, text, None);
+        assert_eq!(p.lines.len(), lines, "{text:?}");
+        check_lines(&p, text);
+        let cr = text.find('\r');
+        if let Some(cr) = cr.filter(|&i| text[i..].starts_with("\r\n")) {
+            assert!(
+                p.cluster_map()
+                    .iter()
+                    .any(|(t, _)| *t == (cr as u32..cr as u32 + 2))
+            );
+        }
+    }
+}
+
+/// No-break spaces (NBSP, narrow NBSP, figure space) never break: the
+/// protected phrase overflows at every width, zero included.
+#[test]
+fn no_break_spaces_do_not_break() {
+    let mut e = engine();
+    for nb in ['\u{00A0}', '\u{202F}', '\u{2007}'] {
+        let text = format!("a{nb}b{nb}c");
+        for w in [0.0, 5.0, 12.0, 20.0] {
+            let p = layout(&mut e, &text, Some(w));
+            assert_eq!(p.lines.len(), 1, "{text:?} at {w}");
+        }
+        // A plain space still breaks.
+        let p = layout(&mut e, &text.replace(nb, " "), Some(5.0));
+        assert_eq!(p.lines.len(), 3);
+    }
+}
+
+/// Over a mixed corpus at many widths: every line after the first starts
+/// at a UAX #14 opportunity, and every mandatory break starts a line.
+#[test]
+fn lines_start_at_break_opportunities() {
+    use unicode_linebreak::{BreakOpportunity, linebreaks};
+    let mut e = engine();
+    let corpus = [
+        "The quick brown fox (jumps) over — the lazy dog! Is it 3.14 or 2,718?",
+        "a\u{00A0}b c\u{202F}d e !f \"quoted text\" end.\r\nnext line\rthird\u{2028}fourth",
+        "Hello שלום world مرحبا بالعالم 123 end.\nנמסטה नमस्ते दुनिया",
+        "日本語のテキストを表示します。改行、組版、段落。",
+    ];
+    for text in corpus {
+        let ops: Vec<(usize, BreakOpportunity)> = linebreaks(text).collect();
+        for w in [0.0, 10.0, 30.0, 55.0, 80.0, 120.0, 200.0, 400.0] {
+            let p = layout(&mut e, text, Some(w));
+            check_lines(&p, text);
+            let starts: Vec<usize> = p.lines.iter().map(|l| l.text.start as usize).collect();
+            for &s in &starts[1..] {
+                assert!(
+                    ops.iter().any(|&(i, _)| i == s),
+                    "{text:?} at {w}: break at {s}"
+                );
+            }
+            for &(i, op) in &ops {
+                if op == BreakOpportunity::Mandatory && i < text.len() {
+                    assert!(
+                        starts.contains(&i),
+                        "{text:?} at {w}: no line at mandatory {i}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// Cluster edges from the placements alone: the smallest glyph x of a
+/// cluster and the largest glyph x + advance (an oracle independent of
+/// the mapping code's traversal).
+fn placed_edges(p: &Paragraph, glyphs: std::ops::Range<u32>) -> (f32, f32) {
+    let g = &p.glyphs[glyphs.start as usize..glyphs.end as usize];
+    let left = g.iter().map(|g| g.x).fold(f32::INFINITY, f32::min);
+    let right = g
+        .iter()
+        .map(|g| g.x + g.advance)
+        .fold(f32::NEG_INFINITY, f32::max);
+    (left, right)
+}
+
+/// Carets, selection rectangles, and hit tests agree exactly with the
+/// placements, on multi-glyph clusters (Devanagari conjuncts, Arabic with
+/// marks, Latin with stacked marks) and bidi text, at several widths;
+/// and along each segment, cluster starts rise left to right at an even
+/// level and fall at an odd one, as drawn.
+#[test]
+fn mapping_reads_the_placements() {
+    let mut e = engine();
+    let texts = [
+        "क्षत्रिय स्त्री द्वार हिन्दी",
+        "مَرْحَبًا بِالْعَالَمِ",
+        "a\u{0301}\u{0323} e\u{0308}\u{0304} q\u{0307}\u{0323}\u{0301}",
+        "abc אבג \u{2002}\u{2003}דהו xyz",
+        "שלום abc \u{2002}\u{2003}def עולם",
+    ];
+    let mut multi = 0;
+    let mut reversed = 0;
+    for text in texts {
+        for w in [None, Some(30.0), Some(60.0), Some(90.0), Some(140.0)] {
+            let p = layout(&mut e, text, w);
+            for line in &p.lines {
+                for seg in &p.segs[line.segs.start as usize..line.segs.end as usize] {
+                    let rtl = seg.level & 1 == 1;
+                    if (seg.level ^ p.runs[seg.run as usize].level) & 1 == 1 {
+                        reversed += 1;
+                    }
+                    // Clusters of this segment, by their placed left edge.
+                    let mut cl: Vec<(std::ops::Range<u32>, std::ops::Range<u32>)> = p
+                        .cluster_map()
+                        .into_iter()
+                        .filter(|(_, g)| g.start >= seg.glyphs.start && g.end <= seg.glyphs.end)
+                        .collect();
+                    cl.sort_by(|a, b| {
+                        placed_edges(&p, a.1.clone())
+                            .0
+                            .total_cmp(&placed_edges(&p, b.1.clone()).0)
+                    });
+                    let starts: Vec<u32> = cl.iter().map(|c| c.0.start).collect();
+                    assert!(
+                        starts.windows(2).all(|w| (w[0] < w[1]) != rtl),
+                        "{text:?} at {w:?}: cluster order {starts:?} (level {})",
+                        seg.level
+                    );
+                    for (t, g) in &cl {
+                        if g.len() > 1 {
+                            multi += 1;
+                        }
+                        let (left, right) = placed_edges(&p, g.clone());
+                        let caret = p.caret(t.start);
+                        assert_eq!(
+                            caret.x,
+                            if rtl { right } else { left },
+                            "{text:?} caret at {}",
+                            t.start
+                        );
+                        assert_eq!(
+                            p.selection_rects(t.clone()),
+                            [(left, line.top, right - left, line.height)],
+                            "{text:?} selection {t:?}"
+                        );
+                        if right == left {
+                            // A newline: no width to hit.
+                            continue;
+                        }
+                        let y = line.top + line.height * 0.5;
+                        let near_left = p.hit(left + (right - left) * 0.25, y);
+                        let near_right = p.hit(left + (right - left) * 0.75, y);
+                        let (a, b) = if rtl {
+                            (t.end, t.start)
+                        } else {
+                            (t.start, t.end)
+                        };
+                        assert_eq!(
+                            (near_left.offset, near_right.offset),
+                            (a, b),
+                            "{text:?} hit {t:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+    assert!(multi > 10, "multi-glyph clusters checked: {multi}");
+    assert!(reversed > 0, "no L1-reversed segment was checked");
 }

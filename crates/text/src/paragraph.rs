@@ -70,9 +70,11 @@ pub struct SpanStyle {
 }
 
 /// What to lay out.
+#[derive(Clone, Copy)]
 pub struct TextSpec<'a> {
     pub text: &'a str,
-    /// Family (a name or a generic name) for every span.
+    /// Family (a name or a generic name) for every span; empty: the
+    /// engine's `default_family`.
     pub family: &'a str,
     pub spans: &'a [SpanStyle],
 }
@@ -112,7 +114,10 @@ impl Run {
 /// A glyph id marking a glyph that is not drawn (a newline).
 pub const HIDDEN: u16 = u16::MAX;
 
-/// One placed glyph: the placement store's row (28 bytes).
+/// One placed glyph: the placement store's row (28 bytes). Every
+/// position consumer reads it: drawing at (x + dx, y), and hit testing,
+/// carets, and selection at cluster edges (the x of a cluster's first
+/// placed glyph, and the pen after its last).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Glyph {
     pub id: u16,
@@ -124,7 +129,8 @@ pub struct Glyph {
     /// Shaping offsets (y down).
     pub dx: f32,
     pub dy: f32,
-    /// Final position: pen x + dx, baseline + dy (paragraph space).
+    /// Pen x (the left edge of the glyph's advance) and baseline + dy,
+    /// paragraph space. The glyph draws at x + dx.
     pub x: f32,
     pub y: f32,
 }
@@ -135,11 +141,10 @@ pub struct Seg {
     pub run: u32,
     pub glyphs: Range<u32>,
     pub text: Range<u32>,
-    /// Left edge (paragraph space) and width.
-    pub x: f32,
-    pub advance: f32,
     /// Bidi level after L1: the run's level, or the paragraph's for
-    /// trailing whitespace.
+    /// trailing whitespace. When its direction differs from the run's,
+    /// the segment's clusters are placed in the reverse of their stored
+    /// order (glyphs inside a cluster keep theirs).
     pub level: u8,
 }
 
@@ -251,8 +256,59 @@ pub(crate) fn is_newline(c: char) -> bool {
     )
 }
 
+/// The start cursor of `next_group` over a segment's glyphs.
+fn group_cursor(glyphs: &Range<u32>, reversed: bool) -> u32 {
+    if reversed { glyphs.end } else { glyphs.start }
+}
+
+/// The next cluster of a segment in placement order, as a glyph range:
+/// stored order, or clusters from the end when `reversed`. Glyphs inside
+/// a cluster keep their stored order either way.
+fn next_group(
+    glyphs: &[Glyph],
+    seg: &Range<u32>,
+    reversed: bool,
+    cursor: &mut u32,
+) -> Option<Range<u32>> {
+    let cluster = |i: u32| glyphs[i as usize].cluster;
+    if reversed {
+        if *cursor <= seg.start {
+            return None;
+        }
+        let end = *cursor;
+        let c = cluster(end - 1);
+        let mut start = end - 1;
+        while start > seg.start && cluster(start - 1) == c {
+            start -= 1;
+        }
+        *cursor = start;
+        Some(start..end)
+    } else {
+        if *cursor >= seg.end {
+            return None;
+        }
+        let start = *cursor;
+        let c = cluster(start);
+        let mut end = start + 1;
+        while end < seg.end && cluster(end) == c {
+            end += 1;
+        }
+        *cursor = end;
+        Some(start..end)
+    }
+}
+
+/// Whether `font` covers every character of `cluster` that needs a
+/// glyph.
+pub(crate) fn covers_cluster(store: &mut FontStore, font: FontInstanceId, cluster: &str) -> bool {
+    cluster
+        .chars()
+        .filter(|&c| !ignorable(c))
+        .all(|c| store.covers(font, c))
+}
+
 /// Characters a font need not cover for a cluster to be covered.
-fn ignorable(c: char) -> bool {
+pub(crate) fn ignorable(c: char) -> bool {
     c.is_control()
         || matches!(c, '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2060}'..='\u{206F}'
             | '\u{FE00}'..='\u{FE0F}' | '\u{FEFF}' | '\u{E0100}'..='\u{E01EF}')
@@ -338,7 +394,12 @@ impl Paragraph {
             let mut f = 0;
             if newline {
                 f |= CL_NEWLINE;
-            } else if s.chars().all(char::is_whitespace) {
+            } else if s.chars().all(|c| {
+                c.is_whitespace()
+                    && unicode_linebreak::break_property(c as u32)
+                        != unicode_linebreak::BreakClass::NonBreakingGlue
+            }) {
+                // Hanging whitespace; no-break spaces (class GL) are content.
                 f |= CL_SPACE;
             }
             let chars = s.char_indices().map(|(i, _)| self.analysis[a + i]);
@@ -396,8 +457,9 @@ impl Paragraph {
             let next = x + c.advance;
             if next <= limit {
                 x = next;
-            } else if c.space {
-                // Overflowing whitespace hangs.
+            } else if c.space && clusters.get(i + 1).is_none_or(|n| n.boundary || n.newline) {
+                // Overflowing whitespace hangs, where UAX #14 allows a
+                // break after it; else it waits for an opportunity.
                 self.push_line(clusters, start..i + 1, &mut y, &mut width);
                 lines += 1;
                 start = i + 1;
@@ -450,16 +512,17 @@ impl Paragraph {
             self.lines[li].x = x;
             let mut pen = x;
             for s in segs.start..segs.end {
-                let seg = &mut self.segs[s as usize];
-                seg.x = pen;
-                let mut gx = pen;
-                for g in seg.glyphs.start..seg.glyphs.end {
-                    let glyph = &mut self.glyphs[g as usize];
-                    glyph.x = gx + glyph.dx;
-                    glyph.y = baseline + glyph.dy;
-                    gx += glyph.advance;
+                let seg = &self.segs[s as usize];
+                let (range, reversed) = (seg.glyphs.clone(), self.reversed(seg));
+                let mut cursor = group_cursor(&range, reversed);
+                while let Some(group) = next_group(&self.glyphs, &range, reversed, &mut cursor) {
+                    for g in group {
+                        let glyph = &mut self.glyphs[g as usize];
+                        glyph.x = pen;
+                        glyph.y = baseline + glyph.dy;
+                        pen += glyph.advance;
+                    }
                 }
-                pen = gx;
             }
         }
     }
@@ -570,14 +633,11 @@ impl Paragraph {
                     s.text.end = s.text.end.max(c.text.end);
                     s.glyphs.start = s.glyphs.start.min(c.glyphs.start);
                     s.glyphs.end = s.glyphs.end.max(c.glyphs.end);
-                    s.advance += c.advance;
                 }
                 _ => self.segs.push(Seg {
                     run: c.run,
                     glyphs: c.glyphs.clone(),
                     text: c.text.clone(),
-                    x: 0.0,
-                    advance: c.advance,
                     level,
                 }),
             }
@@ -611,41 +671,60 @@ impl Paragraph {
             .unwrap_or(self.lines.len().saturating_sub(1))
     }
 
-    /// Clusters of a segment as (text range, left x, width), left to
-    /// right.
+    /// Whether `seg` places its clusters against their stored order (its
+    /// L1 level has another direction than its run).
+    fn reversed(&self, seg: &Seg) -> bool {
+        (seg.level ^ self.runs[seg.run as usize].level) & 1 == 1
+    }
+
+    /// Clusters of a segment, left to right, as (text range, left, right),
+    /// read from the placements: a cluster's left edge is the x of its
+    /// first placed glyph, its right edge the next cluster's left edge or,
+    /// for the last, the pen after the last glyph.
     fn seg_clusters(&self, seg: &Seg) -> Vec<(Range<u32>, f32, f32)> {
-        let run = &self.runs[seg.run as usize];
-        let mut out: Vec<(Range<u32>, f32, f32)> = Vec::new();
-        let mut x = seg.x;
-        let g = &self.glyphs[seg.glyphs.start as usize..seg.glyphs.end as usize];
-        let mut i = 0;
-        while i < g.len() {
-            let c = g[i].cluster;
-            let mut w = 0.0;
-            while i < g.len() && g[i].cluster == c {
-                w += g[i].advance;
-                i += 1;
-            }
-            out.push((c..c, x, w));
-            x += w;
+        let reversed = self.reversed(seg);
+        let mut cursor = group_cursor(&seg.glyphs, reversed);
+        let mut groups: Vec<Range<u32>> = Vec::new();
+        while let Some(g) = next_group(&self.glyphs, &seg.glyphs, reversed, &mut cursor) {
+            groups.push(g);
         }
-        // Ends: in logical order, the next cluster's start.
-        let mut logical: Vec<usize> = (0..out.len()).collect();
-        if run.rtl() {
-            logical.reverse();
-        }
-        for k in 0..logical.len() {
-            let end = match logical.get(k + 1) {
-                Some(&n) => out[n].0.start,
-                None => seg.text.end,
-            };
-            out[logical[k]].0.end = end;
-        }
-        out
+        let first = |g: &Range<u32>| &self.glyphs[g.start as usize];
+        // Left to right, cluster starts rise at an even level and fall at
+        // an odd one: a cluster ends where the next one in logical order
+        // starts.
+        let ltr = seg.level & 1 == 0;
+        (0..groups.len())
+            .map(|k| {
+                let g = &groups[k];
+                let left = first(g).x;
+                let right = match groups.get(k + 1) {
+                    Some(n) => first(n).x,
+                    None => {
+                        let last = &self.glyphs[g.end as usize - 1];
+                        last.x + last.advance
+                    }
+                };
+                let next = if ltr {
+                    groups.get(k + 1)
+                } else {
+                    k.checked_sub(1).map(|p| &groups[p])
+                };
+                let end = next.map_or(seg.text.end, |n| first(n).cluster);
+                (first(g).cluster..end, left, right)
+            })
+            .collect()
+    }
+
+    /// The left and right edges of a line's content (placements).
+    fn line_edges(&self, line: &Line) -> Option<(f32, f32)> {
+        let segs = &self.segs[line.segs.start as usize..line.segs.end as usize];
+        let left = self.seg_clusters(segs.first()?).first()?.1;
+        let right = self.seg_clusters(segs.last()?).last()?.2;
+        Some((left, right))
     }
 
     /// The caret at byte `offset`: the left edge of the cluster starting
-    /// there (its right edge when right-to-left), else the line's end.
+    /// there (its right edge at an odd level), else the line's end.
     pub fn caret(&self, offset: u32) -> Caret {
         let li = self.line_of(offset);
         let Some(line) = self.lines.get(li) else {
@@ -665,19 +744,24 @@ impl Paragraph {
         };
         for s in line.segs.start..line.segs.end {
             let seg = &self.segs[s as usize];
-            let rtl = self.runs[seg.run as usize].rtl();
-            for (text, x, w) in self.seg_clusters(seg) {
+            let rtl = seg.level & 1 == 1;
+            for (text, left, right) in self.seg_clusters(seg) {
                 if text.start == offset {
-                    return bar(if rtl { x + w } else { x });
+                    return bar(if rtl { right } else { left });
                 }
             }
         }
         // The end of the line (past its content, before any trailing
         // newline, which has no advance): its visual end.
-        bar(if self.base_rtl {
-            line.x
-        } else {
-            line.x + line.advance
+        bar(match self.line_edges(line) {
+            Some((left, right)) => {
+                if self.base_rtl {
+                    left
+                } else {
+                    right
+                }
+            }
+            None => line.x,
         })
     }
 
@@ -698,14 +782,14 @@ impl Paragraph {
         let mut best: Option<(f32, Hit)> = None;
         for s in line.segs.start..line.segs.end {
             let seg = &self.segs[s as usize];
-            let rtl = self.runs[seg.run as usize].rtl();
-            for (text, cx, w) in self.seg_clusters(seg) {
+            let rtl = seg.level & 1 == 1;
+            for (text, left, right) in self.seg_clusters(seg) {
                 if text.is_empty() {
                     continue;
                 }
-                if x >= cx && x < cx + w {
+                if x >= left && x < right {
                     // Before or after the cluster, by its nearer half.
-                    let after = (x >= cx + w * 0.5) != rtl;
+                    let after = (x >= left + (right - left) * 0.5) != rtl;
                     let offset = if after { text.end } else { text.start };
                     return Hit {
                         offset,
@@ -713,8 +797,8 @@ impl Paragraph {
                     };
                 }
                 for (edge, offset) in [
-                    (cx, if rtl { text.end } else { text.start }),
-                    (cx + w, if rtl { text.start } else { text.end }),
+                    (left, if rtl { text.end } else { text.start }),
+                    (right, if rtl { text.start } else { text.end }),
                 ] {
                     let d = (x - edge).abs();
                     if best.as_ref().is_none_or(|(bd, _)| d < *bd) {
@@ -757,16 +841,18 @@ impl Paragraph {
             let mut cur: Option<(f32, f32)> = None;
             for s in line.segs.start..line.segs.end {
                 let seg = &self.segs[s as usize];
-                for (text, x, w) in self.seg_clusters(seg) {
+                for (text, left, right) in self.seg_clusters(seg) {
                     let inside =
                         text.start >= range.start && text.end <= range.end && !text.is_empty();
                     match (inside, cur.as_mut()) {
-                        (true, Some(c)) if (c.1 - x).abs() < 1e-3 => c.1 = x + w,
+                        // Adjacent clusters share an edge exactly: both
+                        // read the same placement.
+                        (true, Some(c)) if c.1 == left => c.1 = right,
                         (true, _) => {
                             if let Some((a, b)) = cur.take() {
                                 out.push((a, line.top, b - a, line.height));
                             }
-                            cur = Some((x, x + w));
+                            cur = Some((left, right));
                         }
                         (false, _) => {
                             if let Some((a, b)) = cur.take() {
@@ -781,6 +867,22 @@ impl Paragraph {
             }
         }
         out
+    }
+
+    /// The cluster holding byte `offset`, as its text range: None past
+    /// the end. Every byte of a cluster maps to the same range.
+    pub fn cluster_at(&self, offset: u32) -> Option<Range<u32>> {
+        let r = self.runs.partition_point(|r| r.text.end <= offset);
+        let run = self.runs.get(r).filter(|r| r.text.contains(&offset))?;
+        let g = &self.glyphs[run.glyphs.start as usize..run.glyphs.end as usize];
+        let start = g.iter().map(|g| g.cluster).filter(|&c| c <= offset).max()?;
+        let end = g
+            .iter()
+            .map(|g| g.cluster)
+            .filter(|&c| c > offset)
+            .min()
+            .unwrap_or(run.text.end);
+        Some(start..end)
     }
 
     /// Clusters in logical order as (text range, glyph range): for
@@ -817,6 +919,8 @@ pub struct Shaper {
     primaries: Vec<Option<FontInstanceId>>,
     items: Vec<Item>,
     clusters: Vec<Cluster>,
+    /// Grapheme start bytes of the paragraph being shaped.
+    graphemes: Vec<u32>,
 }
 
 /// A maximal text range with one bidi level, script, font, and span size.
@@ -948,7 +1052,9 @@ impl Shaper {
         self.items.clear();
         let mut chars = 0usize;
         let mut span = 0usize;
+        self.graphemes.clear();
         for (at, g) in text.grapheme_indices(true) {
+            self.graphemes.push(at as u32);
             chars += g.chars().count();
             while span + 1 < spans.len() && spans[span + 1].start as usize <= at {
                 span += 1;
@@ -965,13 +1071,8 @@ impl Shaper {
             // The span's primary face when it covers the grapheme, else
             // fallback.
             let primary = self.primaries[span];
-            let covered = |store: &FontStore, f: FontInstanceId| {
-                g.chars()
-                    .filter(|&c| !ignorable(c))
-                    .all(|c| store.covers(f, c))
-            };
             let font = match primary {
-                Some(f) if covered(fonts.store(), f) => Some(f),
+                Some(f) if covers_cluster(fonts.store(), f, g) => Some(f),
                 _ => fonts.fallback(g, script, attrs(&style)).or(primary),
             };
             match self.items.last_mut() {
@@ -1061,7 +1162,11 @@ impl Shaper {
             let scale = size / upem;
             let mut span = Paragraph::span_at(spans, range.start as u32);
             for (info, pos) in out.glyph_infos().iter().zip(out.glyph_positions()) {
+                // Clusters start at graphemes: HarfRust keeps controls
+                // (CR and LF of a CRLF) apart; a grapheme is one cluster.
                 let cluster = range.start as u32 + info.cluster;
+                let g = self.graphemes.partition_point(|&b| b <= cluster) - 1;
+                let cluster = self.graphemes[g];
                 let c = text[cluster as usize..].chars().next().unwrap_or(' ');
                 let newline = is_newline(c);
                 // Spans in a run: at most a few; clusters are monotonic

@@ -760,7 +760,7 @@ pub fn shape_paragraph(text: &mut TextEngine, p: &Paragraph, wrap: Option<f32>) 
     text.layout_text(
         &TextSpec {
             text: &p.text,
-            family: "system-ui",
+            family: "",
             spans: &spans,
         },
         wrap,

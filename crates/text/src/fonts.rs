@@ -41,8 +41,11 @@ pub struct Synthesis {
 /// the bytes, and the synthesis the match needs.
 #[derive(Clone)]
 pub struct FontBlob {
-    /// Identity of the bytes (a platform blob id, or a registration
-    /// number): two blobs with the same id and index are the same face.
+    /// Identity of the bytes, unique in the process: two blobs with the
+    /// same id and index are the same face. Platform (fontique) blob ids
+    /// come from fontique's process-wide counter and stay below
+    /// `RAW_ID_BASE`; `RawFonts` ids come from its own process-wide
+    /// counter at or above it.
     pub id: u64,
     pub index: u32,
     pub bytes: FaceBytes,
@@ -94,9 +97,33 @@ pub trait FontSource: Send {
     /// with the synthesis the match needs. None: no such family.
     fn select(&mut self, family: &str, attrs: FontAttrs) -> Option<FontBlob>;
 
-    /// Faces to try, in order, for character `ch` of `script` that the
-    /// selected faces do not cover.
-    fn fallback(&mut self, ch: char, script: ScriptTag, attrs: FontAttrs) -> Vec<FontBlob>;
+    /// Faces to try, in priority order, for character `ch` of `script`
+    /// that the selected faces do not cover. `emoji`: the cluster asks
+    /// for emoji presentation (`emoji_presentation`), so emoji faces go
+    /// first. The order must not depend on enumeration order.
+    fn fallback(
+        &mut self,
+        ch: char,
+        script: ScriptTag,
+        attrs: FontAttrs,
+        emoji: bool,
+    ) -> Vec<FontBlob>;
+}
+
+/// Whether a cluster asks for emoji presentation: a variation selector
+/// 16, a keycap, or a first character with default emoji presentation
+/// (the pictograph, emoticon, transport, supplemental, and flag blocks).
+/// An approximation of UTS #51 Emoji_Presentation by block.
+pub fn emoji_presentation(cluster: &str) -> bool {
+    if cluster.contains(['\u{FE0F}', '\u{20E3}']) {
+        return true;
+    }
+    cluster.chars().next().is_some_and(|c| {
+        matches!(c as u32,
+            0x1F1E6..=0x1F1FF | 0x1F300..=0x1F64F | 0x1F680..=0x1F6FF
+            | 0x1F900..=0x1F9FF | 0x1FA70..=0x1FAFF | 0x1F004 | 0x1F0CF | 0x1F18E
+            | 0x1F191..=0x1F19A)
+    })
 }
 
 /// One face in the store.
@@ -139,6 +166,9 @@ pub struct FontStore {
     instance_ix: HashMap<InstanceKey, FontInstanceId>,
     /// HarfRust per-face shaping data, built on first use.
     shapers: Vec<Option<harfrust::ShaperData>>,
+    /// Coverage of non-ASCII characters per face (the charmap parse is
+    /// the cost; ASCII reads the face's mask).
+    coverage: HashMap<(FontFaceId, char), bool>,
 }
 
 impl FontStore {
@@ -234,13 +264,16 @@ impl FontStore {
     }
 
     /// Whether the face of `id` maps `ch` to a glyph.
-    pub fn covers(&self, id: FontInstanceId, ch: char) -> bool {
-        let face = self.face_of(id);
+    pub fn covers(&mut self, id: FontInstanceId, ch: char) -> bool {
+        let face_id = self.instances[id.0 as usize].face;
+        let face = &self.faces[face_id.0 as usize];
         if ch.is_ascii() {
             return face.ascii & (1 << ch as u32) != 0;
         }
-        face.font()
-            .is_some_and(|f| f.charmap().map(ch).is_some_and(|g| g.to_u32() != 0))
+        *self.coverage.entry((face_id, ch)).or_insert_with(|| {
+            face.font()
+                .is_some_and(|f| f.charmap().map(ch).is_some_and(|g| g.to_u32() != 0))
+        })
     }
 
     /// HarfRust shaping data of `face`, built once.
@@ -289,8 +322,14 @@ pub struct RawFonts {
     /// The family generic names (`sans-serif`, `system-ui`, ...) resolve
     /// to: the first registered family unless set.
     default_family: Option<String>,
-    next_id: u64,
 }
+
+/// The first `RawFonts` byte identity. The ids of every `RawFonts` come
+/// from one process-wide counter, so two sources never reuse an id for
+/// different bytes.
+pub const RAW_ID_BASE: u64 = 1 << 63;
+
+static NEXT_RAW_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(RAW_ID_BASE);
 
 impl RawFonts {
     pub fn new() -> RawFonts {
@@ -306,8 +345,7 @@ impl RawFonts {
             Ok(FileRef::Font(_)) => 1,
             Err(_) => 0,
         };
-        let id = self.next_id;
-        self.next_id += 1;
+        let id = NEXT_RAW_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let mut added = 0;
         for index in 0..count {
             let Ok(font) = FontRef::from_index(data, index) else {
@@ -400,7 +438,13 @@ impl FontSource for RawFonts {
         self.best(&family, attrs).map(|f| Self::matched(f, attrs))
     }
 
-    fn fallback(&mut self, ch: char, _script: ScriptTag, attrs: FontAttrs) -> Vec<FontBlob> {
+    fn fallback(
+        &mut self,
+        ch: char,
+        _script: ScriptTag,
+        attrs: FontAttrs,
+        _emoji: bool,
+    ) -> Vec<FontBlob> {
         // One face per family that covers `ch`, in registration order.
         let mut families: Vec<&str> = Vec::new();
         for f in &self.faces {
@@ -425,7 +469,7 @@ impl FontSource for RawFonts {
 /// The pinned test font files (assets/fonts), Noto Sans first: the
 /// fallback order.
 #[cfg(feature = "pinned-fonts")]
-pub fn pinned_files() -> [&'static [u8]; 8] {
+pub fn pinned_files() -> [&'static [u8]; 9] {
     macro_rules! font {
         ($name:literal) => {
             include_bytes!(concat!(
@@ -444,6 +488,7 @@ pub fn pinned_files() -> [&'static [u8]; 8] {
         font!("NotoSansDevanagari-Regular.ttf"),
         font!("NotoSansJP-Subset-Regular.otf"),
         font!("NotoSansSymbols2-Regular.ttf"),
+        font!("NotoEmoji-Subset-Regular.ttf"),
     ]
 }
 
@@ -525,7 +570,7 @@ mod tests {
         // ✕ is not in Noto Sans: the symbols face covers it.
         let r = store.instance_of(&regular).unwrap();
         assert!(!store.covers(r, '✕'));
-        let fb = src.fallback('✕', ScriptTag::of('✕'), FontAttrs::default());
+        let fb = src.fallback('✕', ScriptTag::of('✕'), FontAttrs::default(), false);
         let f = store.instance_of(&fb[0]).unwrap();
         assert!(store.covers(f, '✕'));
         assert_eq!(ScriptTag::of('ب'), ScriptTag(*b"Arab"));

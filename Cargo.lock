@@ -662,6 +662,8 @@ dependencies = [
  "craie-ui",
  "parley",
  "taffy",
+ "unicode-linebreak",
+ "unicode-segmentation",
  "wgpu",
 ]
 

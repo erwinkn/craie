@@ -62,10 +62,11 @@ pub struct Fonts {
     /// (family, attrs) -> primary instance. Few entries: a linear scan,
     /// no key allocation per lookup.
     primary: Vec<(String, FontAttrs, Option<FontInstanceId>)>,
-    /// Fallback candidates per (script, attrs), in order.
-    by_script: HashMap<(ScriptTag, FontAttrs), Vec<FontInstanceId>>,
-    /// The fallback chosen per (first character, attrs).
-    by_char: HashMap<(char, FontAttrs), Option<FontInstanceId>>,
+    /// The source's fallback candidates per (first character, script,
+    /// attrs, emoji), in its priority order. Each cluster picks the first
+    /// candidate covering all of it, so the answer depends on the cluster
+    /// alone, never on text laid out before.
+    candidates: HashMap<(char, ScriptTag, FontAttrs, bool), Vec<FontInstanceId>>,
 }
 
 impl Fonts {
@@ -74,8 +75,7 @@ impl Fonts {
             store: FontStore::new(),
             source,
             primary: Vec::new(),
-            by_script: HashMap::new(),
-            by_char: HashMap::new(),
+            candidates: HashMap::new(),
         }
     }
 
@@ -83,18 +83,7 @@ impl Fonts {
     pub fn set_source(&mut self, source: Box<dyn FontSource>) {
         self.source = source;
         self.primary.clear();
-        self.by_script.clear();
-        self.by_char.clear();
-    }
-
-    fn covers_all(&self, font: FontInstanceId, cluster: &str) -> bool {
-        cluster
-            .chars()
-            .filter(|c| {
-                !c.is_control()
-                    && !matches!(c, '\u{200B}'..='\u{200F}' | '\u{FE00}'..='\u{FE0F}' | '\u{2060}'..='\u{206F}' | '\u{FEFF}')
-            })
-            .all(|c| self.store.covers(font, c))
+        self.candidates.clear();
     }
 }
 
@@ -122,40 +111,25 @@ impl Resolve for Fonts {
         script: ScriptTag,
         attrs: FontAttrs,
     ) -> Option<FontInstanceId> {
-        let first = cluster.chars().find(|c| !c.is_control()).unwrap_or(' ');
-        if let Some(&f) = self.by_char.get(&(first, attrs)) {
-            return f;
-        }
-        // Candidates for the script first, then ones the source offers
-        // for this character.
-        let mut found = None;
-        if !self.by_script.contains_key(&(script, attrs)) {
-            let blobs = self.source.fallback(first, script, attrs);
+        let first = cluster.chars().find(|&c| !paragraph::ignorable(c))?;
+        let emoji = fonts::emoji_presentation(cluster);
+        let key = (first, script, attrs, emoji);
+        if !self.candidates.contains_key(&key) {
+            let blobs = self.source.fallback(first, script, attrs, emoji);
             let list = blobs
                 .iter()
                 .filter_map(|b| self.store.instance_of(b))
                 .collect();
-            self.by_script.insert((script, attrs), list);
+            self.candidates.insert(key, list);
         }
-        for &f in &self.by_script[&(script, attrs)] {
-            if self.covers_all(f, cluster) {
-                found = Some(f);
-                break;
-            }
-        }
-        if found.is_none() {
-            let blobs: Vec<FontBlob> = self.source.fallback(first, script, attrs);
-            for b in &blobs {
-                if let Some(f) = self.store.instance_of(b)
-                    && self.covers_all(f, cluster)
-                {
-                    found = Some(f);
-                    break;
-                }
-            }
-        }
-        self.by_char.insert((first, attrs), found);
-        found
+        let list = &self.candidates[&key];
+        let store = &mut self.store;
+        // The first candidate that covers the whole cluster; else the first
+        // (it covers the first character).
+        list.iter()
+            .copied()
+            .find(|&f| paragraph::covers_cluster(store, f, cluster))
+            .or(list.first().copied())
     }
 
     fn store(&mut self) -> &mut FontStore {
@@ -172,6 +146,9 @@ pub struct TextEngine {
     wrap: WrapScratch,
     raster: Rasterizer,
     pub cache: GlyphCache,
+    /// The family of a `TextSpec` with an empty family: `system-ui`, React
+    /// Native's default (ARCHITECTURE.md §5, Decisions).
+    pub default_family: String,
     /// Paragraphs shaped (cost counter): owned paragraphs and Parley
     /// layouts alike. Rewrapping at another width is not shaping.
     pub shapes: u64,
@@ -193,6 +170,7 @@ impl TextEngine {
     pub fn with_source(source: Box<dyn FontSource>) -> TextEngine {
         TextEngine {
             parley: None,
+            default_family: "system-ui".to_string(),
             fonts: Fonts::new(source),
             shaper: Shaper::default(),
             wrap: WrapScratch::default(),
@@ -207,7 +185,15 @@ impl TextEngine {
     /// never reshapes.
     pub fn layout_text(&mut self, spec: &TextSpec<'_>, max_width: Option<f32>) -> Paragraph {
         self.shapes += 1;
-        let mut p = self.shaper.shape(spec, &mut self.fonts);
+        let spec = TextSpec {
+            family: if spec.family.is_empty() {
+                &self.default_family
+            } else {
+                spec.family
+            },
+            ..*spec
+        };
+        let mut p = self.shaper.shape(&spec, &mut self.fonts);
         p.rewrap_with(max_width, &mut self.wrap);
         p
     }
@@ -254,7 +240,7 @@ impl TextEngine {
                 .map(|g| {
                     (
                         g.id,
-                        (origin.x + g.x) * scale,
+                        (origin.x + g.x + g.dx) * scale,
                         (origin.y + g.y) * scale,
                         brush.unwrap_or(PaintSlot(g.style as u32)),
                     )
@@ -342,6 +328,7 @@ impl TextEngine {
         let run = glyph_run.run();
         let font = run.font();
         let synthesis = run.synthesis();
+        debug_assert!(font.data.id() < fonts::RAW_ID_BASE);
         let blob = FontBlob {
             id: font.data.id(),
             index: font.index,

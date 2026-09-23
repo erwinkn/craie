@@ -5,8 +5,10 @@
 //! metrics, so `compare` finds the first difference of each kind.
 
 use std::borrow::Cow;
+
 use std::ops::Range;
 use std::sync::Arc;
+use unicode_segmentation::UnicodeSegmentation;
 
 use craie_text::TextEngine;
 use craie_text::fonts;
@@ -20,17 +22,20 @@ use parley::{
 /// The pinned families in fallback order: Parley's font stack, and
 /// `fonts::pinned`'s registration order.
 pub const STACK: &str = "Noto Sans, Noto Sans Arabic, Noto Sans Hebrew, Noto Sans Devanagari, \
-                         Noto Sans JP, Noto Sans Symbols 2";
+                         Noto Sans JP, Noto Sans Symbols 2, Noto Emoji";
 
 /// One E01 case: text, styled spans (byte start, style), and the wrap
 /// widths it is laid out at.
 pub struct Case {
     pub name: &'static str,
-    /// Multilingual, styled, wrapped, bidi (the E01 entry's classes).
+    /// Multilingual, styled, wrapped, bidi (the E01 entry's classes),
+    /// and breaks, emoji, fallback, and missing (round 1 additions).
     pub class: &'static str,
     pub text: String,
     pub spans: Vec<SpanStyle>,
     pub widths: Vec<Option<f32>>,
+    /// Some character has no pinned face: both sides draw `.notdef`.
+    pub notdef: bool,
 }
 
 fn span(start: usize, size: f32, weight: u16, italic: bool) -> SpanStyle {
@@ -65,6 +70,7 @@ pub fn cases() -> Vec<Case> {
             class: "wrapped",
             text: long.clone(),
             spans: plain(14.0),
+            notdef: false,
             widths: vec![None, Some(120.0), Some(240.0), Some(480.0)],
         },
         Case {
@@ -72,6 +78,7 @@ pub fn cases() -> Vec<Case> {
             class: "wrapped",
             text: long,
             spans: plain(17.0),
+            notdef: false,
             widths: vec![Some(40.0), Some(90.0)],
         },
         Case {
@@ -85,6 +92,7 @@ pub fn cases() -> Vec<Case> {
                 span(g, 24.0, 400, false),
                 span(a, 14.0, 400, false),
             ],
+            notdef: false,
             widths: vec![None, Some(150.0), Some(300.0)],
         },
         Case {
@@ -96,6 +104,7 @@ pub fn cases() -> Vec<Case> {
                 span(0, 16.0, 700, false),
                 span("Bold مرحبا ".len(), 16.0, 400, true),
             ],
+            notdef: false,
             widths: vec![None, Some(80.0)],
         },
         Case {
@@ -103,6 +112,7 @@ pub fn cases() -> Vec<Case> {
             class: "multilingual",
             text: "Hello नमस्ते दुनिया こんにちは東京 ✕ done — क्षत्रिय 日本語のテキスト".to_string(),
             spans: plain(16.0),
+            notdef: false,
             widths: vec![None, Some(100.0), Some(200.0)],
         },
         Case {
@@ -110,6 +120,7 @@ pub fn cases() -> Vec<Case> {
             class: "bidi",
             text: "Hello שלום world مرحبا بالعالم 123 end.".to_string(),
             spans: plain(15.0),
+            notdef: false,
             widths: vec![None, Some(90.0), Some(160.0)],
         },
         Case {
@@ -117,13 +128,56 @@ pub fn cases() -> Vec<Case> {
             class: "bidi",
             text: "مرحبا بالعالم with English inside and ٣٤٥ numbers، ثم نهاية الجملة.".to_string(),
             spans: plain(15.0),
+            notdef: false,
             widths: vec![None, Some(110.0), Some(220.0)],
+        },
+        Case {
+            name: "breaks",
+            class: "breaks",
+            // Hard breaks Parley handles as UAX #14 does. CRLF, NEL, and
+            // no-break spaces, where Parley differs, have their own tests
+            // (`tests/e01_text.rs`).
+            text: "one\ntwo\rthree\u{2028}four\u{2029}five and the end".to_string(),
+            spans: plain(15.0),
+            notdef: false,
+            widths: vec![None, Some(0.0), Some(25.0), Some(60.0)],
+        },
+        Case {
+            name: "emoji",
+            class: "emoji",
+            text: "Hi 👨\u{200D}👩\u{200D}👧 and 🏳\u{FE0F}\u{200D}🌈, 👍🏽 ok 1\u{FE0F}\u{20E3} \
+                   #\u{FE0F}\u{20E3} 🇯🇵 ✅ ❤\u{FE0F} 🙂🚀"
+                .to_string(),
+            spans: plain(16.0),
+            notdef: false,
+            widths: vec![None, Some(60.0), Some(120.0)],
+        },
+        Case {
+            name: "fallback",
+            class: "fallback",
+            // Marks the primary lacks: the whole cluster falls back. A
+            // base the primary covers with a mark it lacks, where Parley
+            // splits the fonts, has its own test.
+            text: "a\u{0301}\u{0323} 1\u{0651} \u{25CC} ✕ 1\u{20E3}".to_string(),
+            spans: plain(16.0),
+            notdef: false,
+            widths: vec![None, Some(50.0)],
+        },
+        Case {
+            name: "missing",
+            class: "missing",
+            // No pinned face covers Thai or Ethiopic.
+            text: "Thai สวัสดี and Geez ሰላም end".to_string(),
+            spans: plain(15.0),
+            notdef: true,
+            widths: vec![None, Some(60.0)],
         },
         Case {
             name: "hebrew-lines",
             class: "bidi",
             text: "שורה ראשונה\nשורה שנייה עם עוד מילים\n\nסוף".to_string(),
             spans: plain(15.0),
+            notdef: false,
             widths: vec![None, Some(70.0)],
         },
     ]
@@ -156,13 +210,23 @@ pub struct Drawn {
     pub id: u16,
     pub x: f32,
     pub y: f32,
-    /// Byte offset of the glyph's cluster.
+    /// Byte offset of the glyph's cluster (its grapheme's start).
     pub cluster: usize,
     pub advance: f32,
+    /// Index of the pinned file the glyph comes from (`usize::MAX`:
+    /// another font).
+    pub font: usize,
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Snapshot {
+    /// Oracle clusters merged because they split one grapheme (UAX #29,
+    /// GB9c conjuncts; Parley clusters finer). Always 0 for ours.
+    pub grapheme_merges: usize,
+    /// Oracle lines whose `LineMetrics::advance` is not the sum of their
+    /// glyph advances (Parley with emoji ZWJ ligatures); the glyph sum is
+    /// used. Always 0 for ours.
+    pub advance_fixups: usize,
     pub rtl: bool,
     pub width: f32,
     pub height: f32,
@@ -179,8 +243,28 @@ fn newline(text: &str, r: &Range<usize>) -> bool {
     })
 }
 
-/// The owned paragraph's snapshot.
-pub fn ours(p: &Paragraph, text: &str) -> Snapshot {
+/// The pinned file `bytes` points into (`usize::MAX`: none).
+fn pinned_index(bytes: &[u8]) -> usize {
+    fonts::pinned_files()
+        .iter()
+        .position(|f| f.as_ptr() == bytes.as_ptr())
+        .unwrap_or(usize::MAX)
+}
+
+/// Grapheme start bytes of `text`.
+fn grapheme_starts(text: &str) -> Vec<usize> {
+    text.grapheme_indices(true).map(|(i, _)| i).collect()
+}
+
+/// The owned paragraph's snapshot. Drawn glyphs follow the placement
+/// order: a segment whose L1 level differs from its run's direction
+/// places its clusters in reverse.
+pub fn ours(engine: &TextEngine, p: &Paragraph, text: &str) -> Snapshot {
+    let store = &engine.fonts.store;
+    let font_of = |run: u32| {
+        let face = store.instance_data(p.runs[run as usize].font).face;
+        pinned_index(store.face_data(face).bytes.as_ref().as_ref())
+    };
     let clusters = p
         .cluster_map()
         .into_iter()
@@ -204,14 +288,25 @@ pub fn ours(p: &Paragraph, text: &str) -> Snapshot {
         .map(|l| {
             let mut glyphs = Vec::new();
             for s in &p.segs[l.segs.start as usize..l.segs.end as usize] {
-                for g in &p.glyphs[s.glyphs.start as usize..s.glyphs.end as usize] {
+                let font = font_of(s.run);
+                // Cluster groups in stored order; reversed when the
+                // segment's level has another direction than its run.
+                let mut groups: Vec<&[craie_text::paragraph::Glyph]> = p.glyphs
+                    [s.glyphs.start as usize..s.glyphs.end as usize]
+                    .chunk_by(|a, b| a.cluster == b.cluster)
+                    .collect();
+                if (s.level ^ p.runs[s.run as usize].level) & 1 == 1 {
+                    groups.reverse();
+                }
+                for g in groups.into_iter().flatten() {
                     if g.id != HIDDEN {
                         glyphs.push(Drawn {
                             id: g.id,
-                            x: g.x,
+                            x: g.x + g.dx,
                             y: g.y,
                             cluster: g.cluster as usize,
                             advance: g.advance,
+                            font,
                         });
                     }
                 }
@@ -229,6 +324,8 @@ pub fn ours(p: &Paragraph, text: &str) -> Snapshot {
         })
         .collect();
     Snapshot {
+        grapheme_merges: 0,
+        advance_fixups: 0,
         rtl: p.base_rtl,
         width: p.width,
         height: p.height,
@@ -239,29 +336,40 @@ pub fn ours(p: &Paragraph, text: &str) -> Snapshot {
 
 /// Parley's snapshot. Parley splits a ligature over its source clusters
 /// (glyphs on the first, none on the rest): those merge back into one
-/// group, as a shaper cluster.
+/// group, as a shaper cluster. Clusters that split a grapheme merge too
+/// (counted in `grapheme_merges`), and a drawn glyph's cluster is its
+/// grapheme's start.
 pub fn parley(layout: &Layout<u16>, text: &str) -> Snapshot {
+    let starts = grapheme_starts(text);
+    let grapheme = |b: usize| starts[starts.partition_point(|&s| s <= b) - 1];
     let mut clusters: Vec<ClusterSnap> = Vec::new();
     let mut lines = Vec::new();
+    let mut advance_fixups = 0;
+    let mut width = 0.0f32;
     for line in layout.lines() {
         let m = line.metrics();
         let mut glyphs = Vec::new();
+        // The line's advance from its glyphs (hard breaks excluded).
+        let mut advance = 0.0f32;
         for item in line.items() {
             let PositionedLayoutItem::GlyphRun(run) = item else {
                 continue;
             };
             let mut x = run.offset();
             let y = run.baseline();
+            let font = pinned_index(run.run().font().data.data());
             for c in run.run().visual_clusters() {
                 let hard = c.is_hard_line_break() || newline(text, &c.text_range());
                 for g in c.glyphs() {
                     if !hard {
+                        advance += g.advance;
                         glyphs.push(Drawn {
                             id: g.id as u16,
                             x: x + g.x,
                             y: y + g.y,
-                            cluster: c.text_range().start,
+                            cluster: grapheme(c.text_range().start),
                             advance: g.advance,
+                            font,
                         });
                     }
                     x += g.advance;
@@ -290,6 +398,10 @@ pub fn parley(layout: &Layout<u16>, text: &str) -> Snapshot {
                 }
             }
         }
+        if (advance - m.advance).abs() > 1e-3 * advance.abs().max(1.0) {
+            advance_fixups += 1;
+        }
+        width = width.max(advance - m.trailing_whitespace);
         lines.push(LineSnap {
             text: line.text_range(),
             // The line box top. (`block_min_coord` is the selection
@@ -298,7 +410,7 @@ pub fn parley(layout: &Layout<u16>, text: &str) -> Snapshot {
             top: m.baseline - m.ascent - m.leading * 0.5,
             height: m.line_height,
             baseline: m.baseline,
-            advance: m.advance,
+            advance,
             trailing: m.trailing_whitespace,
             x: m.offset,
             glyphs,
@@ -307,9 +419,30 @@ pub fn parley(layout: &Layout<u16>, text: &str) -> Snapshot {
     // Clusters of one run split over lines arrive in line order; within a
     // line, `runs()` is visual order. Logical order is by text start.
     clusters.sort_by_key(|c| c.text.start);
+    let mut merged: Vec<ClusterSnap> = Vec::with_capacity(clusters.len());
+    let mut grapheme_merges = 0;
+    for c in clusters {
+        match merged.last_mut() {
+            Some(last)
+                if grapheme(c.text.start) != c.text.start && last.text.end == c.text.start =>
+            {
+                grapheme_merges += 1;
+                last.text.end = c.text.end;
+                last.glyphs.extend(c.glyphs);
+                last.advance += c.advance;
+            }
+            _ => merged.push(c),
+        }
+    }
+    let clusters = merged;
+    if advance_fixups == 0 {
+        width = layout.width();
+    }
     Snapshot {
+        grapheme_merges,
+        advance_fixups,
         rtl: layout.is_rtl(),
-        width: layout.width(),
+        width,
         height: layout.height(),
         lines,
         clusters,
@@ -325,8 +458,8 @@ pub struct Diff {
     pub clusters: usize,
     pub first_cluster: Option<(ClusterSnap, Option<ClusterSnap>)>,
     pub first_line: Option<(Range<usize>, Option<Range<usize>>)>,
-    /// Lines whose drawn glyph ids differ in visual order, after the L1
-    /// correction below.
+    /// Lines whose drawn glyphs (id, source cluster, font file) differ
+    /// in visual order, after the L1 correction below.
     pub glyph_ids: usize,
     /// Lines where only UAX #9 rule L1 separates the two: the line's
     /// trailing whitespace sits at the paragraph's end side in ours, and
@@ -426,7 +559,12 @@ fn apply_l1(line: &LineSnap, text: &str, rtl: bool) -> Option<Vec<Drawn>> {
 pub fn compare(a: &Snapshot, b: &Snapshot, text: &str) -> Diff {
     let mut d = Diff::default();
     let n = a.lines.len().max(b.lines.len());
-    let ids = |g: &[Drawn]| g.iter().map(|g| g.id).collect::<Vec<_>>();
+    // A drawn glyph is its id, source cluster, and font file.
+    let ids = |g: &[Drawn]| {
+        g.iter()
+            .map(|g| (g.id, g.cluster, g.font))
+            .collect::<Vec<_>>()
+    };
     for i in 0..n {
         match (a.lines.get(i), b.lines.get(i)) {
             (Some(x), Some(y)) => {
