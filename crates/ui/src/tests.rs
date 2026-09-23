@@ -5,21 +5,21 @@ use crate::events::{Key, KeyInput, Mods, mask, out_kind};
 use crate::geom::Size;
 use crate::host::NodeId;
 use crate::mutation::{Command, Mutation, NodeKind, Role, TextSpan, Transaction};
-use crate::scene::{Instance, Scene};
+use crate::scene::{Resolved, Scene};
 use crate::surface;
 use crate::ui::Ui;
 use crate::wire::{self, WireError};
 
 const NIL: u32 = u32::MAX;
 
-/// Glyph instances in the unified stream (everything that isn't a
-/// solid rect).
+/// Every drawn primitive in draw order, in device space.
+fn resolved(scene: &Scene) -> Vec<Resolved> {
+    scene.resolve(&|r| r.0 as u64)
+}
+
+/// Glyphs in the drawn scene.
 fn glyphs(scene: &Scene) -> usize {
-    scene
-        .items
-        .iter()
-        .filter(|i| i.flags & Instance::FLAG_SOLID == 0)
-        .count()
+    resolved(scene).iter().filter(|p| p.kind == 1).count()
 }
 
 const WORDS: &str = "word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word ";
@@ -167,13 +167,11 @@ fn nested_insets_accumulate_once() {
     // Paint-time accumulated origin: the leaf quad emits at the
     // accumulated content origin (13+5, 24+7) = (18, 31) — insets
     // counted exactly once.
-    let quad = ui
-        .scene()
-        .items
-        .iter()
-        .find(|i| i.flags & Instance::FLAG_SOLID != 0)
+    let quad = resolved(ui.scene())
+        .into_iter()
+        .find(|p| p.kind == 0)
         .expect("leaf quad emitted");
-    assert_eq!(quad.position, [18.0, 31.0]);
+    assert_eq!((quad.bounds.origin.x, quad.bounds.origin.y), (18.0, 31.0));
 }
 
 /// `display: none` must remove the subtree from layout AND paint —
@@ -471,22 +469,13 @@ fn surface_bars_paint_from_payload() {
     let mut ui = Ui::new(2.0);
     ui.apply(&buf).unwrap();
     ui.render(Size::new(800.0, 600.0));
-    let red: Vec<_> = ui
-        .scene()
-        .items
-        .iter()
-        .filter(|i| i.color == 0xFF00_00FF)
-        .collect();
-    let green: Vec<_> = ui
-        .scene()
-        .items
-        .iter()
-        .filter(|i| i.color == 0x00FF_00FF)
-        .collect();
+    let all = resolved(ui.scene());
+    let red: Vec<_> = all.iter().filter(|p| p.color == 0xFF00_00FF).collect();
+    let green: Vec<_> = all.iter().filter(|p| p.color == 0x00FF_00FF).collect();
     assert_eq!(red.len(), 1, "half bar in the bar color");
     assert_eq!(green.len(), 1, "max bar in the highlight color");
     // scale=2: the 40pt-tall max bar lands 80 device px tall.
-    assert_eq!(green[0].size[1], 80.0);
+    assert_eq!(green[0].bounds.size.height, 80.0);
 }
 
 /// A surface of an unregistered kind paints only its box.
@@ -509,7 +498,7 @@ fn surface_without_painter_paints_background() {
     let mut ui = Ui::new(1.0);
     ui.apply(&buf).unwrap();
     ui.render(Size::new(800.0, 600.0));
-    assert!(ui.scene().items.iter().any(|i| i.color == 0x1122_3344));
+    assert!(resolved(ui.scene()).iter().any(|p| p.color == 0x1122_3344));
 }
 
 // ---- accessibility ----

@@ -1,5 +1,6 @@
-//! Milestone 0 demo: Parley -> Swash -> Craie atlas -> wgpu, in a real
-//! native window.
+//! Milestone 0 demo: Parley -> Swash -> raster atlas -> scene chunks ->
+//! wgpu, in a real native window. One chunk per paragraph; colors are
+//! paint slots, so the palette lives in each chunk's paint records.
 //!
 //!   cargo run --example text                 open the window
 //!   cargo run --example text -- --screenshot out.png [w h scale]
@@ -8,10 +9,10 @@
 //! The window path is deliberately idle: a frame is produced only when the
 //! OS asks (expose) or the app requests one after a resize/scale change.
 
-use craie_core::geom::{Point, Size};
-use craie_render::{Gpu, Renderer, WindowSurface};
+use craie_core::geom::{Affine, Point, Rect, Size};
 use craie_platform_winit::{self as platform, Window};
-use craie_scene::{Color, Instance, Scene};
+use craie_render::{Gpu, Renderer, WindowSurface};
+use craie_scene::{ChunkWriter, Color, NONE, OrderItem, PaintSlot, Placement, Scene};
 use craie_text::parley::style::{FontStyle, FontWeight, GenericFamily, LineHeight, StyleProperty};
 use craie_text::{ParagraphSpec, TextEngine, TextSpan};
 
@@ -24,11 +25,18 @@ const DIM: Color = Color::rgb(0x9a, 0xa0, 0xae);
 const ACCENT: Color = Color::rgb(0x6d, 0xc7, 0xff);
 const CODE_BG: Color = Color::rgb(0x22, 0x24, 0x2b);
 
+/// Every paragraph chunk carries this palette in its paint slots.
+const PALETTE: [Color; 4] = [FG, DIM, ACCENT, CODE_BG];
+const FG_SLOT: PaintSlot = PaintSlot(0);
+const DIM_SLOT: PaintSlot = PaintSlot(1);
+const ACCENT_SLOT: PaintSlot = PaintSlot(2);
+const CODE_BG_SLOT: PaintSlot = PaintSlot(3);
+
 /// One paragraph of demo content: text plus its default style and ranged
 /// overrides.
 struct Para {
     text: String,
-    defaults: Vec<StyleProperty<'static, Color>>,
+    defaults: Vec<StyleProperty<'static, PaintSlot>>,
     spans: Vec<TextSpan>,
     /// Give this paragraph a background quad (exercises the quad pipeline).
     backing: bool,
@@ -38,7 +46,7 @@ fn para(text: &str, size: f32, spans: Vec<TextSpan>) -> Para {
     Para {
         text: text.to_string(),
         defaults: vec![
-            StyleProperty::Brush(FG),
+            StyleProperty::Brush(FG_SLOT),
             StyleProperty::FontFamily(GenericFamily::SansSerif.into()),
             StyleProperty::FontSize(size),
             StyleProperty::LineHeight(LineHeight::FontSizeRelative(1.25)),
@@ -48,7 +56,7 @@ fn para(text: &str, size: f32, spans: Vec<TextSpan>) -> Para {
     }
 }
 
-fn span(text: &str, needle: &str, style: StyleProperty<'static, Color>) -> TextSpan {
+fn span(text: &str, needle: &str, style: StyleProperty<'static, PaintSlot>) -> TextSpan {
     let start = text.find(needle).expect("span needle not in text");
     TextSpan {
         range: start..start + needle.len(),
@@ -77,7 +85,7 @@ fn paragraphs() -> Vec<Para> {
         vec![span(
             "React → retained native state → native pixels",
             "retained native state",
-            StyleProperty::Brush(ACCENT),
+            StyleProperty::Brush(ACCENT_SLOT),
         )],
     ));
 
@@ -107,7 +115,7 @@ fn paragraphs() -> Vec<Para> {
                 "`code → atlas`",
                 StyleProperty::FontFamily(GenericFamily::Monospace.into()),
             ),
-            span(mixed, "code → atlas", StyleProperty::Brush(ACCENT)),
+            span(mixed, "code → atlas", StyleProperty::Brush(ACCENT_SLOT)),
         ],
     ));
 
@@ -125,7 +133,7 @@ fn paragraphs() -> Vec<Para> {
         vec![span(
             wrap_text,
             "no work while idle",
-            StyleProperty::Brush(DIM),
+            StyleProperty::Brush(DIM_SLOT),
         )],
     ));
 
@@ -139,7 +147,7 @@ fn paragraphs() -> Vec<Para> {
                 code,
                 StyleProperty::FontFamily(GenericFamily::Monospace.into()),
             ),
-            span(code, "// monospace", StyleProperty::Brush(DIM)),
+            span(code, "// monospace", StyleProperty::Brush(DIM_SLOT)),
         ],
     );
     code_para.backing = true;
@@ -148,24 +156,31 @@ fn paragraphs() -> Vec<Para> {
     out
 }
 
-/// Lays out every paragraph at the current logical width and emits the
-/// flat scene (physical pixels via `scale` at emit time).
-/// Returns (scene, runs, glyph instances, rasters performed this pass).
+/// Lays out every paragraph at the current logical size and rebuilds
+/// one chunk per paragraph in `scene` (kept across rebuilds so the glyph
+/// cache's raster ids stay valid). Returns (runs, glyph instances,
+/// rasters performed this pass).
 fn build_scene(
+    scene: &mut Scene,
     text: &mut TextEngine,
     paras: &[Para],
-    width: f32,
+    size: Size,
     scale: f32,
-) -> (Scene, u32, u32, u64) {
-    let wrap = width - 2.0 * MARGIN;
-    let mut scene = Scene {
-        clear: Some(BG),
-        items: Vec::new(),
-    };
+) -> (u32, u32, u64) {
+    scene.clear = BG;
+    scene.scale = scale;
+    if scene.transforms.is_empty() {
+        let root = scene.transforms.alloc(Affine::IDENTITY, NONE);
+        scene.transforms.set_order(vec![root]);
+    }
+    scene.transforms.set_local(0, Affine::scale(scale, scale));
+    let wrap = size.width - 2.0 * MARGIN;
     let rasters_before = text.cache.stats.rasters;
-    let mut runs = 0;
+    let (mut runs, mut glyphs) = (0, 0);
+    let mut w = ChunkWriter::new();
+    let mut order = Vec::new();
     let mut y = MARGIN;
-    for para in paras {
+    for (i, para) in paras.iter().enumerate() {
         let layout = text.layout_paragraph(
             &ParagraphSpec {
                 text: &para.text,
@@ -174,23 +189,38 @@ fn build_scene(
             },
             Some(wrap),
         );
+        for c in PALETTE {
+            w.paint(c.0);
+        }
         // The backing rect paints under this paragraph's glyphs.
         if para.backing {
-            scene.items.push(Instance::quad(
-                (MARGIN - 8.0) * scale,
-                (y - 4.0) * scale,
-                (layout.width() + 16.0) * scale,
-                (layout.height() + 8.0) * scale,
-                CODE_BG.0,
-            ));
+            w.rect(
+                Rect::new(-8.0, -4.0, layout.width() + 16.0, layout.height() + 8.0),
+                0.0,
+                CODE_BG_SLOT,
+            );
         }
-        let emitted = text.emit(&layout, Point::new(MARGIN, y), scale, None, &mut scene.items);
+        let emitted = text.emit(&layout, Point::ZERO, scale, None, &mut scene.atlas, &mut w);
         runs += emitted.glyph_runs;
+        glyphs += emitted.glyphs;
+        let id = i as u32;
+        scene.commit_chunk(id, &mut w);
+        scene.set_placement(
+            id,
+            Placement {
+                offset: [MARGIN, y],
+                transform: 0,
+                clip: NONE,
+            },
+        );
+        order.push(OrderItem::Chunk(id));
         y += layout.height() + GAP;
     }
-    let rasters = text.cache.stats.rasters - rasters_before;
-    let glyphs = scene.items.len() as u32;
-    (scene, runs, glyphs, rasters)
+    scene.set_order(order, Vec::new());
+    let mut missing = Vec::new();
+    scene.prepare(Size::new(size.width * scale, size.height * scale), &mut missing);
+    text.ensure_resident(&missing, &mut scene.atlas);
+    (runs, glyphs, text.cache.stats.rasters - rasters_before)
 }
 
 // ---------------------------------------------------------------- window
@@ -218,10 +248,14 @@ impl Inner {
         let (w, h) = window.size();
         let scale = window.scale_factor() as f32;
         self.surface.resize(&self.gpu, w, h);
-        let (scene, runs, glyphs, rasters) =
-            build_scene(&mut self.text, &self.paras, w as f32 / scale, scale);
-        self.scene = scene;
-        self.renderer.sync_atlas(&self.gpu, &mut self.text.atlas);
+        let (runs, glyphs, rasters) = build_scene(
+            &mut self.scene,
+            &mut self.text,
+            &self.paras,
+            Size::new(w as f32 / scale, h as f32 / scale),
+            scale,
+        );
+        self.renderer.prepare(&self.gpu, &mut self.scene);
         eprintln!(
             "[craie] layout {w}x{h} @{scale:.2}x — {runs} runs, {glyphs} glyph instances, \
              {rasters} rasters, cache {} hits / {} misses",
@@ -240,8 +274,14 @@ impl platform::App for Demo {
         let mut text = TextEngine::new();
         let paras = paragraphs();
         let scale = window.scale_factor() as f32;
-        let (scene, runs, glyphs, rasters) =
-            build_scene(&mut text, &paras, w as f32 / scale, scale);
+        let mut scene = Scene::new();
+        let (runs, glyphs, rasters) = build_scene(
+            &mut scene,
+            &mut text,
+            &paras,
+            Size::new(w as f32 / scale, h as f32 / scale),
+            scale,
+        );
         let mut inner = Inner {
             gpu,
             surface,
@@ -251,7 +291,7 @@ impl platform::App for Demo {
             scene,
             frames: 0,
         };
-        inner.renderer.sync_atlas(&inner.gpu, &mut inner.text.atlas);
+        inner.renderer.prepare(&inner.gpu, &mut inner.scene);
         eprintln!(
             "[craie] ready {w}x{h} @{scale:.2}x — {runs} runs, {glyphs} glyph instances, {rasters} rasters"
         );
@@ -296,17 +336,23 @@ fn run_screenshot(path: &str, w: u32, h: u32, scale: f32) {
     let mut renderer = Renderer::new(&gpu, format);
     let mut text = TextEngine::new();
     let paras = paragraphs();
-    let (scene, runs, glyphs, rasters) =
-        build_scene(&mut text, &paras, w as f32 / scale, scale);
+    let mut scene = Scene::new();
+    let (runs, glyphs, rasters) = build_scene(
+        &mut scene,
+        &mut text,
+        &paras,
+        Size::new(w as f32 / scale, h as f32 / scale),
+        scale,
+    );
     eprintln!(
         "[craie] headless {w}x{h} @{scale}x — {runs} runs, {glyphs} glyph instances, {rasters} rasters"
     );
-    renderer.sync_atlas(&gpu, &mut text.atlas);
+    renderer.prepare(&gpu, &mut scene);
     eprintln!(
         "[craie] atlas: {} alpha pages, {} color pages, {} allocations, {} bytes uploaded",
-        text.atlas.stats.alpha_pages,
-        text.atlas.stats.color_pages,
-        text.atlas.stats.allocations,
+        scene.atlas.stats.alpha_pages,
+        scene.atlas.stats.color_pages,
+        scene.atlas.stats.allocations,
         renderer.atlas_upload_bytes,
     );
 

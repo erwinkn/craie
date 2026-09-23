@@ -85,6 +85,19 @@ fn report(p: &Phase) {
     eprintln!("  {:>26}: {:>8.2} ms, {:>7} allocs", p.name, p.ms, p.allocs);
 }
 
+/// Primitives the last draw list draws.
+fn drawn(scene: &craie_scene::Scene) -> u32 {
+    scene
+        .draw_list()
+        .cmds
+        .iter()
+        .map(|c| match c {
+            craie_scene::DrawCmd::Rects { count, .. } | craie_scene::DrawCmd::Glyphs { count, .. } => *count,
+            _ => 0,
+        })
+        .sum()
+}
+
 /// Seals a transaction as CRW2 bytes.
 fn finish(mut t: Transaction<'_>, seq: u64) -> Vec<u8> {
     t.seq = seq;
@@ -185,9 +198,10 @@ fn bench_rows() {
     ui.paint(VIEW);
     report(&t.stop("paint+emit (cold)"));
     eprintln!(
-        "  {:>26}: {} instances, {} rasters, {} cache entries",
+        "  {:>26}: {} drawn primitives, {} chunks built, {} rasters, {} cache entries",
         "scene",
-        ui.scene().items.len(),
+        drawn(ui.scene()),
+        ui.counters().chunks_built,
         ui.text.cache.stats.rasters,
         ui.text.cache.len()
     );
@@ -273,17 +287,20 @@ fn bench_gpu(ui: &mut Ui) {
     let view = target.create_view(&Default::default());
 
     let t = Timer::start();
-    renderer.sync_atlas(&gpu, &mut ui.text.atlas);
-    report(&t.stop("atlas upload"));
+    renderer.prepare(&gpu, ui.scene_mut());
+    report(&t.stop("upload (first)"));
     eprintln!(
-        "  {:>26}: {} bytes uploaded",
-        "atlas", renderer.atlas_upload_bytes
+        "  {:>26}: {} bytes ({} atlas)",
+        "upload", renderer.stats.upload_bytes, renderer.atlas_upload_bytes
     );
 
-    let scene = ui.scene().clone();
     let t = Timer::start();
-    renderer.draw(&gpu, &view, w, h, &scene);
-    report(&t.stop("draw submit (upload+1 call)"));
+    renderer.draw(&gpu, &view, w, h, ui.scene());
+    report(&t.stop("draw submit (first)"));
+    eprintln!(
+        "  {:>26}: {} draw calls, {} passes",
+        "draw", renderer.stats.draw_calls, renderer.stats.passes
+    );
 
     let t = Timer::start();
     gpu.device
@@ -294,10 +311,13 @@ fn bench_gpu(ui: &mut Ui) {
         .unwrap();
     report(&t.stop("gpu completion (first)"));
 
-    // Steady state: same scene again — warmup effects excluded.
+    // Steady state: same scene again — warmup effects excluded. An
+    // unchanged scene uploads nothing.
     let t = Timer::start();
-    renderer.draw(&gpu, &view, w, h, &scene);
+    renderer.prepare(&gpu, ui.scene_mut());
+    renderer.draw(&gpu, &view, w, h, ui.scene());
     report(&t.stop("draw submit (warm)"));
+    eprintln!("  {:>26}: {} bytes", "upload (warm)", renderer.stats.upload_bytes);
     let t = Timer::start();
     gpu.device
         .poll(wgpu::PollType::Wait {
@@ -483,9 +503,10 @@ fn bench_transcript() {
     ui.paint(VIEW);
     report(&t.stop("paint+emit (cold)"));
     eprintln!(
-        "  {:>26}: {} instances, {} rasters, {} cache entries",
+        "  {:>26}: {} drawn primitives, {} chunks built, {} rasters, {} cache entries",
         "scene",
-        ui.scene().items.len(),
+        drawn(ui.scene()),
+        ui.counters().chunks_built,
         ui.text.cache.stats.rasters,
         ui.text.cache.len()
     );

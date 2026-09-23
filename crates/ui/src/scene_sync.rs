@@ -1,0 +1,677 @@
+//! Host + layout -> retained scene.
+//!
+//! Each node owns one chunk (id = node id) holding its primitives in its
+//! own border-box coordinates. What changes decides the work:
+//!
+//! - content (text, box geometry, surface payload, input state, size):
+//!   the node's chunk is rebuilt;
+//! - color only: one paint record is patched;
+//! - layout position: the chunk's placement offset is patched;
+//! - scroll offset or spatial transform: one transform record is patched;
+//! - opacity: one layer's opacity is patched;
+//! - structure, `display`, `overflow`, or draw topology (a transform
+//!   record or opacity layer appearing): the draw order, the transform
+//!   evaluation order, and the clip records are rebuilt by one walk.
+//!
+//! Spaces: the window root record maps logical units to device pixels.
+//! A node with a transform owns a record for itself and its subtree; a
+//! scroll container owns a record for its content. Every other node
+//! draws in its nearest ancestor record's space at an offset, so a scroll
+//! or a transform animation patches one record and no chunk.
+
+use craie_core::dirty::DirtyQueue;
+use craie_core::geom::{Affine, Point, Rect, Size};
+use craie_core::rev::Rev;
+use craie_scene::{ChunkWriter, ClipRecord, NONE, OrderItem, PaintSlot, Placement, RasterId};
+
+use crate::host::{NodeId, ROOT};
+use crate::layout::{LayoutData, MeasuredText};
+use crate::mutation::NodeKind;
+use crate::text::parley::style::StyleProperty;
+use crate::text::ParagraphSpec;
+use crate::ui::Ui;
+
+/// Derived per-node scene bookkeeping, rebuilt by the tree walk.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct NodeSpace {
+    /// Transform record for the node and its subtree (transformed nodes).
+    pub self_rec: u32,
+    /// Transform record for the node's content (scroll containers).
+    pub content_rec: u32,
+    /// Clip record the node imposes on its children (overflow != visible).
+    pub clip_rec: u32,
+    /// Opacity layer (opacity < 1).
+    pub layer: u32,
+    /// Border-box origin in the parent's space (logical).
+    pub origin: [f32; 2],
+    /// Layout facts the chunk was built from: size, content offset,
+    /// insets. A change rebuilds the chunk.
+    pub built: [f32; 6],
+    /// Walk epoch that last claimed this node's records.
+    pub claimed: u32,
+    /// Walk epoch that last visited the node (dedupes partial walks).
+    pub walked: u32,
+    /// The context the node was last visited with: its parent's child
+    /// space, offset, and clip. Partial walks resume from it.
+    pub ctx: Ctx,
+}
+
+impl Default for NodeSpace {
+    fn default() -> NodeSpace {
+        NodeSpace {
+            self_rec: NONE,
+            content_rec: NONE,
+            clip_rec: NONE,
+            layer: NONE,
+            origin: [0.0; 2],
+            built: [f32::NAN; 6],
+            claimed: 0,
+            walked: 0,
+            ctx: Ctx {
+                space: NONE,
+                offset: [0.0; 2],
+                clip: NONE,
+            },
+        }
+    }
+}
+
+/// Scene-side state owned by `Ui`.
+pub(crate) struct SceneSync {
+    pub spaces: Vec<NodeSpace>,
+    /// The window root record: logical units -> device pixels.
+    pub root_rec: u32,
+    /// (structure, clip) revisions the draw order was built from.
+    pub order_revs: Option<(Rev, Rev)>,
+    pub epoch: u32,
+    /// Nodes that owned records after the last topology walk.
+    pub owners: Vec<u32>,
+    pub writer: ChunkWriter,
+    pub missing: Vec<RasterId>,
+    /// Scale the text chunks were emitted at.
+    pub scale: f32,
+    pub scratch: Vec<u32>,
+    /// Nodes whose chunk build waits until their box nears the viewport.
+    pub deferred: DirtyQueue,
+    /// Visibility inputs the deferred set was last checked against:
+    /// viewport (device px), world revision, placement revision.
+    pub checked: Option<(Size, u64, u64)>,
+}
+
+impl SceneSync {
+    pub fn new(scene: &mut craie_scene::Scene) -> SceneSync {
+        let root_rec = scene.transforms.alloc(Affine::IDENTITY, NONE);
+        SceneSync {
+            spaces: Vec::new(),
+            root_rec,
+            order_revs: None,
+            epoch: 0,
+            owners: Vec::new(),
+            writer: ChunkWriter::new(),
+            missing: Vec::new(),
+            scale: f32::NAN,
+            scratch: Vec::new(),
+            deferred: DirtyQueue::new(),
+            checked: None,
+        }
+    }
+}
+
+/// Walk context: the space children draw in.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Ctx {
+    space: u32,
+    offset: [f32; 2],
+    clip: u32,
+}
+
+/// Outputs of a topology walk.
+#[derive(Default)]
+struct Topo {
+    order: Vec<OrderItem>,
+    layers: Vec<f32>,
+    records: Vec<u32>,
+    clips: Vec<ClipRecord>,
+}
+
+fn layout_key(d: &LayoutData) -> [f32; 6] {
+    [
+        d.rect.size.width,
+        d.rect.size.height,
+        d.content[0],
+        d.content[1],
+        d.insets[0],
+        d.insets[1],
+    ]
+}
+
+/// A node's own transform, applied about its border-box center.
+fn self_local(origin: [f32; 2], t: Affine, size: Size) -> Affine {
+    Affine::translate(origin[0], origin[1])
+        .mul(&t.about(Point::new(size.width / 2.0, size.height / 2.0)))
+}
+
+impl Ui {
+    fn space_mut(&mut self, id: NodeId) -> &mut NodeSpace {
+        let i = id.index();
+        if self.sync.spaces.len() <= i {
+            self.sync.spaces.resize(i + 1, NodeSpace::default());
+        }
+        &mut self.sync.spaces[i]
+    }
+
+    /// Brings the scene up to date with the host and layout. `layout_ran`
+    /// says whether this frame's layout pass changed anything; `viewport`
+    /// is logical.
+    pub(crate) fn sync_scene(&mut self, viewport: Size, layout_ran: bool) {
+        self.scene.begin_frame();
+        self.scene.scale = self.scale;
+        self.scene.clear = crate::scene::Color(self.clear);
+
+        // A scale change re-rasterizes every glyph chunk and remaps the
+        // root record; geometry in logical units is unaffected.
+        if self.sync.scale != self.scale {
+            self.sync.scale = self.scale;
+            self.scene
+                .transforms
+                .set_local(self.sync.root_rec, Affine::scale(self.scale, self.scale));
+            for i in 0..self.host.slot_count() {
+                let id = NodeId(i as u32);
+                if matches!(self.host.kind(id), Some(NodeKind::Text | NodeKind::Input)) {
+                    self.host.dirty.content.push(id.0);
+                }
+            }
+        }
+
+        // Topology changes rebuild the order in one full walk. Otherwise
+        // only nodes whose layout moved (their subtree) or resized (the
+        // node alone) are revisited, then spatial changes patch records.
+        let revs = (self.host.revs.structure, self.host.revs.clip);
+        if self.sync.order_revs != Some(revs) {
+            self.walk_tree(true);
+            self.sync.order_revs = Some(revs);
+            self.layouts.moved.clear();
+            self.layouts.resized.clear();
+        } else {
+            if layout_ran {
+                self.walk_changed();
+            }
+            self.patch_spatial();
+        }
+        self.host.dirty.spatial.clear();
+
+        // Chunk content is demand-driven: a node builds when its box is
+        // within half a viewport of the screen; farther nodes wait in
+        // `deferred` and build in the frame they come into range.
+        self.scene.transforms.derive();
+        let px = Size::new(viewport.width * self.scale, viewport.height * self.scale);
+        let region = Rect::new(-px.width / 2.0, -px.height / 2.0, px.width * 2.0, px.height * 2.0);
+        // Deferred nodes are rechecked only when a visibility input moved.
+        let key = (px, self.scene.transforms.world_rev, self.scene.placement_rev);
+        if self.sync.checked != Some(key) {
+            self.sync.checked = Some(key);
+            for &id in self.sync.deferred.as_slice() {
+                self.host.dirty.content.push(id);
+            }
+            self.sync.deferred.clear();
+        }
+        let mut ids = std::mem::take(&mut self.sync.scratch);
+        self.host.dirty.content.drain_into(&mut ids);
+        let mut built = Vec::with_capacity(ids.len());
+        for &id in &ids {
+            let node = NodeId(id);
+            if self.host.is_live(node) && !self.near(node, &region) {
+                // Stale content must never draw: drop it until rebuilt.
+                self.scene.free_chunk(id);
+                self.sync.deferred.push(id);
+                continue;
+            }
+            self.build_chunk(node);
+            built.push(id);
+        }
+        let ids = built;
+        let mut paint_ids = Vec::new();
+        self.host.dirty.paint.drain_into(&mut paint_ids);
+        for id in paint_ids {
+            if !ids.contains(&id) {
+                self.patch_paint(NodeId(id));
+            }
+        }
+        self.sync.scratch = ids;
+
+        let mut missing = std::mem::take(&mut self.sync.missing);
+        missing.clear();
+        self.scene.prepare(px, &mut missing);
+        if !missing.is_empty() {
+            self.text.ensure_resident(&missing, &mut self.scene.atlas);
+        }
+        self.sync.missing = missing;
+    }
+
+    /// One pre-order walk. Always recomputes placements, record locals,
+    /// and clip rects from layout. With `topo`, also rebuilds the draw
+    /// order, the layer table, the transform evaluation order, and the
+    /// clip records, and frees records nobody claims.
+    fn walk_tree(&mut self, topo: bool) {
+        self.sync.epoch = self.sync.epoch.wrapping_add(1);
+        let mut out = Topo::default();
+        if topo {
+            out.records.push(self.sync.root_rec);
+        }
+        let roots: Vec<NodeId> = self.host.children(ROOT).to_vec();
+        let ctx = Ctx {
+            space: self.sync.root_rec,
+            offset: [0.0; 2],
+            clip: NONE,
+        };
+        for root in roots {
+            self.visit(root, ctx, topo, &mut out);
+        }
+        if topo {
+            // Free the records of nodes that no longer claim them.
+            let epoch = self.sync.epoch;
+            let owners = std::mem::take(&mut self.sync.owners);
+            for id in owners {
+                let s = self.sync.spaces[id as usize];
+                if s.claimed == epoch {
+                    continue;
+                }
+                let s = &mut self.sync.spaces[id as usize];
+                for rec in [&mut s.self_rec, &mut s.content_rec] {
+                    if *rec != NONE {
+                        self.scene.transforms.free(*rec);
+                        *rec = NONE;
+                    }
+                }
+            }
+            for (i, s) in self.sync.spaces.iter().enumerate() {
+                if s.self_rec != NONE || s.content_rec != NONE {
+                    self.sync.owners.push(i as u32);
+                }
+            }
+            self.scene.transforms.set_order(out.records);
+            self.scene.clips.set_all(out.clips);
+            self.scene.set_order(out.order, out.layers);
+        }
+    }
+
+    /// Revisits the nodes layout moved (with their subtrees) or resized
+    /// (alone), resuming from each node's stored context.
+    fn walk_changed(&mut self) {
+        self.sync.epoch = self.sync.epoch.wrapping_add(1);
+        let epoch = self.sync.epoch;
+        let mut out = Topo::default();
+        for id in self.layouts.moved.take() {
+            let s = self.sync.spaces.get(id as usize).copied().unwrap_or_default();
+            if s.walked != epoch && s.ctx.space != NONE {
+                self.visit(NodeId(id), s.ctx, false, &mut out);
+            }
+        }
+        for id in self.layouts.resized.take() {
+            let s = self.sync.spaces.get(id as usize).copied().unwrap_or_default();
+            if s.walked != epoch && s.ctx.space != NONE {
+                self.visit_node(NodeId(id), s.ctx, false, &mut out);
+            }
+        }
+    }
+
+    fn visit(&mut self, id: NodeId, ctx: Ctx, topo: bool, out: &mut Topo) {
+        let Some(child_ctx) = self.visit_node(id, ctx, topo, out) else { return };
+        for i in 0..self.host.child_count(id) {
+            let child = self.host.child_at(id, i);
+            self.visit(child, child_ctx, topo, out);
+        }
+        if topo && self.sync.spaces[id.index()].layer != NONE {
+            out.order.push(OrderItem::EndLayer);
+        }
+    }
+
+    /// Updates one node's placement, records, and clip; returns the
+    /// context its children draw in (`None` when it draws nothing).
+    fn visit_node(&mut self, id: NodeId, ctx: Ctx, topo: bool, out: &mut Topo) -> Option<Ctx> {
+        let node = self.host.node(id)?;
+        let kind = node.kind;
+        let style = self.host.style(id);
+        if style.display == taffy::Display::None {
+            return None;
+        }
+        let clips = style.overflow.x != taffy::Overflow::Visible
+            || style.overflow.y != taffy::Overflow::Visible;
+        let scrolls = style.overflow.x == taffy::Overflow::Scroll
+            || style.overflow.y == taffy::Overflow::Scroll;
+        let data = self.layouts.data(id);
+        let spatial = self.host.spatial[id.index()];
+        let origin = [
+            ctx.offset[0] + data.rect.origin.x,
+            ctx.offset[1] + data.rect.origin.y,
+        ];
+        let epoch = self.sync.epoch;
+        let key = layout_key(&data);
+
+        // Record topology is decided by the walk that rebuilds the order.
+        let mut s = *self.space_mut(id);
+        s.walked = epoch;
+        s.ctx = ctx;
+        if topo {
+            s.claimed = epoch;
+            if spatial.transformed() {
+                if s.self_rec == NONE {
+                    s.self_rec = self.scene.transforms.alloc(Affine::IDENTITY, NONE);
+                }
+            } else if s.self_rec != NONE {
+                self.scene.transforms.free(s.self_rec);
+                s.self_rec = NONE;
+            }
+            if scrolls {
+                if s.content_rec == NONE {
+                    s.content_rec = self.scene.transforms.alloc(Affine::IDENTITY, NONE);
+                }
+            } else if s.content_rec != NONE {
+                self.scene.transforms.free(s.content_rec);
+                s.content_rec = NONE;
+            }
+            s.layer = if spatial.layered() {
+                out.layers.push(spatial.opacity);
+                out.order.push(OrderItem::BeginLayer(out.layers.len() as u32 - 1));
+                out.layers.len() as u32 - 1
+            } else {
+                NONE
+            };
+        } else if s.layer != NONE {
+            self.scene.set_layer_opacity(s.layer, spatial.opacity);
+        }
+        s.origin = origin;
+        if s.built != key {
+            self.host.dirty.content.push(id.0);
+        }
+
+        // The node's own space.
+        let (space, offset) = if s.self_rec != NONE {
+            self.scene.transforms.set_parent(s.self_rec, ctx.space);
+            self.scene
+                .transforms
+                .set_local(s.self_rec, self_local(origin, spatial.transform, data.rect.size));
+            if topo {
+                out.records.push(s.self_rec);
+            }
+            (s.self_rec, [0.0, 0.0])
+        } else {
+            (ctx.space, origin)
+        };
+        self.scene.set_placement(
+            id.0,
+            Placement {
+                offset,
+                transform: space,
+                clip: ctx.clip,
+            },
+        );
+        if topo {
+            out.order.push(OrderItem::Chunk(id.0));
+        }
+
+        // Children: clipped to the padding box, scrolled by the content
+        // record.
+        let mut child_clip = ctx.clip;
+        if clips {
+            let rect = Rect::new(
+                offset[0] + data.clip_box.origin.x,
+                offset[1] + data.clip_box.origin.y,
+                data.clip_box.size.width,
+                data.clip_box.size.height,
+            );
+            let radius = if kind.has_box() {
+                self.host.paint[id.index()].radius
+            } else {
+                0.0
+            };
+            if topo {
+                s.clip_rec = out.clips.len() as u32;
+                out.clips.push(ClipRecord {
+                    rect,
+                    radius,
+                    transform: space,
+                    parent: ctx.clip,
+                });
+            } else if s.clip_rec != NONE {
+                self.scene.clips.set_rect(s.clip_rec, rect, radius);
+            }
+            child_clip = s.clip_rec;
+        } else if topo {
+            s.clip_rec = NONE;
+        }
+        let child_ctx = if s.content_rec != NONE {
+            self.scene.transforms.set_parent(s.content_rec, space);
+            let [sx, sy] = spatial.scroll;
+            self.scene
+                .transforms
+                .set_local(s.content_rec, Affine::translate(offset[0] - sx, offset[1] - sy));
+            if topo {
+                out.records.push(s.content_rec);
+            }
+            Ctx {
+                space: s.content_rec,
+                offset: [0.0, 0.0],
+                clip: child_clip,
+            }
+        } else {
+            Ctx {
+                space,
+                offset,
+                clip: child_clip,
+            }
+        };
+        *self.space_mut(id) = s;
+        Some(child_ctx)
+    }
+
+    /// Scroll, transform, and opacity changes without topology or layout
+    /// changes: patch the node's records and layer in place.
+    fn patch_spatial(&mut self) {
+        let ids = self.host.dirty.spatial.as_slice().to_vec();
+        for id in ids {
+            let node = NodeId(id);
+            if !self.host.is_live(node) {
+                continue;
+            }
+            let Some(s) = self.sync.spaces.get(node.index()).copied() else { continue };
+            let spatial = self.host.spatial[node.index()];
+            let size = self.layouts.data(node).rect.size;
+            let mut base = s.origin;
+            if s.self_rec != NONE {
+                self.scene
+                    .transforms
+                    .set_local(s.self_rec, self_local(s.origin, spatial.transform, size));
+                base = [0.0, 0.0];
+            }
+            if s.content_rec != NONE {
+                let [sx, sy] = spatial.scroll;
+                self.scene
+                    .transforms
+                    .set_local(s.content_rec, Affine::translate(base[0] - sx, base[1] - sy));
+            }
+            if s.layer != NONE {
+                self.scene.set_layer_opacity(s.layer, spatial.opacity);
+            }
+        }
+    }
+
+    /// Whether a node's border box, in device px, intersects `region`.
+    /// Nodes outside the last walk (display: none) count as near: their
+    /// chunk is cheap and never drawn.
+    fn near(&self, id: NodeId, region: &Rect) -> bool {
+        let p = self.scene.placement(id.0);
+        let d = self.layouts.data(id);
+        let local = Rect::new(p.offset[0], p.offset[1], d.rect.size.width, d.rect.size.height);
+        let b = self.scene.transforms.world(p.transform).map_rect(&local);
+        // Overflowing content (text wider than its box) stays in range
+        // through the half-viewport margin.
+        b.intersects(region) || (b.size.width == 0.0 && b.size.height == 0.0)
+    }
+
+    /// Patches the paint records of a chunk whose colors changed.
+    fn patch_paint(&mut self, id: NodeId) {
+        let Some(kind) = self.host.kind(id) else { return };
+        if kind == NodeKind::Text {
+            let spans = &self.host.paragraphs[id.index()].spans;
+            for (i, s) in spans.iter().enumerate() {
+                self.scene.set_paint(id.0, PaintSlot(i as u32), s.color);
+            }
+        } else {
+            let p = self.host.paint[id.index()];
+            self.scene.set_paint(id.0, PaintSlot(0), p.fill);
+            self.scene.set_paint(id.0, PaintSlot(1), p.border_color);
+        }
+    }
+
+    /// Rebuilds one node's chunk from its current state, or frees it when
+    /// the node is gone.
+    fn build_chunk(&mut self, id: NodeId) {
+        let Some(kind) = self.host.kind(id) else {
+            self.scene.free_chunk(id.0);
+            return;
+        };
+        let data = self.layouts.data(id);
+        self.space_mut(id).built = layout_key(&data);
+        let mut w = std::mem::take(&mut self.sync.writer);
+        w.clear();
+        if kind.has_box() {
+            let p = self.host.paint[id.index()];
+            // Slots 0 and 1 are always the fill and border: color patches
+            // address them directly.
+            let fill = w.paint(p.fill);
+            let border = w.paint(p.border_color);
+            let has_border = p.border_width > 0.0 && p.border_color & 0xFF != 0;
+            if p.fill & 0xFF != 0 || has_border {
+                w.rect_bordered(
+                    Rect::new(0.0, 0.0, data.rect.size.width, data.rect.size.height),
+                    p.radius,
+                    fill,
+                    has_border.then_some(border),
+                    p.border_width,
+                );
+            }
+        }
+        match kind {
+            NodeKind::Text => self.build_text(id, &data, &mut w),
+            NodeKind::Input => self.build_input(id, &data, &mut w),
+            NodeKind::Surface => self.build_surface(id, &data, &mut w),
+            NodeKind::View => {}
+        }
+        self.scene.commit_chunk(id.0, &mut w);
+        self.sync.writer = w;
+    }
+
+    fn build_text(&mut self, id: NodeId, data: &LayoutData, w: &mut ChunkWriter) {
+        let Some(p) = self.host.paragraph(id) else { return };
+        for s in &p.spans {
+            w.paint(s.color);
+        }
+        // The content width the layout wrapped this leaf at. A retained
+        // paragraph shaped for another width is stale: rewrap now.
+        let content_w = (data.rect.size.width - data.insets[0]).max(0.0);
+        let slot = id.index();
+        let stale = match self.texts.get(slot).and_then(Option::as_ref) {
+            Some(m) => m.wrap_bits != content_w.to_bits(),
+            None => true,
+        };
+        if stale {
+            let layout = crate::layout::shape_paragraph(&mut self.text, p, Some(content_w));
+            if slot >= self.texts.len() {
+                self.texts.resize_with(slot + 1, || None);
+            }
+            self.texts[slot] = Some(MeasuredText {
+                layout,
+                wrap_bits: content_w.to_bits(),
+            });
+        }
+        let m = self.texts[slot].as_ref().unwrap();
+        self.text.emit(
+            &m.layout,
+            Point::new(data.content[0], data.content[1]),
+            self.scale,
+            None,
+            &mut self.scene.atlas,
+            w,
+        );
+    }
+
+    /// Input chunk: box, selection highlights, text or placeholder, caret.
+    /// Slots: 0 fill, 1 border, 2 text, 3 placeholder, 4 selection, 5 caret.
+    fn build_input(&mut self, id: NodeId, data: &LayoutData, w: &mut ChunkWriter) {
+        let focused = self.focus == Some(id);
+        let content_w = (data.rect.size.width - data.insets[0]).max(0.0);
+        let (cx, cy) = (data.content[0], data.content[1]);
+        let scale = self.scale;
+        let Some(state) = self.inputs.get_mut(id.0) else { return };
+        state.editor.set_width(Some(content_w));
+        let text_slot = w.paint(state.color);
+        let alpha = (state.color & 0xFF) / 2;
+        let ph_slot = w.paint((state.color & !0xFF) | alpha);
+        let sel_slot = w.paint(state.selection_color);
+        let caret_slot = w.paint(state.color);
+        debug_assert_eq!(text_slot, PaintSlot(2));
+        let empty = state.editor.raw_text().is_empty();
+        if focused {
+            state.editor.selection_geometry_with(|bb, _| {
+                w.rect(
+                    Rect::new(
+                        cx + bb.x0 as f32,
+                        cy + bb.y0 as f32,
+                        (bb.x1 - bb.x0).max(0.0) as f32,
+                        (bb.y1 - bb.y0).max(0.0) as f32,
+                    ),
+                    0.0,
+                    sel_slot,
+                );
+            });
+        }
+        let origin = Point::new(cx, cy);
+        if empty && !state.placeholder.is_empty() {
+            let defaults = [StyleProperty::FontSize(state.font_size)];
+            let spec = ParagraphSpec {
+                text: &state.placeholder,
+                defaults: &defaults,
+                spans: &[],
+            };
+            let layout = self.text.layout_paragraph(&spec, Some(content_w));
+            self.text.emit(&layout, origin, scale, Some(ph_slot), &mut self.scene.atlas, w);
+        } else {
+            let layout = state.editor.layout(&mut self.text.font_cx, &mut self.text.layout_cx);
+            self.text.emit(layout, origin, scale, Some(text_slot), &mut self.scene.atlas, w);
+        }
+        if focused && let Some(c) = state.editor.cursor_geometry(1.5) {
+            w.rect(
+                Rect::new(
+                    cx + c.x0 as f32,
+                    cy + c.y0 as f32,
+                    (c.x1 - c.x0).max(1.0) as f32,
+                    (c.y1 - c.y0).max(0.0) as f32,
+                ),
+                0.0,
+                caret_slot,
+            );
+        }
+    }
+
+    /// Surface chunk: the kind's native painter emits quads in content-box
+    /// coordinates. Runs only when the payload, parameters, or size
+    /// change.
+    fn build_surface(&mut self, id: NodeId, data: &LayoutData, w: &mut ChunkWriter) {
+        let Some(spec) = self.host.surfaces.get(&id.0) else { return };
+        let Some(painter) = self.surface_painters.get_mut(&spec.kind) else { return };
+        let content = Rect::new(
+            data.content[0],
+            data.content[1],
+            (data.rect.size.width - data.insets[0]).max(0.0),
+            (data.rect.size.height - data.insets[1]).max(0.0),
+        );
+        self.surface_scratch.clear();
+        painter(spec, content, &mut self.surface_scratch);
+        for q in self.surface_scratch.drain(..) {
+            let fill = w.paint(q.color);
+            let border = (q.border_w > 0.0).then(|| w.paint(q.border_color));
+            w.rect_bordered(Rect::new(q.x, q.y, q.w, q.h), q.radius, fill, border, q.border_w);
+        }
+    }
+}

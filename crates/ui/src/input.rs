@@ -14,7 +14,7 @@ use crate::text::parley::style::StyleProperty;
 
 use crate::clipboard::{Clipboard, MemoryClipboard};
 use crate::geom::Size;
-use crate::scene::Color;
+use crate::scene::PaintSlot;
 use crate::text::TextEngine;
 
 /// A snapshot of buffer + selection for undo.
@@ -26,7 +26,7 @@ struct Snapshot {
 }
 
 pub struct InputState {
-    pub editor: PlainEditor<Color>,
+    pub editor: PlainEditor<PaintSlot>,
     pub placeholder: String,
     pub font_size: f32,
     /// Text color, 0xRRGGBBAA — also the editor's default brush.
@@ -49,7 +49,8 @@ pub struct InputState {
 impl InputState {
     fn new(font_size: f32, color: u32, placeholder: String, multiline: bool) -> InputState {
         let mut editor = PlainEditor::new(font_size);
-        editor.edit_styles().insert(StyleProperty::Brush(Color(color)));
+        // Slot 0 of the input chunk carries the text color.
+        editor.edit_styles().insert(StyleProperty::Brush(PaintSlot(0)));
         InputState {
             editor,
             placeholder,
@@ -109,7 +110,7 @@ fn record_undo(
     undo: &mut Vec<Snapshot>,
     redo: &mut Vec<Snapshot>,
     coalescing_insert: &mut bool,
-    editor: &PlainEditor<Color>,
+    editor: &PlainEditor<PaintSlot>,
     coalesce: bool,
 ) {
     if coalesce && *coalescing_insert && !undo.is_empty() {
@@ -218,10 +219,9 @@ impl Inputs {
                     state.font_size = font_size;
                     state.editor.edit_styles().insert(StyleProperty::FontSize(font_size));
                 }
-                if state.color != color {
-                    state.color = color;
-                    state.editor.edit_styles().insert(StyleProperty::Brush(Color(color)));
-                }
+                // The color lives in the chunk's paint record, not in
+                // the editor's layout.
+                state.color = color;
                 if state.placeholder != placeholder {
                     placeholder.clone_into(&mut state.placeholder);
                 }

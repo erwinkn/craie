@@ -183,7 +183,7 @@ impl GpuSide {
 
     /// Scene upload + one draw submit — the GPU work inside a frame.
     fn draw(&mut self, ui: &mut Ui) {
-        self.renderer.sync_atlas(&self.gpu, &mut ui.text.atlas);
+        self.renderer.prepare(&self.gpu, ui.scene_mut());
         self.renderer
             .draw(&self.gpu, &self.view, self.w, self.h, ui.scene());
     }

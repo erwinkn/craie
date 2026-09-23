@@ -4,6 +4,8 @@
 use std::time::Instant;
 
 use crate::events::{self, Event, Key, KeyInput, Mods, UiEvent, mask, out_kind};
+use craie_core::geom::{Affine, Point};
+
 use crate::geom::Rect;
 use crate::host::{NodeId, ROOT};
 use crate::input::KeyAction;
@@ -39,84 +41,63 @@ impl Ui {
         }
     }
 
-    /// The absolute content-box origin of a node (logical).
-    pub(crate) fn content_origin(&self, id: NodeId) -> (f32, f32) {
-        let r = self.abs_rect(id);
+    /// Maps a window point (logical) into a node's content-box
+    /// coordinates, undoing transforms and scroll offsets.
+    pub(crate) fn to_content(&self, id: NodeId, x: f32, y: f32) -> (f32, f32) {
         let data = self.layouts.data(id);
-        (r.origin.x + data.content[0], r.origin.y + data.content[1])
+        let p = self
+            .node_to_window(id)
+            .invert()
+            .map_or(Point::new(f32::NAN, f32::NAN), |m| m.apply(Point::new(x, y)));
+        (p.x - data.content[0], p.y - data.content[1])
     }
 
-    /// Deepest node containing (x, y) logical, honoring clip chains,
-    /// scroll offsets, hidden/display:none.
+    /// Deepest node containing (x, y) logical, honoring transforms, clip
+    /// chains, scroll offsets, and `display: none`.
     pub fn hit_test(&self, x: f32, y: f32) -> Option<NodeId> {
+        let p = Point::new(x, y);
         for i in (0..self.host.child_count(ROOT)).rev() {
             let root = self.host.child_at(ROOT, i);
-            if let Some(hit) = self.hit_node(
-                root,
-                0.0,
-                0.0,
-                x,
-                y,
-                [f32::MIN, f32::MIN, f32::MAX, f32::MAX],
-            ) {
+            if let Some(hit) = self.hit_node(root, p) {
                 return Some(hit);
             }
         }
         None
     }
 
-    fn hit_node(
-        &self,
-        id: NodeId,
-        ox: f32,
-        oy: f32,
-        x: f32,
-        y: f32,
-        clip: [f32; 4],
-    ) -> Option<NodeId> {
-        if x < clip[0] || y < clip[1] || x >= clip[2] || y >= clip[3] {
-            return None;
-        }
+    /// `p` is in the parent's child frame (its border box minus scroll).
+    /// Each node tests in its own frame, so clips and bounds stay exact
+    /// under rotation and scale.
+    fn hit_node(&self, id: NodeId, p: Point) -> Option<NodeId> {
         self.host.node(id)?;
         let style = self.host.style(id);
         if style.display == taffy::Display::None {
             return None;
         }
         let data = self.layouts.data(id);
-        let ax = ox + data.rect.origin.x;
-        let ay = oy + data.rect.origin.y;
-
+        let size = data.rect.size;
+        let mut q = Point::new(p.x - data.rect.origin.x, p.y - data.rect.origin.y);
+        let t = self.host.spatial[id.index()].transform;
+        if t != Affine::IDENTITY {
+            let m = t.about(Point::new(size.width / 2.0, size.height / 2.0));
+            q = m.invert()?.apply(q);
+        }
         let clips = style.overflow.x != taffy::Overflow::Visible
             || style.overflow.y != taffy::Overflow::Visible;
-        let child_clip = if clips {
-            [
-                clip[0].max(ax + data.clip_box.origin.x),
-                clip[1].max(ay + data.clip_box.origin.y),
-                clip[2].min(ax + data.clip_box.origin.x + data.clip_box.size.width),
-                clip[3].min(ay + data.clip_box.origin.y + data.clip_box.size.height),
-            ]
-        } else {
-            clip
-        };
-        let scrolls = style.overflow.x == taffy::Overflow::Scroll
-            || style.overflow.y == taffy::Overflow::Scroll;
-        let [sx, sy] = if scrolls {
-            self.host.spatial[id.index()].scroll
-        } else {
-            [0.0, 0.0]
-        };
-
-        // Children paint above their parent and later siblings paint
-        // above earlier ones — test them last-to-first.
-        for &child in self.host.children(id).iter().rev() {
-            if let Some(hit) = self.hit_node(child, ax - sx, ay - sy, x, y, child_clip) {
-                return Some(hit);
+        if !clips || data.clip_box.contains(q) {
+            let [sx, sy] = self.scroll_offset_if_scrolls(id);
+            let cp = Point::new(q.x + sx, q.y + sy);
+            // Children paint above their parent and later siblings above
+            // earlier ones: test them last to first.
+            for &child in self.host.children(id).iter().rev() {
+                if let Some(hit) = self.hit_node(child, cp) {
+                    return Some(hit);
+                }
             }
         }
-        if x >= ax && y >= ay && x < ax + data.rect.size.width && y < ay + data.rect.size.height {
-            return Some(id);
-        }
-        None
+        Rect::new(0.0, 0.0, size.width, size.height)
+            .contains(q)
+            .then_some(id)
     }
 
     /// Focusable nodes in document order (for Tab traversal).
@@ -271,9 +252,9 @@ impl Ui {
         if let Some(pid) = self.pressed
             && self.host.kind(pid) == Some(NodeKind::Input)
         {
-            let (cx, cy) = self.content_origin(pid);
+            let (lx, ly) = self.to_content(pid, x, y);
             self.inputs
-                .act(&mut self.text, pid.0, &KeyAction::ExtendTo(x - cx, y - cy));
+                .act(&mut self.text, pid.0, &KeyAction::ExtendTo(lx, ly));
             self.input_changed(pid);
         }
         let hit = self.hit_test(x, y);
@@ -336,8 +317,7 @@ impl Ui {
             && self.host.kind(id) == Some(NodeKind::Input)
             && button == crate::events::Button::Primary
         {
-            let (cx, cy) = self.content_origin(id);
-            let (lx, ly) = (x - cx, y - cy);
+            let (lx, ly) = self.to_content(id, x, y);
             let action = if mods.shift {
                 KeyAction::ExtendTo(lx, ly)
             } else {
@@ -393,12 +373,15 @@ impl Ui {
             if self.host.interaction(id).listeners & bit == 0 {
                 continue;
             }
-            let rect = self.abs_rect(id);
+            let local = self
+                .node_to_window(id)
+                .invert()
+                .map_or(Point::new(0.0, 0.0), |m| m.apply(Point::new(x, y)));
             let mut e = self.event(kind, id);
             e.x = x;
             e.y = y;
-            e.a = x - rect.origin.x;
-            e.b = y - rect.origin.y;
+            e.a = local.x;
+            e.b = local.y;
             e.key = key;
             self.pending_events.push(e);
         }
@@ -511,14 +494,14 @@ impl Ui {
             return None;
         }
         let state = self.inputs.get(id.0)?;
-        let (cx, cy) = self.content_origin(id);
+        let data = self.layouts.data(id);
         let area = state.editor.ime_cursor_area();
-        Some(Rect::new(
-            cx + area.x0 as f32,
-            cy + area.y0 as f32,
+        Some(self.node_to_window(id).map_rect(&Rect::new(
+            data.content[0] + area.x0 as f32,
+            data.content[1] + area.y0 as f32,
             (area.x1 - area.x0).max(0.0) as f32,
             (area.y1 - area.y0).max(0.0) as f32,
-        ))
+        )))
     }
 
     /// Whether an input node is focused — the platform enables IME.

@@ -17,8 +17,8 @@ pub mod host;
 pub mod input;
 pub mod layout;
 pub mod mutation;
-mod paint;
 pub mod platform;
+mod scene_sync;
 pub mod surface;
 #[cfg(test)]
 mod tests;

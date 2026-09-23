@@ -4,18 +4,22 @@
 //! that changes the raster output: font identity (interned), glyph id,
 //! effective pixel size, variation coordinates + synthetic styling
 //! (interned), and the quantized subpixel offset.
+//!
+//! Each key maps to a stable `RasterId` in the scene's raster atlas. The
+//! atlas owns residency; the cache keeps what it needs to rasterize an
+//! evicted glyph again (the key, the font, the coordinates), so a chunk
+//! that references the id never changes when its raster moves.
 
 use std::collections::HashMap;
 
-use etagere::AllocId;
-
-use craie_scene::{AtlasSlot, GlyphAtlas};
+use craie_scene::RasterId;
+use parley::FontData;
 
 /// Quarter-pixel subpixel quantization. Each axis uses 2 bits.
 pub const SUBPIXEL_BITS: u32 = 2;
 pub const SUBPIXEL_STEPS: u32 = 1 << SUBPIXEL_BITS;
 
-/// Compact key into the glyph cache. 16 bytes.
+/// Compact key into the glyph cache. 12 bytes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct GlyphKey {
     /// Interned (font blob id, face index).
@@ -30,17 +34,11 @@ pub struct GlyphKey {
     pub _pad: u8,
 }
 
-/// Where a rasterized glyph lives in the atlas, plus how to place it.
+/// A cached glyph: its raster (none for zero-area glyphs such as
+/// spaces) and its bearing in physical pixels.
 #[derive(Clone, Copy, Debug)]
 pub struct CachedGlyph {
-    /// etagere allocation id — `None` for zero-area glyphs (spaces).
-    pub alloc: Option<AllocId>,
-    /// Atlas page index (within the alpha or color page set).
-    pub page: u16,
-    /// True when the glyph is a 32-bit color bitmap (emoji etc.).
-    pub color: bool,
-    pub x: u16,
-    pub y: u16,
+    pub raster: Option<RasterId>,
     pub w: u16,
     pub h: u16,
     /// Swash placement: bitmap offset relative to the glyph origin.
@@ -48,64 +46,63 @@ pub struct CachedGlyph {
     pub top: i16,
 }
 
-/// A cached glyph plus the frame it was last emitted on — the LRU
-/// signal the atlas eviction pass uses.
-#[derive(Clone, Copy, Debug)]
-struct Entry {
-    glyph: CachedGlyph,
-    last_used: u32,
-}
-
 #[derive(Clone, Copy, Debug, Default)]
 pub struct CacheStats {
     pub hits: u64,
     pub misses: u64,
-    /// Number of actual Swash rasterizations performed.
+    /// Swash rasterizations performed (first rasters and re-rasters).
     pub rasters: u64,
+    /// Re-rasterizations of evicted glyphs.
+    pub rerasters: u64,
+}
+
+pub(crate) struct CoordsRow {
+    pub coords: Box<[i16]>,
+    pub embolden: bool,
+    pub skew: i16,
 }
 
 pub struct GlyphCache {
     /// (blob id, face index) -> compact font slot.
     fonts: HashMap<(u64, u32), u16>,
+    /// Font data per slot, kept to re-rasterize evicted glyphs.
+    pub(crate) font_data: Vec<FontData>,
     /// Interned (normalized coords, embolden, skew) rows. The table is
     /// tiny — a linear scan beats a per-lookup `Box<[i16]>` key alloc.
-    coords: Vec<CoordsRow>,
-    map: HashMap<GlyphKey, Entry>,
-    /// Frame counter for LRU stamping — bumped by `begin_frame`.
-    tick: u32,
+    pub(crate) coords: Vec<CoordsRow>,
+    map: HashMap<GlyphKey, CachedGlyph>,
+    /// Key per raster id, for re-rasterization.
+    pub(crate) keys: Vec<Option<GlyphKey>>,
     pub stats: CacheStats,
-}
-
-struct CoordsRow {
-    coords: Box<[i16]>,
-    embolden: bool,
-    skew: i16,
 }
 
 impl GlyphCache {
     pub fn new() -> GlyphCache {
         GlyphCache {
             fonts: HashMap::new(),
+            font_data: Vec::new(),
             coords: Vec::new(),
             map: HashMap::new(),
-            tick: 0,
+            keys: Vec::new(),
             stats: CacheStats::default(),
         }
     }
 
-    /// Advances the LRU clock. Called once per paint pass.
-    pub fn begin_frame(&mut self) {
-        self.tick = self.tick.wrapping_add(1);
-    }
-
-    /// Interns a font identity to a u16 slot. One map lookup per glyph run.
-    pub fn font_slot(&mut self, blob_id: u64, face_index: u32) -> u16 {
+    /// Interns a font identity to a u16 slot. One map lookup per run.
+    pub fn font_slot(&mut self, font: &FontData) -> u16 {
         let next = self.fonts.len() as u16;
-        *self.fonts.entry((blob_id, face_index)).or_insert(next)
+        let slot = *self
+            .fonts
+            .entry((font.data.id(), font.index))
+            .or_insert(next);
+        if slot as usize == self.font_data.len() {
+            self.font_data.push(font.clone());
+        }
+        slot
     }
 
     /// Interns variation coords + synthesis to a u16 slot.
-    /// `synthesis` is (embolden, skew_degrees quantized to i16*64).
+    /// `skew` is degrees quantized to i16 * 64.
     pub fn coords_slot(&mut self, coords: &[i16], embolden: bool, skew: i16) -> u16 {
         if let Some(i) = self
             .coords
@@ -124,11 +121,10 @@ impl GlyphCache {
     }
 
     pub fn get(&mut self, key: &GlyphKey) -> Option<CachedGlyph> {
-        match self.map.get_mut(key) {
-            Some(entry) => {
+        match self.map.get(key) {
+            Some(g) => {
                 self.stats.hits += 1;
-                entry.last_used = self.tick;
-                Some(entry.glyph)
+                Some(*g)
             }
             None => {
                 self.stats.misses += 1;
@@ -137,44 +133,20 @@ impl GlyphCache {
         }
     }
 
-    pub fn insert(&mut self, key: GlyphKey, entry: CachedGlyph) {
-        self.map.insert(
-            key,
-            Entry {
-                glyph: entry,
-                last_used: self.tick,
-            },
-        );
+    pub fn insert(&mut self, key: GlyphKey, glyph: CachedGlyph) {
+        if let Some(id) = glyph.raster {
+            let i = id.0 as usize;
+            if self.keys.len() <= i {
+                self.keys.resize(i + 1, None);
+            }
+            self.keys[i] = Some(key);
+        }
+        self.map.insert(key, glyph);
     }
 
-    /// Evicts the least-recently-used entry in `color`'s page set and
-    /// frees its atlas slot. Entries used on the current frame are
-    /// ineligible. Returns false when nothing evictable remains.
-    pub fn evict_oldest(
-        &mut self,
-        atlas: &mut GlyphAtlas,
-        color: bool,
-    ) -> bool {
-        let victim = self
-            .map
-            .iter()
-            .filter(|(_, e)| e.glyph.color == color && e.last_used < self.tick)
-            .min_by_key(|(_, e)| e.last_used)
-            .map(|(k, _)| *k);
-        let Some(key) = victim else { return false };
-        let entry = self.map.remove(&key).unwrap();
-        if let Some(alloc) = entry.glyph.alloc {
-            atlas.free(
-                color,
-                AtlasSlot {
-                    alloc,
-                    page: entry.glyph.page,
-                    x: entry.glyph.x,
-                    y: entry.glyph.y,
-                },
-            );
-        }
-        true
+    /// The key a raster id was produced from.
+    pub fn key_of(&self, id: RasterId) -> Option<GlyphKey> {
+        self.keys.get(id.0 as usize).copied().flatten()
     }
 
     pub fn len(&self) -> usize {
@@ -205,87 +177,4 @@ pub fn quantize_subpixel(v: f32) -> (i32, u8) {
 /// Inverse of the bucket: the fractional offset passed to Swash, in pixels.
 pub fn subpixel_offset(bucket: u8) -> f32 {
     bucket as f32 / SUBPIXEL_STEPS as f32
-}
-
-#[cfg(test)]
-mod atlas_tests {
-    use super::*;
-
-    fn key(g: u16) -> GlyphKey {
-        GlyphKey {
-            font: 0,
-            coords: 0,
-            glyph: g,
-            size_bits: 0,
-            subpixel: 0,
-            _pad: 0,
-        }
-    }
-
-    /// A capped, full page set returns None; evicting the oldest cache
-    /// entry frees a slot and the next write lands.
-    #[test]
-    fn eviction_frees_atlas_space() {
-        let mut atlas = GlyphAtlas::for_test(64, 1, 1);
-        let mut cache = GlyphCache::new();
-        let px = [7u8; 16 * 16];
-
-        // Fill the single 64x64 alpha page (16x16 glyphs + 2px gutter).
-        let mut n = 0u16;
-        while let Some(slot) = atlas.write_alpha(16, 16, &px) {
-            cache.insert(
-                key(n),
-                CachedGlyph {
-                    alloc: Some(slot.alloc),
-                    page: slot.page,
-                    color: false,
-                    x: slot.x,
-                    y: slot.y,
-                    w: 16,
-                    h: 16,
-                    left: 0,
-                    top: 0,
-                },
-            );
-            n += 1;
-            cache.begin_frame();
-        }
-        assert!(n > 0, "test atlas must hold at least one glyph");
-        assert_eq!(atlas.alpha_pages(), 1);
-
-        // Full and capped: the next write must fail.
-        assert!(atlas.write_alpha(16, 16, &px).is_none());
-
-        // Evict the oldest (everything was stamped before this frame):
-        // the freed slot accepts the write again.
-        assert!(cache.evict_oldest(&mut atlas, false));
-        assert!(atlas.write_alpha(16, 16, &px).is_some());
-        assert_eq!(atlas.stats.evictions, 1);
-    }
-
-    /// Entries stamped on the current frame are never evicted — a glyph
-    /// can't be freed while this pass is still drawing it.
-    #[test]
-    fn current_frame_entries_are_safe() {
-        let mut atlas = GlyphAtlas::for_test(64, 1, 1);
-        let mut cache = GlyphCache::new();
-        let slot = atlas.write_alpha(16, 16, &[1u8; 256]).unwrap();
-        cache.insert(
-            key(0),
-            CachedGlyph {
-                alloc: Some(slot.alloc),
-                page: slot.page,
-                color: false,
-                x: slot.x,
-                y: slot.y,
-                w: 16,
-                h: 16,
-                left: 0,
-                top: 0,
-            },
-        );
-        // No begin_frame: the entry sits on the current tick.
-        assert!(!cache.evict_oldest(&mut atlas, false));
-        assert_eq!(atlas.stats.evictions, 0);
-    }
 }

@@ -97,7 +97,9 @@ impl Inner {
         // Layout and the scene viewport are logical; the surface is physical.
         self.ui
             .render(Size::new(w as f32 / scale, h as f32 / scale));
-        self.renderer.sync_atlas(&self.gpu, &mut self.ui.text.atlas);
+        // Upload only what the scene changed; an unchanged frame uploads
+        // nothing.
+        self.renderer.prepare(&self.gpu, self.ui.scene_mut());
         window.request_redraw();
     }
 

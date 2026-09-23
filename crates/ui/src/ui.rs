@@ -17,12 +17,15 @@ use std::collections::HashMap;
 use std::time::Instant;
 
 use crate::events::{Event, Mods, UiEvent};
+use craie_core::geom::{Affine, Point};
+
 use crate::geom::{Rect, Size};
 use crate::host::{Host, NodeId, Revs};
 use crate::input::Inputs;
 use crate::layout::{self, Layouts, MeasuredText};
 use crate::mutation::{Command, NodeKind, Transaction};
-use crate::scene::{Color, Scene};
+use crate::scene::{PaintSlot, Scene};
+use crate::scene_sync::SceneSync;
 use crate::surface::{self, Quad, SurfacePainter};
 use crate::text::TextEngine;
 use crate::text::parley::Layout as ParleyLayout;
@@ -57,6 +60,12 @@ pub struct Ui {
     pub(crate) force_paint: bool,
     /// Revisions at the last completed paint.
     painted: Option<Revs>,
+    /// Viewport of the last layout pass; a change relayouts.
+    laid_out: Option<Size>,
+    /// A layout pass ran since the last paint: geometry must resync.
+    relayout: bool,
+    /// Scene-side bookkeeping (spaces, records, scratch).
+    pub(crate) sync: SceneSync,
     /// Display scale factor (physical / logical).
     pub scale: f32,
     /// Background clear color, 0xRRGGBBAA.
@@ -70,6 +79,8 @@ impl Ui {
     pub fn new(scale: f32) -> Ui {
         let mut surface_painters: HashMap<u32, SurfacePainter> = HashMap::new();
         surface_painters.insert(surface::kind::BARS, Box::new(surface::paint_bars));
+        let mut scene = Scene::default();
+        let sync = SceneSync::new(&mut scene);
         Ui {
             host: Host::new(),
             layouts: Layouts::new(),
@@ -86,10 +97,13 @@ impl Ui {
             a11y_stale: true,
             force_paint: true,
             painted: None,
+            laid_out: None,
+            relayout: false,
+            sync,
             scale,
             clear: 0x1415_18FF,
             seq: 0,
-            scene: Scene::default(),
+            scene,
         }
     }
 
@@ -338,6 +352,7 @@ impl Ui {
     /// where wrap widths change without any mutation arriving.
     pub fn invalidate_layout(&mut self) {
         self.layouts.clear_all_caches(self.host.slot_count());
+        self.laid_out = None;
         self.force_paint = true;
     }
 
@@ -351,13 +366,23 @@ impl Ui {
     }
 
     /// Layout phase only: Taffy over the host at `size` (logical units).
-    pub fn layout(&mut self, size: Size) {
+    /// Runs only when layout inputs, structure, text metrics, or the
+    /// viewport changed; returns whether it ran.
+    pub fn layout(&mut self, size: Size) -> bool {
+        if self.host.dirty.layout.is_empty() && self.laid_out == Some(size) {
+            return false;
+        }
         self.layout_timed(size);
+        true
     }
 
-    /// `layout` instrumented: returns (root-layout ms, finalize ms).
+    /// Unconditional layout pass, instrumented: returns (root-layout ms,
+    /// finalize ms).
     pub fn layout_timed(&mut self, size: Size) -> (f64, f64) {
         let mut total = (0.0, 0.0);
+        self.laid_out = Some(size);
+        self.relayout = true;
+        self.layouts.passes += 1;
         let roots: Vec<NodeId> = self.host.children(crate::host::ROOT).to_vec();
         layout::invalidate(&mut self.host, &mut self.layouts);
         for root in roots {
@@ -376,49 +401,84 @@ impl Ui {
         total
     }
 
-    /// Paint phase only: rebuilds the scene at the current layout.
-    /// `viewport` is the logical viewport for culling.
+    /// Paint phase only: brings the scene up to date with the current
+    /// layout. `viewport` is logical, for culling.
     pub fn paint(&mut self, viewport: Size) {
-        // Advances the glyph cache's LRU clock: glyphs emitted this pass
-        // are ineligible for eviction.
-        self.text.cache.begin_frame();
-        self.paint_impl(viewport);
+        let layout_ran = std::mem::take(&mut self.relayout);
+        self.sync_scene(viewport, layout_ran);
         self.force_paint = false;
         self.painted = Some(self.host.revs);
-        self.host.dirty.content.clear();
-        self.host.dirty.paint.clear();
-        self.host.dirty.spatial.clear();
+    }
+
+    /// Cost counters across layout, text, and the scene.
+    pub fn counters(&self) -> craie_core::counters::Counters {
+        let mut c = self.scene.counters;
+        c.layout_passes = self.layouts.passes;
+        c.layout_nodes = self.layouts.cache_misses;
+        c.shapes = self.text.shapes;
+        c.rasters = self.text.cache.stats.rasters;
+        c.transforms_written = self.scene.transforms.writes;
+        c
     }
 
     pub fn scene(&self) -> &Scene {
         &self.scene
     }
 
+    pub fn scene_mut(&mut self) -> &mut Scene {
+        &mut self.scene
+    }
+
     /// Retained text layout for a node (valid after `render`).
-    pub fn text_layout(&self, id: NodeId) -> Option<&ParleyLayout<Color>> {
+    pub fn text_layout(&self, id: NodeId) -> Option<&ParleyLayout<PaintSlot>> {
         self.texts
             .get(id.index())
             .and_then(|m| m.as_ref())
             .map(|m| &m.layout)
     }
 
-    /// The node's absolute border box (logical), scroll offsets applied.
-    pub fn abs_rect(&self, id: NodeId) -> Rect {
-        let data = self.layouts.data(id);
-        let mut x = data.rect.origin.x;
-        let mut y = data.rect.origin.y;
+    /// Maps a node's border-box coordinates to window coordinates
+    /// (logical): layout positions, scroll offsets, and transforms of the
+    /// node and every ancestor.
+    pub fn node_to_window(&self, id: NodeId) -> Affine {
+        let mut chain: Vec<NodeId> = Vec::new();
         let mut cur = id;
-        loop {
-            let p = self.host.parent(cur);
-            if !p.is_node() {
-                break;
-            }
-            let pd = self.layouts.data(p);
-            let [sx, sy] = self.host.spatial[p.index()].scroll;
-            x += pd.rect.origin.x - sx;
-            y += pd.rect.origin.y - sy;
-            cur = p;
+        while cur.is_node() && self.host.is_live(cur) {
+            chain.push(cur);
+            cur = self.host.parent(cur);
         }
-        Rect::new(x, y, data.rect.size.width, data.rect.size.height)
+        let mut m = Affine::IDENTITY;
+        let mut parent: Option<NodeId> = None;
+        for &n in chain.iter().rev() {
+            if let Some(p) = parent {
+                let [sx, sy] = self.scroll_offset_if_scrolls(p);
+                m = m.mul(&Affine::translate(-sx, -sy));
+            }
+            let d = self.layouts.data(n);
+            let t = self.host.spatial[n.index()].transform;
+            m = m
+                .mul(&Affine::translate(d.rect.origin.x, d.rect.origin.y))
+                .mul(&t.about(Point::new(d.rect.size.width / 2.0, d.rect.size.height / 2.0)));
+            parent = Some(n);
+        }
+        m
+    }
+
+    /// The scroll offset a container applies to its children.
+    pub(crate) fn scroll_offset_if_scrolls(&self, id: NodeId) -> [f32; 2] {
+        let style = self.host.style(id);
+        if style.overflow.x == taffy::Overflow::Scroll || style.overflow.y == taffy::Overflow::Scroll {
+            self.host.spatial[id.index()].scroll
+        } else {
+            [0.0; 2]
+        }
+    }
+
+    /// The node's window-space bounding box (logical), transforms and
+    /// scroll offsets applied.
+    pub fn abs_rect(&self, id: NodeId) -> Rect {
+        let d = self.layouts.data(id);
+        self.node_to_window(id)
+            .map_rect(&Rect::new(0.0, 0.0, d.rect.size.width, d.rect.size.height))
     }
 }

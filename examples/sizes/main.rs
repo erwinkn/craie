@@ -9,13 +9,13 @@
 use std::mem::{align_of, size_of};
 
 use craie_core::span::Span;
-use craie_scene::{Color, Instance};
+use craie_scene::{Chunk, Color, GlyphInstance, Placement, RectInstance, WorldGpu};
 use craie_text::GlyphKey;
 use craie_text::parley::Layout as ParleyLayout;
 use craie_ui::host::{
     BoxPaint, Host, Interaction, NodeFlags, NodeHeader, NodeId, Paragraph, Spatial,
 };
-use craie_ui::layout::{EmittedText, LayoutData, MeasuredText};
+use craie_ui::layout::{LayoutData, MeasuredText};
 use craie_ui::mutation::Mutation;
 
 fn row(name: &str, bytes: usize, align: usize, note: &str) {
@@ -100,19 +100,13 @@ fn main() {
         "MeasuredText",
         size_of::<MeasuredText>(),
         align_of::<MeasuredText>(),
-        "retained Parley layout + emitted batch slot",
+        "retained Parley layout",
     );
     row(
-        "parley::Layout<Color>",
-        size_of::<ParleyLayout<Color>>(),
-        align_of::<ParleyLayout<Color>>(),
+        "parley::Layout<PaintSlot>",
+        size_of::<ParleyLayout<craie_scene::PaintSlot>>(),
+        align_of::<ParleyLayout<craie_scene::PaintSlot>>(),
         "shaped text per text node",
-    );
-    row(
-        "EmittedText",
-        size_of::<EmittedText>(),
-        align_of::<EmittedText>(),
-        "paint-ready instance batch",
     );
 
     println!("\npaint / GPU data:");
@@ -122,12 +116,11 @@ fn main() {
         align_of::<Color>(),
         "0xRRGGBBAA",
     );
-    row(
-        "Instance",
-        size_of::<Instance>(),
-        align_of::<Instance>(),
-        "unified vertex row (quad or glyph)",
-    );
+    row("RectInstance", size_of::<RectInstance>(), align_of::<RectInstance>(), "rect pool row");
+    row("GlyphInstance", size_of::<GlyphInstance>(), align_of::<GlyphInstance>(), "glyph pool row");
+    row("Placement", size_of::<Placement>(), align_of::<Placement>(), "per chunk: offset, record, clip");
+    row("WorldGpu", size_of::<WorldGpu>(), align_of::<WorldGpu>(), "per transform record");
+    row("Chunk", size_of::<Chunk>(), align_of::<Chunk>(), "per chunk: spans, segments, bounds");
 
     println!("\ntext cache:");
     row(
@@ -147,7 +140,7 @@ fn main() {
 
     println!("\nrepresentation check (anything above holding Vec/Box/Arc/HashMap is suspect):");
     println!(
-        "  NodeHeader: {} — GlyphKey: {} — Instance: {}",
+        "  NodeHeader: {} — GlyphKey: {} — GlyphInstance: {}",
         if size_of::<NodeHeader>() <= 24 {
             "compact"
         } else {
@@ -158,7 +151,7 @@ fn main() {
         } else {
             "LARGE"
         },
-        if size_of::<Instance>() <= 48 {
+        if size_of::<GlyphInstance>() <= 24 {
             "compact"
         } else {
             "LARGE"

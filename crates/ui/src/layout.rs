@@ -25,7 +25,7 @@ use crate::geom::{Rect, Size};
 use crate::host::{Host, NodeFlags, NodeId, Paragraph};
 use crate::input::Inputs;
 use crate::mutation::NodeKind;
-use crate::scene::{Color, Instance};
+use crate::scene::PaintSlot;
 use crate::text::parley::Layout as TextLayout;
 use crate::text::parley::style::{FontStyle, FontWeight, StyleProperty};
 use crate::text::{ParagraphSpec, TextEngine, TextSpan as SpecSpan};
@@ -53,28 +53,13 @@ pub struct LayoutData {
     pub scroll_extent: [f32; 2],
 }
 
-/// Paint-ready instances for a text node, keyed on the inputs that change
-/// them: display scale, absolute content origin, and color. A hit replays
-/// with zero shaping, rasterization, or glyph-cache lookups.
-pub struct EmittedText {
-    pub scale_bits: u32,
-    /// Logical content-box origin the batch was emitted for.
-    pub origin: [f32; 2],
-    /// Color baked into `instances` (alpha glyphs only).
-    pub color: u32,
-    /// Physical-pixel instances, ready to append to the scene.
-    pub instances: Vec<Instance>,
-}
-
 /// A text leaf's retained Parley layout, plus the wrap width it was
-/// produced for (`u32::MAX` bits = unwrapped). Rebuilt only when the text
-/// row is dirty or the wrap width changes; `emit` against a retained
-/// layout costs no reshaping and no re-rasterization.
+/// produced for (`u32::MAX` bits = unwrapped). Rebuilt only when the
+/// paragraph's metrics change or the wrap width changes; emitting a
+/// retained layout costs no reshaping and no re-rasterization.
 pub struct MeasuredText {
-    pub layout: TextLayout<Color>,
+    pub layout: TextLayout<PaintSlot>,
     pub wrap_bits: u32,
-    /// Cached emit output; `None` until first paint after a (re)layout.
-    pub emitted: Option<EmittedText>,
 }
 
 /// Per-node layout results. `cache`, `unrounded` and `rects` are indexed
@@ -86,9 +71,17 @@ pub struct Layouts {
     cache: Vec<Cache>,
     unrounded: Vec<Layout>,
     rects: Vec<LayoutData>,
+    /// Layout passes run (cost counter).
+    pub passes: u64,
     /// Taffy cache behavior, for experiments: hits/misses since `new`.
     pub cache_hits: u64,
     pub cache_misses: u64,
+    /// Nodes whose border-box origin changed in the last passes: their
+    /// subtree's placements move. Drained by the scene sync.
+    pub moved: craie_core::dirty::DirtyQueue,
+    /// Nodes whose size, insets, or clip box changed (origin unchanged):
+    /// their own chunk and clip update.
+    pub resized: craie_core::dirty::DirtyQueue,
 }
 
 fn row_mut<T: Default + Clone>(rows: &mut Vec<T>, i: usize) -> &mut T {
@@ -102,10 +95,13 @@ impl Layouts {
     pub fn new() -> Layouts {
         Layouts {
             default: Style::default(),
+            passes: 0,
             cache: Vec::new(),
             unrounded: Vec::new(),
             rects: Vec::new(),
             cache_hits: 0,
+            moved: Default::default(),
+            resized: Default::default(),
             cache_misses: 0,
         }
     }
@@ -312,11 +308,9 @@ impl TreeView<'_> {
             width: layout.width(),
             height: layout.height(),
         };
-        self.texts[slot] = Some(MeasuredText {
-            layout,
-            wrap_bits,
-            emitted: None,
-        });
+        self.texts[slot] = Some(MeasuredText { layout, wrap_bits });
+        // The shaped paragraph changed: its chunk must be re-emitted.
+        self.host.dirty.content.push(id.0);
         if let Some(n) = self.host.node_mut(id) {
             n.flags.clear(NodeFlags::TEXT);
         }
@@ -448,6 +442,7 @@ impl RoundTree for TreeView<'_> {
     fn set_final_layout(&mut self, node_id: TaffyId, layout: &Layout) {
         let id = from_taffy(node_id);
         let data = row_mut(&mut self.store.rects, id.0 as usize);
+        let before = *data;
         data.rect = Rect::new(
             layout.location.x,
             layout.location.y,
@@ -479,6 +474,15 @@ impl RoundTree for TreeView<'_> {
             (so.right - data.clip_box.size.width).max(0.0),
             (so.bottom - data.clip_box.size.height).max(0.0),
         ];
+        if data.rect.origin != before.rect.origin {
+            self.store.moved.push(id.0);
+        } else if data.rect.size != before.rect.size
+            || data.insets != before.insets
+            || data.content != before.content
+            || data.clip_box != before.clip_box
+        {
+            self.store.resized.push(id.0);
+        }
         if let Some(n) = self.host.node_mut(id) {
             n.flags.clear(NodeFlags::LAYOUT);
         }
@@ -486,14 +490,14 @@ impl RoundTree for TreeView<'_> {
 }
 
 /// Shapes a paragraph: span zero is the base style, later spans override
-/// over their byte ranges. The brush is the span's color index into the
-/// paragraph's spans, so colors resolve at emit and a color change never
-/// reshapes.
+/// over their byte ranges. The brush is the span index, which is also the
+/// span's paint slot in the text chunk, so a color change patches a
+/// paint record and never reshapes.
 pub fn shape_paragraph(
     text: &mut TextEngine,
     p: &Paragraph,
     wrap: Option<f32>,
-) -> TextLayout<Color> {
+) -> TextLayout<PaintSlot> {
     let base = p.spans.first().copied().unwrap_or_default();
     let defaults = [
         StyleProperty::FontSize(base.font_size),
@@ -503,10 +507,11 @@ pub fn shape_paragraph(
         } else {
             FontStyle::Normal
         }),
-        StyleProperty::Brush(Color(base.color)),
+        StyleProperty::Brush(PaintSlot(0)),
     ];
     let mut spans: Vec<SpecSpan> = Vec::new();
     for (i, s) in p.spans.iter().enumerate().skip(1) {
+        let slot = PaintSlot(i as u32);
         let end = p
             .spans
             .get(i + 1)
@@ -530,7 +535,7 @@ pub fn shape_paragraph(
         });
         spans.push(SpecSpan {
             range,
-            style: StyleProperty::Brush(Color(s.color)),
+            style: StyleProperty::Brush(slot),
         });
     }
     text.layout_paragraph(

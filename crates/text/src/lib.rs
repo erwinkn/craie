@@ -1,5 +1,6 @@
-//! Text subsystem: Parley layout -> Swash raster -> Craie cache/atlas ->
-//! flat `Instance` rows in the unified scene.
+//! Text subsystem: Parley layout -> Swash raster -> glyph cache ->
+//! stable `RasterId`s in the scene's raster atlas -> chunk-local glyph
+//! instances whose brush is a paint slot.
 //!
 //! Coarse resources (`FontContext`, `LayoutContext`, `ScaleContext`) are
 //! created once and reused; nothing here is per-paragraph.
@@ -7,19 +8,17 @@
 mod cache;
 mod raster;
 
-pub use craie_scene::{ATLAS_PAGE_SIZE, AtlasStats, GlyphAtlas};
-pub use cache::{CacheStats, GlyphCache, GlyphKey};
+pub use cache::{CacheStats, CachedGlyph, GlyphCache, GlyphKey};
 pub use raster::Rasterizer;
 
 use std::ops::Range;
 
+use craie_core::Point;
+use craie_scene::{ChunkWriter, PaintSlot, RasterAtlas, RasterId};
 use parley::layout::{GlyphRun, Layout, PositionedLayoutItem};
 use parley::style::StyleProperty;
 use parley::{Alignment, AlignmentOptions, FontContext, LayoutContext};
 use swash::zeno::Vector;
-
-use craie_core::Point;
-use craie_scene::{Color, Instance};
 
 pub use parley;
 pub use swash;
@@ -28,7 +27,7 @@ pub use swash;
 #[derive(Clone)]
 pub struct TextSpan {
     pub range: Range<usize>,
-    pub style: StyleProperty<'static, Color>,
+    pub style: StyleProperty<'static, PaintSlot>,
 }
 
 /// Inputs for laying out one paragraph. Borrowed throughout — laying out
@@ -36,17 +35,18 @@ pub struct TextSpan {
 pub struct ParagraphSpec<'a> {
     pub text: &'a str,
     /// Default styles for the whole paragraph.
-    pub defaults: &'a [StyleProperty<'static, Color>],
+    pub defaults: &'a [StyleProperty<'static, PaintSlot>],
     /// Ranged style overrides.
     pub spans: &'a [TextSpan],
 }
 
 pub struct TextEngine {
     pub font_cx: FontContext,
-    pub layout_cx: LayoutContext<Color>,
+    pub layout_cx: LayoutContext<PaintSlot>,
     raster: Rasterizer,
     pub cache: GlyphCache,
-    pub atlas: GlyphAtlas,
+    /// Paragraphs shaped and broken into lines (cost counter).
+    pub shapes: u64,
 }
 
 /// Per-`emit` counters, for experiments and instrumentation.
@@ -54,8 +54,6 @@ pub struct TextEngine {
 pub struct EmitStats {
     pub glyph_runs: u32,
     pub glyphs: u32,
-    pub cache_hits_before: u64,
-    pub cache_misses_before: u64,
 }
 
 impl TextEngine {
@@ -65,7 +63,7 @@ impl TextEngine {
             layout_cx: LayoutContext::new(),
             raster: Rasterizer::new(),
             cache: GlyphCache::new(),
-            atlas: GlyphAtlas::new(),
+            shapes: 0,
         }
     }
 
@@ -79,7 +77,8 @@ impl TextEngine {
         &mut self,
         spec: &ParagraphSpec,
         max_width: Option<f32>,
-    ) -> Layout<Color> {
+    ) -> Layout<PaintSlot> {
+        self.shapes += 1;
         let mut builder = self
             .layout_cx
             .ranged_builder(&mut self.font_cx, spec.text, 1.0, false);
@@ -89,48 +88,50 @@ impl TextEngine {
         for span in spec.spans {
             builder.push(span.style.clone(), span.range.clone());
         }
-        let mut layout: Layout<Color> = builder.build(spec.text);
+        let mut layout: Layout<PaintSlot> = builder.build(spec.text);
         layout.break_all_lines(max_width);
         layout.align(Alignment::Start, AlignmentOptions::default());
         layout
     }
 
-    /// Walks a laid-out paragraph and appends glyph instances positioned at
-    /// `origin` (logical units), scaled to physical pixels by `scale`.
-    /// `brush`, when set, overrides the run color for alpha glyphs.
-    /// Rasterizes and atlas-allocates only cache misses, so re-emitting an
-    /// unchanged paragraph performs no Swash work.
+    /// Appends a laid-out paragraph's glyphs to a chunk, positioned at
+    /// `origin` (chunk-local logical units). Each glyph takes its run's
+    /// brush as its paint slot, or `brush` when set. Rasterizes only
+    /// cache misses; re-emitting an unchanged paragraph does no Swash work.
+    ///
+    /// Glyph positions are quantized on the physical-pixel grid relative
+    /// to the chunk origin, which the renderer snaps to a whole device
+    /// pixel, so a moved chunk reuses every raster.
     pub fn emit(
         &mut self,
-        layout: &Layout<Color>,
+        layout: &Layout<PaintSlot>,
         origin: Point,
         scale: f32,
-        brush: Option<Color>,
-        out: &mut Vec<Instance>,
+        brush: Option<PaintSlot>,
+        atlas: &mut RasterAtlas,
+        out: &mut ChunkWriter,
     ) -> EmitStats {
-        let mut stats = EmitStats {
-            cache_hits_before: self.cache.stats.hits,
-            cache_misses_before: self.cache.stats.misses,
-            ..EmitStats::default()
-        };
+        let mut stats = EmitStats::default();
         for line in layout.lines() {
             for item in line.items() {
                 if let PositionedLayoutItem::GlyphRun(glyph_run) = item {
                     stats.glyph_runs += 1;
-                    self.emit_run(&glyph_run, origin, scale, brush, out, &mut stats);
+                    self.emit_run(&glyph_run, origin, scale, brush, atlas, out, &mut stats);
                 }
             }
         }
         stats
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn emit_run(
         &mut self,
-        glyph_run: &GlyphRun<'_, Color>,
+        glyph_run: &GlyphRun<'_, PaintSlot>,
         origin: Point,
         scale: f32,
-        brush: Option<Color>,
-        out: &mut Vec<Instance>,
+        brush: Option<PaintSlot>,
+        atlas: &mut RasterAtlas,
+        out: &mut ChunkWriter,
         stats: &mut EmitStats,
     ) {
         let run = glyph_run.run();
@@ -141,10 +142,10 @@ impl TextEngine {
         let synthesis = run.synthesis();
         let skew_q = (synthesis.skew().unwrap_or(0.0) * 64.0) as i16;
 
-        let font_slot = self.cache.font_slot(font.data.id(), font.index);
+        let font_slot = self.cache.font_slot(font);
         let coords_slot = self.cache.coords_slot(coords, synthesis.embolden(), skew_q);
 
-        let color = brush.unwrap_or(glyph_run.style().brush);
+        let slot = brush.unwrap_or(glyph_run.style().brush);
         let baseline = (origin.y + glyph_run.baseline()) * scale;
         let mut run_x = (origin.x + glyph_run.offset()) * scale;
 
@@ -156,6 +157,7 @@ impl TextEngine {
         let skew = synthesis.skew();
         // Lazy: a run whose glyphs all hit the cache never builds a scaler.
         let mut scaler = None;
+        let inv = 1.0 / scale;
 
         for glyph in glyph_run.glyphs() {
             let gx = run_x + glyph.x * scale;
@@ -174,8 +176,8 @@ impl TextEngine {
                 _pad: 0,
             };
 
-            let entry = match self.cache.get(&key) {
-                Some(entry) => entry,
+            let cached = match self.cache.get(&key) {
+                Some(c) => c,
                 None => {
                     if scaler.is_none() {
                         scaler = self.raster.scaler(font, font_size, coords);
@@ -193,101 +195,62 @@ impl TextEngine {
                         continue;
                     };
                     self.cache.stats.rasters += 1;
-                    let Some(entry) =
-                        Self::insert_into_atlas(&mut self.atlas, &mut self.cache, &rastered)
-                    else {
-                        continue;
+                    let p = rastered.image.placement;
+                    let raster = if p.width == 0 || p.height == 0 {
+                        None
+                    } else {
+                        let id = atlas.new_id(p.width as u16, p.height as u16, rastered.color);
+                        atlas.insert(id, &rastered.image.data);
+                        Some(id)
                     };
-                    self.cache.insert(key, entry);
-                    entry
+                    let c = CachedGlyph {
+                        raster,
+                        w: p.width as u16,
+                        h: p.height as u16,
+                        left: p.left as i16,
+                        top: p.top as i16,
+                    };
+                    self.cache.insert(key, c);
+                    c
                 }
             };
-
-            if entry.w == 0 || entry.h == 0 {
-                continue;
-            }
-            let atlas_size = ATLAS_PAGE_SIZE as f32;
-            let flags = if entry.color {
-                Instance::FLAG_COLOR
-            } else {
-                0
-            };
-            out.push(Instance {
-                position: [
-                    (ix + entry.left as i32) as f32,
-                    (iy - entry.top as i32) as f32,
-                ],
-                size: [entry.w as f32, entry.h as f32],
-                uv_min: [entry.x as f32 / atlas_size, entry.y as f32 / atlas_size],
-                uv_max: [
-                    (entry.x + entry.w) as f32 / atlas_size,
-                    (entry.y + entry.h) as f32 / atlas_size,
-                ],
-                // The painter stamps the effective clip on every instance.
-                clip_min: [f32::MIN, f32::MIN],
-                clip_max: [f32::MAX, f32::MAX],
-                color: color.0,
-                aux_color: 0,
-                params: [0.0; 4],
-                page: entry.page,
-                flags,
-            });
+            let Some(raster) = cached.raster else { continue };
+            out.glyph(
+                (ix + cached.left as i32) as f32 * inv,
+                (iy - cached.top as i32) as f32 * inv,
+                cached.w as f32 * inv,
+                cached.h as f32 * inv,
+                raster,
+                slot,
+            );
         }
     }
 
-    /// Writes one rasterized glyph into the atlas. At the page cap the
-    /// least-recently-used cache entries of the same set are evicted
-    /// until the write lands; `None` means the glyph can't fit at all.
-    /// Associated fn: `self.raster` may be borrowed by a live scaler.
-    fn insert_into_atlas(
-        atlas: &mut GlyphAtlas,
-        cache: &mut GlyphCache,
-        rastered: &raster::Rastered,
-    ) -> Option<cache::CachedGlyph> {
-        let p = &rastered.image.placement;
-        let (w, h) = (p.width, p.height);
-        if w == 0 || h == 0 {
-            return Some(cache::CachedGlyph {
-                alloc: None,
-                page: 0,
-                color: false,
-                x: 0,
-                y: 0,
-                w: 0,
-                h: 0,
-                left: 0,
-                top: 0,
-            });
-        }
-        let color = rastered.color;
-        let data = &rastered.image.data;
-        let mut slot = if color {
-            atlas.write_color(w, h, data)
-        } else {
-            atlas.write_alpha(w, h, data)
-        };
-        while slot.is_none() {
-            if !cache.evict_oldest(atlas, color) {
-                return None;
+    /// Rasterizes `ids` again after eviction. Needs neither the paragraph
+    /// nor its layout: the cache kept each raster's key and font.
+    pub fn ensure_resident(&mut self, ids: &[RasterId], atlas: &mut RasterAtlas) {
+        for &id in ids {
+            if atlas.entry(id).resident {
+                continue;
             }
-            slot = if color {
-                atlas.write_color(w, h, data)
-            } else {
-                atlas.write_alpha(w, h, data)
-            };
+            let Some(key) = self.cache.key_of(id) else { continue };
+            let font = self.cache.font_data[key.font as usize].clone();
+            let row = &self.cache.coords[key.coords as usize];
+            let coords: Vec<i16> = row.coords.to_vec();
+            let size = f32::from_bits(key.size_bits);
+            let embolden = if row.embolden { size * 0.02 } else { 0.0 };
+            let skew = (row.skew != 0).then(|| row.skew as f32 / 64.0);
+            let Some(mut scaler) = self.raster.scaler(&font, size, &coords) else { continue };
+            let offset = Vector::new(
+                cache::subpixel_offset(key.subpixel & 3),
+                cache::subpixel_offset(key.subpixel >> 2),
+            );
+            if let Some(r) = Rasterizer::render(&mut scaler, key.glyph, offset, embolden, skew) {
+                self.cache.stats.rasters += 1;
+                self.cache.stats.rerasters += 1;
+                atlas.insert(id, &r.image.data);
+            }
         }
-        let slot = slot.unwrap();
-        Some(cache::CachedGlyph {
-            alloc: Some(slot.alloc),
-            page: slot.page,
-            color,
-            x: slot.x,
-            y: slot.y,
-            w: w as u16,
-            h: h as u16,
-            left: p.left as i16,
-            top: p.top as i16,
-        })
     }
 }
 
