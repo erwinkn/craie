@@ -268,6 +268,9 @@ pub struct Host {
     pub families: Vec<String>,
     pub interaction: Vec<Interaction>,
     pub labels: HashMap<u32, Box<str>>,
+    /// Declared transitions per node (`animation.rs`), id-keyed: few
+    /// nodes have any.
+    pub transitions: HashMap<u32, Vec<crate::animation::Transition>>,
     pub surfaces: HashMap<u32, SurfaceData>,
     /// Item index of a list row (a child of a List node); NIL otherwise.
     pub list_index: Vec<u32>,
@@ -318,6 +321,7 @@ impl Host {
             families: Vec::new(),
             interaction: Vec::new(),
             labels: HashMap::new(),
+            transitions: HashMap::new(),
             surfaces: HashMap::new(),
             list_index: Vec::new(),
             lists: crate::list::Lists::default(),
@@ -441,6 +445,7 @@ impl Host {
         }
         self.interaction[i] = Interaction::default();
         self.labels.remove(&id.0);
+        self.transitions.remove(&id.0);
         self.surfaces.remove(&id.0);
         self.list_index[i] = NIL;
         self.lists.forget(id.0);
@@ -535,6 +540,7 @@ impl Host {
         p.text = String::new();
         p.spans = Vec::new();
         self.labels.remove(&id.0);
+        self.transitions.remove(&id.0);
         self.surfaces.remove(&id.0);
         self.list_index[i] = NIL;
         self.lists.forget(id.0);

@@ -2,7 +2,7 @@ import { test, expect } from "bun:test"
 import { Activity, createElement } from "react"
 import { createRoot, View, Text, TextInput, ScrollView, Pressable, Bars, List, ROLE } from "../src/index.js"
 import { CraieHost } from "../src/host.js"
-import type { Transport, UiEvent } from "../src/host.js"
+import type { HostNode, Transport, UiEvent } from "../src/host.js"
 import { readFrame } from "./crw2.js"
 import { decodeEvents } from "../src/native.js"
 
@@ -623,4 +623,62 @@ test("event records decode the 32-bit revision", () => {
   const [e] = decodeEvents(buf)
   expect([e!.kind, e!.generation, e!.node, e!.key, e!.revision, e!.text])
     .toEqual([3, 9, 42, 7 << 16, 0x0102_0304, "hi"])
+})
+
+// Step 4: style.transition travels in its own op: last at mount (first
+// values do not tween), first on a change (it applies to the changes in
+// the same commit); it never reaches the layout style.
+test("transitions travel in their own op", async () => {
+  const t = new FakeTransport()
+  const root = createRoot(t)
+  function App({ o, fast }: { o: number; fast: boolean }) {
+    return createElement(View, {
+      style: {
+        width: 10, opacity: o,
+        transition: { opacity: { duration: fast ? 100 : 250, easing: "ease-out" }, width: { spring: { stiffness: 200 } } },
+      },
+    })
+  }
+  root.renderSync(createElement(App, { o: 1, fast: false }))
+  await tick()
+  let ops = t.ops(0)
+  const tags = ops.map(o => o.tag)
+  expect(tags.indexOf(0xa0)).toBeGreaterThan(tags.indexOf(0x10))
+  const tr = ops.find(o => o.tag === 0xa0)!
+  // count 2: opacity (1) then width (4), in property order.
+  expect(tr.f[0]).toBe(2)
+  expect(tr.f.slice(1, 9).map(v => Math.round(v * 1000) / 1000)).toEqual([1, 0, 0, 0.25, 0, 0, 0.58, 1])
+  expect(tr.f.slice(9, 17).map(v => Math.round(v * 1000) / 1000)).toEqual([4, 1, 0, 200, 26, 1, 0, 0])
+  // The layout style has no transition key: an unchanged transition
+  // sends nothing; a changed one goes before the opacity it applies to.
+  t.frames.length = 0
+  root.renderSync(createElement(App, { o: 0.5, fast: false }))
+  await tick()
+  expect(t.ops().map(o => o.tag)).toEqual([0x20])
+  t.frames.length = 0
+  root.renderSync(createElement(App, { o: 0, fast: true }))
+  await tick()
+  expect(t.ops().map(o => o.tag)).toEqual([0xa0, 0x20])
+})
+
+// Step 4: node.animate encodes one property's target and timing.
+test("animate sends one tween command", async () => {
+  const t = new FakeTransport()
+  const root = createRoot(t)
+  let node: HostNode | null = null
+  root.renderSync(createElement(View, { ref: (n: HostNode | null) => { node = n } }))
+  await tick()
+  t.frames.length = 0
+  const n = node as unknown as HostNode
+  n.animate("backgroundColor", "#ff0000", { duration: 300, easing: [0.1, 0.2, 0.3, 0.4], delay: 50 })
+  n.animate("padding", 8, { spring: {} })
+  n.animate("transform", [{ translateX: 5 }], { duration: 100 })
+  await tick()
+  const ops = t.ops()
+  expect(ops.map(o => o.tag)).toEqual([0xa1, 0xa1, 0xa1])
+  const r = (v: number) => Math.round(v * 1000) / 1000
+  expect(ops[0]!.f.map(r)).toEqual([2, 0xff0000ff, 0, 0.05, 0.3, 0.1, 0.2, 0.3, 0.4])
+  expect(ops[1]!.f.map(r)).toEqual([6, 8, 8, 8, 8, 1, 0, 170, 26, 1, 0, 0])
+  expect(ops[2]!.f.slice(0, 7).map(r)).toEqual([0, 1, 0, 0, 1, 5, 0])
+  expect(() => n.animate("gap", [1, 2, 3], { duration: 1 })).toThrow()
 })

@@ -103,6 +103,19 @@ export function readFrame(buf: Uint8Array): Frame {
       }
       case 0x92: op.f.push(u32()); break // list index
       case 0x93: op.f.push(u8()); break // scroll anchor
+      case 0xa0: { // transition: count x (prop, timing)
+        const n = u8(); op.f.push(n)
+        for (let i = 0; i < n; i++) { op.f.push(u8(), u8()); for (let k = 0; k < 6; k++) op.f.push(f32()) }
+        break
+      }
+      case 0xa1: { // animate: prop, value by prop, timing
+        const p = u8(); op.f.push(p)
+        const n = [6, 1, 0, 0, 1, 1, 4, 2][p]!
+        if (p === 2 || p === 3) op.f.push(u32())
+        for (let i = 0; i < n; i++) op.f.push(f32())
+        op.f.push(u8()); for (let k = 0; k < 6; k++) op.f.push(f32())
+        break
+      }
       default: throw Error(`unknown op 0x${tag.toString(16)}`)
     }
     ops.push(op)

@@ -20,6 +20,7 @@
 //! the same `Transaction` the Rust direct API builds, so one executor
 //! serves both. Op tags group by family (high nibble).
 
+use crate::animation::{Prop, Timing, Transition, Value};
 use taffy::{
     AlignContent, AlignItems, Dimension, Display, ExpandedDimension, ExpandedLengthPercentage,
     ExpandedLengthPercentageAuto, FlexDirection, FlexWrap, LengthPercentage, LengthPercentageAuto,
@@ -65,6 +66,9 @@ pub mod op {
     pub const LIST_SPLICE: u8 = 0x91;
     pub const LIST_INDEX: u8 = 0x92;
     pub const SCROLL_ANCHOR: u8 = 0x93;
+    // animation
+    pub const TRANSITION: u8 = 0xA0;
+    pub const ANIMATE: u8 = 0xA1;
 }
 
 /// SPATIAL op field mask bits.
@@ -547,6 +551,27 @@ pub fn encode(txn: &Transaction<'_>) -> Vec<u8> {
                 u32le(&mut ops, *id);
                 ops.push(*anchor as u8);
             }
+            Mutation::Transition { id, transitions } => {
+                ops.push(op::TRANSITION);
+                u32le(&mut ops, *id);
+                ops.push(transitions.len() as u8);
+                for t in transitions.iter() {
+                    ops.push(t.prop as u8);
+                    put_timing(&mut ops, &t.timing);
+                }
+            }
+            Mutation::Animate {
+                id,
+                prop,
+                value,
+                timing,
+            } => {
+                ops.push(op::ANIMATE);
+                u32le(&mut ops, *id);
+                ops.push(*prop as u8);
+                put_anim_value(&mut ops, value);
+                put_timing(&mut ops, timing);
+            }
         }
     }
     // Span families go through the string table too.
@@ -975,6 +1000,36 @@ pub fn decode(buf: &[u8]) -> Result<Transaction<'_>, WireError> {
                 let anchor = Anchor::from_u8(r.u8()?).ok_or(WireError::BadRef("anchor"))?;
                 Mutation::ScrollAnchor { id, anchor }
             }
+            op::TRANSITION => {
+                let id = r.u32()?;
+                let count = r.u8()? as usize;
+                if count > Prop::COUNT {
+                    return Err(WireError::BadRef("transition count"));
+                }
+                let mut transitions = Vec::with_capacity(count);
+                for _ in 0..count {
+                    let prop =
+                        Prop::from_u8(r.u8()?).ok_or(WireError::BadRef("animation property"))?;
+                    let timing = r.timing()?;
+                    transitions.push(Transition { prop, timing });
+                }
+                Mutation::Transition {
+                    id,
+                    transitions: transitions.into(),
+                }
+            }
+            op::ANIMATE => {
+                let id = r.u32()?;
+                let prop = Prop::from_u8(r.u8()?).ok_or(WireError::BadRef("animation property"))?;
+                let value = r.anim_value(prop)?;
+                let timing = r.timing()?;
+                Mutation::Animate {
+                    id,
+                    prop,
+                    value,
+                    timing,
+                }
+            }
             _ => return Err(WireError::BadOp(tag)),
         };
         txn.mutations.push(m);
@@ -982,9 +1037,126 @@ pub fn decode(buf: &[u8]) -> Result<Transaction<'_>, WireError> {
     Ok(txn)
 }
 
+fn u32le(out: &mut Vec<u8>, v: u32) {
+    out.extend_from_slice(&v.to_le_bytes());
+}
+
+fn f32le(out: &mut Vec<u8>, v: f32) {
+    out.extend_from_slice(&v.to_le_bytes());
+}
+
+/// Timing kinds on the wire.
+pub mod timing_kind {
+    pub const CURVE: u8 = 0;
+    pub const SPRING: u8 = 1;
+}
+
+/// A timing: kind u8, delay f32, then five f32 (a curve: duration, x1,
+/// y1, x2, y2; a spring: stiffness, damping, mass, 0, 0). 25 bytes.
+fn put_timing(out: &mut Vec<u8>, t: &Timing) {
+    let (kind, v) = match *t {
+        Timing::Curve {
+            delay,
+            duration,
+            x1,
+            y1,
+            x2,
+            y2,
+        } => (timing_kind::CURVE, [delay, duration, x1, y1, x2, y2]),
+        Timing::Spring {
+            delay,
+            stiffness,
+            damping,
+            mass,
+        } => (
+            timing_kind::SPRING,
+            [delay, stiffness, damping, mass, 0.0, 0.0],
+        ),
+    };
+    out.push(kind);
+    for x in v {
+        f32le(out, x);
+    }
+}
+
+/// An `Animate` target by property: transform 6 f32, opacity f32, a
+/// color u32, width or height f32, padding 4 f32 (left, right, top,
+/// bottom), gap 2 f32 (column, row). Lengths only.
+fn put_anim_value(out: &mut Vec<u8>, v: &Value) {
+    let lp = |l: &taffy::LengthPercentage| match l.expand() {
+        taffy::style::ExpandedLengthPercentage::Length(v) => v,
+        _ => f32::NAN,
+    };
+    match v {
+        Value::Transform(t) => t.0.iter().for_each(|&x| f32le(out, x)),
+        Value::Opacity(o) => f32le(out, *o),
+        Value::Color(c) => u32le(out, *c),
+        Value::Size(d) => f32le(
+            out,
+            match d.expand() {
+                taffy::style::ExpandedDimension::Length(v) => v,
+                _ => f32::NAN,
+            },
+        ),
+        Value::Padding(p) => p.iter().for_each(|l| f32le(out, lp(l))),
+        Value::Gap(g) => g.iter().for_each(|l| f32le(out, lp(l))),
+    }
+}
+
 struct Reader<'a> {
     buf: &'a [u8],
     pos: usize,
+}
+
+impl Reader<'_> {
+    fn timing(&mut self) -> Result<Timing, WireError> {
+        let kind = self.u8()?;
+        let mut v = [0.0f32; 6];
+        for x in &mut v {
+            *x = self.f32()?;
+        }
+        let [delay, a, b, c, d, e] = v;
+        match kind {
+            timing_kind::CURVE => Ok(Timing::Curve {
+                delay,
+                duration: a,
+                x1: b,
+                y1: c,
+                x2: d,
+                y2: e,
+            }),
+            timing_kind::SPRING if d == 0.0 && e == 0.0 => Ok(Timing::Spring {
+                delay,
+                stiffness: a,
+                damping: b,
+                mass: c,
+            }),
+            _ => Err(WireError::BadRef("timing")),
+        }
+    }
+
+    fn anim_value(&mut self, prop: Prop) -> Result<Value, WireError> {
+        let lp = taffy::LengthPercentage::length;
+        Ok(match prop {
+            Prop::Transform => {
+                let mut m = [0.0f32; 6];
+                for v in &mut m {
+                    *v = self.f32()?;
+                }
+                Value::Transform(Affine(m))
+            }
+            Prop::Opacity => Value::Opacity(self.f32()?),
+            Prop::Fill | Prop::BorderColor => Value::Color(self.u32()?),
+            Prop::Width | Prop::Height => Value::Size(taffy::Dimension::length(self.f32()?)),
+            Prop::Padding => Value::Padding([
+                lp(self.f32()?),
+                lp(self.f32()?),
+                lp(self.f32()?),
+                lp(self.f32()?),
+            ]),
+            Prop::Gap => Value::Gap([lp(self.f32()?), lp(self.f32()?)]),
+        })
+    }
 }
 
 impl<'a> Reader<'a> {

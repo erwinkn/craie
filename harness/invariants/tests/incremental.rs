@@ -4,7 +4,7 @@
 //! transaction.
 
 use craie_core::geom::Size;
-use craie_harness::{Gen, compare, rebuild};
+use craie_harness::{Gen, compare, rebuild, without_animation};
 use craie_ui::ui::Ui;
 
 const VIEW: Size = Size {
@@ -22,42 +22,72 @@ const TOL: f32 = 0.01;
 fn run(seed: u64, scale: f32) {
     let mut g = Gen::new(seed);
     let mut ui = Ui::new(scale);
-    ui.apply_txn(&g.mount()).unwrap();
+    // The twin gets every transaction without animation: at rest, the
+    // animated Ui equals it.
+    let mut twin = Ui::new(scale);
+    let mount = g.mount();
+    ui.apply_txn(&mount).unwrap();
+    twin.apply_txn(&mount).unwrap();
     ui.render(VIEW);
+    twin.render(VIEW);
+    let apply = |ui: &mut Ui, twin: &mut Ui, t: &craie_ui::mutation::Transaction<'static>| {
+        let plain = without_animation(t, twin);
+        ui.apply_txn(t)
+            .unwrap_or_else(|e| panic!("seed {seed}: invalid txn {e:?}\n{:?}", t.mutations));
+        twin.apply_txn(&plain).unwrap();
+    };
     // The clock: frame-sized steps, with a pause (past the settle time)
     // every few steps, so spaces move, settle, and move again.
     let mut now = 0.0;
     for step in 0..STEPS {
         now += if step % 4 == 3 { 0.25 } else { 0.016 };
         ui.set_time(now);
+        twin.set_time(now);
         let t = g.step(&ui);
-        ui.apply_txn(&t).unwrap_or_else(|e| {
-            panic!(
-                "seed {seed} step {step}: invalid txn {e:?}\n{:?}",
-                t.mutations
-            )
-        });
+        apply(&mut ui, &mut twin, &t);
         ui.render(VIEW);
         if let Some(t) = g.select(&mut ui) {
-            ui.apply_txn(&t).unwrap();
+            apply(&mut ui, &mut twin, &t);
+        }
+        twin.set_text_selection(ui.text_selection());
+        if let Some(t) = g.animate(&ui) {
+            apply(&mut ui, &mut twin, &t);
         }
         ui.render(VIEW);
+        twin.render(VIEW);
         if step % 3 == 0
             && let Some((id, x, y)) = g.scroll(&ui)
         {
             ui.scroll_to(id, x, y);
+            twin.scroll_to(id, x, y);
             ui.render(VIEW);
+            twin.render(VIEW);
         }
         if step % 5 == 4 {
-            // Compare at rest: settle everything, as a clean build is.
+            // Compare at rest: finish every animation, then settle
+            // everything, as a clean build is.
+            if let Some(end) = ui.animations_end() {
+                now = now.max(end) + 0.001;
+                ui.set_time(now);
+                ui.render(VIEW);
+            }
+            assert!(!ui.animating(), "seed {seed} step {step}: animations end");
             now += craie_ui::ui::SETTLE_SECS * 1.5;
-            ui.set_time(now);
-            ui.settle();
-            ui.render(VIEW);
+            for u in [&mut ui, &mut twin] {
+                u.set_time(now);
+                u.settle();
+                u.render(VIEW);
+            }
             assert_eq!(ui.next_settle(), None, "seed {seed} step {step}: at rest");
             let clean = rebuild(&ui, VIEW);
             if let Err(m) = compare(&ui, &clean, VIEW, TOL) {
                 panic!("seed {seed} scale {scale} step {step}: {}", m.0);
+            }
+            if let Err(m) = compare(&ui, &twin, VIEW, TOL) {
+                panic!(
+                    "seed {seed} scale {scale} step {step}: animated vs plain: {}",
+                    m.0
+                );
             }
         }
     }

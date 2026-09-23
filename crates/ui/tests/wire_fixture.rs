@@ -116,4 +116,50 @@ fn js_fixture_decodes_and_executes() {
     assert_eq!((l.descs[1].id, l.descs[1].text_len), (5, 42));
     assert_eq!(host.list_index[5], 1);
     assert_eq!(host.lists.policy(0), craie_ui::mutation::Anchor::StickToEnd);
+
+    // Animation: declared transitions (property order; milliseconds
+    // arrive as seconds) and two running tweens.
+    use craie_ui::animation::{Prop, Timing, Value};
+    let tr = &host.transitions[&0];
+    assert_eq!(tr.len(), 2);
+    assert_eq!((tr[0].prop, tr[1].prop), (Prop::Opacity, Prop::Width));
+    let Timing::Curve {
+        delay,
+        duration,
+        x1,
+        x2,
+        ..
+    } = tr[0].timing
+    else {
+        panic!("{:?}", tr[0].timing)
+    };
+    assert_eq!((delay, duration, x1, x2), (0.05, 0.25, 0.0, 0.58));
+    assert_eq!(
+        tr[1].timing,
+        Timing::Spring {
+            delay: 0.0,
+            stiffness: 200.0,
+            damping: 20.0,
+            mass: 1.0
+        }
+    );
+    let animates: Vec<_> = txn
+        .mutations
+        .iter()
+        .filter_map(|m| match m {
+            Mutation::Animate { prop, value, .. } => Some((*prop, *value)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        animates,
+        [
+            (Prop::Fill, Value::Color(0xff00_00ff)),
+            (
+                Prop::Gap,
+                Value::Gap([LengthPercentage::length(4.0), LengthPercentage::length(6.0)])
+            ),
+        ]
+    );
+    assert!(ui.animating());
 }

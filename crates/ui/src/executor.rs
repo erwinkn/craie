@@ -9,6 +9,9 @@
 
 use std::collections::HashMap;
 
+use craie_core::geom::Affine;
+
+use crate::animation::{Prop, Value};
 use crate::host::{Host, MAX_NODES, NodeId};
 use crate::list::{IdIndex, MAX_ITEMS};
 use crate::mutation::{Command, ItemDesc, Mutation, NIL, NodeKind, TextSpan, Transaction};
@@ -434,9 +437,64 @@ pub fn validate(host: &Host, txn: &Transaction<'_>) -> Result<(), WireError> {
             Mutation::ScrollAnchor { id, .. } => {
                 need_live(&o, *id, "scroll anchor on an absent node")?;
             }
+            Mutation::Transition { id, transitions } => {
+                need_live(&o, *id, "transition on an absent node")?;
+                if transitions.len() > Prop::COUNT {
+                    return Err(invalid("too many transitions"));
+                }
+                for (k, t) in transitions.iter().enumerate() {
+                    if !t.timing.is_valid() {
+                        return Err(invalid("transition timing out of range"));
+                    }
+                    if transitions[..k].iter().any(|u| u.prop == t.prop) {
+                        return Err(invalid("transition declared twice"));
+                    }
+                }
+            }
+            Mutation::Animate {
+                id,
+                prop,
+                value,
+                timing,
+            } => {
+                need_live(&o, *id, "animate on an absent node")?;
+                if prop.is_paint() && !o.kind(*id).is_some_and(NodeKind::has_box) {
+                    return Err(invalid("paint animation on a node without a box"));
+                }
+                if !timing.is_valid() {
+                    return Err(invalid("animation timing out of range"));
+                }
+                if !valid_target(*prop, value) {
+                    return Err(invalid("animation target out of range"));
+                }
+            }
         }
     }
     Ok(())
+}
+
+/// An `Animate` target: the value kind of `prop`, finite, lengths (not
+/// percents or keywords) in range.
+fn valid_target(prop: Prop, value: &Value) -> bool {
+    let len = |v: Option<f32>| v.is_some_and(|v| v.is_finite() && (0.0..=1e6).contains(&v));
+    let lp = |l: &taffy::LengthPercentage| {
+        len(match l.expand() {
+            taffy::style::ExpandedLengthPercentage::Length(v) => Some(v),
+            _ => None,
+        })
+    };
+    match (prop, value) {
+        (Prop::Transform, Value::Transform(t)) => t.0.iter().all(|v| v.is_finite()),
+        (Prop::Opacity, Value::Opacity(o)) => (0.0..=1.0).contains(o),
+        (Prop::Fill | Prop::BorderColor, Value::Color(_)) => true,
+        (Prop::Width | Prop::Height, Value::Size(d)) => len(match d.expand() {
+            taffy::style::ExpandedDimension::Length(v) => Some(v),
+            _ => None,
+        }),
+        (Prop::Padding, Value::Padding(p)) => p.iter().all(lp),
+        (Prop::Gap, Value::Gap(g)) => g.iter().all(lp),
+        _ => false,
+    }
 }
 
 impl Ui {
@@ -480,28 +538,21 @@ impl Ui {
             }
             Mutation::Layout { id, style } => {
                 let node = NodeId(*id);
-                let new = if *style == NIL {
+                let mut new = if *style == NIL {
                     crate::host::default_style()
                 } else {
                     txn.styles[*style as usize].clone()
                 };
-                let old = &self.host.layout[node.index()];
-                if *old == new {
-                    return;
+                // Animated fields: a transition tweens to the new value,
+                // so the row keeps the value on screen.
+                for prop in [Prop::Width, Prop::Height, Prop::Padding, Prop::Gap] {
+                    let next = layout_field(&new, prop);
+                    if !self.intercept(node, prop, next) {
+                        let current = self.row_value(node, prop);
+                        set_layout_field(&mut new, prop, current);
+                    }
                 }
-                let display_changed = old.display != new.display;
-                let overflow_changed = old.overflow != new.overflow;
-                self.host.layout[node.index()] = new;
-                self.host.revs.layout_input.bump();
-                self.host.mark_layout(node);
-                if display_changed {
-                    self.host.revs.structure.bump();
-                    self.host.dirty.semantic.push(*id);
-                }
-                if overflow_changed {
-                    self.host.revs.clip.bump();
-                    self.host.dirty.semantic.push(*id);
-                }
+                self.set_layout(node, new);
             }
             Mutation::Spatial {
                 id,
@@ -509,32 +560,11 @@ impl Ui {
                 opacity,
             } => {
                 let node = NodeId(*id);
-                let s = &mut self.host.spatial[node.index()];
-                let before = (s.transformed(), s.layered());
-                let mut changed = false;
-                if let Some(t) = transform
-                    && s.transform != *t
-                {
-                    s.transform = *t;
-                    changed = true;
-                }
-                if let Some(o) = opacity
-                    && s.opacity != *o
-                {
-                    s.opacity = *o;
-                    changed = true;
-                }
-                if !changed {
-                    return;
-                }
-                if before != (s.transformed(), s.layered()) {
-                    // A transform record or an opacity layer appears or
-                    // goes: the draw topology changes.
-                    self.host.revs.structure.bump();
-                }
-                self.host.revs.transform.bump();
-                self.host.dirty.spatial.push(*id);
-                self.host.dirty.semantic.push(*id);
+                let transform = transform
+                    .filter(|t| self.intercept(node, Prop::Transform, Value::Transform(*t)));
+                let opacity =
+                    opacity.filter(|o| self.intercept(node, Prop::Opacity, Value::Opacity(*o)));
+                self.set_spatial(node, transform, opacity);
             }
             Mutation::Paint {
                 id,
@@ -542,43 +572,30 @@ impl Ui {
                 radius,
                 border,
             } => {
-                let p = &mut self.host.paint[*id as usize];
-                let mut geometry = false;
-                let mut color = false;
-                if let Some(f) = fill
-                    && p.fill != *f
-                {
-                    // Transparent <-> visible changes whether a rect exists.
-                    geometry |= (p.fill & 0xFF == 0) != (f & 0xFF == 0);
-                    p.fill = *f;
-                    color = true;
+                let node = NodeId(*id);
+                let fill = fill.filter(|c| self.intercept(node, Prop::Fill, Value::Color(*c)));
+                let border_color = border
+                    .map(|(c, _)| c)
+                    .filter(|c| self.intercept(node, Prop::BorderColor, Value::Color(*c)));
+                self.set_paint(node, fill, *radius, border_color, border.map(|(_, w)| w));
+            }
+            Mutation::Transition { id, transitions } => {
+                // Later changes use the new set; running tweens finish.
+                if transitions.is_empty() {
+                    self.host.transitions.remove(id);
+                } else {
+                    self.host.transitions.insert(*id, transitions.to_vec());
                 }
-                if let Some(r) = radius {
-                    let r = r.max(0.0);
-                    if p.radius != r {
-                        p.radius = r;
-                        geometry = true;
-                    }
-                }
-                if let Some((c, w)) = border {
-                    let w = w.max(0.0);
-                    if p.border_width != w {
-                        p.border_width = w;
-                        geometry = true;
-                    }
-                    if p.border_color != *c {
-                        geometry |= (p.border_color & 0xFF == 0) != (c & 0xFF == 0);
-                        p.border_color = *c;
-                        color = true;
-                    }
-                }
-                if geometry {
-                    self.host.dirty.content.push(*id);
-                } else if color {
-                    self.host.dirty.paint.push(*id);
-                }
-                if geometry || color {
-                    self.host.revs.paint.bump();
+            }
+            Mutation::Animate {
+                id,
+                prop,
+                value,
+                timing,
+            } => {
+                let node = NodeId(*id);
+                if self.start_animation(node, *prop, *value, *timing) {
+                    self.write_value(node, *prop, *value);
                 }
             }
             Mutation::Paragraph { id, text, spans } => {
@@ -785,5 +802,153 @@ impl Ui {
             *t = None;
         }
         self.inputs.remove(node.0);
+        self.animations.forget(node);
+    }
+
+    /// Writes a node's layout row; the one writer for layout inputs
+    /// (mutations and the animation driver).
+    pub(crate) fn set_layout(&mut self, node: NodeId, new: taffy::Style) {
+        let old = &self.host.layout[node.index()];
+        if *old == new {
+            return;
+        }
+        let display_changed = old.display != new.display;
+        let overflow_changed = old.overflow != new.overflow;
+        self.host.layout[node.index()] = new;
+        self.host.revs.layout_input.bump();
+        self.host.mark_layout(node);
+        if display_changed {
+            self.host.revs.structure.bump();
+            self.host.dirty.semantic.push(node.0);
+        }
+        if overflow_changed {
+            self.host.revs.clip.bump();
+            self.host.dirty.semantic.push(node.0);
+        }
+    }
+
+    /// Writes a node's spatial row (the fields given).
+    pub(crate) fn set_spatial(
+        &mut self,
+        node: NodeId,
+        transform: Option<Affine>,
+        opacity: Option<f32>,
+    ) {
+        let s = &mut self.host.spatial[node.index()];
+        let before = (s.transformed(), s.layered());
+        let mut changed = false;
+        if let Some(t) = transform
+            && s.transform != t
+        {
+            s.transform = t;
+            changed = true;
+        }
+        if let Some(o) = opacity
+            && s.opacity != o
+        {
+            s.opacity = o;
+            changed = true;
+        }
+        if !changed {
+            return;
+        }
+        if before != (s.transformed(), s.layered()) {
+            // A transform record or an opacity layer appears or goes:
+            // the draw topology changes.
+            self.host.revs.structure.bump();
+        }
+        self.host.revs.transform.bump();
+        self.host.dirty.spatial.push(node.0);
+        self.host.dirty.semantic.push(node.0);
+    }
+
+    /// Writes a node's box paint row (the fields given).
+    pub(crate) fn set_paint(
+        &mut self,
+        node: NodeId,
+        fill: Option<u32>,
+        radius: Option<f32>,
+        border_color: Option<u32>,
+        border_width: Option<f32>,
+    ) {
+        let id = node.0;
+        let p = &mut self.host.paint[node.index()];
+        let mut geometry = false;
+        let mut color = false;
+        if let Some(f) = fill
+            && p.fill != f
+        {
+            // Transparent <-> visible changes whether a rect exists.
+            geometry |= (p.fill & 0xFF == 0) != (f & 0xFF == 0);
+            p.fill = f;
+            color = true;
+        }
+        if let Some(r) = radius {
+            let r = r.max(0.0);
+            if p.radius != r {
+                p.radius = r;
+                geometry = true;
+            }
+        }
+        if let Some(w) = border_width {
+            let w = w.max(0.0);
+            if p.border_width != w {
+                p.border_width = w;
+                geometry = true;
+            }
+        }
+        if let Some(c) = border_color
+            && p.border_color != c
+        {
+            geometry |= (p.border_color & 0xFF == 0) != (c & 0xFF == 0);
+            p.border_color = c;
+            color = true;
+        }
+        if geometry {
+            self.host.dirty.content.push(id);
+        } else if color {
+            self.host.dirty.paint.push(id);
+        }
+        if geometry || color {
+            self.host.revs.paint.bump();
+        }
+    }
+}
+
+/// An animatable layout field of `style` as a declared value.
+fn layout_field(style: &taffy::Style, prop: Prop) -> Value {
+    match prop {
+        Prop::Width => Value::Size(style.size.width),
+        Prop::Height => Value::Size(style.size.height),
+        Prop::Padding => Value::Padding([
+            style.padding.left,
+            style.padding.right,
+            style.padding.top,
+            style.padding.bottom,
+        ]),
+        _ => Value::Gap([style.gap.width, style.gap.height]),
+    }
+}
+
+/// Sets `prop`'s field of `style` to `v`.
+fn set_layout_field(style: &mut taffy::Style, prop: Prop, v: Value) {
+    match (prop, v) {
+        (Prop::Width, Value::Size(d)) => style.size.width = d,
+        (Prop::Height, Value::Size(d)) => style.size.height = d,
+        (Prop::Padding, Value::Padding([l, r, t, b])) => {
+            style.padding = taffy::Rect {
+                left: l,
+                right: r,
+                top: t,
+                bottom: b,
+            }
+        }
+        (Prop::Gap, Value::Gap([w, h])) => {
+            style.gap = taffy::Size {
+                width: w,
+                height: h,
+            }
+        }
+        _ => {}
     }
 }

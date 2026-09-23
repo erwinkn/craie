@@ -17,6 +17,9 @@ import {
   transformMatrix,
   type AccessibilityRole,
   type Affine,
+  type AnimProp,
+  type Timing,
+  type Transitions,
   type ItemDesc,
   type ListTemplate,
   type ScrollAnchor,
@@ -97,6 +100,11 @@ export interface HostNode {
   /** Replaces an input node's buffer. Inputs are uncontrolled: this
    * command is the only way to change the text after mount. */
   setText(text: string): void
+  /** Tweens one property natively to `to` (the value it keeps after,
+   * until a commit sets that property again): transform an RN
+   * transform list, colors as in props, padding a number or [left,
+   * right, top, bottom], gap a number or [column, row]. */
+  animate(prop: AnimProp, to: unknown, timing: Timing): void
 }
 
 export interface Transport {
@@ -155,6 +163,29 @@ function utf8Length(s: string): number {
     else n += 3
   }
   return n
+}
+
+/** Key of a transition declaration, for change detection. */
+function transitionKey(t: Transitions | undefined): string {
+  if (!t) return ""
+  const keys = Object.keys(t).filter(k => t[k as AnimProp] !== undefined).sort()
+  return keys.length ? JSON.stringify(keys.map(k => [k, t[k as AnimProp]])) : ""
+}
+
+/** An `animate` target in its wire shape (see `Encoder.animate`). */
+function animValue(prop: AnimProp, to: unknown): number[] {
+  const nums = (v: unknown, n: number): number[] => {
+    if (typeof v === "number") return Array(n).fill(v)
+    if (Array.isArray(v) && v.length === n && v.every(x => typeof x === "number")) return v
+    throw Error(`bad ${prop} animation target`)
+  }
+  switch (prop) {
+    case "transform": return [...transformMatrix(to as any)]
+    case "backgroundColor": case "borderColor": return [color(to as string | number)]
+    case "padding": return nums(to, 4)
+    case "gap": return nums(to, 2)
+    default: return nums(to, 1)
+  }
 }
 
 /** A nested Text's span style: its parent's, with the props it sets
@@ -427,6 +458,10 @@ export class CraieHost {
       setText(text: string) {
         this.root.cmd(this, (e, id) => e.cmdSetText(id, text))
       },
+      animate(prop: AnimProp, to: unknown, timing: Timing) {
+        const value = animValue(prop, to)
+        this.root.cmd(this, (e, id) => e.animate(id, prop, value, timing))
+      },
     }
     return n
   }
@@ -640,6 +675,13 @@ export class CraieHost {
     const enc = this.encoder
     const id = n.id
 
+    // Transitions: a change applies to this commit's changes (CSS uses
+    // the after-change style), so it goes first; at mount it goes last,
+    // so first values do not tween.
+    const oldTr = mounted ? transitionKey(oldProps.style?.transition) : ""
+    const newTr = transitionKey(props.style?.transition)
+    if (mounted && oldTr !== newTr) enc.transition(id, props.style?.transition)
+
     // Layout inputs (spatial keys split off; hiding is display: none).
     const oldLayout = mounted ? layoutOf(oldProps, n.suspended) : undefined
     const newLayout = layoutOf(props, n.suspended)
@@ -674,6 +716,8 @@ export class CraieHost {
         )
       }
     }
+
+    if (!mounted && newTr !== "") enc.transition(id, props.style?.transition)
 
     if (n.kind === 3) {
       // Surface kind + params; the payload is a typed array copied once

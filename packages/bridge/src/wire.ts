@@ -4,8 +4,9 @@
 //            string_count u32 | style_count u32 | span_count u32
 //   strings: count x (u32 byte_len + utf8)
 //   styles:  count x (u64 presence mask + fields in schema order)
-//   spans:   count x 16 bytes (start u32, font_size f32, color u32,
-//            weight u16, flags u8, reserved u8)
+//   spans:   count x 28 bytes (start u32, font_size f32, color u32,
+//            weight u16, flags u8, reserved u8, family u32, letter
+//            spacing f32, line height f32)
 //   ops:     u8-tagged records to the end of the buffer
 //
 // Strings, styles, and spans are per-transaction tables: ops refer to
@@ -46,7 +47,43 @@ const enum Op {
   ListSplice = 0x91,
   ListIndex = 0x92,
   ScrollAnchor = 0x93,
+  // animation
+  Transition = 0xa0,
+  Animate = 0xa1,
 }
+
+/** Animatable properties — mirror animation.rs `Prop`. */
+export const ANIM_PROP = {
+  transform: 0,
+  opacity: 1,
+  backgroundColor: 2,
+  borderColor: 3,
+  width: 4,
+  height: 5,
+  padding: 6,
+  gap: 7,
+} as const
+export type AnimProp = keyof typeof ANIM_PROP
+
+/** CSS named easings as cubic-bezier control points. */
+export const EASING = {
+  linear: [0, 0, 1, 1],
+  ease: [0.25, 0.1, 0.25, 1],
+  "ease-in": [0.42, 0, 1, 1],
+  "ease-out": [0, 0, 0.58, 1],
+  "ease-in-out": [0.42, 0, 0.58, 1],
+} as const
+export type Easing = keyof typeof EASING | readonly [number, number, number, number]
+
+/** A timing in milliseconds (as RN Animated): a CSS curve over
+ * `duration` (default easing `ease`), or a spring (defaults: stiffness
+ * 170, damping 26, mass 1). */
+export type Timing =
+  | { duration: number; delay?: number; easing?: Easing }
+  | { spring: { stiffness?: number; damping?: number; mass?: number }; delay?: number }
+
+/** `style.transition`: later changes of these properties tween. */
+export type Transitions = Partial<Record<AnimProp, Timing>>
 
 /** Scroll anchoring policies — mirror mutation.rs `Anchor`. */
 export const ANCHOR = { "keep-visible": 0, "stick-to-end": 1, none: 2 } as const
@@ -218,6 +255,8 @@ export interface StyleProps {
   transform?: Transform
   /** Spatial: group opacity in [0, 1]. */
   opacity?: number
+  /** Not layout: declared transitions, sent in their own op. */
+  transition?: Transitions
 }
 
 /** One RN-style transform step. Angles: "45deg", "0.5rad", or radians. */
@@ -437,6 +476,22 @@ function mul(p: Affine, c: Affine): Affine {
   ]
 }
 
+/** A timing on the wire: kind u8, delay f32, five f32 (a curve:
+ * duration, x1, y1, x2, y2; a spring: stiffness, damping, mass, 0, 0).
+ * Seconds natively. */
+function putTiming(b: Writer, t: Timing) {
+  const delay = (t.delay ?? 0) / 1000
+  if ("spring" in t) {
+    b.u8(1)
+    for (const v of [delay, t.spring.stiffness ?? 170, t.spring.damping ?? 26, t.spring.mass ?? 1, 0, 0]) b.f32(v)
+    return
+  }
+  const e = typeof t.easing === "object" ? t.easing : EASING[t.easing ?? "ease"]
+  if (!e) throw Error(`unknown easing "${String(t.easing)}"`)
+  b.u8(0)
+  for (const v of [delay, t.duration / 1000, ...e]) b.f32(v)
+}
+
 /** Folds an RN-style transform list into one matrix. Like CSS, the list
  * composes left to right, so the last step applies to points first. */
 export function transformMatrix(t: Transform | undefined): Affine {
@@ -468,8 +523,8 @@ export function transformMatrix(t: Transform | undefined): Affine {
 /** The layout part of a style: everything but the spatial keys. */
 export function layoutPart(s: StyleProps | undefined): StyleProps | undefined {
   if (!s) return undefined
-  if (s.transform === undefined && s.opacity === undefined) return s
-  const { transform: _t, opacity: _o, ...rest } = s
+  if (s.transform === undefined && s.opacity === undefined && s.transition === undefined) return s
+  const { transform: _t, opacity: _o, transition: _tr, ...rest } = s
   return rest
 }
 
@@ -726,6 +781,32 @@ export class Encoder {
     this.ops.u8(Op.ScrollAnchor)
     this.ops.u32(id)
     this.ops.u8(ANCHOR[anchor])
+  }
+
+  /** Replaces a node's declared transitions (none: clears). */
+  transition(id: number, transitions: Transitions | undefined) {
+    const b = this.ops
+    const list = (Object.keys(ANIM_PROP) as AnimProp[]).filter(p => transitions?.[p] !== undefined)
+    b.u8(Op.Transition)
+    b.u32(id)
+    b.u8(list.length)
+    for (const p of list) {
+      b.u8(ANIM_PROP[p])
+      putTiming(b, transitions![p]!)
+    }
+  }
+
+  /** Tweens one property to `value`, in the property's wire shape:
+   * transform 6 numbers, a color as 0xRRGGBBAA, padding [left, right,
+   * top, bottom], gap [column, row], others one number. */
+  animate(id: number, prop: AnimProp, value: readonly number[], timing: Timing) {
+    const b = this.ops
+    b.u8(Op.Animate)
+    b.u32(id)
+    b.u8(ANIM_PROP[prop])
+    if (prop === "backgroundColor" || prop === "borderColor") b.u32(value[0]! >>> 0)
+    else for (const v of value) b.f32(v)
+    putTiming(b, timing)
   }
 
   /** Seals the transaction and resets every table for the next one. */

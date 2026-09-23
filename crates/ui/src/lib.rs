@@ -8,6 +8,9 @@
 //! presentation.
 
 pub mod a11y;
+pub mod animation;
+#[cfg(test)]
+mod animation_tests;
 pub mod bridge;
 pub mod clipboard;
 mod dispatch;

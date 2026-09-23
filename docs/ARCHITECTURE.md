@@ -151,7 +151,18 @@ a measurement.
 
 ## 2. Wire and mutation executor
 
-**Current.** CRW2 as targeted, minus the animation family (step 4).
+**Current.** CRW2 as targeted. The animation family (0xA0, step 4):
+a transition op replaces a node's declared transitions (count u8, then
+per property a u8 and a 25-byte timing), and an animate op tweens one
+property to a target (the target in its property's shape: transform 6
+f32, opacity f32, a color u32, width or height f32, padding 4 f32, gap
+2 f32; lengths only). A timing is a kind u8 (curve or spring), a delay,
+and five f32 (a curve's duration and control points, or a spring's
+stiffness, damping, and mass). Validation rejects unknown properties
+and timing kinds, a property declared twice, non-finite or
+out-of-range timings (curve x control points outside [0, 1], an
+undamped spring, more than 600 s), targets of the wrong kind, and paint
+animations on nodes without a box.
 The list family (0x90) carries list configuration (overscan, fallback
 extent, row templates), item splices (11 bytes per item: template
 u16, text length u32, identity u32, flags u8, borrowed from the buffer),
@@ -770,7 +781,25 @@ and render target so a host can embed it.
 
 ## 12. Animation
 
-**Current.** None. Animation is JS-driven per commit.
+**Current.** The native driver (`animation.rs`, step 4). A node's
+declared transitions live on the host (`Host::transitions`, id-keyed),
+running animations in the driver (`Ui::animations`), at most one per
+node and property. A mutation of a property with a running animation
+compares with its declared target: equal changes nothing, another value
+retargets it from the value on screen (with a transition) or cancels it
+and jumps (without one). Without a running one, a declared transition
+starts a tween from the value on screen. `render` first advances every
+animation to the UI clock and writes the rows through the mutation's
+own writers (`set_layout`, `set_spatial`, `set_paint`); the final frame
+writes the declared value. A size target that is not a length is
+resolved by one probe layout; a padding or gap that is not a length
+jumps (`LEDGER.md` DF-4). Transforms interpolate as rotation x
+upper-triangular x translation; colors premultiplied. Curves are CSS
+cubic-bezier; springs are damped oscillators from rest. `needs_paint`
+holds while anything runs, and the platform asks for the next frame
+after each one. JS: `style.transition` (per property: a duration,
+delay, and easing, or a spring; milliseconds) and `node.animate(prop,
+to, timing)`.
 
 **Target.** A native transition driver on the UI thread.
 
@@ -788,8 +817,8 @@ and render target so a host can embed it.
   overwritten each frame by one writer.
 - Active animations request a redraw each frame. Idle means no work.
 
-**Experiments.** None yet. Cost assertions: a transform or opacity
-tween performs zero layouts and zero shapes.
+**Experiments.** Cost assertions: a transform or opacity tween performs
+zero layouts and zero shapes (asserted, `EXPERIMENTS.md` Step 4).
 
 **Decisions.**
 - Native driver in the next milestone, including layout properties,
@@ -797,6 +826,12 @@ tween performs zero layouts and zero shapes.
   need.
 - Per-node layout rows make the write path a single entry. No override
   table, no private style copies.
+- Transitions follow CSS where it decides (2026-09-23, step 4): a
+  transition declared in the same commit as a change applies to it
+  (the after-change style), first values at mount do not tween, and a
+  changed transition set affects later changes only. `animate` leaves
+  its target in the row until a commit sets that property again (as
+  React Native's native driver).
 
 ## 13. Input, focus, editing
 

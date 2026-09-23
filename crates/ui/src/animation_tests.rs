@@ -1,0 +1,430 @@
+//! The animation driver through transactions: tweens write the rows
+//! each frame, transform and opacity tweens neither lay out nor shape,
+//! layout tweens reflow siblings, `auto` targets resolve by one probe
+//! layout, and the wire carries both ops.
+
+use crate::animation::{Prop, Timing, Transition, Value};
+use crate::geom::Size;
+use crate::host::NodeId;
+use crate::mutation::{NodeKind, Transaction};
+use crate::ui::Ui;
+use crate::wire;
+use craie_core::geom::Affine;
+
+const NIL: u32 = u32::MAX;
+const VIEW: Size = Size {
+    width: 400.0,
+    height: 300.0,
+};
+
+fn linear(secs: f32) -> Timing {
+    Timing::curve(secs, [0.0, 0.0, 1.0, 1.0])
+}
+
+fn at(ui: &mut Ui, t: f64) {
+    ui.set_time(t);
+    ui.render(VIEW);
+}
+
+fn sized(w: f32, h: f32) -> taffy::Style {
+    taffy::Style {
+        flex_shrink: 0.0,
+        size: taffy::Size {
+            width: taffy::Dimension::length(w),
+            height: taffy::Dimension::length(h),
+        },
+        ..taffy::Style::default()
+    }
+}
+
+/// A row container (0, 300 wide) holding box 1 (100x40) and box 2
+/// (50x40), and a text (3).
+fn row_ui() -> Ui {
+    let mut ui = Ui::new(1.0);
+    let mut t = Transaction::new(1);
+    let row = taffy::Style {
+        flex_direction: taffy::FlexDirection::Row,
+        align_items: Some(taffy::AlignItems::START),
+        size: taffy::Size {
+            width: taffy::Dimension::length(300.0),
+            height: taffy::Dimension::auto(),
+        },
+        ..taffy::Style::default()
+    };
+    t.create(0, NodeKind::View)
+        .layout(0, &row)
+        .place(NIL, 0, NIL);
+    t.create(1, NodeKind::View)
+        .layout(1, &sized(100.0, 40.0))
+        .fill(1, 0x0000_00FF)
+        .place(0, 1, NIL);
+    t.create(2, NodeKind::View)
+        .layout(2, &sized(50.0, 40.0))
+        .fill(2, 0xFFFF_FFFF)
+        .place(0, 2, NIL);
+    t.create(3, NodeKind::Text)
+        .text(3, "moving words", 16.0, 0xFFFF_FFFF)
+        .place(0, 3, NIL);
+    ui.apply_txn(&t).unwrap();
+    at(&mut ui, 0.0);
+    ui
+}
+
+fn apply(ui: &mut Ui, f: impl FnOnce(&mut Transaction<'static>)) {
+    let mut t = Transaction::new(ui.seq + 1);
+    f(&mut t);
+    ui.apply_txn(&t).unwrap();
+}
+
+/// A transaction-building case.
+type Case = Box<dyn Fn(&mut Transaction<'static>)>;
+
+fn near(a: f32, b: f32) -> bool {
+    (a - b).abs() < 1e-3
+}
+
+/// Transform and opacity tweens write the spatial row each frame and do
+/// zero layouts and zero shapes (ARCHITECTURE.md section 12).
+#[test]
+fn spatial_tweens_neither_lay_out_nor_shape() {
+    let mut ui = row_ui();
+    apply(&mut ui, |t| {
+        t.transition(
+            3,
+            &[
+                Transition {
+                    prop: Prop::Opacity,
+                    timing: linear(1.0),
+                },
+                Transition {
+                    prop: Prop::Transform,
+                    timing: linear(1.0),
+                },
+            ],
+        );
+    });
+    at(&mut ui, 0.0);
+    apply(&mut ui, |t| {
+        t.opacity(3, 0.0)
+            .transform(3, Affine::translate(100.0, 0.0));
+    });
+    // The rows keep the value on screen until a frame advances them.
+    assert_eq!(ui.host.spatial[3].opacity, 1.0);
+    let before = ui.counters();
+    for (k, time) in [0.25, 0.5, 0.75].into_iter().enumerate() {
+        assert!(ui.needs_paint(), "a running animation owes frames");
+        at(&mut ui, time);
+        let s = ui.host.spatial[3];
+        let want = 0.25 * (k + 1) as f32;
+        assert!(near(s.opacity, 1.0 - want), "{time}: {}", s.opacity);
+        assert!(
+            near(s.transform.0[4], 100.0 * want),
+            "{time}: {:?}",
+            s.transform
+        );
+    }
+    let spent = ui.counters().since(&before);
+    assert_eq!((spent.layout_passes, spent.shapes), (0, 0));
+    at(&mut ui, 1.0);
+    assert_eq!(ui.host.spatial[3].opacity, 0.0);
+    assert_eq!(ui.host.spatial[3].transform, Affine::translate(100.0, 0.0));
+    assert!(!ui.animating());
+    let spent = ui.counters().since(&before);
+    assert_eq!((spent.layout_passes, spent.shapes), (0, 0));
+}
+
+/// A width tween relayouts each frame: the sibling after it moves.
+#[test]
+fn width_tween_reflows_siblings() {
+    let mut ui = row_ui();
+    apply(&mut ui, |t| {
+        t.transition(
+            1,
+            &[Transition {
+                prop: Prop::Width,
+                timing: linear(1.0),
+            }],
+        );
+    });
+    apply(&mut ui, |t| {
+        t.layout(1, &sized(200.0, 40.0));
+    });
+    at(&mut ui, 0.5);
+    let x2 = |ui: &Ui| ui.layouts.data(NodeId(2)).rect.origin.x;
+    assert!(near(ui.layouts.data(NodeId(1)).rect.size.width, 150.0));
+    assert!(near(x2(&ui), 150.0));
+    at(&mut ui, 1.0);
+    assert!(near(x2(&ui), 200.0));
+    assert!(!ui.animating());
+    assert_eq!(ui.host.layout[1], sized(200.0, 40.0));
+}
+
+/// A tween to `auto` finds its end by one probe layout and restores
+/// `auto` on the final frame; one from `auto` starts at the laid-out
+/// size.
+#[test]
+fn size_tweens_to_and_from_auto() {
+    let mut ui = Ui::new(1.0);
+    let column = taffy::Style {
+        flex_direction: taffy::FlexDirection::Column,
+        size: taffy::Size {
+            width: taffy::Dimension::length(300.0),
+            height: taffy::Dimension::auto(),
+        },
+        ..taffy::Style::default()
+    };
+    let mut t = Transaction::new(1);
+    t.create(0, NodeKind::View)
+        .layout(0, &column)
+        .place(NIL, 0, NIL);
+    t.create(1, NodeKind::View)
+        .layout(1, &sized(100.0, 40.0))
+        .transition(
+            1,
+            &[Transition {
+                prop: Prop::Width,
+                timing: linear(1.0),
+            }],
+        )
+        .place(0, 1, NIL);
+    ui.apply_txn(&t).unwrap();
+    at(&mut ui, 0.0);
+    let auto_width = taffy::Style {
+        size: taffy::Size {
+            width: taffy::Dimension::auto(),
+            height: taffy::Dimension::length(40.0),
+        },
+        ..taffy::Style::default()
+    };
+    apply(&mut ui, |t| {
+        t.layout(1, &auto_width);
+    });
+    let width = |ui: &Ui| ui.layouts.data(NodeId(1)).rect.size.width;
+    at(&mut ui, 0.5);
+    // Stretched in a 300-wide column: auto resolves to 300.
+    assert!(near(width(&ui), 200.0), "{}", width(&ui));
+    at(&mut ui, 1.0);
+    assert!(near(width(&ui), 300.0));
+    assert!(ui.host.layout[1].size.width.is_auto(), "auto restored");
+    // Back from auto: starts at the laid-out 300.
+    apply(&mut ui, |t| {
+        t.layout(1, &sized(50.0, 40.0));
+    });
+    at(&mut ui, 1.5);
+    assert!(near(width(&ui), 175.0), "{}", width(&ui));
+    at(&mut ui, 2.0);
+    assert_eq!(ui.host.layout[1], sized(50.0, 40.0));
+}
+
+/// A resent equal value leaves a tween running; a new one retargets it
+/// from the value on screen.
+#[test]
+fn tweens_retarget_from_the_value_on_screen() {
+    let mut ui = row_ui();
+    apply(&mut ui, |t| {
+        t.transition(
+            1,
+            &[Transition {
+                prop: Prop::Opacity,
+                timing: linear(1.0),
+            }],
+        );
+    });
+    apply(&mut ui, |t| {
+        t.opacity(1, 0.0);
+    });
+    at(&mut ui, 0.5);
+    apply(&mut ui, |t| {
+        t.opacity(1, 0.0);
+    });
+    at(&mut ui, 0.75);
+    assert!(near(ui.host.spatial[1].opacity, 0.25));
+    apply(&mut ui, |t| {
+        t.opacity(1, 1.0);
+    });
+    at(&mut ui, 1.25);
+    assert!(
+        near(ui.host.spatial[1].opacity, 0.625),
+        "{}",
+        ui.host.spatial[1].opacity
+    );
+    at(&mut ui, 1.75);
+    assert_eq!(ui.host.spatial[1].opacity, 1.0);
+    assert!(!ui.animating());
+}
+
+/// `Animate` tweens once; a plain set (no transition) cancels it and
+/// jumps. Springs end on their target.
+#[test]
+fn animate_tweens_once_and_a_set_cancels_it() {
+    let mut ui = row_ui();
+    apply(&mut ui, |t| {
+        t.animate(1, Prop::Fill, Value::Color(0xFF00_00FF), linear(1.0));
+    });
+    at(&mut ui, 0.5);
+    assert_eq!(ui.host.paint[1].fill, 0x8000_00FF);
+    apply(&mut ui, |t| {
+        t.fill(1, 0x00FF_00FF);
+    });
+    assert!(!ui.animating());
+    assert_eq!(ui.host.paint[1].fill, 0x00FF_00FF);
+    at(&mut ui, 0.75);
+    assert_eq!(ui.host.paint[1].fill, 0x00FF_00FF);
+
+    let spring = Timing::Spring {
+        delay: 0.0,
+        stiffness: 170.0,
+        damping: 12.0,
+        mass: 1.0,
+    };
+    let target = Affine::rotate(1.0).mul(&Affine::scale(2.0, 2.0));
+    apply(&mut ui, |t| {
+        t.animate(2, Prop::Transform, Value::Transform(target), spring);
+    });
+    let end = ui.animations_end().unwrap();
+    // Started at the clock of its transaction (0.75).
+    assert!((end - (0.75 + spring.run_secs())).abs() < 1e-9);
+    at(&mut ui, 1.2);
+    assert_ne!(ui.host.spatial[2].transform, target);
+    at(&mut ui, end);
+    assert_eq!(ui.host.spatial[2].transform, target);
+    assert!(!ui.animating());
+}
+
+/// Removing a node drops its animations; its id reused starts clean.
+#[test]
+fn removed_nodes_drop_their_animations() {
+    let mut ui = row_ui();
+    apply(&mut ui, |t| {
+        t.animate(1, Prop::Opacity, Value::Opacity(0.0), linear(1.0));
+    });
+    at(&mut ui, 0.5);
+    apply(&mut ui, |t| {
+        t.remove(1).create(1, NodeKind::View).place(0, 1, NIL);
+    });
+    assert!(!ui.animating());
+    at(&mut ui, 1.0);
+    assert_eq!(ui.host.spatial[1].opacity, 1.0);
+    assert!(ui.host.transitions.is_empty());
+}
+
+/// Both ops round-trip through the wire; invalid timings, duplicate
+/// declarations, non-length targets, and paint animations on text
+/// reject the transaction.
+#[test]
+fn animation_ops_round_trip_and_validate() {
+    let spring = Timing::Spring {
+        delay: 0.1,
+        stiffness: 200.0,
+        damping: 20.0,
+        mass: 1.0,
+    };
+    let mut t = Transaction::new(1);
+    t.transition(
+        1,
+        &[
+            Transition {
+                prop: Prop::Width,
+                timing: linear(0.3).with_delay(0.05),
+            },
+            Transition {
+                prop: Prop::Fill,
+                timing: spring,
+            },
+        ],
+    )
+    .animate(
+        1,
+        Prop::Padding,
+        Value::Padding([taffy::LengthPercentage::length(4.0); 4]),
+        linear(1.0),
+    )
+    .animate(1, Prop::BorderColor, Value::Color(0x1234_5678), spring)
+    .animate(
+        1,
+        Prop::Transform,
+        Value::Transform(Affine::rotate(0.3)),
+        Timing::curve(0.2, [0.25, 0.1, 0.25, 1.0]),
+    );
+    let bytes = wire::encode(&t);
+    let decoded = wire::decode(&bytes).unwrap();
+    assert_eq!(decoded.mutations, t.mutations);
+
+    let mut ui = row_ui();
+    let seq = ui.seq;
+    let bad: Vec<Case> = vec![
+        Box::new(|t| {
+            t.animate(
+                1,
+                Prop::Opacity,
+                Value::Opacity(0.0),
+                Timing::Spring {
+                    delay: 0.0,
+                    stiffness: 100.0,
+                    damping: 0.0,
+                    mass: 1.0,
+                },
+            );
+        }),
+        Box::new(|t| {
+            t.animate(
+                1,
+                Prop::Opacity,
+                Value::Opacity(0.0),
+                Timing::curve(1.0, [1.5, 0.0, 1.0, 1.0]),
+            );
+        }),
+        Box::new(|t| {
+            t.animate(1, Prop::Opacity, Value::Opacity(0.0), linear(f32::NAN));
+        }),
+        Box::new(|t| {
+            let tr = Transition {
+                prop: Prop::Width,
+                timing: linear(1.0),
+            };
+            t.transition(1, &[tr, tr]);
+        }),
+        Box::new(|t| {
+            t.animate(
+                1,
+                Prop::Width,
+                Value::Size(taffy::Dimension::percent(0.5)),
+                linear(1.0),
+            );
+        }),
+        Box::new(|t| {
+            t.animate(1, Prop::Width, Value::Opacity(1.0), linear(1.0));
+        }),
+        Box::new(|t| {
+            t.animate(3, Prop::Fill, Value::Color(0xFF), linear(1.0));
+        }),
+        Box::new(|t| {
+            t.animate(9, Prop::Opacity, Value::Opacity(0.0), linear(1.0));
+        }),
+    ];
+    for (k, f) in bad.iter().enumerate() {
+        let mut t = Transaction::new(seq + 1);
+        f(&mut t);
+        assert!(ui.apply_txn(&t).is_err(), "case {k}");
+        // The wire encodes a target by its property: a mismatched value
+        // (case 5) exists only in the direct API.
+        if k != 5 {
+            assert!(ui.apply(&wire::encode(&t)).is_err(), "case {k} on the wire");
+        }
+        assert_eq!(ui.seq, seq);
+        assert!(!ui.animating());
+    }
+    // Unknown timing kinds and properties fail decoding.
+    let mut t = Transaction::new(seq + 1);
+    t.animate(1, Prop::Opacity, Value::Opacity(0.0), linear(1.0));
+    let buf = wire::encode(&t);
+    let at = buf.iter().rposition(|&b| b == wire::op::ANIMATE).unwrap();
+    let mut prop = buf.clone();
+    prop[at + 5] = 8;
+    assert!(ui.apply(&prop).is_err());
+    let mut kind = buf.clone();
+    kind[at + 5 + 1 + 4] = 2;
+    assert!(ui.apply(&kind).is_err());
+    ui.apply(&buf).unwrap();
+    assert!(ui.animating());
+}

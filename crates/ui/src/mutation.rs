@@ -369,6 +369,20 @@ pub enum Mutation<'a> {
         id: u32,
         anchor: Anchor,
     },
+    // animation
+    /// Replaces the node's declared transitions (empty clears): later
+    /// changes of these properties tween.
+    Transition {
+        id: u32,
+        transitions: Cow<'a, [crate::animation::Transition]>,
+    },
+    /// Tweens `prop` to `value` once.
+    Animate {
+        id: u32,
+        prop: crate::animation::Prop,
+        value: crate::animation::Value,
+        timing: crate::animation::Timing,
+    },
 }
 
 impl Mutation<'_> {
@@ -392,7 +406,9 @@ impl Mutation<'_> {
             | Mutation::ListConfig { id, .. }
             | Mutation::ListSplice { id, .. }
             | Mutation::ListIndex { id, .. }
-            | Mutation::ScrollAnchor { id, .. } => id,
+            | Mutation::ScrollAnchor { id, .. }
+            | Mutation::Transition { id, .. }
+            | Mutation::Animate { id, .. } => id,
             Mutation::Place { child, .. } => child,
         }
     }
@@ -506,6 +522,34 @@ impl<'a> Transaction<'a> {
 
     pub fn fill(&mut self, id: u32, color: u32) -> &mut Self {
         self.paint(id, Some(color), None, None)
+    }
+
+    /// Declares the node's transitions (replacing any).
+    pub fn transition(
+        &mut self,
+        id: u32,
+        transitions: &[crate::animation::Transition],
+    ) -> &mut Self {
+        self.push(Mutation::Transition {
+            id,
+            transitions: transitions.to_vec().into(),
+        })
+    }
+
+    /// Tweens one property to `value` (its property is `prop`).
+    pub fn animate(
+        &mut self,
+        id: u32,
+        prop: crate::animation::Prop,
+        value: crate::animation::Value,
+        timing: crate::animation::Timing,
+    ) -> &mut Self {
+        self.push(Mutation::Animate {
+            id,
+            prop,
+            value,
+            timing,
+        })
     }
 
     pub fn paragraph(

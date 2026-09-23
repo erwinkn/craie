@@ -84,6 +84,9 @@ pub fn snapshot(ui: &Ui) -> Transaction<'static> {
         if it.listeners != 0 || it.focusable || it.selectable {
             t.interaction_flags(id.0, it.listeners, it.focusable, it.selectable);
         }
+        if let Some(tr) = host.transitions.get(&id.0) {
+            t.transition(id.0, tr);
+        }
         if let Some(label) = host.label(id) {
             t.label(id.0, label.to_string());
         }
@@ -159,6 +162,75 @@ pub fn rebuild(ui: &Ui, viewport: Size) -> Ui {
         clean.render(viewport);
     }
     clean
+}
+
+/// `t` as it applies without animation, to `twin` (the state it reads
+/// for fields an `Animate` does not name): transitions dropped, each
+/// `Animate` a plain set of its target. At rest, a `Ui` that animates
+/// must equal its twin.
+pub fn without_animation(t: &Transaction<'static>, twin: &Ui) -> Transaction<'static> {
+    use craie_ui::animation::Value;
+    let mut out = t.clone();
+    out.mutations.clear();
+    for m in &t.mutations {
+        match m {
+            Mutation::Transition { .. } => {}
+            Mutation::Animate { id, value, .. } => {
+                let i = *id as usize;
+                match *value {
+                    Value::Transform(m) => {
+                        out.transform(*id, m);
+                    }
+                    Value::Opacity(o) => {
+                        out.opacity(*id, o);
+                    }
+                    Value::Color(c) if m_prop(m) == craie_ui::animation::Prop::Fill => {
+                        out.fill(*id, c);
+                    }
+                    Value::Color(c) => {
+                        let w = twin.host.paint[i].border_width;
+                        out.paint(*id, None, None, Some((c, w)));
+                    }
+                    _ => {
+                        let mut style = twin.host.layout[i].clone();
+                        match *value {
+                            Value::Size(d) if m_prop(m) == craie_ui::animation::Prop::Width => {
+                                style.size.width = d
+                            }
+                            Value::Size(d) => style.size.height = d,
+                            Value::Padding([l, r, t, b]) => {
+                                style.padding = taffy::Rect {
+                                    left: l,
+                                    right: r,
+                                    top: t,
+                                    bottom: b,
+                                }
+                            }
+                            Value::Gap([w, h]) => {
+                                style.gap = taffy::Size {
+                                    width: w,
+                                    height: h,
+                                }
+                            }
+                            _ => {}
+                        }
+                        out.layout(*id, &style);
+                    }
+                }
+            }
+            m => {
+                out.mutations.push(m.clone());
+            }
+        }
+    }
+    out
+}
+
+fn m_prop(m: &Mutation<'_>) -> craie_ui::animation::Prop {
+    match m {
+        Mutation::Animate { prop, .. } => *prop,
+        _ => unreachable!(),
+    }
 }
 
 /// A clock time past any motion in a fresh `Ui`.
@@ -403,6 +475,8 @@ pub struct Gen {
     /// Selection choices draw from their own stream, so `step`'s
     /// sequences stay the same with or without `select`.
     sel: Rng,
+    /// Animation choices (`animate`): their own stream too.
+    anim: Rng,
     model: Model,
     seq: u64,
 }
@@ -416,6 +490,7 @@ impl Gen {
         Gen {
             rng: Rng::new(seed),
             sel: Rng::new(seed ^ 0x5E1E_C7ED),
+            anim: Rng::new(seed ^ 0xA41_3A7E),
             model: Model::default(),
             seq: 0,
         }
@@ -806,6 +881,71 @@ impl Gen {
             }));
         }
         out
+    }
+
+    /// Animation churn: may declare transitions on an attached node, and
+    /// may start an `Animate` on one, with short curves and springs.
+    pub fn animate(&mut self, ui: &Ui) -> Option<Transaction<'static>> {
+        use craie_ui::animation::{Prop, Timing, Transition, Value};
+        let nodes = self.model.attached();
+        let g = &mut self.anim;
+        let timing = |g: &mut Rng| {
+            let delay = if g.chance(0.3) { 0.05 } else { 0.0 };
+            if g.chance(0.3) {
+                Timing::Spring {
+                    delay,
+                    stiffness: 150.0 + 100.0 * g.unit(),
+                    damping: 10.0 + 20.0 * g.unit(),
+                    mass: 1.0,
+                }
+            } else {
+                Timing::curve(0.05 + 0.4 * g.unit(), [0.25, 0.1, 0.25, 1.0]).with_delay(delay)
+            }
+        };
+        let mut t = Transaction::new(self.seq + 1);
+        let mut any = false;
+        if g.chance(0.3) {
+            let id = nodes[g.below(nodes.len() as u32) as usize];
+            let mut list = Vec::new();
+            for k in 0..Prop::COUNT as u8 {
+                if g.chance(0.4) {
+                    list.push(Transition {
+                        prop: Prop::from_u8(k).unwrap(),
+                        timing: timing(g),
+                    });
+                }
+            }
+            t.transition(id, &list);
+            any = true;
+        }
+        if g.chance(0.3) {
+            let id = nodes[g.below(nodes.len() as u32) as usize];
+            let has_box = ui.host.kind(NodeId(id)).is_some_and(|k| k.has_box());
+            let len = taffy::LengthPercentage::length;
+            let (prop, value) = match g.below(6) {
+                0 => (
+                    Prop::Transform,
+                    Value::Transform(Affine::rotate(g.unit() - 0.5)),
+                ),
+                1 => (Prop::Opacity, Value::Opacity(g.unit())),
+                2 if has_box => (Prop::Fill, Value::Color(0x3050_70FF | (g.below(255) << 24))),
+                3 => (
+                    Prop::Width,
+                    Value::Size(taffy::Dimension::length(20.0 + 100.0 * g.unit())),
+                ),
+                4 => (Prop::Padding, Value::Padding([len(g.below(8) as f32); 4])),
+                _ => (Prop::Gap, Value::Gap([len(g.below(8) as f32); 2])),
+            };
+            let tm = timing(g);
+            t.animate(id, prop, value, tm);
+            any = true;
+        }
+        if any {
+            self.seq += 1;
+            Some(t)
+        } else {
+            None
+        }
     }
 
     /// Picks a scrollable node and an offset to scroll to (applied

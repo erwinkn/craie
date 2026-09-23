@@ -311,6 +311,11 @@ impl App for HostApp {
             (w, h),
             scale,
         );
+        // Running animations advance every frame: ask for the next one
+        // (presentation paces it). Idle requests none.
+        if inner.ui.animating() {
+            window.request_redraw();
+        }
         // Layout is current now: bounds and the caret area are too; the
         // frame's events (list ranges, anchoring scrolls) go out.
         Inner::flush_out(&mut inner.ui, &self.session);

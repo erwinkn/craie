@@ -3,13 +3,15 @@
 //   host.ts:   runApp(bindings, new URL("./app.tsx", import.meta.url))
 //   app.tsx:   const root = attachApp(bindings); root.render(<View ...>...</View>)
 
-import React, { createContext, createElement, useState, type ReactNode } from "react"
+import React, { createContext, createElement, useState, type ReactNode, type Ref } from "react"
 import ReactReconciler from "react-reconciler"
 import { ConcurrentRoot, DefaultEventPriority } from "react-reconciler/constants.js"
 import { CraieHost, type HostNode, type SurfaceParam, type Transport } from "./host.js"
 import {
   SURFACE,
   type AccessibilityRole,
+  type AnimProp,
+  type Easing,
   type ItemDesc,
   type ListTemplate,
   type ScrollAnchor,
@@ -20,6 +22,8 @@ export { attachApp, decodeEvents, loadBindings, runApp, NativeTransport } from "
 export type { Bindings, NativeClientHandle, NativeHostHandle } from "./native.js"
 export {
   ANCHOR,
+  ANIM_PROP,
+  EASING,
   Encoder,
   NIL,
   ROLE,
@@ -30,8 +34,10 @@ export {
   type ListTemplate,
   type ScrollAnchor,
   type StyleProps,
+  type Timing,
   type Transform,
   type TransformStep,
+  type Transitions,
 } from "./wire.js"
 export type { HostNode, SurfaceParam, Transport, UiEvent } from "./host.js"
 
@@ -68,6 +74,9 @@ export interface ScrollEvt {
 }
 
 export interface ListenerProps {
+  /** The native node: `focus`, `blur`, `scrollTo`, `setText`,
+   * `animate`. */
+  ref?: Ref<HostNode>
   onPointerMove?: (e: PointerEvt) => void
   onPointerDown?: (e: PointerEvt) => void
   onPointerUp?: (e: PointerEvt) => void

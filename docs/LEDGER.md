@@ -112,6 +112,40 @@ Reviewer minors and nitpicks not fixed yet.
   span of the hovered text node and emits enter and leave with it),
   when a consumer needs it.
 
+### DF-3: no completion signal for `animate`
+
+- Source: step 4 implementation (own finding).
+- Where: crates/ui/src/animation.rs, packages/bridge/src/host.ts
+  (`HostNode.animate`).
+- Claim: JS cannot await the end of a native tween (no event, no
+  promise), so sequencing animations needs timers.
+- Why deferred: not in the section 12 target; the event family needs a
+  listener bit and a routing rule.
+- Resolves in: an animation-end event (kind, node, property) when a
+  consumer needs sequencing.
+
+### DF-4: padding and gap tweens need lengths
+
+- Source: step 4 implementation (own finding).
+- Where: crates/ui/src/animation.rs (`current_num`, `declared_num`).
+- Claim: a padding or gap change from or to a percent jumps instead of
+  tweening; width and height resolve percents and `auto` by the probe
+  layout.
+- Why deferred: resolving a percent padding needs the containing
+  block's width per frame; section 12 names `auto` only for sizes.
+- Resolves in: the owned flex layout (step 6), which can report
+  resolved padding and gap per node.
+
+### DF-5: retargeting restarts the full duration
+
+- Source: step 4 implementation (own finding).
+- Where: crates/ui/src/animation.rs (`start_animation`).
+- Claim: a transition reversed midway runs its whole duration from the
+  value on screen; CSS shortens a reversing transition by the
+  proportion already run.
+- Why deferred: behavior refinement, no correctness effect.
+- Resolves in: when a consumer reports it.
+
 ## Closed
 
 - S3A-14 (emoji presentation by the Unicode property, VS15/VS16) and

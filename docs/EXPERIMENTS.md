@@ -402,6 +402,37 @@ gone with it.
   builds hold a second copy of the bytes in the harness, so four E01
   tests failed in release only. It now compares by content.
 
+### Step 4: native animation driver
+
+- Cost assertion (ARCHITECTURE.md section 12): transform and opacity
+  tweens do zero layouts and zero shapes over every frame of the tween
+  (`spatial_tweens_neither_lay_out_nor_shape`, counters). A width tween
+  relayouts each frame and moves the next sibling
+  (`width_tween_reflows_siblings`); a tween to `auto` resolves its end
+  by one probe layout and restores `auto` on its final frame, and one
+  from `auto` starts at the laid-out size (`size_tweens_to_and_from_auto`).
+- Two oracles over the generated sequences (`tests/incremental.rs`,
+  8 seeds x 60 steps, 1x and 2x). `Gen::animate` declares transitions
+  and starts `Animate` tweens (curves and springs, delays) from its own
+  random stream, so the mutation stream of each seed does not change.
+  (1) Incremental equals rebuild, as before: the snapshot carries
+  transitions. (2) At rest, the animated Ui equals a twin that got the
+  same transactions without animation (transitions dropped, each
+  `Animate` a plain set): the end state of every tween is its declared
+  value. The first oracle cannot see that (a rebuild reads the rows the
+  driver wrote): with the final frame's write removed, (1) passes and
+  (2) fails (seed 1, step 14). A removed node's animations are dropped
+  (`removed_nodes_drop_their_animations`, which fails with the drop
+  removed).
+- Timing functions: CSS cubic-bezier by Newton steps with a bisection
+  fallback (ease-in-out 0.5 at the middle, ease 0.4085 at 0.25); damped
+  springs from rest in closed form, ending once the offset stays within
+  0.001 (from the envelope when underdamped, by bisection otherwise).
+  Transforms interpolate as rotation x upper-triangular x translation
+  (a rotation by angle, the shorter way; scales by factor); colors
+  premultiplied.
+- The wire fixture (JS encoder, Rust decoder) carries both ops.
+
 ### E14: layout-aware virtualization, list versus a plain column (step 2)
 
 `cargo run --release -p craie-harness --example e14_lists`: a scroller

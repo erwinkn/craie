@@ -67,6 +67,12 @@ enc.create(5, 0)                                    // a row
 enc.listIndex(5, 1)
 enc.place(4, 5, NIL)
 enc.scrollAnchor(0, "stick-to-end")
+enc.transition(0, {                                 // animation family
+  opacity: { duration: 250, delay: 50, easing: "ease-out" },
+  width: { spring: { stiffness: 200, damping: 20 } },
+})
+enc.animate(0, "backgroundColor", [0xff00_00ff], { duration: 300, easing: [0.1, 0.2, 0.3, 0.4] })
+enc.animate(0, "gap", [4, 6], { spring: {}, delay: 20 })
 
 await Bun.write(new URL("../test/fixture.bin", import.meta.url).pathname, enc.finish(99n))
 console.log("wrote fixture.bin")

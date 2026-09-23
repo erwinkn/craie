@@ -62,6 +62,8 @@ pub struct Ui {
     /// when it was set, and the host revisions it was last checked at.
     pub(crate) selection_generations: [u16; 3],
     pub(crate) selection_revs: crate::host::Revs,
+    /// Running animations (`animation.rs`).
+    pub(crate) animations: crate::animation::Animations,
     /// Events accumulated for the JS side since the last `take_events`.
     pub(crate) pending_events: Vec<UiEvent>,
     /// Set when anything observable to assistive tech changed.
@@ -120,6 +122,7 @@ impl Ui {
             selection_highlight: Vec::new(),
             selection_generations: [0; 3],
             selection_revs: Default::default(),
+            animations: Default::default(),
             pending_events: Vec::new(),
             a11y_stale: true,
             force_paint: true,
@@ -408,6 +411,7 @@ impl Ui {
         // native edits).
         let d = &self.host.dirty;
         if self.force_paint
+            || self.animating()
             || !d.layout.is_empty()
             || !d.content.is_empty()
             || !d.paint.is_empty()
@@ -437,6 +441,7 @@ impl Ui {
     /// rebuilds the scene. Cheap on a clean tree, but callers should
     /// still gate on `needs_paint`.
     pub fn render(&mut self, size: Size) -> &Scene {
+        self.run_animations(size);
         self.layout(size);
         self.sync_lists(size);
         self.paint(size);
