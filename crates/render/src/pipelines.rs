@@ -156,10 +156,26 @@ pub fn build(gpu: &Gpu, format: wgpu::TextureFormat) -> Pipelines {
             ],
         });
     let scene_module = shader(&gpu.device, include_str!("shaders/scene.wgsl"), "scene");
-    let composite_module = shader(&gpu.device, include_str!("shaders/composite.wgsl"), "composite");
+    let composite_module = shader(
+        &gpu.device,
+        include_str!("shaders/composite.wgsl"),
+        "composite",
+    );
     Pipelines {
-        scene: pipeline(gpu, "scene", &scene_module, &[Some(&scene_bgl), Some(&atlas_bgl)], format),
-        composite: pipeline(gpu, "composite", &composite_module, &[Some(&composite_bgl)], format),
+        scene: pipeline(
+            gpu,
+            "scene",
+            &scene_module,
+            &[Some(&scene_bgl), Some(&atlas_bgl)],
+            format,
+        ),
+        composite: pipeline(
+            gpu,
+            "composite",
+            &composite_module,
+            &[Some(&composite_bgl)],
+            format,
+        ),
         scene_bgl,
         atlas_bgl,
         composite_bgl,

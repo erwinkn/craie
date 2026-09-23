@@ -82,6 +82,8 @@ pub struct Layouts {
     /// Nodes whose size, insets, or clip box changed (origin unchanged):
     /// their own chunk and clip update.
     pub resized: craie_core::dirty::DirtyQueue,
+    /// Nodes whose scroll extent changed: their offset is re-clamped.
+    pub extents: craie_core::dirty::DirtyQueue,
 }
 
 fn row_mut<T: Default + Clone>(rows: &mut Vec<T>, i: usize) -> &mut T {
@@ -102,6 +104,7 @@ impl Layouts {
             cache_hits: 0,
             moved: Default::default(),
             resized: Default::default(),
+            extents: Default::default(),
             cache_misses: 0,
         }
     }
@@ -474,6 +477,9 @@ impl RoundTree for TreeView<'_> {
             (so.right - data.clip_box.size.width).max(0.0),
             (so.bottom - data.clip_box.size.height).max(0.0),
         ];
+        if data.scroll_extent != before.scroll_extent {
+            self.store.extents.push(id.0);
+        }
         if data.rect.origin != before.rect.origin {
             self.store.moved.push(id.0);
         } else if data.rect.size != before.rect.size

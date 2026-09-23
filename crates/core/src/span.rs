@@ -156,6 +156,14 @@ impl<T: Copy> SpanPool<T> {
         &mut self.items[span.range()]
     }
 
+    /// Writes one item, marking only that item dirty.
+    pub fn set_at(&mut self, span: Span, index: usize, value: T) {
+        assert!(index < span.len(), "span write out of bounds");
+        let i = span.start() + index;
+        self.items[i] = value;
+        self.mark(i..i + 1);
+    }
+
     /// Items written since the last `take_dirty` (upper bound).
     pub fn dirty_items(&self) -> usize {
         self.dirty.as_ref().map_or(0, DirtyRanges::items_upper)
@@ -163,7 +171,10 @@ impl<T: Copy> SpanPool<T> {
 
     /// Takes written ranges since the last call, merged and sorted.
     pub fn take_dirty(&mut self) -> Vec<Range<usize>> {
-        self.dirty.as_mut().map(DirtyRanges::take).unwrap_or_default()
+        self.dirty
+            .as_mut()
+            .map(DirtyRanges::take)
+            .unwrap_or_default()
     }
 
     /// Allocates a list of `len` fill values.
@@ -225,7 +236,8 @@ impl<T: Copy> SpanPool<T> {
             self.relocate(span, class_for(len + 1));
         }
         let start = span.start();
-        self.items.copy_within(start + index..start + len, start + index + 1);
+        self.items
+            .copy_within(start + index..start + len, start + index + 1);
         self.items[start + index] = value;
         *span = span.with_len(len + 1);
         self.stats.live_len += 1;
@@ -238,7 +250,8 @@ impl<T: Copy> SpanPool<T> {
         assert!(index < len, "span remove out of bounds");
         let start = span.start();
         let value = self.items[start + index];
-        self.items.copy_within(start + index + 1..start + len, start + index);
+        self.items
+            .copy_within(start + index + 1..start + len, start + index);
         *span = span.with_len(len - 1);
         self.stats.live_len -= 1;
         self.mark(start + index..start + len - 1);

@@ -96,8 +96,11 @@ impl Mirror {
             if r.is_empty() {
                 continue;
             }
-            gpu.queue
-                .write_buffer(buf, r.start as u64 * item, bytemuck::cast_slice(&data[r.clone()]));
+            gpu.queue.write_buffer(
+                buf,
+                r.start as u64 * item,
+                bytemuck::cast_slice(&data[r.clone()]),
+            );
             bytes += r.len() as u64 * item;
         }
         (bytes, false)
@@ -288,14 +291,20 @@ impl Renderer {
         }
         // Fresh textures need every page's used region; otherwise only
         // the dirty rects go up.
-        let Some(a) = self.atlas.as_ref() else { return 0 };
+        let Some(a) = self.atlas.as_ref() else {
+            return 0;
+        };
         for color in [false, true] {
             let pages = if color { color_pages } else { alpha_pages };
             let bpp = if color { 4 } else { 1 };
             let tex = if color { &a.color } else { &a.alpha };
             for p in 0..pages as usize {
                 let (data, dirty) = atlas.page_bytes(color, p);
-                let rect = if fresh { atlas.page_used(color, p) } else { dirty };
+                let rect = if fresh {
+                    atlas.page_used(color, p)
+                } else {
+                    dirty
+                };
                 if let Some(rect) = rect {
                     bytes += upload_rect(gpu, tex, page_size, p as u32, rect, data, bpp);
                 }
@@ -376,7 +385,12 @@ impl Renderer {
                     let parent = *parents.last().unwrap();
                     let comp = vps.len();
                     vps.push(Viewport {
-                        rect: [bounds[0] as f32, bounds[1] as f32, bounds[2] as f32, bounds[3] as f32],
+                        rect: [
+                            bounds[0] as f32,
+                            bounds[1] as f32,
+                            bounds[2] as f32,
+                            bounds[3] as f32,
+                        ],
                         uv: [w as f32 / tw, h as f32 / th],
                         opacity,
                         ..vps[parent]
@@ -483,13 +497,34 @@ impl Renderer {
                         size: wgpu::BufferSize::new(size_of::<Viewport>() as u64),
                     }),
                 },
-                wgpu::BindGroupEntry { binding: 1, resource: self.rects.binding() },
-                wgpu::BindGroupEntry { binding: 2, resource: self.glyphs.binding() },
-                wgpu::BindGroupEntry { binding: 3, resource: self.paints.binding() },
-                wgpu::BindGroupEntry { binding: 4, resource: self.placements.binding() },
-                wgpu::BindGroupEntry { binding: 5, resource: self.worlds.binding() },
-                wgpu::BindGroupEntry { binding: 6, resource: self.clips.binding() },
-                wgpu::BindGroupEntry { binding: 7, resource: self.rasters.binding() },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: self.rects.binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: self.glyphs.binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: self.paints.binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: self.placements.binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: self.worlds.binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 6,
+                    resource: self.clips.binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 7,
+                    resource: self.rasters.binding(),
+                },
             ],
         }));
     }
@@ -543,10 +578,18 @@ impl Renderer {
                                     self.scene_bg.as_ref().unwrap(),
                                     &[(vp as u64 * VIEWPORT_STRIDE) as u32],
                                 );
-                                pass.set_bind_group(1, &self.atlas.as_ref().unwrap().bind_group, &[]);
+                                pass.set_bind_group(
+                                    1,
+                                    &self.atlas.as_ref().unwrap().bind_group,
+                                    &[],
+                                );
                                 bound = true;
                             }
-                            let kind = if matches!(cmd, DrawCmd::Glyphs { .. }) { 1u32 << 31 } else { 0 };
+                            let kind = if matches!(cmd, DrawCmd::Glyphs { .. }) {
+                                1u32 << 31
+                            } else {
+                                0
+                            };
                             pass.draw(0..4, (kind | start)..(kind | (start + count)));
                             self.stats.draw_calls += 1;
                             *i += 1;
@@ -601,7 +644,11 @@ impl Renderer {
                     });
                     self.stats.passes += 1;
                     pass.set_pipeline(&self.composite_pipeline);
-                    pass.set_bind_group(0, &composites[l], &[(comp_vp as u64 * VIEWPORT_STRIDE) as u32]);
+                    pass.set_bind_group(
+                        0,
+                        &composites[l],
+                        &[(comp_vp as u64 * VIEWPORT_STRIDE) as u32],
+                    );
                     pass.draw(0..4, 0..1);
                     self.stats.draw_calls += 1;
                     load = wgpu::LoadOp::Load;

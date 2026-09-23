@@ -8,6 +8,7 @@ members = [
     "crates/ui",
     "crates/platform-winit",
     "crates/node",
+    "harness/invariants",
 ]
 # craie-node is an N-API cdylib: it links only inside Node, so plain
 # `cargo test` leaves it out.
@@ -18,6 +19,7 @@ default-members = [
     "crates/text",
     "crates/ui",
     "crates/platform-winit",
+    "harness/invariants",
 ]
 
 [workspace.package]

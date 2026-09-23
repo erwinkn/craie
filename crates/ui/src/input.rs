@@ -9,8 +9,8 @@
 
 use std::collections::HashMap;
 
-use crate::text::parley::{Generation, PlainEditor};
 use crate::text::parley::style::StyleProperty;
+use crate::text::parley::{Generation, PlainEditor};
 
 use crate::clipboard::{Clipboard, MemoryClipboard};
 use crate::geom::Size;
@@ -50,7 +50,9 @@ impl InputState {
     fn new(font_size: f32, color: u32, placeholder: String, multiline: bool) -> InputState {
         let mut editor = PlainEditor::new(font_size);
         // Slot 0 of the input chunk carries the text color.
-        editor.edit_styles().insert(StyleProperty::Brush(PaintSlot(0)));
+        editor
+            .edit_styles()
+            .insert(StyleProperty::Brush(PaintSlot(0)));
         InputState {
             editor,
             placeholder,
@@ -217,7 +219,10 @@ impl Inputs {
             Some(state) => {
                 if state.font_size != font_size {
                     state.font_size = font_size;
-                    state.editor.edit_styles().insert(StyleProperty::FontSize(font_size));
+                    state
+                        .editor
+                        .edit_styles()
+                        .insert(StyleProperty::FontSize(font_size));
                 }
                 // The color lives in the chunk's paint record, not in
                 // the editor's layout.
@@ -403,7 +408,11 @@ impl Inputs {
         let Some(state) = self.map.get_mut(&id) else {
             return false;
         };
-        let snap = if undo { state.undo.pop() } else { state.redo.pop() };
+        let snap = if undo {
+            state.undo.pop()
+        } else {
+            state.redo.pop()
+        };
         let Some(snap) = snap else { return false };
         let current = state.snapshot();
         if undo {

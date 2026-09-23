@@ -9,10 +9,11 @@
 //! through dirty rects. Two page sets: R8 alpha and RGBA color. A page
 //! cap bounds memory; allocation failure evicts the least-recently-used
 //! raster that is not pinned. A raster is pinned while its `last_used`
-//! epoch equals the current epoch: the frame driver stamps every raster
-//! of every visible chunk before any allocation can run, so a visible
-//! glyph never disappears mid-frame. When the pinned set alone exceeds
-//! the cap, pages grow past it and `stats.over_budget_pages` records it.
+//! epoch equals the current epoch: rasters are stamped as chunks use
+//! them, and the frame driver stamps every raster of every visible chunk
+//! (re-rasterizing the missing ones) before drawing, so a visible glyph
+//! never disappears mid-frame. When the pinned set alone exceeds the
+//! cap, pages grow past it and `stats.over_budget_pages` records it.
 
 use craie_core::RectPx;
 use craie_core::dirty::DirtyRanges;
@@ -203,8 +204,21 @@ impl RasterAtlas {
             }
         };
         let page_size = self.page_size;
-        let pages = if color { &mut self.color } else { &mut self.alpha };
-        blit(&mut pages[slot.1 as usize], page_size, bpp, slot.2, slot.3, w, h, data);
+        let pages = if color {
+            &mut self.color
+        } else {
+            &mut self.alpha
+        };
+        blit(
+            &mut pages[slot.1 as usize],
+            page_size,
+            bpp,
+            slot.2,
+            slot.3,
+            w,
+            h,
+            data,
+        );
         let e = &mut self.entries[id.0 as usize];
         e.alloc = Some(slot.0);
         e.page = slot.1;
@@ -227,20 +241,34 @@ impl RasterAtlas {
             .entries
             .iter()
             .enumerate()
-            .filter(|(_, e)| e.resident && e.color == color && e.alloc.is_some() && e.last_used != epoch)
+            .filter(|(_, e)| {
+                e.resident && e.color == color && e.alloc.is_some() && e.last_used != epoch
+            })
             .min_by_key(|(_, e)| e.last_used.wrapping_sub(epoch))
             .map(|(i, _)| i);
         let Some(i) = victim else { return false };
         let e = &mut self.entries[i];
-        let pages = if color { &mut self.color } else { &mut self.alpha };
-        pages[e.page as usize].alloc.deallocate(e.alloc.take().unwrap());
+        let pages = if color {
+            &mut self.color
+        } else {
+            &mut self.alpha
+        };
+        pages[e.page as usize]
+            .alloc
+            .deallocate(e.alloc.take().unwrap());
         e.resident = false;
         self.stats.evictions += 1;
         true
     }
 
     /// Returns (alloc, page, x, y). `force` grows past the page cap.
-    fn alloc(&mut self, color: bool, w: u32, h: u32, force: bool) -> Option<(AllocId, u16, u16, u16)> {
+    fn alloc(
+        &mut self,
+        color: bool,
+        w: u32,
+        h: u32,
+        force: bool,
+    ) -> Option<(AllocId, u16, u16, u16)> {
         let (pages, max, bpp) = if color {
             (&mut self.color, self.max_color, 4)
         } else {
@@ -251,7 +279,12 @@ impl RasterAtlas {
             if let Some(a) = page.alloc.allocate(size) {
                 self.stats.allocations += 1;
                 let r = a.rectangle;
-                return Some((a.id, i as u16, (r.min.x + GUTTER as i32) as u16, (r.min.y + GUTTER as i32) as u16));
+                return Some((
+                    a.id,
+                    i as u16,
+                    (r.min.x + GUTTER as i32) as u16,
+                    (r.min.y + GUTTER as i32) as u16,
+                ));
             }
         }
         if pages.len() >= max && !force {
@@ -267,7 +300,12 @@ impl RasterAtlas {
         let a = pages[i].alloc.allocate(size)?;
         self.stats.allocations += 1;
         let r = a.rectangle;
-        Some((a.id, i as u16, (r.min.x + GUTTER as i32) as u16, (r.min.y + GUTTER as i32) as u16))
+        Some((
+            a.id,
+            i as u16,
+            (r.min.x + GUTTER as i32) as u16,
+            (r.min.y + GUTTER as i32) as u16,
+        ))
     }
 
     pub fn alpha_pages(&self) -> usize {
@@ -280,13 +318,21 @@ impl RasterAtlas {
 
     /// CPU mirror and pending dirty rect of a page.
     pub fn page_bytes(&self, color: bool, page: usize) -> (&[u8], Option<RectPx>) {
-        let p = if color { &self.color[page] } else { &self.alpha[page] };
+        let p = if color {
+            &self.color[page]
+        } else {
+            &self.alpha[page]
+        };
         (&p.data, p.dirty)
     }
 
     /// Union of all blitted content on a page.
     pub fn page_used(&self, color: bool, page: usize) -> Option<RectPx> {
-        let p = if color { &self.color[page] } else { &self.alpha[page] };
+        let p = if color {
+            &self.color[page]
+        } else {
+            &self.alpha[page]
+        };
         p.used
     }
 
@@ -380,7 +426,11 @@ mod tests {
         atlas.take_gpu_dirty();
         atlas.begin_epoch();
         fill(&mut atlas, 1);
-        let gone = ids.iter().find(|id| !atlas.entry(**id).resident).copied().unwrap();
+        let gone = ids
+            .iter()
+            .find(|id| !atlas.entry(**id).resident)
+            .copied()
+            .unwrap();
         assert_eq!(atlas.entry(gone).w, 16);
         atlas.begin_epoch();
         assert!(!atlas.touch(gone));

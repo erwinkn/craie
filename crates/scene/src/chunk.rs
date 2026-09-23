@@ -103,8 +103,15 @@ impl ChunkWriter {
                     SegKind::Rects => self.rects.len() as u32 - 1,
                     SegKind::Glyphs => self.glyphs.len() as u32 - 1,
                 };
-                assert!(self.segments.len() < MAX_SEGMENTS, "too many chunk segments");
-                self.segments.push(Segment { kind, start, len: 1 });
+                assert!(
+                    self.segments.len() < MAX_SEGMENTS,
+                    "too many chunk segments"
+                );
+                self.segments.push(Segment {
+                    kind,
+                    start,
+                    len: 1,
+                });
             }
         }
         self.bounds = Some(match self.bounds {

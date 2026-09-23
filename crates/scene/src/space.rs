@@ -184,6 +184,8 @@ pub struct Clips {
     gpu_dirty: DirtyRanges,
     stale: bool,
     world_rev: u64,
+    /// Bumped whenever a derived clip row changes.
+    pub rev: u64,
 }
 
 impl Clips {
@@ -224,7 +226,10 @@ impl Clips {
         }
         self.stale = false;
         self.world_rev = transforms.world_rev;
-        self.gpu.resize(self.records.len(), ClipGpu::default());
+        if self.gpu.len() != self.records.len() {
+            self.gpu.resize(self.records.len(), ClipGpu::default());
+            self.rev += 1;
+        }
         for (i, r) in self.records.iter().enumerate() {
             let inv = transforms
                 .world(r.transform)
@@ -232,13 +237,19 @@ impl Clips {
                 .unwrap_or(Affine([0.0; 6]));
             let row = ClipGpu {
                 inv: inv.0,
-                rect: [r.rect.origin.x, r.rect.origin.y, r.rect.max_x(), r.rect.max_y()],
+                rect: [
+                    r.rect.origin.x,
+                    r.rect.origin.y,
+                    r.rect.max_x(),
+                    r.rect.max_y(),
+                ],
                 radius: r.radius,
                 parent: r.parent,
             };
             if self.gpu[i] != row {
                 self.gpu[i] = row;
                 self.gpu_dirty.add(i..i + 1);
+                self.rev += 1;
             }
         }
     }
@@ -279,7 +290,10 @@ mod tests {
         let child = t.alloc(Affine::translate(10.0, 0.0), root);
         t.set_order(vec![root, child]);
         assert!(t.derive());
-        assert_eq!(t.world(child).apply(Point::new(1.0, 1.0)), Point::new(22.0, 2.0));
+        assert_eq!(
+            t.world(child).apply(Point::new(1.0, 1.0)),
+            Point::new(22.0, 2.0)
+        );
         // Unchanged: nothing recomputed, nothing dirty.
         t.take_gpu_dirty();
         assert!(!t.derive());
@@ -297,10 +311,23 @@ mod tests {
         t.derive();
         let mut c = Clips::default();
         c.set_all(vec![
-            ClipRecord { rect: Rect::new(0.0, 0.0, 100.0, 100.0), radius: 0.0, transform: root, parent: NONE },
-            ClipRecord { rect: Rect::new(50.0, 50.0, 100.0, 100.0), radius: 4.0, transform: root, parent: 0 },
+            ClipRecord {
+                rect: Rect::new(0.0, 0.0, 100.0, 100.0),
+                radius: 0.0,
+                transform: root,
+                parent: NONE,
+            },
+            ClipRecord {
+                rect: Rect::new(50.0, 50.0, 100.0, 100.0),
+                radius: 4.0,
+                transform: root,
+                parent: 0,
+            },
         ]);
         c.derive(&t);
-        assert_eq!(c.world_bounds(&t, 1), Some(Rect::new(50.0, 50.0, 50.0, 50.0)));
+        assert_eq!(
+            c.world_bounds(&t, 1),
+            Some(Rect::new(50.0, 50.0, 50.0, 50.0))
+        );
     }
 }

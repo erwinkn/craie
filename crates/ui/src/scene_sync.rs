@@ -27,8 +27,8 @@ use craie_scene::{ChunkWriter, ClipRecord, NONE, OrderItem, PaintSlot, Placement
 use crate::host::{NodeId, ROOT};
 use crate::layout::{LayoutData, MeasuredText};
 use crate::mutation::NodeKind;
-use crate::text::parley::style::StyleProperty;
 use crate::text::ParagraphSpec;
+use crate::text::parley::style::StyleProperty;
 use crate::ui::Ui;
 
 /// Derived per-node scene bookkeeping, rebuilt by the tree walk.
@@ -205,9 +205,18 @@ impl Ui {
         // `deferred` and build in the frame they come into range.
         self.scene.transforms.derive();
         let px = Size::new(viewport.width * self.scale, viewport.height * self.scale);
-        let region = Rect::new(-px.width / 2.0, -px.height / 2.0, px.width * 2.0, px.height * 2.0);
+        let region = Rect::new(
+            -px.width / 2.0,
+            -px.height / 2.0,
+            px.width * 2.0,
+            px.height * 2.0,
+        );
         // Deferred nodes are rechecked only when a visibility input moved.
-        let key = (px, self.scene.transforms.world_rev, self.scene.placement_rev);
+        let key = (
+            px,
+            self.scene.transforms.world_rev,
+            self.scene.placement_rev,
+        );
         if self.sync.checked != Some(key) {
             self.sync.checked = Some(key);
             for &id in self.sync.deferred.as_slice() {
@@ -302,13 +311,23 @@ impl Ui {
         let epoch = self.sync.epoch;
         let mut out = Topo::default();
         for id in self.layouts.moved.take() {
-            let s = self.sync.spaces.get(id as usize).copied().unwrap_or_default();
+            let s = self
+                .sync
+                .spaces
+                .get(id as usize)
+                .copied()
+                .unwrap_or_default();
             if s.walked != epoch && s.ctx.space != NONE {
                 self.visit(NodeId(id), s.ctx, false, &mut out);
             }
         }
         for id in self.layouts.resized.take() {
-            let s = self.sync.spaces.get(id as usize).copied().unwrap_or_default();
+            let s = self
+                .sync
+                .spaces
+                .get(id as usize)
+                .copied()
+                .unwrap_or_default();
             if s.walked != epoch && s.ctx.space != NONE {
                 self.visit_node(NodeId(id), s.ctx, false, &mut out);
             }
@@ -316,7 +335,9 @@ impl Ui {
     }
 
     fn visit(&mut self, id: NodeId, ctx: Ctx, topo: bool, out: &mut Topo) {
-        let Some(child_ctx) = self.visit_node(id, ctx, topo, out) else { return };
+        let Some(child_ctx) = self.visit_node(id, ctx, topo, out) else {
+            return;
+        };
         for i in 0..self.host.child_count(id) {
             let child = self.host.child_at(id, i);
             self.visit(child, child_ctx, topo, out);
@@ -372,7 +393,8 @@ impl Ui {
             }
             s.layer = if spatial.layered() {
                 out.layers.push(spatial.opacity);
-                out.order.push(OrderItem::BeginLayer(out.layers.len() as u32 - 1));
+                out.order
+                    .push(OrderItem::BeginLayer(out.layers.len() as u32 - 1));
                 out.layers.len() as u32 - 1
             } else {
                 NONE
@@ -388,9 +410,10 @@ impl Ui {
         // The node's own space.
         let (space, offset) = if s.self_rec != NONE {
             self.scene.transforms.set_parent(s.self_rec, ctx.space);
-            self.scene
-                .transforms
-                .set_local(s.self_rec, self_local(origin, spatial.transform, data.rect.size));
+            self.scene.transforms.set_local(
+                s.self_rec,
+                self_local(origin, spatial.transform, data.rect.size),
+            );
             if topo {
                 out.records.push(s.self_rec);
             }
@@ -443,9 +466,10 @@ impl Ui {
         let child_ctx = if s.content_rec != NONE {
             self.scene.transforms.set_parent(s.content_rec, space);
             let [sx, sy] = spatial.scroll;
-            self.scene
-                .transforms
-                .set_local(s.content_rec, Affine::translate(offset[0] - sx, offset[1] - sy));
+            self.scene.transforms.set_local(
+                s.content_rec,
+                Affine::translate(offset[0] - sx, offset[1] - sy),
+            );
             if topo {
                 out.records.push(s.content_rec);
             }
@@ -474,7 +498,9 @@ impl Ui {
             if !self.host.is_live(node) {
                 continue;
             }
-            let Some(s) = self.sync.spaces.get(node.index()).copied() else { continue };
+            let Some(s) = self.sync.spaces.get(node.index()).copied() else {
+                continue;
+            };
             let spatial = self.host.spatial[node.index()];
             let size = self.layouts.data(node).rect.size;
             let mut base = s.origin;
@@ -502,7 +528,12 @@ impl Ui {
     fn near(&self, id: NodeId, region: &Rect) -> bool {
         let p = self.scene.placement(id.0);
         let d = self.layouts.data(id);
-        let local = Rect::new(p.offset[0], p.offset[1], d.rect.size.width, d.rect.size.height);
+        let local = Rect::new(
+            p.offset[0],
+            p.offset[1],
+            d.rect.size.width,
+            d.rect.size.height,
+        );
         let b = self.scene.transforms.world(p.transform).map_rect(&local);
         // Overflowing content (text wider than its box) stays in range
         // through the half-viewport margin.
@@ -511,7 +542,9 @@ impl Ui {
 
     /// Patches the paint records of a chunk whose colors changed.
     fn patch_paint(&mut self, id: NodeId) {
-        let Some(kind) = self.host.kind(id) else { return };
+        let Some(kind) = self.host.kind(id) else {
+            return;
+        };
         if kind == NodeKind::Text {
             let spans = &self.host.paragraphs[id.index()].spans;
             for (i, s) in spans.iter().enumerate() {
@@ -563,7 +596,9 @@ impl Ui {
     }
 
     fn build_text(&mut self, id: NodeId, data: &LayoutData, w: &mut ChunkWriter) {
-        let Some(p) = self.host.paragraph(id) else { return };
+        let Some(p) = self.host.paragraph(id) else {
+            return;
+        };
         for s in &p.spans {
             w.paint(s.color);
         }
@@ -603,7 +638,9 @@ impl Ui {
         let content_w = (data.rect.size.width - data.insets[0]).max(0.0);
         let (cx, cy) = (data.content[0], data.content[1]);
         let scale = self.scale;
-        let Some(state) = self.inputs.get_mut(id.0) else { return };
+        let Some(state) = self.inputs.get_mut(id.0) else {
+            return;
+        };
         state.editor.set_width(Some(content_w));
         let text_slot = w.paint(state.color);
         let alpha = (state.color & 0xFF) / 2;
@@ -635,10 +672,26 @@ impl Ui {
                 spans: &[],
             };
             let layout = self.text.layout_paragraph(&spec, Some(content_w));
-            self.text.emit(&layout, origin, scale, Some(ph_slot), &mut self.scene.atlas, w);
+            self.text.emit(
+                &layout,
+                origin,
+                scale,
+                Some(ph_slot),
+                &mut self.scene.atlas,
+                w,
+            );
         } else {
-            let layout = state.editor.layout(&mut self.text.font_cx, &mut self.text.layout_cx);
-            self.text.emit(layout, origin, scale, Some(text_slot), &mut self.scene.atlas, w);
+            let layout = state
+                .editor
+                .layout(&mut self.text.font_cx, &mut self.text.layout_cx);
+            self.text.emit(
+                layout,
+                origin,
+                scale,
+                Some(text_slot),
+                &mut self.scene.atlas,
+                w,
+            );
         }
         if focused && let Some(c) = state.editor.cursor_geometry(1.5) {
             w.rect(
@@ -658,8 +711,12 @@ impl Ui {
     /// coordinates. Runs only when the payload, parameters, or size
     /// change.
     fn build_surface(&mut self, id: NodeId, data: &LayoutData, w: &mut ChunkWriter) {
-        let Some(spec) = self.host.surfaces.get(&id.0) else { return };
-        let Some(painter) = self.surface_painters.get_mut(&spec.kind) else { return };
+        let Some(spec) = self.host.surfaces.get(&id.0) else {
+            return;
+        };
+        let Some(painter) = self.surface_painters.get_mut(&spec.kind) else {
+            return;
+        };
         let content = Rect::new(
             data.content[0],
             data.content[1],
@@ -671,7 +728,13 @@ impl Ui {
         for q in self.surface_scratch.drain(..) {
             let fill = w.paint(q.color);
             let border = (q.border_w > 0.0).then(|| w.paint(q.border_color));
-            w.rect_bordered(Rect::new(q.x, q.y, q.w, q.h), q.radius, fill, border, q.border_w);
+            w.rect_bordered(
+                Rect::new(q.x, q.y, q.w, q.h),
+                q.radius,
+                fill,
+                border,
+                q.border_w,
+            );
         }
     }
 }

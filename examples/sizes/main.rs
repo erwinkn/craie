@@ -116,11 +116,36 @@ fn main() {
         align_of::<Color>(),
         "0xRRGGBBAA",
     );
-    row("RectInstance", size_of::<RectInstance>(), align_of::<RectInstance>(), "rect pool row");
-    row("GlyphInstance", size_of::<GlyphInstance>(), align_of::<GlyphInstance>(), "glyph pool row");
-    row("Placement", size_of::<Placement>(), align_of::<Placement>(), "per chunk: offset, record, clip");
-    row("WorldGpu", size_of::<WorldGpu>(), align_of::<WorldGpu>(), "per transform record");
-    row("Chunk", size_of::<Chunk>(), align_of::<Chunk>(), "per chunk: spans, segments, bounds");
+    row(
+        "RectInstance",
+        size_of::<RectInstance>(),
+        align_of::<RectInstance>(),
+        "rect pool row",
+    );
+    row(
+        "GlyphInstance",
+        size_of::<GlyphInstance>(),
+        align_of::<GlyphInstance>(),
+        "glyph pool row",
+    );
+    row(
+        "Placement",
+        size_of::<Placement>(),
+        align_of::<Placement>(),
+        "per chunk: offset, record, clip",
+    );
+    row(
+        "WorldGpu",
+        size_of::<WorldGpu>(),
+        align_of::<WorldGpu>(),
+        "per transform record",
+    );
+    row(
+        "Chunk",
+        size_of::<Chunk>(),
+        align_of::<Chunk>(),
+        "per chunk: spans, segments, bounds",
+    );
 
     println!("\ntext cache:");
     row(

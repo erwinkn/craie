@@ -65,6 +65,8 @@ pub struct Scene {
     pub scale: f32,
     list: DrawList,
     list_valid: bool,
+    /// (world, clip) revisions the draw list was culled against.
+    list_revs: (u64, u64),
     /// Bumped whenever a placement changes (visibility input).
     pub placement_rev: u64,
     pub counters: Counters,
@@ -94,6 +96,7 @@ impl Scene {
             scale: 1.0,
             list: DrawList::default(),
             list_valid: false,
+            list_revs: (u64::MAX, u64::MAX),
             placement_rev: 0,
             counters: Counters::default(),
         }
@@ -112,7 +115,10 @@ impl Scene {
     }
 
     pub fn placement(&self, id: u32) -> Placement {
-        self.placements.get(id as usize).copied().unwrap_or_default()
+        self.placements
+            .get(id as usize)
+            .copied()
+            .unwrap_or_default()
     }
 
     pub fn chunk_capacity(&self) -> usize {
@@ -154,7 +160,9 @@ impl Scene {
 
     /// Drops chunk `id` and returns its pool ranges.
     pub fn free_chunk(&mut self, id: u32) {
-        let Some(c) = self.chunks.get_mut(id as usize) else { return };
+        let Some(c) = self.chunks.get_mut(id as usize) else {
+            return;
+        };
         if !c.live {
             return;
         }
@@ -183,7 +191,7 @@ impl Scene {
         let Some(c) = self.chunk(id) else { return };
         let span = c.paints;
         if (slot.0 as usize) < span.len() && self.paints.get(span)[slot.0 as usize] != color {
-            self.paints.get_mut(span)[slot.0 as usize] = color;
+            self.paints.set_at(span, slot.0 as usize, color);
             self.counters.paints_patched += 1;
         }
     }
@@ -221,18 +229,14 @@ impl Scene {
         self.placement_dirty.take()
     }
 
-    /// Starts a frame's residency epoch and re-pins the rasters of the
-    /// last frame's visible chunks, so chunk updates that rasterize new
-    /// glyphs cannot evict anything still on screen.
+    /// Starts a frame's residency epoch. Rasters emitted this frame are
+    /// pinned as they are used; `prepare` pins every raster of every
+    /// visible chunk before it re-rasterizes missing ones, so a visible
+    /// glyph never drops. Eviction picks the least recently used of the
+    /// rest, which keeps the budget unless the visible set alone
+    /// exceeds it.
     pub fn begin_frame(&mut self) {
         self.atlas.begin_epoch();
-        for i in 0..self.list.visible.len() {
-            let id = self.list.visible[i];
-            let Some(c) = self.chunks.get(id as usize).filter(|c| c.live) else { continue };
-            for g in self.glyphs.get(c.glyphs) {
-                self.atlas.touch(RasterId(g.raster));
-            }
-        }
     }
 
     /// World-space bounds of a chunk in device pixels.
@@ -254,12 +258,14 @@ impl Scene {
     /// every visible chunk and appends the non-resident ones to
     /// `missing` — the caller re-rasterizes them before drawing.
     pub fn prepare(&mut self, viewport: Size, missing: &mut Vec<RasterId>) -> &DrawList {
-        if self.transforms.derive() {
-            self.list_valid = false;
-        }
+        self.transforms.derive();
         self.clips.derive(&self.transforms);
-        if !self.list_valid || self.list.viewport != viewport {
+        // Culling depends on world matrices and clips: a revision the list
+        // was not built from invalidates it, whoever derived first.
+        let revs = (self.transforms.world_rev, self.clips.rev);
+        if !self.list_valid || self.list.viewport != viewport || self.list_revs != revs {
             self.build_list(viewport);
+            self.list_revs = revs;
         }
         for i in 0..self.list.visible.len() {
             let c = self.chunks[self.list.visible[i] as usize];
@@ -288,7 +294,11 @@ impl Scene {
         visible.clear();
         // Clip world bounds, once per clip.
         let clip_bounds: Vec<Rect> = (0..self.clips.len() as u32)
-            .map(|i| self.clips.world_bounds(&self.transforms, i).unwrap_or(Rect::ZERO))
+            .map(|i| {
+                self.clips
+                    .world_bounds(&self.transforms, i)
+                    .unwrap_or(Rect::ZERO)
+            })
             .collect();
         // Open layers: (cmd index of BeginLayer, accumulated bounds).
         let mut layers: Vec<(usize, Option<Rect>)> = Vec::new();
@@ -312,7 +322,10 @@ impl Scene {
                         continue;
                     }
                     let (at, bounds) = layers.pop().expect("unbalanced layer order");
-                    match bounds.map(|b| b.intersect(&screen)).filter(|b| b.size.width > 0.0 && b.size.height > 0.0) {
+                    match bounds
+                        .map(|b| b.intersect(&screen))
+                        .filter(|b| b.size.width > 0.0 && b.size.height > 0.0)
+                    {
                         Some(b) => {
                             let px = [
                                 b.origin.x.floor() as i32,
@@ -336,7 +349,9 @@ impl Scene {
                     if skip_depth > 0 {
                         continue;
                     }
-                    let Some(c) = self.chunks.get(id as usize).filter(|c| c.live) else { continue };
+                    let Some(c) = self.chunks.get(id as usize).filter(|c| c.live) else {
+                        continue;
+                    };
                     if c.rects.is_empty() && c.glyphs.is_empty() {
                         continue;
                     }
@@ -360,14 +375,24 @@ impl Scene {
                         let start = base + s.start;
                         // Merge with the previous draw when contiguous.
                         match (kind, cmds.last_mut()) {
-                            (0, Some(DrawCmd::Rects { start: s0, count })) if *s0 + *count == start => {
+                            (0, Some(DrawCmd::Rects { start: s0, count }))
+                                if *s0 + *count == start =>
+                            {
                                 *count += s.len
                             }
-                            (1, Some(DrawCmd::Glyphs { start: s0, count })) if *s0 + *count == start => {
+                            (1, Some(DrawCmd::Glyphs { start: s0, count }))
+                                if *s0 + *count == start =>
+                            {
                                 *count += s.len
                             }
-                            (0, _) => cmds.push(DrawCmd::Rects { start, count: s.len }),
-                            _ => cmds.push(DrawCmd::Glyphs { start, count: s.len }),
+                            (0, _) => cmds.push(DrawCmd::Rects {
+                                start,
+                                count: s.len,
+                            }),
+                            _ => cmds.push(DrawCmd::Glyphs {
+                                start,
+                                count: s.len,
+                            }),
                         }
                     }
                 }
@@ -394,6 +419,23 @@ impl Scene {
     /// rebuild through this view. `raster_key` maps a raster to a
     /// stable identity (ids differ between two scenes).
     pub fn resolve(&self, raster_key: &dyn Fn(RasterId) -> u64) -> Vec<Resolved> {
+        self.resolve_where(raster_key, &|_| true)
+    }
+
+    /// `resolve` restricted to the chunks the last draw list draws.
+    pub fn resolve_drawn(&self, raster_key: &dyn Fn(RasterId) -> u64) -> Vec<Resolved> {
+        let mut drawn = vec![false; self.chunks.len()];
+        for &id in &self.list.visible {
+            drawn[id as usize] = true;
+        }
+        self.resolve_where(raster_key, &|id| drawn[id as usize])
+    }
+
+    fn resolve_where(
+        &self,
+        raster_key: &dyn Fn(RasterId) -> u64,
+        keep: &dyn Fn(u32) -> bool,
+    ) -> Vec<Resolved> {
         let mut out = Vec::new();
         let mut opacity: Vec<f32> = vec![1.0];
         for item in &self.order {
@@ -407,12 +449,18 @@ impl Scene {
                 }
                 OrderItem::Chunk(id) => {
                     let Some(c) = self.chunk(id) else { continue };
+                    if !keep(id) {
+                        continue;
+                    }
                     let o = *opacity.last().unwrap();
                     if o <= 0.0 {
                         continue;
                     }
                     let p = self.placements[id as usize];
-                    let w = self.transforms.world(p.transform).mul(&Affine::translate(p.offset[0], p.offset[1]));
+                    let w = self
+                        .transforms
+                        .world(p.transform)
+                        .mul(&Affine::translate(p.offset[0], p.offset[1]));
                     let clip = if p.clip == NONE {
                         None
                     } else {
@@ -421,14 +469,20 @@ impl Scene {
                     for s in c.segments() {
                         match s.kind {
                             SegKind::Rects => {
-                                let rs = &self.rects.get(c.rects)[s.start as usize..(s.start + s.len) as usize];
+                                let rs = &self.rects.get(c.rects)
+                                    [s.start as usize..(s.start + s.len) as usize];
                                 for r in rs {
-                                    let local = Rect::new(r.rect[0], r.rect[1], r.rect[2], r.rect[3]);
+                                    let local =
+                                        Rect::new(r.rect[0], r.rect[1], r.rect[2], r.rect[3]);
                                     out.push(Resolved {
                                         kind: 0,
                                         bounds: w.map_rect(&local),
                                         color: self.paints.backing()[r.fill as usize],
-                                        aux: if r.border == NO_PAINT { 0 } else { self.paints.backing()[r.border as usize] as u64 },
+                                        aux: if r.border == NO_PAINT {
+                                            0
+                                        } else {
+                                            self.paints.backing()[r.border as usize] as u64
+                                        },
                                         params: [r.radius, r.border_width],
                                         opacity: o,
                                         clip,
@@ -436,7 +490,8 @@ impl Scene {
                                 }
                             }
                             SegKind::Glyphs => {
-                                let gs = &self.glyphs.get(c.glyphs)[s.start as usize..(s.start + s.len) as usize];
+                                let gs = &self.glyphs.get(c.glyphs)
+                                    [s.start as usize..(s.start + s.len) as usize];
                                 for g in gs {
                                     let e = self.atlas.entry(RasterId(g.raster));
                                     let size = [e.w as f32 / self.scale, e.h as f32 / self.scale];
@@ -513,11 +568,14 @@ mod tests {
             let fill = w.paint(0xFF00_00FF);
             w.rect(Rect::new(0.0, 0.0, 10.0, 10.0), 0.0, fill);
             s.commit_chunk(id, &mut w);
-            s.set_placement(id, Placement {
-                offset: [0.0, id as f32 * 20.0],
-                transform: root,
-                clip: NONE,
-            });
+            s.set_placement(
+                id,
+                Placement {
+                    offset: [0.0, id as f32 * 20.0],
+                    transform: root,
+                    clip: NONE,
+                },
+            );
         }
         s.set_order((0..n).map(OrderItem::Chunk).collect(), vec![]);
         s
@@ -557,13 +615,21 @@ mod tests {
             vec![0.5, 0.5],
         );
         let mut missing = Vec::new();
-        let cmds = s.prepare(Size::new(100.0, 100.0), &mut missing).cmds.clone();
+        let cmds = s
+            .prepare(Size::new(100.0, 100.0), &mut missing)
+            .cmds
+            .clone();
         assert_eq!(cmds.len(), 5);
-        assert!(matches!(cmds[1], DrawCmd::BeginLayer { opacity, bounds: [0, 20, 10, 30] } if opacity == 0.5));
+        assert!(
+            matches!(cmds[1], DrawCmd::BeginLayer { opacity, bounds: [0, 20, 10, 30] } if opacity == 0.5)
+        );
         assert_eq!(cmds[3], DrawCmd::EndLayer);
         // Zero opacity skips the subtree entirely.
         s.set_layer_opacity(0, 0.0);
-        let cmds = s.prepare(Size::new(100.0, 100.0), &mut missing).cmds.clone();
+        let cmds = s
+            .prepare(Size::new(100.0, 100.0), &mut missing)
+            .cmds
+            .clone();
         assert!(!cmds.iter().any(|c| matches!(c, DrawCmd::BeginLayer { .. })));
     }
 

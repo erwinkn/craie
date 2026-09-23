@@ -651,6 +651,20 @@ name = "craie-core"
 version = "0.0.0"
 
 [[package]]
+name = "craie-harness"
+version = "0.0.0"
+dependencies = [
+ "accesskit",
+ "craie-core",
+ "craie-render",
+ "craie-scene",
+ "craie-text",
+ "craie-ui",
+ "taffy",
+ "wgpu",
+]
+
+[[package]]
 name = "craie-node"
 version = "0.0.0"
 dependencies = [

@@ -92,7 +92,8 @@ fn drawn(scene: &craie_scene::Scene) -> u32 {
         .cmds
         .iter()
         .map(|c| match c {
-            craie_scene::DrawCmd::Rects { count, .. } | craie_scene::DrawCmd::Glyphs { count, .. } => *count,
+            craie_scene::DrawCmd::Rects { count, .. }
+            | craie_scene::DrawCmd::Glyphs { count, .. } => *count,
             _ => 0,
         })
         .sum()
@@ -317,7 +318,10 @@ fn bench_gpu(ui: &mut Ui) {
     renderer.prepare(&gpu, ui.scene_mut());
     renderer.draw(&gpu, &view, w, h, ui.scene());
     report(&t.stop("draw submit (warm)"));
-    eprintln!("  {:>26}: {} bytes", "upload (warm)", renderer.stats.upload_bytes);
+    eprintln!(
+        "  {:>26}: {} bytes",
+        "upload (warm)", renderer.stats.upload_bytes
+    );
     let t = Timer::start();
     gpu.device
         .poll(wgpu::PollType::Wait {

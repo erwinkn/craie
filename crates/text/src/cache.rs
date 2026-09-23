@@ -149,6 +149,26 @@ impl GlyphCache {
         self.keys.get(id.0 as usize).copied().flatten()
     }
 
+    /// A raster's identity independent of interning order: font blob and
+    /// face, coordinates, glyph, size, subpixel. Two engines that
+    /// rasterized the same glyph agree on it (test oracle).
+    pub fn stable_key(&self, id: RasterId) -> Option<u64> {
+        use std::hash::{Hash, Hasher};
+        let k = self.key_of(id)?;
+        let font = &self.font_data[k.font as usize];
+        let row = &self.coords[k.coords as usize];
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        // Blob ids are per font context; identify the font by content.
+        let bytes = font.data.as_ref();
+        let edge = bytes.len().min(4096);
+        (bytes.len(), font.index).hash(&mut h);
+        bytes[..edge].hash(&mut h);
+        bytes[bytes.len() - edge..].hash(&mut h);
+        (&*row.coords, row.embolden, row.skew).hash(&mut h);
+        (k.glyph, k.size_bits, k.subpixel).hash(&mut h);
+        Some(h.finish())
+    }
+
     pub fn len(&self) -> usize {
         self.map.len()
     }

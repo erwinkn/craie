@@ -177,7 +177,14 @@ impl TextEngine {
             };
 
             let cached = match self.cache.get(&key) {
-                Some(c) => c,
+                Some(c) => {
+                    // Pin for this frame; if evicted earlier, `prepare`
+                    // re-rasterizes it before drawing.
+                    if let Some(r) = c.raster {
+                        atlas.touch(r);
+                    }
+                    c
+                }
                 None => {
                     if scaler.is_none() {
                         scaler = self.raster.scaler(font, font_size, coords);
@@ -214,7 +221,9 @@ impl TextEngine {
                     c
                 }
             };
-            let Some(raster) = cached.raster else { continue };
+            let Some(raster) = cached.raster else {
+                continue;
+            };
             out.glyph(
                 (ix + cached.left as i32) as f32 * inv,
                 (iy - cached.top as i32) as f32 * inv,
@@ -233,14 +242,18 @@ impl TextEngine {
             if atlas.entry(id).resident {
                 continue;
             }
-            let Some(key) = self.cache.key_of(id) else { continue };
+            let Some(key) = self.cache.key_of(id) else {
+                continue;
+            };
             let font = self.cache.font_data[key.font as usize].clone();
             let row = &self.cache.coords[key.coords as usize];
             let coords: Vec<i16> = row.coords.to_vec();
             let size = f32::from_bits(key.size_bits);
             let embolden = if row.embolden { size * 0.02 } else { 0.0 };
             let skew = (row.skew != 0).then(|| row.skew as f32 / 64.0);
-            let Some(mut scaler) = self.raster.scaler(&font, size, &coords) else { continue };
+            let Some(mut scaler) = self.raster.scaler(&font, size, &coords) else {
+                continue;
+            };
             let offset = Vector::new(
                 cache::subpixel_offset(key.subpixel & 3),
                 cache::subpixel_offset(key.subpixel >> 2),

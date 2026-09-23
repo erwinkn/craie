@@ -48,7 +48,9 @@ impl Ui {
         let p = self
             .node_to_window(id)
             .invert()
-            .map_or(Point::new(f32::NAN, f32::NAN), |m| m.apply(Point::new(x, y)));
+            .map_or(Point::new(f32::NAN, f32::NAN), |m| {
+                m.apply(Point::new(x, y))
+            });
         (p.x - data.content[0], p.y - data.content[1])
     }
 

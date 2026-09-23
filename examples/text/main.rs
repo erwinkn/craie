@@ -218,7 +218,10 @@ fn build_scene(
     }
     scene.set_order(order, Vec::new());
     let mut missing = Vec::new();
-    scene.prepare(Size::new(size.width * scale, size.height * scale), &mut missing);
+    scene.prepare(
+        Size::new(size.width * scale, size.height * scale),
+        &mut missing,
+    );
     text.ensure_resident(&missing, &mut scene.atlas);
     (runs, glyphs, text.cache.stats.rasters - rasters_before)
 }

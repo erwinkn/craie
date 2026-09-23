@@ -1,0 +1,672 @@
+//! Craie verification harness.
+//!
+//! The central invariant: an incrementally updated `Ui` equals a clean
+//! rebuild of the same final state. `snapshot` serializes a `Ui`'s host
+//! state into one mount transaction; `compare` checks layout, the drawn
+//! scene, hit tests, and the accessibility projection between two `Ui`s.
+//! `Gen` produces seeded mutation sequences in the shape a reconciler
+//! emits. `drain_uploads` takes the scene's pending GPU uploads the way
+//! the renderer does, without a GPU, so cost tests can count bytes.
+
+use std::collections::BTreeMap;
+
+use craie_core::geom::{Affine, Rect, Size};
+use craie_core::rng::Rng;
+use craie_scene::{RasterId, Resolved, Scene};
+use craie_ui::host::{NodeId, ROOT};
+use craie_ui::mutation::{Mutation, NIL, NodeKind, Role, TextSpan, Transaction};
+use craie_ui::ui::Ui;
+
+/// Serializes `ui`'s live nodes into one mount transaction with the same
+/// ids: the "clean rebuild" input. Scroll offsets need layout extents and
+/// are applied by `rebuild` after the first frame.
+pub fn snapshot(ui: &Ui) -> Transaction<'static> {
+    let host = &ui.host;
+    let mut t = Transaction::new(1);
+    let default = taffy::Style::default();
+    for i in 0..host.slot_count() {
+        let id = NodeId(i as u32);
+        let Some(node) = host.node(id) else { continue };
+        let kind = node.kind;
+        t.create(id.0, kind);
+        let style = host.style(id);
+        if *style != default {
+            t.layout(id.0, style);
+        }
+        let s = host.spatial[id.index()];
+        if s.transform != Affine::IDENTITY || s.opacity != 1.0 {
+            t.push(Mutation::Spatial {
+                id: id.0,
+                transform: (s.transform != Affine::IDENTITY).then_some(s.transform),
+                opacity: (s.opacity != 1.0).then_some(s.opacity),
+            });
+        }
+        if kind.has_box() {
+            let p = host.paint[id.index()];
+            if p != Default::default() {
+                t.paint(
+                    id.0,
+                    Some(p.fill),
+                    Some(p.radius),
+                    Some((p.border_color, p.border_width)),
+                );
+            }
+        }
+        if let Some(p) = host.paragraph(id) {
+            t.paragraph(id.0, p.text.clone(), &p.spans);
+        }
+        let it = host.interaction(id);
+        if it.role != Role::None {
+            t.role(id.0, it.role);
+        }
+        if it.listeners != 0 || it.focusable {
+            t.interaction(id.0, it.listeners, it.focusable);
+        }
+        if let Some(label) = host.label(id) {
+            t.label(id.0, label.to_string());
+        }
+        if let Some(sd) = host.surfaces.get(&id.0) {
+            t.surface(id.0, sd.kind, sd.params);
+            if !sd.payload.is_empty() {
+                t.payload(id.0, sd.payload.clone());
+            }
+        }
+    }
+    for &root in host.children(ROOT) {
+        t.append(NIL, root.0);
+    }
+    for i in 0..host.slot_count() {
+        let id = NodeId(i as u32);
+        if host.node(id).is_none() {
+            continue;
+        }
+        for &c in host.children(id) {
+            t.append(id.0, c.0);
+        }
+    }
+    t
+}
+
+/// A fresh `Ui` built from `ui`'s state in one transaction, rendered at
+/// `viewport`, with scroll offsets restored.
+pub fn rebuild(ui: &Ui, viewport: Size) -> Ui {
+    let mut clean = Ui::new(ui.scale);
+    clean.clear = ui.clear;
+    clean.apply_txn(&snapshot(ui)).expect("snapshot must apply");
+    clean.render(viewport);
+    let mut scrolled = false;
+    for i in 0..ui.host.slot_count() {
+        let id = NodeId(i as u32);
+        if ui.host.node(id).is_none() {
+            continue;
+        }
+        let [x, y] = ui.host.spatial[id.index()].scroll;
+        if x != 0.0 || y != 0.0 {
+            clean.scroll_to(id, x, y);
+            scrolled = true;
+        }
+    }
+    if scrolled {
+        clean.render(viewport);
+    }
+    clean
+}
+
+/// The drawn scene with glyphs keyed by a stable raster identity.
+pub fn drawn(ui: &Ui) -> Vec<Resolved> {
+    let cache = &ui.text.cache;
+    ui.scene()
+        .resolve_drawn(&|r: RasterId| cache.stable_key(r).unwrap_or(u64::MAX))
+}
+
+/// One difference between two `Ui`s.
+#[derive(Debug)]
+pub struct Mismatch(pub String);
+
+fn near(a: f32, b: f32, tol: f32) -> bool {
+    (a - b).abs() <= tol || (a.is_nan() && b.is_nan())
+}
+
+fn rect_near(a: Rect, b: Rect, tol: f32) -> bool {
+    near(a.origin.x, b.origin.x, tol)
+        && near(a.origin.y, b.origin.y, tol)
+        && near(a.size.width, b.size.width, tol)
+        && near(a.size.height, b.size.height, tol)
+}
+
+/// Nodes in the displayed tree (attached, not under `display: none`).
+fn displayed(ui: &Ui) -> Vec<NodeId> {
+    let mut out = Vec::new();
+    let mut stack: Vec<NodeId> = ui.host.children(ROOT).iter().rev().copied().collect();
+    while let Some(id) = stack.pop() {
+        if ui.host.node(id).is_none() || ui.host.display_none(id) {
+            continue;
+        }
+        out.push(id);
+        stack.extend(ui.host.children(id).iter().rev().copied());
+    }
+    out
+}
+
+/// Compares layout, the drawn scene, hit tests, and semantics.
+/// `tol` is in logical units for layout and device px for the scene.
+pub fn compare(a: &Ui, b: &Ui, viewport: Size, tol: f32) -> Result<(), Mismatch> {
+    let nodes = displayed(a);
+    if nodes != displayed(b) {
+        return Err(Mismatch("displayed trees differ".into()));
+    }
+    for &id in &nodes {
+        let (da, db) = (a.layouts.data(id), b.layouts.data(id));
+        if !rect_near(da.rect, db.rect, tol) || !near(da.content[0], db.content[0], tol) {
+            return Err(Mismatch(format!(
+                "layout of {id:?}: {:?} vs {:?}",
+                da.rect, db.rect
+            )));
+        }
+    }
+    let (sa, sb) = (drawn(a), drawn(b));
+    if sa.len() != sb.len() {
+        return Err(Mismatch(format!(
+            "drawn primitive count {} vs {}",
+            sa.len(),
+            sb.len()
+        )));
+    }
+    for (i, (pa, pb)) in sa.iter().zip(&sb).enumerate() {
+        if !pa.close_to(pb, tol) {
+            return Err(Mismatch(format!("primitive {i}: {pa:?} vs {pb:?}")));
+        }
+    }
+    let step = 17.0;
+    let mut y = 1.0;
+    while y < viewport.height {
+        let mut x = 1.0;
+        while x < viewport.width {
+            let (ha, hb) = (a.hit_test(x, y), b.hit_test(x, y));
+            if ha != hb {
+                return Err(Mismatch(format!("hit at ({x}, {y}): {ha:?} vs {hb:?}")));
+            }
+            x += step;
+        }
+        y += step;
+    }
+    let (ta, tb) = (semantic(a, viewport), semantic(b, viewport));
+    if ta.len() != tb.len() {
+        return Err(Mismatch("semantic trees differ in size".into()));
+    }
+    for (k, (ra, la, ba)) in &ta {
+        let Some((rb, lb, bb)) = tb.get(k) else {
+            return Err(Mismatch(format!("semantic node {k} missing")));
+        };
+        if ra != rb || la != lb || !rect_near(*ba, *bb, tol) {
+            return Err(Mismatch(format!(
+                "semantic node {k}: {ra:?}/{la:?}/{ba:?} vs {rb:?}/{lb:?}/{bb:?}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+type SemanticRow = (accesskit::Role, Option<String>, Rect);
+
+fn semantic(ui: &Ui, viewport: Size) -> BTreeMap<u64, SemanticRow> {
+    ui.a11y_tree(viewport)
+        .nodes
+        .into_iter()
+        .map(|(id, n)| {
+            let b = n.bounds().map_or(Rect::ZERO, |r| {
+                Rect::new(
+                    r.x0 as f32,
+                    r.y0 as f32,
+                    (r.x1 - r.x0) as f32,
+                    (r.y1 - r.y0) as f32,
+                )
+            });
+            (id.0, (n.role(), n.label().map(str::to_string), b))
+        })
+        .collect()
+}
+
+/// Takes the scene's pending uploads exactly as the renderer does and
+/// returns their size in bytes. Zero after an unchanged frame.
+pub fn drain_uploads(scene: &mut Scene) -> u64 {
+    fn bytes<T>(ranges: Vec<std::ops::Range<usize>>) -> u64 {
+        ranges
+            .iter()
+            .map(|r| (r.len() * size_of::<T>()) as u64)
+            .sum()
+    }
+    let mut n = 0;
+    n += bytes::<craie_scene::RectInstance>(scene.rects.take_dirty());
+    n += bytes::<craie_scene::GlyphInstance>(scene.glyphs.take_dirty());
+    n += bytes::<u32>(scene.paints.take_dirty());
+    n += bytes::<craie_scene::Placement>(scene.take_placement_dirty());
+    n += bytes::<craie_scene::WorldGpu>(scene.transforms.take_gpu_dirty());
+    n += bytes::<craie_scene::ClipGpu>(scene.clips.take_gpu_dirty());
+    n += bytes::<craie_scene::RasterGpu>(scene.atlas.take_gpu_dirty());
+    for color in [false, true] {
+        let pages = if color {
+            scene.atlas.color_pages()
+        } else {
+            scene.atlas.alpha_pages()
+        };
+        for p in 0..pages {
+            if let (_, Some(r)) = scene.atlas.page_bytes(color, p) {
+                n += ((r.max_x - r.min_x) * (r.max_y - r.min_y)) as u64;
+            }
+        }
+    }
+    scene.atlas.clear_page_dirty();
+    n
+}
+
+// ------------------------------------------------------------ generator
+
+const WORDS: &[&str] = &[
+    "retained",
+    "native",
+    "state",
+    "chunk",
+    "glyph",
+    "layout",
+    "React",
+    "frame",
+    "paint",
+    "scene",
+    "atlas",
+    "日本語",
+    "مرحبا",
+    "🎨",
+    "wrap",
+    "the",
+    "a",
+    "of",
+];
+
+/// A reconciler-shaped model of the tree: which ids are live, their kind
+/// and parent, so generated mutations are valid.
+#[derive(Default)]
+struct Model {
+    kind: BTreeMap<u32, NodeKind>,
+    parent: BTreeMap<u32, u32>,
+    children: BTreeMap<u32, Vec<u32>>,
+    free: Vec<u32>,
+    next: u32,
+}
+
+impl Model {
+    fn alloc(&mut self) -> u32 {
+        self.free.pop().unwrap_or_else(|| {
+            self.next += 1;
+            self.next - 1
+        })
+    }
+
+    fn containers(&self) -> Vec<u32> {
+        self.kind
+            .iter()
+            .filter(|(id, k)| **k == NodeKind::View && self.parent.contains_key(id))
+            .map(|(id, _)| *id)
+            .collect()
+    }
+
+    fn attached(&self) -> Vec<u32> {
+        self.parent.keys().copied().collect()
+    }
+
+    fn subtree(&self, id: u32, out: &mut Vec<u32>) {
+        out.push(id);
+        for &c in self.children.get(&id).map(Vec::as_slice).unwrap_or(&[]) {
+            self.subtree(c, out);
+        }
+    }
+}
+
+/// Seeded generator of valid mutation sequences.
+pub struct Gen {
+    pub rng: Rng,
+    model: Model,
+    seq: u64,
+}
+
+fn length(v: f32) -> taffy::Dimension {
+    taffy::Dimension::length(v)
+}
+
+impl Gen {
+    pub fn new(seed: u64) -> Gen {
+        Gen {
+            rng: Rng::new(seed),
+            model: Model::default(),
+            seq: 0,
+        }
+    }
+
+    fn pick<T: Copy>(&mut self, xs: &[T]) -> T {
+        xs[self.rng.below(xs.len() as u32) as usize]
+    }
+
+    fn color(&mut self) -> u32 {
+        let base = self.pick(&[
+            0x6DC7_FF00u32,
+            0xB1E1_8A00,
+            0xFFB4_6D00,
+            0x2A2D_3800,
+            0xECEC_F000,
+        ]);
+        base | self.pick(&[0xFFu32, 0xFF, 0x80, 0x00])
+    }
+
+    fn style(&mut self) -> taffy::Style {
+        let mut s = taffy::Style::default();
+        let r = &mut self.rng;
+        if r.chance(0.5) {
+            s.flex_direction = taffy::FlexDirection::Column;
+        }
+        if r.chance(0.3) {
+            s.size.width = length(20.0 + r.below(200) as f32);
+        }
+        if r.chance(0.3) {
+            s.size.height = length(10.0 + r.below(120) as f32);
+        }
+        if r.chance(0.3) {
+            let p = taffy::LengthPercentage::length(r.below(12) as f32);
+            s.padding = taffy::Rect {
+                left: p,
+                right: p,
+                top: p,
+                bottom: p,
+            };
+        }
+        if r.chance(0.2) {
+            s.gap = taffy::Size {
+                width: taffy::LengthPercentage::length(4.0),
+                height: taffy::LengthPercentage::length(4.0),
+            };
+        }
+        if r.chance(0.15) {
+            let o = if r.chance(0.5) {
+                taffy::Overflow::Scroll
+            } else {
+                taffy::Overflow::Hidden
+            };
+            s.overflow = taffy::Point { x: o, y: o };
+        }
+        if r.chance(0.08) {
+            s.display = taffy::Display::None;
+        }
+        if r.chance(0.08) {
+            s.position = taffy::Position::Absolute;
+            s.inset.left = taffy::LengthPercentageAuto::length(r.below(60) as f32);
+            s.inset.top = taffy::LengthPercentageAuto::length(r.below(60) as f32);
+        }
+        s
+    }
+
+    fn text(&mut self) -> String {
+        let n = 1 + self.rng.below(12) as usize;
+        (0..n)
+            .map(|_| self.pick(WORDS))
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    fn spans(&mut self, text: &str) -> Vec<TextSpan> {
+        let size = self.pick(&[12.0, 14.0, 17.0, 22.0]);
+        let mut spans = vec![TextSpan {
+            font_size: size,
+            color: self.color() | 0xFF,
+            ..TextSpan::default()
+        }];
+        if self.rng.chance(0.3)
+            && let Some((at, _)) = text.char_indices().nth(text.chars().count() / 2)
+            && at > 0
+        {
+            spans.push(TextSpan {
+                start: at as u32,
+                font_size: size,
+                color: self.color() | 0xFF,
+                weight: 700,
+                italic: self.rng.chance(0.5),
+            });
+        }
+        spans
+    }
+
+    /// The initial mount: a root column holding a few children.
+    pub fn mount(&mut self) -> Transaction<'static> {
+        self.seq += 1;
+        let mut t = Transaction::new(self.seq);
+        let root = self.model.alloc();
+        let mut s = taffy::Style::default();
+        s.flex_direction = taffy::FlexDirection::Column;
+        s.size = taffy::Size {
+            width: taffy::Dimension::percent(1.0),
+            height: taffy::Dimension::percent(1.0),
+        };
+        t.create(root, NodeKind::View)
+            .layout(root, &s)
+            .fill(root, 0x1415_18FF)
+            .append(NIL, root);
+        self.model.kind.insert(root, NodeKind::View);
+        self.model.parent.insert(root, NIL);
+        for _ in 0..6 {
+            self.op_create(&mut t);
+        }
+        t
+    }
+
+    fn op_create(&mut self, t: &mut Transaction<'static>) {
+        let containers = self.model.containers();
+        let parent = self.pick(&containers);
+        let kind = self.pick(&[
+            NodeKind::View,
+            NodeKind::View,
+            NodeKind::Text,
+            NodeKind::Surface,
+        ]);
+        let id = self.model.alloc();
+        t.create(id, kind);
+        match kind {
+            NodeKind::Text => {
+                let text = self.text();
+                let spans = self.spans(&text);
+                t.paragraph(id, text, &spans);
+            }
+            NodeKind::Surface => {
+                let n = 1 + self.rng.below(8);
+                let bytes: Vec<u8> = (0..n).flat_map(|_| self.rng.unit().to_le_bytes()).collect();
+                let c = self.color() | 0xFF;
+                t.surface(id, craie_ui::surface::kind::BARS, [c, 0, 0, 0])
+                    .payload(id, bytes);
+                let mut s = taffy::Style::default();
+                s.size = taffy::Size {
+                    width: length(80.0),
+                    height: length(30.0),
+                };
+                t.layout(id, &s);
+            }
+            _ => {
+                let s = self.style();
+                let c = self.color();
+                t.layout(id, &s).fill(id, c);
+            }
+        }
+        let siblings = self
+            .model
+            .children
+            .get(&parent)
+            .cloned()
+            .unwrap_or_default();
+        let before = if !siblings.is_empty() && self.rng.chance(0.3) {
+            self.pick(&siblings)
+        } else {
+            NIL
+        };
+        t.place(parent, id, before);
+        self.model.kind.insert(id, kind);
+        self.model.parent.insert(id, parent);
+        let list = self.model.children.entry(parent).or_default();
+        match list.iter().position(|&c| c == before) {
+            Some(p) => list.insert(p, id),
+            None => list.push(id),
+        }
+    }
+
+    fn op_remove(&mut self, t: &mut Transaction<'static>) {
+        let candidates: Vec<u32> = self
+            .model
+            .attached()
+            .into_iter()
+            .filter(|id| self.model.parent[id] != NIL)
+            .collect();
+        if candidates.is_empty() {
+            return;
+        }
+        let top = self.pick(&candidates);
+        let mut all = Vec::new();
+        self.model.subtree(top, &mut all);
+        // The reconciler detaches the top, then removes every node.
+        t.detach(top);
+        let parent = self.model.parent[&top];
+        self.model
+            .children
+            .get_mut(&parent)
+            .unwrap()
+            .retain(|&c| c != top);
+        for id in all {
+            t.remove(id);
+            self.model.kind.remove(&id);
+            self.model.parent.remove(&id);
+            self.model.children.remove(&id);
+            self.model.free.push(id);
+        }
+    }
+
+    fn op_move(&mut self, t: &mut Transaction<'static>) {
+        let attached: Vec<u32> = self
+            .model
+            .attached()
+            .into_iter()
+            .filter(|id| self.model.parent[id] != NIL)
+            .collect();
+        if attached.is_empty() {
+            return;
+        }
+        let id = self.pick(&attached);
+        let parent = self.model.parent[&id];
+        let siblings = self.model.children[&parent].clone();
+        let before = self.pick(&siblings);
+        if before == id {
+            return;
+        }
+        t.place(parent, id, before);
+        let list = self.model.children.get_mut(&parent).unwrap();
+        list.retain(|&c| c != id);
+        let p = list.iter().position(|&c| c == before).unwrap();
+        list.insert(p, id);
+    }
+
+    /// One transaction of 1-4 random mutations. `ui` supplies current
+    /// paragraphs for color-only changes.
+    pub fn step(&mut self, ui: &Ui) -> Transaction<'static> {
+        self.seq += 1;
+        let mut t = Transaction::new(self.seq);
+        for _ in 0..1 + self.rng.below(4) {
+            let nodes = self.model.attached();
+            let id = self.pick(&nodes);
+            let kind = self.model.kind[&id];
+            match self.rng.below(12) {
+                0 | 1 => self.op_create(&mut t),
+                2 => self.op_remove(&mut t),
+                3 => self.op_move(&mut t),
+                4 if kind != NodeKind::Text => {
+                    let s = self.style();
+                    t.layout(id, &s);
+                }
+                5 if kind.has_box() => {
+                    let c = self.color();
+                    t.fill(id, c);
+                }
+                6 if kind.has_box() => {
+                    let c = self.color() | 0xFF;
+                    let w = self.pick(&[0.0, 1.0, 2.0]);
+                    let r = self.pick(&[0.0, 4.0, 12.0]);
+                    t.paint(id, None, Some(r), Some((c, w)));
+                }
+                7 if kind == NodeKind::Text => {
+                    let text = self.text();
+                    let spans = self.spans(&text);
+                    t.paragraph(id, text, &spans);
+                }
+                8 => {
+                    let m = match self.rng.below(4) {
+                        0 => Affine::IDENTITY,
+                        1 => Affine::translate(
+                            self.rng.below(40) as f32 - 20.0,
+                            self.rng.below(40) as f32,
+                        ),
+                        2 => Affine::rotate(self.rng.unit() - 0.5),
+                        _ => Affine::scale(0.5 + self.rng.unit(), 0.5 + self.rng.unit()),
+                    };
+                    t.transform(id, m);
+                }
+                9 => {
+                    let o = self.pick(&[1.0, 1.0, 0.5, 0.25, 0.0]);
+                    t.opacity(id, o);
+                }
+                10 => {
+                    let r = self.pick(&[Role::None, Role::Button, Role::Group, Role::Heading]);
+                    t.role(id, r);
+                    if self.rng.chance(0.5) {
+                        t.label(id, self.pick(WORDS).to_string());
+                    }
+                }
+                11 if kind == NodeKind::Surface => {
+                    let n = 1 + self.rng.below(8);
+                    let bytes: Vec<u8> =
+                        (0..n).flat_map(|_| self.rng.unit().to_le_bytes()).collect();
+                    t.payload(id, bytes);
+                }
+                _ => {
+                    let c = self.color() | 0xFF;
+                    match ui.host.paragraph(NodeId(id)) {
+                        // Color-only paragraph change: a paint patch. Only
+                        // for nodes the ui already holds (not created in
+                        // this transaction).
+                        Some(p) if kind == NodeKind::Text && !p.spans.is_empty() => {
+                            let text = p.text.clone();
+                            let spans: Vec<TextSpan> = p
+                                .spans
+                                .iter()
+                                .map(|s| TextSpan { color: c, ..*s })
+                                .collect();
+                            t.paragraph(id, text, &spans);
+                        }
+                        _ if kind.has_box() => {
+                            t.fill(id, c);
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+        t
+    }
+
+    /// Picks a scrollable node and an offset to scroll to (applied
+    /// natively between frames, as wheel input would).
+    pub fn scroll(&mut self, ui: &Ui) -> Option<(NodeId, f32, f32)> {
+        let scrollers: Vec<u32> = self
+            .model
+            .attached()
+            .into_iter()
+            .filter(|id| ui.host.style(NodeId(*id)).overflow.y == taffy::Overflow::Scroll)
+            .collect();
+        if scrollers.is_empty() {
+            return None;
+        }
+        let id = self.pick(&scrollers);
+        Some((NodeId(id), 0.0, self.rng.below(200) as f32))
+    }
+}

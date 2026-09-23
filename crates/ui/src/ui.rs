@@ -398,6 +398,15 @@ impl Ui {
             total.0 += c;
             total.1 += r;
         }
+        // Content that shrank below a scroll offset pulls the offset back
+        // into range, as browsers do.
+        for id in self.layouts.extents.take() {
+            let node = NodeId(id);
+            if self.host.is_live(node) {
+                let [x, y] = self.host.spatial[node.index()].scroll;
+                self.scroll_to(node, x, y);
+            }
+        }
         total
     }
 
@@ -458,7 +467,10 @@ impl Ui {
             let t = self.host.spatial[n.index()].transform;
             m = m
                 .mul(&Affine::translate(d.rect.origin.x, d.rect.origin.y))
-                .mul(&t.about(Point::new(d.rect.size.width / 2.0, d.rect.size.height / 2.0)));
+                .mul(&t.about(Point::new(
+                    d.rect.size.width / 2.0,
+                    d.rect.size.height / 2.0,
+                )));
             parent = Some(n);
         }
         m
@@ -467,7 +479,9 @@ impl Ui {
     /// The scroll offset a container applies to its children.
     pub(crate) fn scroll_offset_if_scrolls(&self, id: NodeId) -> [f32; 2] {
         let style = self.host.style(id);
-        if style.overflow.x == taffy::Overflow::Scroll || style.overflow.y == taffy::Overflow::Scroll {
+        if style.overflow.x == taffy::Overflow::Scroll
+            || style.overflow.y == taffy::Overflow::Scroll
+        {
             self.host.spatial[id.index()].scroll
         } else {
             [0.0; 2]
@@ -478,7 +492,11 @@ impl Ui {
     /// scroll offsets applied.
     pub fn abs_rect(&self, id: NodeId) -> Rect {
         let d = self.layouts.data(id);
-        self.node_to_window(id)
-            .map_rect(&Rect::new(0.0, 0.0, d.rect.size.width, d.rect.size.height))
+        self.node_to_window(id).map_rect(&Rect::new(
+            0.0,
+            0.0,
+            d.rect.size.width,
+            d.rect.size.height,
+        ))
     }
 }

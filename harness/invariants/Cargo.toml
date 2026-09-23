@@ -1,0 +1,20 @@
+[package]
+name = "craie-harness"
+description = "Verification harness: incremental-equals-clean-rebuild, cost invariants, release-graph checks"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+# Dev-only. Reference libraries enter here (never in release crates);
+# `tests/release_graph.rs` asserts release graphs stay clean.
+[dependencies]
+craie-core.workspace = true
+craie-scene.workspace = true
+craie-text.workspace = true
+craie-render.workspace = true
+wgpu.workspace = true
+craie-ui.workspace = true
+taffy.workspace = true
+accesskit.workspace = true

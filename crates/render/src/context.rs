@@ -15,20 +15,26 @@ pub struct Gpu {
 impl Gpu {
     /// Headless device for offscreen rendering and tests.
     pub fn headless() -> Gpu {
+        Gpu::try_headless().expect("no wgpu adapter")
+    }
+
+    /// Headless device, or `None` when the machine has no adapter (CI
+    /// without a GPU).
+    pub fn try_headless() -> Option<Gpu> {
         let instance = instance();
         let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
             power_preference: wgpu::PowerPreference::default(),
             compatible_surface: None,
             ..Default::default()
         }))
-        .expect("no wgpu adapter");
+        .ok()?;
         let (device, queue) = request_device(&adapter);
-        Gpu {
+        Some(Gpu {
             instance,
             adapter,
             device,
             queue,
-        }
+        })
     }
 
     /// Device + surface for a platform window. `target` is any wgpu window
