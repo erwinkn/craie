@@ -43,6 +43,10 @@ pub fn import(svg: &[u8]) -> Result<(Asset, Report), String> {
         items: Vec::new(),
     };
     group(tree.root(), 1.0, &mut asset, &mut report);
+    // The runtime's limits: an asset it would refuse is an error here.
+    if let Err(e) = craie_vector::asset::decode(&craie_vector::asset::encode(&asset)) {
+        return Err(format!("the asset exceeds runtime limits: {e:?}"));
+    }
     Ok((asset, report))
 }
 
@@ -73,9 +77,12 @@ fn prescan(svg: &[u8], report: &mut Report) -> Result<(), String> {
             "foreignObject" => report.note("foreignObject (skipped)"),
             _ => {}
         }
+        // Presentation attributes, inline styles, and stylesheets.
         let styled = node
             .attribute("style")
-            .is_some_and(|s| s.contains("vector-effect"));
+            .is_some_and(|s| s.contains("vector-effect"))
+            || (node.tag_name().name() == "style"
+                && node.text().is_some_and(|t| t.contains("vector-effect")));
         if node.attribute("vector-effect").is_some() || styled {
             report.note("vector-effect (ignored)");
         }
@@ -366,6 +373,30 @@ mod tests {
         let stops: String = (0..65)
             .map(|k| format!(r#"<stop offset="{}" stop-color="red"/>"#, k as f32 / 64.0))
             .collect();
+        // A stylesheet's vector-effect (S5B-13).
+        let (_, r) = load(
+            r##"<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20">
+                <style>path { vector-effect: non-scaling-stroke; }</style>
+                <path d="M0 0 L10 10" stroke="black" transform="scale(2)"/>
+            </svg>"##,
+        );
+        assert!(
+            r.unsupported.iter().any(|u| u.starts_with("vector-effect")),
+            "{r:?}"
+        );
+        // More items than the runtime takes (S5B-15): an error, not a
+        // file the runtime refuses.
+        let rects: String = (0..=craie_vector::asset::MAX_ITEMS)
+            .map(|k| format!(r#"<rect x="{}" width="1" height="1"/>"#, k % 100))
+            .collect();
+        let big = format!(
+            r#"<svg xmlns="http://www.w3.org/2000/svg" width="100" height="1">{rects}</svg>"#
+        );
+        assert!(
+            import(big.as_bytes())
+                .unwrap_err()
+                .contains("runtime limits")
+        );
         let (_, r) = load(&format!(
             r##"<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20">
                 <defs><linearGradient id="many">{stops}</linearGradient></defs>

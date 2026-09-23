@@ -91,7 +91,43 @@ impl Path {
         p
     }
 
-    /// The path with every point mapped by `m`.
+    /// The same path with every subpath's start explicit: drawing that
+    /// begins before any `MoveTo` starts at the origin, and after a
+    /// `Close` at the closed subpath's start (so a transform maps those
+    /// points too).
+    pub fn explicit(&self) -> Path {
+        let mut out = Vec::with_capacity(self.verbs.len() + 1);
+        let (mut open, mut at, mut start) = (false, [0.0f32; 2], [0.0f32; 2]);
+        for &v in &self.verbs {
+            let end = match v {
+                Verb::MoveTo(p) => {
+                    open = true;
+                    at = p;
+                    start = p;
+                    out.push(v);
+                    continue;
+                }
+                Verb::Close => {
+                    out.push(v);
+                    open = false;
+                    at = start;
+                    continue;
+                }
+                Verb::LineTo(p) | Verb::QuadTo(_, p) | Verb::CubicTo(_, _, p) => p,
+            };
+            if !open {
+                out.push(Verb::MoveTo(at));
+                start = at;
+                open = true;
+            }
+            out.push(v);
+            at = end;
+        }
+        Path { verbs: out }
+    }
+
+    /// The path with every point mapped by `m` (implicit subpath starts
+    /// made explicit first).
     pub fn transformed(&self, m: &Affine) -> Path {
         let f = |[x, y]: [f32; 2]| {
             let p = m.apply(craie_core::geom::Point::new(x, y));
@@ -99,6 +135,7 @@ impl Path {
         };
         Path {
             verbs: self
+                .explicit()
                 .verbs
                 .iter()
                 .map(|v| match *v {
@@ -384,6 +421,31 @@ mod tests {
         // the inner one (miter joins).
         let sq = stroke(&Path::rect(0.0, 0.0, 10.0, 10.0), &s(LineCap::Butt), 0.01).unwrap();
         assert!((sq.area() - (144.0 - 64.0)).abs() < 1e-3, "{}", sq.area());
+    }
+
+    /// Implicit subpath starts (before any MoveTo; after a Close) move
+    /// with a transform (S5B-14).
+    #[test]
+    fn transforms_move_implicit_starts() {
+        let mut p = Path::new();
+        p.line_to(10.0, 0.0).line_to(0.0, 10.0).close();
+        let t = p.transformed(&Affine::translate(10.0, 10.0));
+        let m = fill(&t, FillRule::NonZero, 0.1).unwrap();
+        let (mut lo, mut hi) = ([f32::MAX; 2], [f32::MIN; 2]);
+        for v in &m.vertices {
+            lo = [lo[0].min(v[0]), lo[1].min(v[1])];
+            hi = [hi[0].max(v[0]), hi[1].max(v[1])];
+        }
+        assert_eq!((lo, hi), ([10.0, 10.0], [20.0, 20.0]));
+        assert!((m.area() - 50.0).abs() < 1e-6);
+        // After a Close, the next subpath starts at the closed one's
+        // start.
+        let mut q = Path::new();
+        q.move_to(5.0, 5.0)
+            .line_to(6.0, 5.0)
+            .close()
+            .line_to(5.0, 6.0);
+        assert_eq!(q.explicit().verbs[3], Verb::MoveTo([5.0, 5.0]));
     }
 
     #[test]

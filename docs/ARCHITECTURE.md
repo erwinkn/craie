@@ -714,8 +714,10 @@ path, fill rule or stroke, paint, opacity, and transform), reporting
 every feature it cannot represent (the tool fails on one unless
 `--lenient`). A `Vector` node (kind 5) takes the asset as its payload;
 validation decodes it (a bad asset rejects the transaction). Its view
-box is its intrinsic size (a set dimension scales the other); the
-drawing fits the content box, centered, aspect kept. Each item
+box is its intrinsic content size (a set dimension, and min and max
+sizes, scale the other axis); the drawing fits the content box,
+centered, aspect kept, and is clipped to its view box as an embedded
+SVG is. Each item
 tessellates in its own space at a quarter device pixel of tolerance,
 maps into the chunk, and is cached per node until the content box, the
 display scale, or the asset changes. JS: `<Vector asset={bytes} />`,

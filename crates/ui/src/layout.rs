@@ -305,17 +305,48 @@ impl TreeView<'_> {
             let Some(a) = self.host.vectors.get(&id.0).and_then(|v| v.asset.as_ref()) else {
                 return TSize::ZERO;
             };
-            let size = self.style_of(id).size;
+            let style = self.style_of(id);
+            let size = style.size;
             let content = |known: Option<f32>, set: bool, avail: AvailableSpace| {
                 (known.is_some() || set)
                     .then(|| avail.into_option())
                     .flatten()
             };
-            let [width, height] = crate::vector::intrinsic(
+            // Min and max sizes are border boxes: less padding and border
+            // (lengths; a percentage counts as 0 here).
+            let len = |l: taffy::LengthPercentage| match l.expand() {
+                taffy::style::ExpandedLengthPercentage::Length(v) => v,
+                _ => 0.0,
+            };
+            let inset = [
+                len(style.padding.left)
+                    + len(style.padding.right)
+                    + len(style.border.left)
+                    + len(style.border.right),
+                len(style.padding.top)
+                    + len(style.padding.bottom)
+                    + len(style.border.top)
+                    + len(style.border.bottom),
+            ];
+            let limit = |d: taffy::LengthPercentageAuto, axis: usize| match d.expand() {
+                taffy::style::ExpandedLengthPercentageAuto::Length(v) => {
+                    Some((v - inset[axis]).max(0.0))
+                }
+                _ => None,
+            };
+            let [width, height] = crate::vector::constrained(
                 a.view_box,
                 [
                     content(known.width, !size.width.is_auto(), available.width),
                     content(known.height, !size.height.is_auto(), available.height),
+                ],
+                [
+                    limit(style.min_size.width, 0),
+                    limit(style.min_size.height, 1),
+                ],
+                [
+                    limit(style.max_size.width, 0),
+                    limit(style.max_size.height, 1),
                 ],
             );
             return TSize { width, height };

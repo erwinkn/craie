@@ -63,6 +63,93 @@ pub fn intrinsic(view_box: [f32; 4], known: [Option<f32>; 2]) -> [f32; 2] {
     }
 }
 
+/// The intrinsic content size under min and max constraints (content
+/// box; `None`: unconstrained): a clamped width sets the height by the
+/// aspect ratio unless the height is known, and a clamped height the
+/// width.
+pub fn constrained(
+    view_box: [f32; 4],
+    known: [Option<f32>; 2],
+    min: [Option<f32>; 2],
+    max: [Option<f32>; 2],
+) -> [f32; 2] {
+    let [w0, h0] = intrinsic(view_box, known);
+    let ratio = view_box[3] / view_box[2];
+    let clamp = |v: f32, lo: Option<f32>, hi: Option<f32>| {
+        let v = hi.map_or(v, |h| v.min(h));
+        lo.map_or(v, |l| v.max(l))
+    };
+    let (mut w, mut h) = (w0, h0);
+    if known[0].is_none() {
+        let c = clamp(w, min[0], max[0]);
+        if c != w && known[1].is_none() {
+            h = c * ratio;
+        }
+        w = c;
+    }
+    if known[1].is_none() {
+        let c = clamp(h, min[1], max[1]);
+        if c != h && known[0].is_none() {
+            w = clamp(c / ratio, min[0], max[0]);
+        }
+        h = c;
+    }
+    [w, h]
+}
+
+/// `mesh` cut to `clip` (the drawing's viewport, as SVG clips an
+/// embedded drawing): triangles inside stay, triangles across an edge
+/// are cut (Sutherland-Hodgman) and re-fanned, triangles outside go.
+fn clip_mesh(mesh: Mesh, clip: Rect) -> Mesh {
+    let (x0, y0, x1, y1) = (clip.origin.x, clip.origin.y, clip.max_x(), clip.max_y());
+    let inside = |v: &[f32; 2]| v[0] >= x0 && v[0] <= x1 && v[1] >= y0 && v[1] <= y1;
+    if mesh.vertices.iter().all(inside) {
+        return mesh;
+    }
+    let mut out = Mesh::default();
+    let mut poly: Vec<[f32; 2]> = Vec::with_capacity(9);
+    let mut next: Vec<[f32; 2]> = Vec::with_capacity(9);
+    for t in mesh.indices.chunks_exact(3) {
+        poly.clear();
+        poly.extend(t.iter().map(|&i| mesh.vertices[i as usize]));
+        // Each edge: (axis, bound, keep below the bound).
+        for (axis, bound, below) in [(0, x0, false), (0, x1, true), (1, y0, false), (1, y1, true)] {
+            let keep = |v: &[f32; 2]| {
+                if below {
+                    v[axis] <= bound
+                } else {
+                    v[axis] >= bound
+                }
+            };
+            next.clear();
+            for k in 0..poly.len() {
+                let (a, b) = (poly[k], poly[(k + 1) % poly.len()]);
+                let (ka, kb) = (keep(&a), keep(&b));
+                if ka {
+                    next.push(a);
+                }
+                if ka != kb {
+                    let t = (bound - a[axis]) / (b[axis] - a[axis]);
+                    next.push([a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t]);
+                }
+            }
+            std::mem::swap(&mut poly, &mut next);
+            if poly.is_empty() {
+                break;
+            }
+        }
+        if poly.len() < 3 {
+            continue;
+        }
+        let base = out.vertices.len() as u32;
+        out.vertices.extend_from_slice(&poly);
+        for k in 1..poly.len() as u32 - 1 {
+            out.indices.extend([base, base + k, base + k + 1]);
+        }
+    }
+    out
+}
+
 /// The largest factor by which `m` stretches a length (its largest
 /// singular value).
 fn max_stretch(m: &Affine) -> f32 {
@@ -80,6 +167,11 @@ fn fade(color: u32, opacity: f32) -> u32 {
 
 fn prepare(asset: &Asset, content: Rect, scale: f32) -> Vec<Prepared> {
     let place = fit(asset.view_box, content);
+    // The view box in chunk space: the drawing's viewport.
+    let [vx, vy, vw, vh] = asset.view_box;
+    let p0 = place.apply(craie_core::geom::Point::new(vx, vy));
+    let p1 = place.apply(craie_core::geom::Point::new(vx + vw, vy + vh));
+    let viewport = Rect::new(p0.x, p0.y, p1.x - p0.x, p1.y - p0.y);
     let mut out = Vec::with_capacity(asset.items.len());
     for it in &asset.items {
         let m = place.mul(&it.transform);
@@ -120,6 +212,7 @@ fn prepare(asset: &Asset, content: Rect, scale: f32) -> Vec<Prepared> {
             }
         };
         let Ok(mesh) = mesh else { continue };
+        let mesh = clip_mesh(mesh, viewport);
         if mesh.indices.is_empty() {
             continue;
         }
@@ -478,10 +571,8 @@ mod review_tests {
         let exact = std::f64::consts::PI * 100.0 * 100.0;
         // Flattening loses less than perimeter x tolerance (0.25 px).
         let lost = exact - area(&ui);
-        assert!(
-            lost >= 0.0 && lost < 2.0 * std::f64::consts::PI * 100.0 * 0.25,
-            "{lost}"
-        );
+        let bound = 2.0 * std::f64::consts::PI * 100.0 * 0.25;
+        assert!((0.0..bound).contains(&lost), "{lost}");
         // Strokes under a stretching transform tessellate in item space
         // at a quarter device px over the largest stretch: that stretch
         // is the matrix's largest singular value.
@@ -493,6 +584,47 @@ mod review_tests {
         ));
         // A shear [1 1; 0 1]: the golden ratio.
         assert!(close(Affine([1.0, 0.0, 1.0, 1.0, 0.0, 0.0]), 1.618_034));
+    }
+
+    /// S5B-11: a drawing clips to its viewport, as an embedded SVG
+    /// does: a rect running past the view box (x 30..70 in 40 x 40) is
+    /// cut at its edge.
+    #[test]
+    fn drawings_clip_to_their_viewport() {
+        let asset = encode(&Asset {
+            view_box: [0.0, 0.0, 40.0, 40.0],
+            paints: vec![Paint::Solid(0xFF00_00FF)],
+            items: vec![Item {
+                path: Path::rect(30.0, 5.0, 40.0, 10.0),
+                style: ItemStyle::Fill(FillRule::NonZero),
+                paint: 0,
+                opacity: 1.0,
+                transform: Affine::IDENTITY,
+            }],
+        });
+        let ui = one(asset, taffy::Style::default(), 1.0);
+        let mesh = &ui.vector_meshes[&1].items[0].mesh;
+        assert!(mesh.vertices.iter().all(|v| v[0] <= 40.0));
+        // The kept part: 10 x 10.
+        assert!((mesh.area() - 100.0).abs() < 1e-3, "{}", mesh.area());
+    }
+
+    /// S5B-12: min and max sizes keep the aspect ratio (24 x 12: max
+    /// width 12 gives 12 x 6; min width 48 gives 48 x 24; max height 3
+    /// gives 6 x 3).
+    #[test]
+    fn size_limits_keep_the_aspect() {
+        let limited = |f: &dyn Fn(&mut taffy::Style)| {
+            let mut s = taffy::Style::default();
+            f(&mut s);
+            let ui = one(red_box(), s, 1.0);
+            let r = ui.layouts.data(NodeId(1)).rect;
+            (r.size.width, r.size.height)
+        };
+        let l = taffy::LengthPercentageAuto::length;
+        assert_eq!(limited(&|s| s.max_size.width = l(12.0)), (12.0, 6.0));
+        assert_eq!(limited(&|s| s.min_size.width = l(48.0)), (48.0, 24.0));
+        assert_eq!(limited(&|s| s.max_size.height = l(3.0)), (6.0, 3.0));
     }
 
     /// S5B-04: a display-scale change re-tessellates vector chunks (the

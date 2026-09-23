@@ -236,3 +236,6 @@ Reviewer minors and nitpicks not fixed yet.
   asset scale, group opacity over painted items, radial oracle through
   the full mapping, stop truncation and miter-clip reports): fixed in
   step 5b round 1.
+- S5B-11..15 (viewport clipping, size limits and the aspect ratio,
+  stylesheet vector-effect, implicit subpath starts under transforms,
+  assets past runtime limits): fixed in step 5b round 2.
