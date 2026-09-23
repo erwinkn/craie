@@ -440,7 +440,9 @@ fn build_transcript_txn() -> Vec<u8> {
     enc.place(NIL, 0, NIL);
 
     for i in 0..MESSAGES {
-        message(&mut enc, 1 + i * 8, i);
+        // Six ids per message (its widest shape): dense enough for the
+        // executor's id slack (a message without a code block leaves one).
+        message(&mut enc, 1 + i * 6, i);
     }
     finish(enc, 1)
 }
@@ -520,7 +522,7 @@ fn bench_transcript() {
     report(&t.stop("paint (warm, unchanged)"));
 
     // Streaming: one transaction per token into a new trailing message.
-    let last_body = 1 + (MESSAGES - 1) * 8 + 4;
+    let last_body = 1 + (MESSAGES - 1) * 6 + 4;
     let mut acc = String::new();
     let mut apply_ms = 0.0;
     let mut layout_ms = 0.0;

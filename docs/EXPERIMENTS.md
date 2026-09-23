@@ -499,6 +499,21 @@ gone with it.
   scroll, and empty draws: medians 0.176/0.182, 2.53/2.50, 0.203/0.142
   ms. No change is measurable at this load.
 
+### Step 6a: compact layout row
+
+- `LayoutRow` (136 bytes: 25 tagged `f32` lengths, grow, shrink,
+  aspect ratio, enum bytes) replaces the 240-byte `taffy::Style` per
+  node; Taffy reads it through its style traits. Round trips with
+  `taffy::Style` are exact over generated styles; generated trees lay
+  out bit for bit as Taffy's own tree does with the converted styles
+  (`tests/layout_row_equals_taffy_style.rs`; it fails with one trait
+  method changed). Live heap at 5k rows (`examples/bench`): 41,157 KiB
+  before, 39,493 KiB after.
+- The bench's transcript case had failed since the dense-id rule of
+  step 1's review (its ids left gaps past the slack); it allocates six
+  ids per message now and runs again (live heap 37,569 KiB at 2,000
+  messages).
+
 ### E14: layout-aware virtualization, list versus a plain column (step 2)
 
 `cargo run --release -p craie-harness --example e14_lists`: a scroller

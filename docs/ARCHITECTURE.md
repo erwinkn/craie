@@ -269,11 +269,19 @@ prove validity.
 - Dense per-node stores cost about 348 bytes per node today, 240 of
   them the `taffy::Style` row (2026-09-23). A compact Craie-owned row
   replaces it with the owned flex engine (step 6).
+- The compact row came first, ahead of the owned engine (2026-09-24,
+  step 6a): Taffy reads it through its style traits, so the memory win
+  does not wait for the engine, and the engine (step 6b) is written
+  against the row it will read.
 
 ## 4. Layout
 
 **Current.** Taffy 0.14 through its low-level traits, reading each
-node's own layout row. Results land in `Layouts` (cache, unrounded
+node's own layout row: a Craie-owned `LayoutRow` (`craie-layout`, 136
+bytes, step 6a) that holds exactly what the wire can express (lengths
+in one tagged `f32` array, enums as bytes) and implements Taffy's style
+traits, so no `taffy::Style` is stored per node; transactions still
+carry taffy styles, converted when a layout op applies. Results land in `Layouts` (cache, unrounded
 layout, final rect, content-box offset); finalize records nodes whose
 origin moved, whose size changed, and whose scroll extent changed. A
 layout pass runs only when the layout queue is non-empty or the

@@ -21,9 +21,14 @@ target shape.
   about 5.3 MiB).
 - Why accepted: layout inputs are per-node rows by decision (step 1);
   Taffy needs its own `Style` per node until Craie owns flex layout.
-- Resolves in: step 6 (owned flex layout: a compact owned layout row).
-- Re-test: `cargo run --release --example bench` (live heap, 5k rows),
-  EXPERIMENTS.md "Step 1".
+- Partly resolved (step 6a): the layout row is a 136-byte `LayoutRow`
+  (was 240). Live heap at 5k rows: 39,493 KiB (38.6 MiB) against 41,157
+  KiB just before step 6a and 43.8 MiB at step 1; 2.2 MiB above the
+  pre-step-1 baseline.
+- Resolves in: the rest of step 6 (the owned engine can drop what only
+  Taffy's cache and output tables need), or accepted at that size.
+- Re-test: `cargo run --release -p craie-platform-winit --example
+  bench` (live heap, 5k rows), EXPERIMENTS.md "Step 1".
 
 ### AR-2: long-Latin rewrap time against Parley
 
