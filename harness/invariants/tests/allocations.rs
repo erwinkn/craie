@@ -127,16 +127,17 @@ fn steady_frames_do_not_allocate() {
 /// visible cost change: re-measure and update with the reason.
 const WGPU_FRAME: usize = 56;
 const WGPU_PASS: usize = 23;
-/// wgpu's staging allocations for one small buffer write in `prepare`,
-/// and the extra tracking cost at the submission that follows it.
+/// wgpu's staging allocations for one small buffer write in
+/// `Renderer::upload`, and the extra tracking cost at the submission that
+/// follows it. Craie's share of prepare (`collect`) is measured apart.
 const WGPU_WRITE: usize = 8;
 const WGPU_WRITE_SUBMIT: usize = 5;
 
-/// The whole frame on a real device: UI render, renderer prepare, and
-/// draw (plan + encode). Separate budgets per phase: Craie phases
-/// (render, prepare with nothing to upload, plan) allocate nothing when
-/// nothing changed; encoding costs wgpu a fixed amount per pass, the
-/// same every frame.
+/// The whole frame on a real device: UI render, renderer prepare
+/// (collect + upload), and draw (plan + encode). Separate budgets per
+/// phase: Craie phases (render, collect, plan) allocate nothing once
+/// warm, changed or not; wgpu phases (upload, encode) cost a fixed
+/// amount per write and per pass, the same every frame.
 #[test]
 fn whole_frame_budgets() {
     let Some(gpu) = craie_render::Gpu::try_headless() else {
@@ -165,7 +166,8 @@ fn whole_frame_budgets() {
     #[derive(Debug, PartialEq)]
     struct Frame {
         render: usize,
-        prepare: usize,
+        collect: usize,
+        upload: usize,
         plan: usize,
         encode: usize,
         passes: u32,
@@ -177,7 +179,8 @@ fn whole_frame_budgets() {
             }
             ui.render(VIEW);
         });
-        let prepare = allocs(|| renderer.prepare(&gpu, ui.scene_mut()));
+        let collect = allocs(|| renderer.collect(ui.scene_mut()));
+        let upload = allocs(|| renderer.upload(&gpu, ui.scene_mut()));
         let plan = allocs(|| renderer.plan_frame(&gpu, w, h, ui.scene_mut()));
         let encode = allocs(|| renderer.encode_frame(&gpu, &view, ui.scene()));
         // Retire the frame outside the measurement.
@@ -189,7 +192,8 @@ fn whole_frame_budgets() {
             .unwrap();
         Frame {
             render,
-            prepare,
+            collect,
+            upload,
             plan,
             encode,
             passes: renderer.stats.passes,
@@ -205,8 +209,8 @@ fn whole_frame_budgets() {
         frame(&mut ui, None);
         let first = frame(&mut ui, None);
         assert_eq!(
-            (first.render, first.prepare, first.plan),
-            (0, 0, 0),
+            (first.render, first.collect, first.upload, first.plan),
+            (0, 0, 0, 0),
             "opacity {opacity}: {first:?}"
         );
         assert!(
@@ -218,18 +222,24 @@ fn whole_frame_budgets() {
         }
     }
 
-    // Color patches, after two to warm the queues: the UI and the plan
-    // allocate nothing; wgpu stages the one paint write and tracks it at
-    // submission.
-    for k in 0..3u32 {
+    // Color patches, after two to warm the queues, alternating with idle
+    // frames: the Craie phases allocate nothing either way; wgpu stages
+    // the one paint write and tracks it at submission.
+    for k in 0..6u32 {
         let mut t = Transaction::new(3 + k as u64);
         t.fill(0, 0x2233_44FF + (k << 8));
         let f = frame(&mut ui, Some(&t));
+        let idle = frame(&mut ui, None);
         if k < 2 {
             continue;
         }
-        assert_eq!((f.render, f.plan), (0, 0), "{f:?}");
-        assert!(f.prepare <= WGPU_WRITE, "{f:?}");
+        assert_eq!((f.render, f.collect, f.plan), (0, 0, 0), "{f:?}");
+        assert!(f.upload <= WGPU_WRITE, "{f:?}");
         assert!(f.encode <= budget(f.passes) + WGPU_WRITE_SUBMIT, "{f:?}");
+        assert_eq!(
+            (idle.render, idle.collect, idle.upload, idle.plan),
+            (0, 0, 0, 0),
+            "{idle:?}"
+        );
     }
 }

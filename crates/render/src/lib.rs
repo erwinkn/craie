@@ -175,8 +175,9 @@ pub struct Renderer {
     /// Viewport uniform bytes last written: an unchanged frame writes none.
     viewport_bytes: Vec<u8>,
     scratch: DrawScratch,
-    /// Dirty ranges of the table being synced (reused).
-    ranges: Vec<Range<usize>>,
+    /// Dirty ranges per table (rects, glyphs, paints, placements,
+    /// worlds, clips, rasters), collected by `collect` (kept buffers).
+    ranges: [Vec<Range<usize>>; 7],
     pub stats: RenderStats,
     /// Bytes uploaded to atlas textures this session (diagnostics).
     pub atlas_upload_bytes: u64,
@@ -228,7 +229,7 @@ impl Renderer {
             layer_pool: Vec::new(),
             viewport_bytes: Vec::new(),
             scratch: DrawScratch::default(),
-            ranges: Vec::new(),
+            ranges: Default::default(),
             stats: RenderStats::default(),
             atlas_upload_bytes: 0,
         }
@@ -238,29 +239,43 @@ impl Renderer {
     /// and table ranges, and dirty atlas rects. An unchanged scene
     /// uploads nothing. Adds the bytes to `scene.counters.upload_bytes`.
     pub fn prepare(&mut self, gpu: &Gpu, scene: &mut Scene) {
+        self.collect(scene);
+        self.upload(gpu, scene);
+    }
+
+    /// Craie's share of `prepare`: moves each table's dirty ranges into
+    /// a kept buffer. Once warm it allocates nothing.
+    pub fn collect(&mut self, scene: &mut Scene) {
+        let [rects, glyphs, paints, placements, worlds, clips, rasters] = &mut self.ranges;
+        scene.rects.take_dirty_into(rects);
+        scene.glyphs.take_dirty_into(glyphs);
+        scene.paints.take_dirty_into(paints);
+        scene.take_placement_dirty_into(placements);
+        scene.transforms.take_gpu_dirty_into(worlds);
+        scene.clips.take_gpu_dirty_into(clips);
+        scene.atlas.take_gpu_dirty_into(rasters);
+    }
+
+    /// wgpu's share of `prepare`: writes the collected ranges and dirty
+    /// atlas rects. Its allocations are wgpu's staging and tracking.
+    pub fn upload(&mut self, gpu: &Gpu, scene: &mut Scene) {
         let mut bytes = self.sync_atlas(gpu, &mut scene.atlas);
         let mut recreated = false;
         let mut add = |(b, r): (u64, bool)| {
             bytes += b;
             recreated |= r;
         };
-        // One reused range buffer: a frame allocates nothing here.
-        let mut r = std::mem::take(&mut self.ranges);
-        scene.rects.take_dirty_into(&mut r);
-        add(self.rects.sync(gpu, scene.rects.backing(), &r));
-        scene.glyphs.take_dirty_into(&mut r);
-        add(self.glyphs.sync(gpu, scene.glyphs.backing(), &r));
-        scene.paints.take_dirty_into(&mut r);
-        add(self.paints.sync(gpu, scene.paints.backing(), &r));
-        scene.take_placement_dirty_into(&mut r);
-        add(self.placements.sync(gpu, scene.placements(), &r));
-        scene.transforms.take_gpu_dirty_into(&mut r);
-        add(self.worlds.sync(gpu, scene.transforms.gpu_rows(), &r));
-        scene.clips.take_gpu_dirty_into(&mut r);
-        add(self.clips.sync(gpu, scene.clips.gpu_rows(), &r));
-        scene.atlas.take_gpu_dirty_into(&mut r);
-        add(self.rasters.sync(gpu, scene.atlas.gpu_rows(), &r));
-        self.ranges = r;
+        let [rects, glyphs, paints, placements, worlds, clips, rasters] = &self.ranges;
+        add(self.rects.sync(gpu, scene.rects.backing(), rects));
+        add(self.glyphs.sync(gpu, scene.glyphs.backing(), glyphs));
+        add(self.paints.sync(gpu, scene.paints.backing(), paints));
+        add(self.placements.sync(gpu, scene.placements(), placements));
+        add(self.worlds.sync(gpu, scene.transforms.gpu_rows(), worlds));
+        add(self.clips.sync(gpu, scene.clips.gpu_rows(), clips));
+        add(self.rasters.sync(gpu, scene.atlas.gpu_rows(), rasters));
+        for r in &mut self.ranges {
+            r.clear();
+        }
         if recreated || self.scene_bg.is_none() {
             self.rebind(gpu);
         }

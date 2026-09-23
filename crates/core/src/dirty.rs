@@ -144,16 +144,24 @@ impl DirtyRanges {
         self.ranges.iter().map(|r| r.len()).sum()
     }
 
+    /// Sorts and merges in place: no allocation (unstable sort, merge by
+    /// compaction), and the set keeps its capacity.
     fn normalize(&mut self) {
-        self.ranges.sort_by_key(|r| r.start);
-        let mut out: Vec<Range<usize>> = Vec::with_capacity(self.ranges.len());
-        for r in self.ranges.drain(..) {
-            match out.last_mut() {
-                Some(last) if r.start <= last.end => last.end = last.end.max(r.end),
-                _ => out.push(r),
+        if self.ranges.len() < 2 {
+            return;
+        }
+        self.ranges.sort_unstable_by_key(|r| r.start);
+        let mut w = 0;
+        for i in 1..self.ranges.len() {
+            let r = self.ranges[i].clone();
+            if r.start <= self.ranges[w].end {
+                self.ranges[w].end = self.ranges[w].end.max(r.end);
+            } else {
+                w += 1;
+                self.ranges[w] = r;
             }
         }
-        self.ranges = out;
+        self.ranges.truncate(w + 1);
     }
 }
 
@@ -184,5 +192,35 @@ mod tests {
         d.add(0..1);
         d.add(5..6);
         assert_eq!(d.take(), vec![0..1, 5..6]);
+    }
+
+    /// In-place normalization equals a bitmap union: sorted, disjoint,
+    /// non-touching ranges covering exactly the written items. The set
+    /// keeps its capacity across takes.
+    #[test]
+    fn ranges_match_bitmap_oracle() {
+        let mut rng = crate::rng::Rng::new(7);
+        let mut d = DirtyRanges::default();
+        let mut out = Vec::new();
+        for _ in 0..200 {
+            let mut bits = [false; 300];
+            // At most MAX_RANGES writes: the set never collapses.
+            for _ in 0..rng.below(MAX_RANGES as u32 + 1) {
+                let a = rng.below(280) as usize;
+                let r = a..a + 1 + rng.below(20) as usize;
+                bits[r.clone()].iter_mut().for_each(|b| *b = true);
+                d.add(r);
+            }
+            d.take_into(&mut out);
+            assert!(d.ranges.is_empty());
+            for w in out.windows(2) {
+                assert!(w[0].end < w[1].start, "{out:?}");
+            }
+            let mut got = [false; 300];
+            for r in &out {
+                got[r.clone()].iter_mut().for_each(|b| *b = true);
+            }
+            assert_eq!(got, bits);
+        }
     }
 }
