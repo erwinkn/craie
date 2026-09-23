@@ -305,21 +305,22 @@ impl Inputs {
         let Some(state) = self.map.get_mut(&id) else {
             return false;
         };
-        // An edit ends a composition's undo grouping; navigation,
-        // selection, and copy leave composition (and its group) alone.
-        if matches!(
-            action,
-            KeyAction::Insert(_)
-                | KeyAction::Newline
-                | KeyAction::Backspace
-                | KeyAction::Delete
-                | KeyAction::BackspaceWord
-                | KeyAction::DeleteWord
-                | KeyAction::Cut
-                | KeyAction::Paste
-        ) {
-            state.compose_undo = false;
-        }
+        // Edits record an undo entry, but only when the text changes:
+        // the snapshot is taken first and kept only then. A real change
+        // also ends a composition's undo group; navigation, selection,
+        // copy, and edits that change nothing leave it.
+        let edit = match action {
+            KeyAction::Insert(_) => Some(true),
+            KeyAction::Newline
+            | KeyAction::Backspace
+            | KeyAction::Delete
+            | KeyAction::BackspaceWord
+            | KeyAction::DeleteWord
+            | KeyAction::Cut
+            | KeyAction::Paste => Some(false),
+            _ => None,
+        };
+        let before = edit.map(|_| state.snapshot());
         // Insertions and cuts only replace the selection: they read no
         // layout, and their reshape makes it clean.
         let reads_layout = !matches!(
@@ -334,12 +335,9 @@ impl Inputs {
         if reads_layout {
             state.editor.refresh(text);
         }
-        let mut coalescing = false;
         let ed = &mut state.editor;
         match action {
             KeyAction::Insert(s) => {
-                state.record_undo(true);
-                coalescing = true;
                 let s = if state.multiline {
                     s.clone()
                 } else {
@@ -349,24 +347,19 @@ impl Inputs {
             }
             KeyAction::Newline => {
                 if state.multiline {
-                    state.record_undo(false);
                     state.editor.insert_or_replace_selection(text, "\n");
                 }
             }
             KeyAction::Backspace => {
-                state.record_undo(false);
                 state.editor.backdelete(text);
             }
             KeyAction::Delete => {
-                state.record_undo(false);
                 state.editor.delete(text);
             }
             KeyAction::BackspaceWord => {
-                state.record_undo(false);
                 state.editor.backdelete_word(text);
             }
             KeyAction::DeleteWord => {
-                state.record_undo(false);
                 state.editor.delete_word(text);
             }
             KeyAction::MoveLeft => ed.motion(Motion::Left, false),
@@ -401,7 +394,6 @@ impl Inputs {
             KeyAction::Cut => {
                 if let Some(sel) = ed.selected_text() {
                     self.clipboard.set(sel);
-                    state.record_undo(false);
                     state.editor.delete_selection(text);
                 }
             }
@@ -409,7 +401,6 @@ impl Inputs {
                 if let Some(s) = self.clipboard.get()
                     && !s.is_empty()
                 {
-                    state.record_undo(false);
                     let s = if state.multiline {
                         s
                     } else {
@@ -421,8 +412,20 @@ impl Inputs {
             KeyAction::Submit => {}
             KeyAction::Undo | KeyAction::Redo => unreachable!(),
         }
-        if !coalescing {
-            state.coalescing_insert = false;
+        match (edit, before) {
+            (Some(coalesce), Some(snap)) if state.editor.raw_text() != snap.text => {
+                state.compose_undo = false;
+                // Consecutive insertions coalesce into one entry.
+                if !(coalesce && state.coalescing_insert && !state.undo.is_empty()) {
+                    state.undo.push(snap);
+                    if state.undo.len() > 128 {
+                        state.undo.remove(0);
+                    }
+                }
+                state.redo.clear();
+                state.coalescing_insert = coalesce;
+            }
+            _ => state.coalescing_insert = false,
         }
         true
     }

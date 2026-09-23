@@ -357,7 +357,8 @@ boundaries at once. Undo snapshots keep full cursors; a composition is
 one undo step from its start to its commit. `TextInput` is uncontrolled
 (`value` is sent once at mount; `setText` replaces the text without an
 `onChangeText` echo); `onChangeText` fires only when the committed text
-changes. Parley is
+changes, including when a composition finishes (ImeDone, focus loss).
+An edit records an undo entry only when it changes the text. Parley is
 not a dependency of any release crate: the harness keeps it as the
 oracle. Validation bounds font sizes to `MAX_FONT_SIZE`
 (2048 logical points). A glyph larger than an atlas page renders: it

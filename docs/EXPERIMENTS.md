@@ -339,7 +339,12 @@ composition starts, with the commit in the same step); word moves
 stopped at soft line breaks (neighbours now cross lines, as Parley's);
 `onChangeText` fired on caret moves (now only when the committed text
 changes; a JS `setText` does not echo); undo dropped cursor affinity
-(snapshots keep full cursors). `editing_never_leaves_char_boundaries`
+(snapshots keep full cursors). Rounds 2 and 3 found
+the composition undo group's lifecycle (it now ends only when an edit
+changes the text, or on undo, redo, `setText`, finish, or commit; undo
+entries are recorded only when an edit changes the text) and a missing
+`onChangeText` when a composition finishes (ImeDone or focus loss).
+`editing_never_leaves_char_boundaries`
 runs 24 seeds of 300 random operations over multibyte, bidi, emoji,
 and mark text, and asserts both cursors and the preedit range stay on
 character boundaries.

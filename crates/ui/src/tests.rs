@@ -2047,6 +2047,10 @@ fn composition_undo_restores_the_replaced_text() {
     preedit(&mut ui, "か");
     key(&mut ui, Key::Unknown, Some("c"), meta());
     key(&mut ui, Key::Left, None, Mods::default());
+    // Cut with nothing selectable and Paste with an empty clipboard
+    // change nothing: the group stays.
+    key(&mut ui, Key::Unknown, Some("x"), meta());
+    key(&mut ui, Key::Unknown, Some("v"), meta());
     preedit(&mut ui, "");
     ui.dispatch(&Event::ImeCommit("かな".into()));
     key(&mut ui, Key::Unknown, Some("z"), meta());
@@ -2153,4 +2157,43 @@ fn undo_restores_caret_affinity() {
         before.1 == 0.0,
         "the caret starts on the first line: {before:?}"
     );
+}
+
+/// Finishing a composition commits its text and notifies JS once: on
+/// ImeDone, and when focus leaves the input.
+#[test]
+fn finishing_a_composition_emits_one_change() {
+    let changes = |ui: &mut Ui| -> Vec<String> {
+        ui.take_events()
+            .into_iter()
+            .filter(|e| e.kind == out_kind::CHANGE)
+            .map(|e| e.text)
+            .collect()
+    };
+    let mut ui = focused_input("", 300.0, false);
+    changes(&mut ui);
+    ui.dispatch(&Event::ImePreedit {
+        text: "かな".into(),
+        cursor: Some((6, 6)),
+    });
+    assert_eq!(changes(&mut ui), Vec::<String>::new(), "a preedit alone");
+    ui.dispatch(&Event::ImeDone);
+    assert_eq!(changes(&mut ui), ["かな"]);
+    ui.dispatch(&Event::ImeDone);
+    assert_eq!(changes(&mut ui), Vec::<String>::new(), "no duplicate");
+
+    let mut ui = focused_input("", 300.0, false);
+    changes(&mut ui);
+    ui.dispatch(&Event::ImePreedit {
+        text: "x".into(),
+        cursor: Some((1, 1)),
+    });
+    ui.dispatch(&Event::PointerDown {
+        x: 500.0,
+        y: 500.0,
+        button: Button::Primary,
+        mods: Mods::default(),
+    });
+    assert_eq!(ui.focused(), None);
+    assert_eq!(changes(&mut ui), ["x"]);
 }

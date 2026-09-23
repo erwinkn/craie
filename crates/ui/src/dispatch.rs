@@ -161,8 +161,10 @@ impl Ui {
         }
         if let Some(old) = self.focus {
             if self.host.kind(old) == Some(NodeKind::Input) {
+                // A composition in progress becomes committed text.
                 self.inputs.finish_compose(&mut self.text, old.0);
                 self.host.dirty.content.push(old.0);
+                self.emit_change(old);
             }
             if self.host.interaction(old).listeners & mask::FOCUS != 0 {
                 self.pending_events.push(self.event(out_kind::BLUR, old));
@@ -269,6 +271,7 @@ impl Ui {
                 if let Some(f) = self.focus {
                     self.inputs.finish_compose(&mut self.text, f.0);
                     self.input_changed(f);
+                    self.emit_change(f);
                 }
             }
             Event::Focus(gained) => {
