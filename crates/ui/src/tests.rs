@@ -2034,6 +2034,55 @@ fn composition_undo_restores_the_replaced_text() {
     assert_eq!(ui.inputs.text(0), "かな");
     key(&mut ui, Key::Unknown, Some("z"), meta());
     assert_eq!(ui.inputs.text(0), "hello");
+
+    // Copy and caret moves during the composition keep the group.
+    let preedit = |ui: &mut Ui, t: &str| {
+        ui.dispatch(&Event::ImePreedit {
+            text: t.into(),
+            cursor: (!t.is_empty()).then_some((t.len(), t.len())),
+        })
+    };
+    let mut ui = focused_input("hello", 300.0, false);
+    key(&mut ui, Key::Unknown, Some("a"), meta());
+    preedit(&mut ui, "か");
+    key(&mut ui, Key::Unknown, Some("c"), meta());
+    key(&mut ui, Key::Left, None, Mods::default());
+    preedit(&mut ui, "");
+    ui.dispatch(&Event::ImeCommit("かな".into()));
+    key(&mut ui, Key::Unknown, Some("z"), meta());
+    assert_eq!(ui.inputs.text(0), "hello", "copy and moves keep the group");
+
+    // Undo during a composition ends the group: the next commit records
+    // its own entry and ends the redo history.
+    let mut ui = focused_input("hello", 300.0, false);
+    key(&mut ui, Key::Unknown, Some("a"), meta());
+    preedit(&mut ui, "か");
+    key(&mut ui, Key::Unknown, Some("z"), meta());
+    assert_eq!(ui.inputs.text(0), "hello");
+    preedit(&mut ui, "");
+    ui.dispatch(&Event::ImeCommit("x".into()));
+    let after_commit = ui.inputs.text(0);
+    key(&mut ui, Key::Unknown, Some("z"), meta());
+    assert_eq!(
+        ui.inputs.text(0),
+        "hello",
+        "undo returns to before the commit"
+    );
+    key(
+        &mut ui,
+        Key::Unknown,
+        Some("z"),
+        Mods {
+            meta: true,
+            shift: true,
+            ..Mods::default()
+        },
+    );
+    assert_eq!(
+        ui.inputs.text(0),
+        after_commit,
+        "redo gives the commit, not the old preedit"
+    );
 }
 
 /// `onChangeText` fires for committed-text changes only: not for caret

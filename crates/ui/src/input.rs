@@ -260,6 +260,7 @@ impl Inputs {
     pub fn set_text(&mut self, id: u32, value: &str) {
         if let Some(state) = self.map.get_mut(&id) {
             state.record_undo(false);
+            state.compose_undo = false;
             state.editor.set_text(value);
         }
     }
@@ -304,8 +305,21 @@ impl Inputs {
         let Some(state) = self.map.get_mut(&id) else {
             return false;
         };
-        // A key action ends any composition's undo grouping.
-        state.compose_undo = false;
+        // An edit ends a composition's undo grouping; navigation,
+        // selection, and copy leave composition (and its group) alone.
+        if matches!(
+            action,
+            KeyAction::Insert(_)
+                | KeyAction::Newline
+                | KeyAction::Backspace
+                | KeyAction::Delete
+                | KeyAction::BackspaceWord
+                | KeyAction::DeleteWord
+                | KeyAction::Cut
+                | KeyAction::Paste
+        ) {
+            state.compose_undo = false;
+        }
         // Insertions and cuts only replace the selection: they read no
         // layout, and their reshape makes it clean.
         let reads_layout = !matches!(
@@ -430,6 +444,7 @@ impl Inputs {
             state.undo.push(current);
         }
         state.coalescing_insert = false;
+        state.compose_undo = false;
         state.restore(text, snap);
         true
     }
@@ -468,7 +483,12 @@ impl Inputs {
         let Some(state) = self.map.get_mut(&id) else {
             return;
         };
-        if !std::mem::take(&mut state.compose_undo) {
+        if std::mem::take(&mut state.compose_undo) {
+            // Joins the entry the composition recorded; a new edit still
+            // ends the redo history.
+            state.redo.clear();
+            state.coalescing_insert = false;
+        } else {
             state.record_undo(false);
         }
         state.editor.insert_or_replace_selection(text, s);
