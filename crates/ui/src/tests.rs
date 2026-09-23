@@ -1157,4 +1157,11 @@ fn node_ids_stay_dense() {
         t.create(id, NodeKind::View);
     }
     ui.apply_txn(&t).unwrap();
+    // Many creates that each jump the slack still fail: the limit
+    // counts nodes created, not ids reached.
+    let mut t = Transaction::new(3);
+    for k in 1..=4u32 {
+        t.create(100 + k * 4000, NodeKind::View);
+    }
+    assert!(ui.apply_txn(&t).is_err());
 }

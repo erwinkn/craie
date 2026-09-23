@@ -59,8 +59,8 @@ struct Overlay<'h> {
     /// link made before its parent's removal is an orphan (the host
     /// detaches the children of a removed node).
     removed: HashMap<u32, usize>,
-    /// Ids the batch created beyond the host's slots so far.
-    grown: u32,
+    /// Creates validated so far in the batch.
+    created: u32,
 }
 
 impl Overlay<'_> {
@@ -99,7 +99,7 @@ pub fn validate(host: &Host, txn: &Transaction<'_>) -> Result<(), WireError> {
         kinds: HashMap::new(),
         parents: HashMap::new(),
         removed: HashMap::new(),
-        grown: 0,
+        created: 0,
     };
     let need_live = |o: &Overlay, id: u32, why: &'static str| {
         if o.live(id) {
@@ -117,15 +117,12 @@ pub fn validate(host: &Host, txn: &Transaction<'_>) -> Result<(), WireError> {
                     return Err(invalid("create beyond the node id limit"));
                 }
                 // Ids stay dense: the bridge allocates them in order and
-                // recycles freed ones, so a create never jumps far past
-                // the slots in use. Memory grows with nodes sent, not
-                // with the largest id named.
-                let slots = host.slot_count() as u32 + o.grown;
-                if *id >= slots + ID_SLACK {
+                // recycles freed ones, so a batch never names an id far
+                // past the slots in use plus the nodes it creates. Memory
+                // grows with nodes sent, not with the largest id named.
+                o.created += 1;
+                if *id >= host.slot_count() as u32 + o.created + ID_SLACK {
                     return Err(invalid("create leaves a gap in node ids"));
-                }
-                if *id >= slots {
-                    o.grown += *id + 1 - slots;
                 }
                 if o.live(*id) {
                     return Err(invalid("create over a live node"));

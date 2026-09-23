@@ -159,16 +159,21 @@ fn clip_coverage(dev: vec2<f32>, first: u32) -> f32 {
         let center = (lo + hi) * 0.5;
         let half = (hi - lo) * 0.5;
         // An open axis (overflow visible) bounds nothing.
-        var d: f32;
+        // Distance in local units -> device px: a local axis changes by
+        // the length of its inverse-matrix row per device pixel.
+        let per_px_x = max(length(vec2<f32>(c.ia, c.ic)), 1e-6);
+        let per_px_y = max(length(vec2<f32>(c.ib, c.id)), 1e-6);
+        var d_px: f32;
         switch (c.flags & 3u) {
-            case 1u: { d = abs(lp.y - center.y) - half.y; }
-            case 2u: { d = abs(lp.x - center.x) - half.x; }
-            case 3u: { d = -1.0e9; }
-            default: { d = sd_rect(lp - center, half, c.radius); }
+            case 1u: { d_px = (abs(lp.y - center.y) - half.y) / per_px_y; }
+            case 2u: { d_px = (abs(lp.x - center.x) - half.x) / per_px_x; }
+            case 3u: { d_px = -1.0e9; }
+            default: {
+                let px = 1.0 / sqrt(max(abs(c.ia * c.id - c.ib * c.ic), 1e-12));
+                d_px = sd_rect(lp - center, half, c.radius) * px;
+            }
         }
-        // Distance in local units -> device px.
-        let px = 1.0 / sqrt(max(abs(c.ia * c.id - c.ib * c.ic), 1e-12));
-        cov = cov * clamp(0.5 - d * px, 0.0, 1.0);
+        cov = cov * clamp(0.5 - d_px, 0.0, 1.0);
         id = c.parent;
     }
     return cov;
