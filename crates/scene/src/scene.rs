@@ -273,8 +273,9 @@ impl Scene {
 
     /// World-space bounds of a chunk in device pixels, as drawn: from
     /// the origin the shader uses (snapped to the pixel grid in a space
-    /// that snaps), with 1 px of margin for anti-aliased edges (a rect's
-    /// quad reaches 1 px past it).
+    /// that snaps), with 2 device px of margin along each local axis
+    /// (rect and glyph quads reach 1 px past their shapes for
+    /// anti-aliasing; snapped rect edges move up to half a pixel).
     pub fn chunk_world_bounds(&self, id: u32) -> Rect {
         let c = &self.chunks[id as usize];
         let p = self.placements[id as usize];
@@ -288,13 +289,20 @@ impl Scene {
         }
         w.0[4] = origin.x;
         w.0[5] = origin.y;
-        let b = w.map_rect(&c.bounds);
-        Rect::new(
-            b.origin.x - 1.0,
-            b.origin.y - 1.0,
-            b.size.width + 2.0,
-            b.size.height + 2.0,
-        )
+        // Local units per 2 device px along each local axis (from the
+        // matrix's column lengths); a collapsed axis draws nothing wider.
+        let margin = |a: f32, b: f32| {
+            let len = a.hypot(b);
+            if len > 1e-6 { 2.0 / len } else { 0.0 }
+        };
+        let (mx, my) = (margin(w.0[0], w.0[1]), margin(w.0[2], w.0[3]));
+        let b = c.bounds;
+        w.map_rect(&Rect::new(
+            b.origin.x - mx,
+            b.origin.y - my,
+            b.size.width + 2.0 * mx,
+            b.size.height + 2.0 * my,
+        ))
     }
 
     /// Derives world matrices and clip rows, then (re)builds the draw
@@ -611,15 +619,25 @@ impl Scene {
                                     lo = [lo[0].min(p.x), lo[1].min(p.y)];
                                     hi = [hi[0].max(p.x), hi[1].max(p.y)];
                                     geometry.extend([p.x, p.y]);
-                                    if last_paint == Some((v.paint, v.info >> 31)) {
-                                        continue;
-                                    }
-                                    last_paint = Some((v.paint, v.info >> 31));
                                     let at = v.paint as usize;
                                     if v.info & PathVertex::GRADIENT == 0 {
+                                        // Every vertex's paint: where one
+                                        // paint ends and the next starts.
                                         mix(words[at] as u64);
                                         continue;
                                     }
+                                    // Where the vertex falls in gradient
+                                    // space: what the fragment evaluates.
+                                    let m = |k: usize| f32::from_bits(words[at + 5 + k]);
+                                    geometry.extend([
+                                        m(0) * v.pos[0] + m(2) * v.pos[1] + m(4),
+                                        m(1) * v.pos[0] + m(3) * v.pos[1] + m(5),
+                                    ]);
+                                    mix(words[at] as u64 | 1 << 40);
+                                    if last_paint == Some(v.paint) {
+                                        continue;
+                                    }
+                                    last_paint = Some(v.paint);
                                     let head = words[at];
                                     mix(head as u64 | 1 << 40);
                                     let n = (head >> 16) as usize;
@@ -797,9 +815,9 @@ mod tests {
             .clone();
         assert_eq!(cmds.len(), 5);
         assert!(
-            // The chunk's rect plus 1 px of anti-aliasing margin,
+            // The chunk's rect plus 2 px of anti-aliasing margin,
             // clipped to the screen.
-            matches!(cmds[1], DrawCmd::BeginLayer { opacity, bounds: [0, 19, 11, 31] } if opacity == 0.5)
+            matches!(cmds[1], DrawCmd::BeginLayer { opacity, bounds: [0, 18, 12, 32] } if opacity == 0.5)
         );
         assert_eq!(cmds[3], DrawCmd::EndLayer);
         // Zero opacity skips the subtree entirely.
@@ -940,11 +958,11 @@ mod tests {
             s.prepare(Size::new(100.0, 100.0), &mut missing).visible,
             [0]
         );
-        // The bounds start at the snapped origin (0), less the 1 px
+        // The bounds start at the snapped origin (0), less the 2 px
         // anti-aliasing margin.
         let b = s.chunk_world_bounds(0);
-        assert_eq!((b.origin.x, b.origin.y), (-1.0, 7.0));
-        assert!((b.size.width - 2.4).abs() < 1e-6);
+        assert_eq!((b.origin.x, b.origin.y), (-2.0, 6.0));
+        assert!((b.size.width - 4.4).abs() < 1e-6);
         // Far off screen: culled.
         let mut s = one_mesh(None, Affine::IDENTITY, -5.0);
         assert!(
@@ -990,6 +1008,76 @@ mod tests {
         let (ra, rb) = (view(&a), view(&b));
         assert!((ra[0].bounds.origin.x - rb[0].bounds.origin.x).abs() < 0.01);
         assert!(!same(&a, &b), "rotated");
+    }
+
+    /// S5A-11 and S5A-12: the view records which triangle has which
+    /// paint (not only the paint sequence), and where each vertex falls
+    /// in gradient space (a same-sized device mesh from another local
+    /// size samples the gradient elsewhere).
+    #[test]
+    fn mesh_resolve_sees_paint_runs_and_gradient_space() {
+        let tris = |colors: [u32; 3]| {
+            let mut s = Scene::new();
+            let root = s.transforms.alloc(Affine::IDENTITY, NONE);
+            s.transforms.set_order(vec![root]);
+            let mut w = ChunkWriter::new();
+            for (k, c) in colors.into_iter().enumerate() {
+                let x = k as f32 * 10.0;
+                let p = w.paint(c);
+                assert!(w.mesh(&[[x, 0.0], [x + 8.0, 0.0], [x, 8.0]], &[0, 1, 2], p, false));
+            }
+            s.commit_chunk(0, &mut w);
+            s.set_placement(
+                0,
+                Placement {
+                    offset: [0.0, 0.0],
+                    transform: root,
+                    clip: NONE,
+                },
+            );
+            s.set_order(vec![OrderItem::Chunk(0)], vec![]);
+            s.transforms.derive();
+            s
+        };
+        let same = |a: &Scene, b: &Scene| {
+            let (a, b) = (a.resolve(&|_| 0), b.resolve(&|_| 0));
+            a.len() == b.len() && a.iter().zip(&b).all(|(x, y)| x.close_to(y, 0.01))
+        };
+        let (r, b) = (0xFF00_00FF, 0x0000_FFFF);
+        assert!(same(&tris([r, b, b]), &tris([r, b, b])));
+        assert!(!same(&tris([r, b, b]), &tris([r, r, b])), "paint runs");
+
+        let g = crate::chunk::GradientPaint {
+            kind: crate::prim::gradient::LINEAR,
+            geometry: [0.0, 0.0, 64.0, 0.0],
+            to_gradient: [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+            stops: vec![(0.0, r), (1.0, b)],
+        };
+        let square = |size: f32, scale: f32| {
+            let mut s = Scene::new();
+            let root = s.transforms.alloc(Affine::scale(scale, scale), NONE);
+            s.transforms.set_order(vec![root]);
+            let mut w = ChunkWriter::new();
+            let slot = w.gradient(&g);
+            let v = [[0.0, 0.0], [size, 0.0], [size, size], [0.0, size]];
+            assert!(w.mesh(&v, &[0, 1, 2, 0, 2, 3], slot, true));
+            s.commit_chunk(0, &mut w);
+            s.set_placement(
+                0,
+                Placement {
+                    offset: [0.0, 0.0],
+                    transform: root,
+                    clip: NONE,
+                },
+            );
+            s.set_order(vec![OrderItem::Chunk(0)], vec![]);
+            s.transforms.derive();
+            s
+        };
+        assert!(same(&square(64.0, 1.0), &square(64.0, 1.0)));
+        let (a, b2) = (square(64.0, 1.0), square(32.0, 2.0));
+        assert!(a.resolve(&|_| 0)[0].bounds == b2.resolve(&|_| 0)[0].bounds);
+        assert!(!same(&a, &b2), "gradient space");
     }
 
     /// S5A-05: a mesh with a partial triangle, an index out of range, or

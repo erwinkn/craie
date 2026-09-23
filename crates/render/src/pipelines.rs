@@ -83,7 +83,7 @@ fn pipeline(
     gpu: &Gpu,
     label: &str,
     module: &wgpu::ShaderModule,
-    vs: &str,
+    (vs, fs): (&str, &str),
     topology: wgpu::PrimitiveTopology,
     layouts: &[Option<&wgpu::BindGroupLayout>],
     format: wgpu::TextureFormat,
@@ -108,7 +108,7 @@ fn pipeline(
             },
             fragment: Some(wgpu::FragmentState {
                 module,
-                entry_point: Some("fs_main"),
+                entry_point: Some(fs),
                 compilation_options: Default::default(),
                 targets: &[Some(wgpu::ColorTargetState {
                     format,
@@ -181,31 +181,31 @@ pub fn build(gpu: &Gpu, format: wgpu::TextureFormat) -> Pipelines {
     use wgpu::PrimitiveTopology::{TriangleList, TriangleStrip};
     let both = |label: &str,
                 module: &wgpu::ShaderModule,
-                vs: &str,
+                entries: (&str, &str),
                 topology,
                 layouts: &[Option<&wgpu::BindGroupLayout>]| {
-        [1, MSAA].map(|n| pipeline(gpu, label, module, vs, topology, layouts, format, n))
+        [1, MSAA].map(|n| pipeline(gpu, label, module, entries, topology, layouts, format, n))
     };
     let scene_layouts = [Some(&scene_bgl), Some(&atlas_bgl)];
     Pipelines {
         scene: both(
             "scene",
             &scene_module,
-            "vs_main",
+            ("vs_main", "fs_main"),
             TriangleStrip,
             &scene_layouts,
         ),
         path: both(
             "path",
             &scene_module,
-            "vs_path",
+            ("vs_path", "fs_path"),
             TriangleList,
             &scene_layouts,
         ),
         composite: both(
             "composite",
             &composite_module,
-            "vs_main",
+            ("vs_main", "fs_main"),
             TriangleStrip,
             &[Some(&composite_bgl)],
         ),

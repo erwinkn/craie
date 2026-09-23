@@ -103,6 +103,9 @@ fn vs_main(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> 
     let kind = ii >> 31u;
     let idx = ii & 0x7fffffffu;
     var out: VsOut;
+    // A primitive that covers nothing emits a degenerate quad (every
+    // corner at one point: no fragments).
+    let nothing = vec4<f32>(-2.0, -2.0, 0.0, 1.0);
     if (kind == 0u) {
         let r = rects[idx];
         let p = placements[r.chunk];
@@ -110,6 +113,12 @@ fn vs_main(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> 
         let origin = chunk_origin(w, p);
         let aligned = (w.flags & 1u) != 0u;
         let s = sqrt(abs(w.a * w.d - w.b * w.c));
+        // Column lengths: device px per local unit along each local axis.
+        let col = vec2<f32>(length(vec2<f32>(w.a, w.b)), length(vec2<f32>(w.c, w.d)));
+        if (!(r.w > 0.0 && r.h > 0.0) || col.x < 1e-6 || col.y < 1e-6) {
+            out.pos = nothing;
+            return out;
+        }
         var dev: vec2<f32>;
         if (aligned) {
             var p0 = origin + linear(w, vec2<f32>(r.x, r.y));
@@ -121,6 +130,11 @@ fn vs_main(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> 
             }
             let lo = min(p0, p1);
             let hi = max(p0, p1);
+            if (hi.x <= lo.x || hi.y <= lo.y) {
+                // Snapped to no area.
+                out.pos = nothing;
+                return out;
+            }
             // The quad reaches 1 px past the rect: every pixel its edge
             // touches runs the fragment with full sample coverage, so the
             // analytic coverage alone decides, single-sampled or not.
@@ -128,12 +142,14 @@ fn vs_main(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> 
             out.half = (hi - lo) * 0.5;
             out.local = dev - (lo + hi) * 0.5;
         } else {
-            // 1 device px of margin in rect units, as above.
-            let m = 1.0 / max(s, 1e-6);
-            let size = vec2<f32>(r.w, r.h) + vec2<f32>(2.0 * m);
-            dev = origin + linear(w, vec2<f32>(r.x - m, r.y - m) + corner * size);
+            // At least 1 device px of margin along each local axis, as
+            // above (the scene's culling bounds allow 2).
+            let m = vec2<f32>(1.0) / col;
+            let size = vec2<f32>(r.w, r.h) + 2.0 * m;
+            let lp = vec2<f32>(r.x, r.y) - m + corner * size;
+            dev = origin + linear(w, lp);
             out.half = vec2<f32>(r.w, r.h) * 0.5 * s;
-            out.local = (corner - vec2<f32>(0.5, 0.5)) * size * s;
+            out.local = (lp - vec2<f32>(r.x + r.w * 0.5, r.y + r.h * 0.5)) * s;
         }
         out.pos = to_ndc(dev);
         out.params = vec2<f32>(r.radius * s, r.border_width * s);
@@ -155,10 +171,14 @@ fn vs_main(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> 
         let origin = chunk_origin(w, p);
         // Bitmaps are rasterized at the display scale: at an unscaled
         // world a quad pixel is a device pixel. A bitmap made smaller to
-        // fit a page draws scaled up to its quad.
-        let dev = origin + linear(w, vec2<f32>(g.x, g.y) + corner * quad / vp.scale);
+        // fit a page draws scaled up to its quad. The quad reaches one
+        // bitmap pixel into the atlas gutter (transparent) on each side:
+        // edge pixels run with full sample coverage, so the bitmap alone
+        // decides their coverage at any sample count.
+        let texel = quad / max(size, vec2<f32>(1.0)) / vp.scale;
+        let dev = origin + linear(w, vec2<f32>(g.x, g.y) - texel + corner * (quad / vp.scale + 2.0 * texel));
         out.pos = to_ndc(dev);
-        out.local = (xy + corner * size) / vp.page;
+        out.local = (xy - vec2<f32>(1.0) + corner * (size + vec2<f32>(2.0))) / vp.page;
         out.color = unpack(paints[g.paint]);
         out.info = vec4<u32>(1u, p.clip, ras.page & 0xffffu, ras.page >> 16u);
     }
@@ -282,6 +302,35 @@ fn clip_coverage(dev: vec2<f32>, first: u32) -> f32 {
     return cov;
 }
 
+
+// Paths shade per sample (reading `sample_index` asks for it): the
+// clip is a hard inside test at each sample's position, so
+// multisampling alone gives the edge coverage of a path and of its
+// clip, never their product. (`position` may be the pixel center here,
+// so the sample position comes from the pattern.)
+@fragment
+fn fs_path(in: VsOut, @builtin(sample_index) sample: u32) -> @location(0) vec4<f32> {
+    if (in.info.y != NONE) {
+        // The standard 4-sample positions (Vulkan, Metal, D3D) from the
+        // pixel's top-left: where the rasterizer tests mesh coverage.
+        var samples = array<vec2<f32>, 4>(
+            vec2<f32>(0.375, 0.125),
+            vec2<f32>(0.875, 0.375),
+            vec2<f32>(0.125, 0.625),
+            vec2<f32>(0.625, 0.875),
+        );
+        let at = floor(in.pos.xy) + samples[sample & 3u] + vp.origin;
+        if (clip_coverage(at, in.info.y) < 0.5) {
+            discard;
+        }
+    }
+    var c = in.color;
+    if (in.info.w != 0u) {
+        c = gradient_color(in.info.z, in.local);
+    }
+    return vec4<f32>(c.rgb * c.a, c.a);
+}
+
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     var cov = 1.0;
@@ -292,14 +341,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         }
     }
     var out: vec4<f32>;
-    if (in.info.x == 2u) {
-        // Path: coverage comes from multisampling.
-        var c = in.color;
-        if (in.info.w != 0u) {
-            c = gradient_color(in.info.z, in.local);
-        }
-        out = vec4<f32>(c.rgb * c.a, c.a);
-    } else if (in.info.x == 0u) {
+    if (in.info.x == 0u) {
         let d = sd_rect(in.local, in.half, in.params.x);
         if (in.info.w != 0u) {
             // Border ring occupies the outer params.y px of the rect.

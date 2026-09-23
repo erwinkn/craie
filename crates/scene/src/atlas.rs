@@ -407,11 +407,28 @@ fn blit(page: &mut Page, page_size: u32, bpp: u32, x: u16, y: u16, w: u32, h: u3
     let stride = (page_size * bpp) as usize;
     let row = (w * bpp) as usize;
     let (x, y) = (x as usize, y as usize);
+    let b = bpp as usize;
     for r in 0..h as usize {
-        let dst = (y + r) * stride + x * bpp as usize;
+        let dst = (y + r) * stride + x * b;
         page.data[dst..dst + row].copy_from_slice(&src[r * row..r * row + row]);
+        // The gutter columns, cleared: a reused slot may hold an evicted
+        // bitmap's pixels, and glyph quads sample one gutter pixel out.
+        let left = dst - GUTTER as usize * b;
+        page.data[left..dst].fill(0);
+        page.data[dst + row..dst + row + GUTTER as usize * b].fill(0);
     }
-    let rect = RectPx::new(x as u32, y as u32, x as u32 + w, y as u32 + h);
+    let g = GUTTER as usize;
+    let full = (w as usize + 2 * g) * b;
+    for gy in (y - g..y).chain(y + h as usize..y + h as usize + g) {
+        let at = gy * stride + (x - g) * b;
+        page.data[at..at + full].fill(0);
+    }
+    let rect = RectPx::new(
+        (x - g) as u32,
+        (y - g) as u32,
+        (x + w as usize + g) as u32,
+        (y + h as usize + g) as u32,
+    );
     for slot in [&mut page.dirty, &mut page.used] {
         match slot {
             Some(d) => d.union(rect),
@@ -423,6 +440,33 @@ fn blit(page: &mut Page, page_size: u32, bpp: u32, x: u16, y: u16, w: u32, h: u3
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A raster placed in a reused slot clears its 1 px gutter (glyph
+    /// quads sample it): no pixel of an evicted bitmap stays beside it.
+    #[test]
+    fn inserts_clear_their_gutter() {
+        // One page, filled by one bitmap (62 + 2 gutter = 64).
+        let mut atlas = RasterAtlas::with_budget(64, 1, 0);
+        let big = atlas.new_id(62, 62, false);
+        atlas.insert(big, &[255u8; 62 * 62]);
+        // A later epoch: the next insert evicts it and reuses its area.
+        atlas.begin_epoch();
+        let small = atlas.new_id(8, 8, false);
+        atlas.insert(small, &[128u8; 64]);
+        assert_eq!(atlas.stats.evictions, 1);
+        let e = atlas.entry(small);
+        assert!(e.resident);
+        let (x, y) = (e.x as usize, e.y as usize);
+        let (data, _) = atlas.page_bytes(false, 0);
+        let px = |x: usize, y: usize| data[y * 64 + x];
+        for k in 0..10 {
+            assert_eq!(px(x - 1, y + k.min(7)), 0, "left gutter");
+            assert_eq!(px(x + 8, y + k.min(7)), 0, "right gutter");
+            assert_eq!(px(x - 1 + k, y - 1), 0, "top gutter");
+            assert_eq!(px(x - 1 + k, y + 8), 0, "bottom gutter");
+        }
+        assert_eq!(px(x, y), 128);
+    }
 
     fn fill(atlas: &mut RasterAtlas, n: usize) -> Vec<RasterId> {
         (0..n)

@@ -794,10 +794,15 @@ and render target so a host can embed it.
   concrete limitation.
 - Paths anti-alias by 4x MSAA, only in frames that draw them (2026-09-23,
   step 5a). Tessellated triangles have hard edges; rects and glyphs
-  already anti-alias analytically and render the same either way (a
-  rect's quad reaches 1 px past its edges, so the analytic coverage
-  alone decides its edge pixels at any sample count; culling and layer
-  bounds use the snapped origin plus that 1 px).
+  already anti-alias analytically and render the same either way: a
+  rect's quad reaches at least 1 device px past its edges along each
+  local axis, and a glyph's one texel into the atlas gutter (cleared on
+  every insert), so their own coverage alone decides their edge pixels
+  at any sample count; zero-area rects emit no quad; culling and layer
+  bounds use the snapped origin plus 2 device px per local axis. Paths
+  shade per sample, testing their clip at each sample's position (the
+  standard 4-sample pattern), so path and clip coverage never
+  multiply.
   Frames without paths keep their cost (no multisampled target exists
   until a path draws). The multisampled attachment is stored, not
   transient: a layer's composite reopens its parent's pass, which must

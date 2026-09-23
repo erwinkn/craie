@@ -164,3 +164,7 @@ Reviewer minors and nitpicks not fixed yet.
   layer bounds, gradients without stops, mesh entries in the rebuild
   oracle, malformed meshes, non-finite tessellation output): fixed in
   step 5a round 1.
+- S5A-07..12 (glyph and clip coverage in multisampled frames,
+  zero-area rects, transform-aware quad margins and layer bounds, paint
+  runs and gradient space in the rebuild oracle): fixed in step 5a
+  round 2.
