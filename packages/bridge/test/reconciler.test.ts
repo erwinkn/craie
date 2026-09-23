@@ -1,6 +1,6 @@
 import { test, expect } from "bun:test"
 import { Activity, createElement } from "react"
-import { createRoot, View, Text, TextInput, ScrollView, Pressable, Bars, List, ROLE } from "../src/index.js"
+import { createRoot, View, Text, TextInput, ScrollView, Pressable, Bars, List, ROLE, Vector } from "../src/index.js"
 import { CraieHost } from "../src/host.js"
 import type { HostNode, Transport, UiEvent } from "../src/host.js"
 import { readFrame } from "./crw2.js"
@@ -747,4 +747,32 @@ test("a rejected animate call writes nothing and holds nothing", async () => {
     kind: 15, node: id, generation: 0, revision: 0, x: 0, y: 0, a: 0, b: 0, key: 1, text: "",
   })
   expect(await ok).toEqual({ finished: true, reason: "finished" })
+})
+
+// Step 5b: a Vector node carries its asset as a payload (identity
+// compare), and is an image for assistive technology by default.
+test("vectors send their asset once per change", async () => {
+  const t = new FakeTransport()
+  const root = createRoot(t)
+  const a = new Uint8Array([1, 2, 3])
+  const b = new Uint8Array([4, 5])
+  function App({ asset, bg }: { asset: Uint8Array; bg: string }) {
+    return createElement(Vector, { asset, backgroundColor: bg, accessibilityLabel: "logo" })
+  }
+  root.renderSync(createElement(App, { asset: a, bg: "#000000" }))
+  await tick()
+  const ops = t.ops(0)
+  const create = ops.find(o => o.tag === 0x01)!
+  expect(create.f[0]).toBe(5)
+  const payload = ops.find(o => o.tag === 0x71)!
+  expect([...payload.bytes!]).toEqual([1, 2, 3])
+  expect(ops.find(o => o.tag === 0x50)!.f[0]).toBe(ROLE.image)
+  t.frames.length = 0
+  root.renderSync(createElement(App, { asset: a, bg: "#ffffff" }))
+  await tick()
+  expect(t.ops().some(o => o.tag === 0x71)).toBe(false)
+  t.frames.length = 0
+  root.renderSync(createElement(App, { asset: b, bg: "#ffffff" }))
+  await tick()
+  expect([...t.ops().find(o => o.tag === 0x71)!.bytes!]).toEqual([4, 5])
 })

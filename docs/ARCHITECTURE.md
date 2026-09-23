@@ -707,6 +707,20 @@ are solid colors and linear and radial gradients (pad spread). The
 scene draws meshes and never sees lyon (layer map test). Surfaces
 (step 1) remain for native painters that emit quads.
 
+Step 5b: SVG is imported at build time. `tools/svg-import` (library
+and the `craie-svg in.svg out.crv` tool) runs usvg and writes a
+`CRV1` asset (`craie_vector::asset`: view box, paints, and items of
+path, fill rule or stroke, paint, opacity, and transform), reporting
+every feature it cannot represent (the tool fails on one unless
+`--lenient`). A `Vector` node (kind 5) takes the asset as its payload;
+validation decodes it (a bad asset rejects the transaction). Its view
+box is its intrinsic size (a set dimension scales the other); the
+drawing fits the content box, centered, aspect kept. Each item
+tessellates in its own space at a quarter device pixel of tolerance,
+maps into the chunk, and is cached per node until the content box, the
+display scale, or the asset changes. JS: `<Vector asset={bytes} />`,
+an image for assistive technology by default.
+
 **Target.** Paths, fills, strokes, joins, caps, gradients, affine
 transforms, clips, group opacity. Two preparation strategies stay
 possible behind `PathRecord`: tessellation and coverage/strip
@@ -725,6 +739,12 @@ fills, strokes, gradients, transforms, clips, images, group opacity.
 - SVG imports at build time only, via usvg, into prepared path assets.
   usvg stays out of the shipped binary. Runtime import waits for a
   product feature.
+- Assets keep paths, not meshes (2026-09-23, step 5b): tessellation runs
+  at the display scale on the device, so a drawing is as smooth at 16
+  px as at 512 and one asset serves every size. Group opacity folds into
+  each item's paint (exact when a group's children do not overlap; the
+  importer reports the other case). Unsupported SVG features are
+  reported, never silently dropped (`LEDGER.md` DF-6).
 
 ## 10. Glyph atlas and resources
 

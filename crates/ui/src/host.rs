@@ -221,6 +221,14 @@ pub struct SurfaceData {
     pub payload: Vec<u8>,
 }
 
+/// A vector node's asset: its bytes (as sent) and their decoding.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct VectorData {
+    pub bytes: Vec<u8>,
+    /// `None` until a payload arrives.
+    pub asset: Option<std::sync::Arc<craie_vector::asset::Asset>>,
+}
+
 /// Revisions. A derived value records the revisions it was built from
 /// and is valid while they are unchanged.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -272,6 +280,8 @@ pub struct Host {
     /// nodes have any.
     pub transitions: HashMap<u32, Vec<crate::animation::Transition>>,
     pub surfaces: HashMap<u32, SurfaceData>,
+    /// Vector nodes' assets, id-keyed.
+    pub vectors: HashMap<u32, VectorData>,
     /// Item index of a list row (a child of a List node); NIL otherwise.
     pub list_index: Vec<u32>,
     /// List states and scroll anchors (§7).
@@ -323,6 +333,7 @@ impl Host {
             labels: HashMap::new(),
             transitions: HashMap::new(),
             surfaces: HashMap::new(),
+            vectors: HashMap::new(),
             list_index: Vec::new(),
             lists: crate::list::Lists::default(),
             revs: Revs::default(),
@@ -447,10 +458,14 @@ impl Host {
         self.labels.remove(&id.0);
         self.transitions.remove(&id.0);
         self.surfaces.remove(&id.0);
+        self.vectors.remove(&id.0);
         self.list_index[i] = NIL;
         self.lists.forget(id.0);
         if kind == NodeKind::Surface {
             self.surfaces.insert(id.0, SurfaceData::default());
+        }
+        if kind == NodeKind::Vector {
+            self.vectors.insert(id.0, VectorData::default());
         }
         self.live += 1;
         self.revs.structure.bump();
@@ -542,6 +557,7 @@ impl Host {
         self.labels.remove(&id.0);
         self.transitions.remove(&id.0);
         self.surfaces.remove(&id.0);
+        self.vectors.remove(&id.0);
         self.list_index[i] = NIL;
         self.lists.forget(id.0);
         let generation = self.nodes[i].generation.wrapping_add(1);

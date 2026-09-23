@@ -469,6 +469,28 @@ gone with it.
   (130, 0, 125)); a mesh inside a 0.5 opacity layer composites to 188
   (white over black in sRGB).
 
+### Step 5b: build-time SVG assets and vector nodes
+
+- `tools/svg-import` (usvg 0.46, default features off: no system fonts)
+  imports fills and strokes, view boxes, transforms, fill, stroke, and
+  group opacity, and linear and radial gradients (objectBoundingBox
+  units resolved), and reports the rest; its output decodes back to
+  itself. The asset decoder refuses every truncation and a sweep of
+  single-byte corruptions without panicking, and checks counts against
+  the bytes before allocating.
+- `examples/vector` (headless, 2x): four icons (cubic heart, radial
+  gradient disc with a ring, linear gradient star with round joins,
+  even-odd ring with a round-capped check) at 16, 32, and 64 pt draw as
+  the SVG specifies; all twelve share one multisampled layer (content
+  between them is disjoint).
+- The rebuild oracle creates vector nodes (three assets) in its random
+  sequences; with the snapshot's vector payloads removed it fails. The
+  animation twin now takes the animated Ui's scroll offsets before
+  comparing: a tween that shrank content clamps an offset the twin
+  never clamps (seed 8 found it once the stream changed).
+- The wire fixture (JS-written bytes) carries a vector node and a
+  hand-built asset that decodes natively.
+
 ### E14: layout-aware virtualization, list versus a plain column (step 2)
 
 `cargo run --release -p craie-harness --example e14_lists`: a scroller

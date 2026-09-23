@@ -711,6 +711,7 @@ impl Ui {
             NodeKind::Text => self.build_text(id, &data, &mut w),
             NodeKind::Input => self.build_input(id, &data, &mut w),
             NodeKind::Surface => self.build_surface(id, &data, &mut w),
+            NodeKind::Vector => self.build_vector(id, &data, &mut w),
             NodeKind::View | NodeKind::List => {}
         }
         self.scene.commit_chunk(id.0, &mut w);

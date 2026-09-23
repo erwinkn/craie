@@ -244,6 +244,27 @@ export function Surface(props: SurfaceProps) {
   return createElement("surface", props)
 }
 
+export interface VectorProps extends ListenerProps {
+  style?: StyleProps
+  backgroundColor?: string | number
+  borderRadius?: number
+  borderColor?: string | number
+  borderWidth?: number
+  /** A vector asset: the bytes `craie-svg in.svg out.crv` writes (SVG
+   * is imported at build time). Its view box is the node's intrinsic
+   * size; the drawing fits its content box, centered, aspect kept. */
+  asset: Uint8Array
+  accessibilityLabel?: string
+  accessibilityRole?: AccessibilityRole
+  hidden?: boolean
+}
+
+/** A vector drawing (icons, illustrations) from a prepared asset. An
+ * image for assistive technology unless a role is given. */
+export function Vector(props: VectorProps) {
+  return createElement("vector", { accessibilityRole: "image", ...props })
+}
+
 /** Bar chart surface (`SURFACE.bars`). */
 export function Bars({ values, color, maxColor, gap, ...props }: BarsProps) {
   return createElement("surface", {

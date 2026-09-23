@@ -90,6 +90,11 @@ pub fn snapshot(ui: &Ui) -> Transaction<'static> {
         if let Some(label) = host.label(id) {
             t.label(id.0, label.to_string());
         }
+        if let Some(v) = host.vectors.get(&id.0)
+            && !v.bytes.is_empty()
+        {
+            t.payload(id.0, v.bytes.clone());
+        }
         if let Some(sd) = host.surfaces.get(&id.0) {
             t.surface(id.0, sd.kind, sd.params);
             if !sd.payload.is_empty() {
@@ -430,6 +435,61 @@ const WORDS: &[&str] = &[
     "of",
 ];
 
+/// One of three small vector assets: a filled square with a hole
+/// (even-odd), a stroked circle, and a gradient triangle.
+fn vector_asset(which: u32) -> Vec<u8> {
+    use craie_vector::asset::{Asset, Item, ItemStyle, encode};
+    use craie_vector::{FillRule, Paint, Path, Stroke};
+    let item = |path: Path, style, paint| Item {
+        path,
+        style,
+        paint,
+        opacity: 1.0,
+        transform: Affine::IDENTITY,
+    };
+    let asset = match which {
+        0 => {
+            let mut p = Path::rect(0.0, 0.0, 24.0, 24.0);
+            p.verbs.extend(Path::rect(6.0, 6.0, 12.0, 12.0).verbs);
+            Asset {
+                view_box: [0.0, 0.0, 24.0, 24.0],
+                paints: vec![Paint::Solid(0x6DC7_FFFF)],
+                items: vec![item(p, ItemStyle::Fill(FillRule::EvenOdd), 0)],
+            }
+        }
+        1 => Asset {
+            view_box: [0.0, 0.0, 20.0, 20.0],
+            paints: vec![Paint::Solid(0xFFB0_40FF)],
+            items: vec![item(
+                Path::circle(10.0, 10.0, 7.0),
+                ItemStyle::Stroke(Stroke {
+                    width: 3.0,
+                    ..Stroke::default()
+                }),
+                0,
+            )],
+        },
+        _ => {
+            let mut p = Path::new();
+            p.move_to(0.0, 16.0)
+                .line_to(16.0, 16.0)
+                .line_to(8.0, 0.0)
+                .close();
+            Asset {
+                view_box: [0.0, 0.0, 32.0, 16.0],
+                paints: vec![Paint::Linear {
+                    start: [0.0, 0.0],
+                    end: [16.0, 0.0],
+                    stops: vec![(0.0, 0xFFFF_FFFF), (1.0, 0x3040_60FF)],
+                    transform: Affine::IDENTITY,
+                }],
+                items: vec![item(p, ItemStyle::Fill(FillRule::NonZero), 0)],
+            }
+        }
+    };
+    encode(&asset)
+}
+
 /// A reconciler-shaped model of the tree: which ids are live, their kind
 /// and parent, so generated mutations are valid.
 #[derive(Default)]
@@ -645,6 +705,7 @@ impl Gen {
             NodeKind::View,
             NodeKind::Text,
             NodeKind::Surface,
+            NodeKind::Vector,
         ]);
         let id = self.model.alloc();
         t.create(id, kind);
@@ -653,6 +714,15 @@ impl Gen {
                 let text = self.text();
                 let spans = self.spans(t, &text);
                 t.paragraph(id, text, &spans);
+            }
+            NodeKind::Vector => {
+                let asset = vector_asset(self.rng.below(3));
+                t.payload(id, asset);
+                if self.rng.chance(0.5) {
+                    let mut s = taffy::Style::default();
+                    s.size.width = length(16.0 + self.rng.below(64) as f32);
+                    t.layout(id, &s);
+                }
             }
             NodeKind::Surface => {
                 let n = 1 + self.rng.below(8);

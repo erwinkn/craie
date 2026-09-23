@@ -37,7 +37,7 @@ fn js_fixture_decodes_and_executes() {
     let host = &ui.host;
 
     // remove(1): view + input + surface + list + row remain.
-    assert_eq!(host.len(), 5);
+    assert_eq!(host.len(), 6);
     assert_eq!(host.kind(NodeId(0)), Some(NodeKind::View));
     let paint = host.paint[0];
     assert_eq!(paint.fill, 0x1122_33ff);
@@ -101,7 +101,10 @@ fn js_fixture_decodes_and_executes() {
     // Labels: set, then cleared.
     assert_eq!(host.label(NodeId(0)), Some("root container"));
     assert_eq!(host.label(NodeId(3)), None);
-    assert_eq!(host.children(NodeId(0)), [NodeId(3), NodeId(2), NodeId(4)]);
+    assert_eq!(
+        host.children(NodeId(0)),
+        [NodeId(3), NodeId(2), NodeId(4), NodeId(6)]
+    );
 
     // List: templates, items after two splices, a row, an anchor.
     let l = host.lists.get(4).unwrap();
@@ -162,4 +165,11 @@ fn js_fixture_decodes_and_executes() {
         ]
     );
     assert!(ui.animating());
+
+    // A vector node: the JS-written asset decodes natively.
+    assert_eq!(host.kind(NodeId(6)), Some(NodeKind::Vector));
+    let asset = host.vectors[&6].asset.as_ref().expect("asset decodes");
+    assert_eq!(asset.view_box, [0.0, 0.0, 10.0, 10.0]);
+    assert_eq!(asset.items.len(), 1);
+    assert_eq!(asset.paints[0], craie_vector::Paint::Solid(0x0080_ffff));
 }

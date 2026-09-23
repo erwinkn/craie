@@ -42,6 +42,9 @@ pub enum NodeKind {
     /// A virtualized list inside a scroll container: it owns its item
     /// count and extents and lays out only its rendered rows.
     List = 4,
+    /// A vector drawing from a prepared asset (`craie_vector::asset`,
+    /// payload bytes), fitted into its content box.
+    Vector = 5,
 }
 
 impl NodeKind {
@@ -52,6 +55,7 @@ impl NodeKind {
             2 => NodeKind::Input,
             3 => NodeKind::Surface,
             4 => NodeKind::List,
+            5 => NodeKind::Vector,
             _ => return None,
         })
     }

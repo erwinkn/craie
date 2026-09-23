@@ -28,6 +28,7 @@ pub mod surface;
 #[cfg(test)]
 mod tests;
 pub mod ui;
+pub mod vector;
 pub mod wire;
 
 pub use executor::validate;

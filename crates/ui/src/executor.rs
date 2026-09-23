@@ -357,11 +357,21 @@ pub fn validate(host: &Host, txn: &Transaction<'_>) -> Result<(), WireError> {
             | Mutation::Interaction { id, .. } => {
                 need_live(&o, *id, "semantics on an absent node")?;
             }
-            Mutation::Surface { id, .. } | Mutation::Payload { id, .. } => {
+            Mutation::Surface { id, .. } => {
                 if o.kind(*id) != Some(NodeKind::Surface) {
                     return Err(invalid("surface data on a non-surface node"));
                 }
             }
+            Mutation::Payload { id, bytes } => match o.kind(*id) {
+                Some(NodeKind::Surface) => {}
+                // A vector's payload is its asset: it must decode.
+                Some(NodeKind::Vector) => {
+                    if craie_vector::asset::decode(bytes).is_err() {
+                        return Err(invalid("vector asset does not decode"));
+                    }
+                }
+                _ => return Err(invalid("payload on a node without one")),
+            },
             Mutation::Command { id, cmd } => {
                 need_live(&o, *id, "command on an absent node")?;
                 match cmd {
@@ -743,6 +753,27 @@ impl Ui {
                     self.host.dirty.content.push(*id);
                 }
             }
+            Mutation::Payload { id, bytes }
+                if self.host.kind(NodeId(*id)) == Some(NodeKind::Vector) =>
+            {
+                let v = self.host.vectors.entry(*id).or_default();
+                if v.bytes[..] != bytes[..] {
+                    // Validated: it decodes.
+                    let asset = craie_vector::asset::decode(bytes)
+                        .ok()
+                        .map(std::sync::Arc::new);
+                    v.bytes.clear();
+                    v.bytes.extend_from_slice(bytes);
+                    v.asset = asset;
+                    self.host.copied_bytes += bytes.len() as u64;
+                    self.host.revs.resource.bump();
+                    self.host.dirty.content.push(*id);
+                    // The view box is its intrinsic size.
+                    self.host.revs.layout_input.bump();
+                    self.host.mark_layout(NodeId(*id));
+                    self.vector_meshes.remove(id);
+                }
+            }
             Mutation::Payload { id, bytes } => {
                 let s = self.host.surfaces.entry(*id).or_default();
                 if s.payload[..] != bytes[..] {
@@ -806,6 +837,7 @@ impl Ui {
             *t = None;
         }
         self.inputs.remove(node.0);
+        self.vector_meshes.remove(&node.0);
         self.animations.forget(node);
         self.layouts.forget(node);
     }

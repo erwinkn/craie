@@ -155,6 +155,35 @@ Reviewer minors and nitpicks not fixed yet.
 - Why deferred: behavior refinement, no correctness effect.
 - Resolves in: when a consumer reports it.
 
+### DF-6: SVG features the importer does not represent
+
+- Source: step 5b implementation (own finding).
+- Where: tools/svg-import/src/lib.rs (`Report`).
+- Claim: clip paths and masks (drawn unclipped), filters, blend modes,
+  patterns, images, text (outline it first), stroke dashes (drawn
+  solid), spreads other than pad, radial focal points (drawn centered),
+  and group opacity over overlapping children (folded into each item)
+  are not represented. The importer reports each one and fails unless
+  `--lenient`.
+- Why deferred: section 9's initial profile names clips, images, and
+  group opacity; they need scene support (path clips, image resources,
+  isolated groups inside a chunk) beyond meshes.
+- Resolves in: path clip records in the scene (clips), image resources
+  (section 10), and group layers inside vector chunks.
+
+### DF-7: vector detail follows the box, not the world scale
+
+- Source: step 5b implementation (own finding).
+- Where: crates/ui/src/vector.rs (`prepare`, the cache key).
+- Claim: tessellation tolerance comes from the content box and the
+  display scale; a transform that scales a vector node up (an
+  animation, a zoom) draws the same meshes larger, so curves can show
+  facets past about 4x.
+- Why deferred: re-tessellating on every scaled frame costs more than
+  the defect; transforms of vectors are rare in the target UIs.
+- Resolves in: keying the cache on the world scale in steps (powers of
+  two), or E07 (coverage preparation).
+
 ## Closed
 
 - S3A-14 (emoji presentation by the Unicode property, VS15/VS16) and

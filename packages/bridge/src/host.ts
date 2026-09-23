@@ -31,8 +31,8 @@ import {
 } from "./wire.js"
 
 // 0 view, 1 text, 2 input, 3 surface, 4 list — mirror NodeKind
-export type Kind = 0 | 1 | 2 | 3 | 4
-export const KIND: Record<string, Kind> = { view: 0, text: 1, input: 2, surface: 3, list: 4 }
+export type Kind = 0 | 1 | 2 | 3 | 4 | 5
+export const KIND: Record<string, Kind> = { view: 0, text: 1, input: 2, surface: 3, list: 4, vector: 5 }
 
 /** One decoded UI -> JS event record (see events.rs `UiEvent`). */
 export interface UiEvent {
@@ -765,6 +765,12 @@ export class CraieHost {
       if (props.payload !== undefined && props.payload !== oldProps.payload) {
         enc.payload(id, props.payload)
       }
+    }
+
+    if (n.kind === 5 && props.asset !== undefined && props.asset !== oldProps.asset) {
+      // Vector: the asset bytes (`craie-svg` output), copied once per
+      // change (identity compare).
+      enc.payload(id, props.asset)
     }
 
     if (n.kind === 4) {

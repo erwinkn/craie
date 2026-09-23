@@ -83,6 +83,29 @@ fn run(seed: u64, scale: f32) {
             if let Err(m) = compare(&ui, &clean, VIEW, TOL) {
                 panic!("seed {seed} scale {scale} step {step}: {}", m.0);
             }
+            // Scroll offsets are native interaction state with a history:
+            // a tween that shrank content clamped an offset the twin never
+            // clamped (browsers keep such a clamp too). The twin takes the
+            // animated Ui's offsets, as a rebuild does; declared state is
+            // what must match.
+            for i in 0..ui.host.slot_count() {
+                let id = craie_ui::host::NodeId(i as u32);
+                if ui.host.node(id).is_none() || twin.host.node(id).is_none() {
+                    continue;
+                }
+                let [x, y] = ui.host.spatial[i].scroll;
+                if twin.host.spatial[i].scroll != [x, y] {
+                    twin.scroll_to(id, x, y);
+                }
+            }
+            twin.render(VIEW);
+            // A scroll is motion: rest past it before comparing.
+            now += craie_ui::ui::SETTLE_SECS * 1.5;
+            for u in [&mut ui, &mut twin] {
+                u.set_time(now);
+                u.settle();
+                u.render(VIEW);
+            }
             if let Err(m) = compare(&ui, &twin, VIEW, TOL) {
                 panic!(
                     "seed {seed} scale {scale} step {step}: animated vs plain: {}",

@@ -297,6 +297,14 @@ impl TreeView<'_> {
                 height: size.height,
             };
         }
+        if node.kind == NodeKind::Vector {
+            // The view box is the intrinsic size (aspect kept).
+            let Some(a) = self.host.vectors.get(&id.0).and_then(|v| v.asset.as_ref()) else {
+                return TSize::ZERO;
+            };
+            let [width, height] = crate::vector::intrinsic(a.view_box, [known.width, known.height]);
+            return TSize { width, height };
+        }
         if node.kind != NodeKind::Text {
             return TSize::ZERO;
         }

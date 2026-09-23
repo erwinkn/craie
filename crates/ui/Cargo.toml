@@ -10,6 +10,7 @@ repository.workspace = true
 craie-core.workspace = true
 craie-scene.workspace = true
 craie-text.workspace = true
+craie-vector.workspace = true
 taffy.workspace = true
 accesskit.workspace = true
 tracing.workspace = true

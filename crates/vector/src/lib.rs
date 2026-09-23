@@ -15,6 +15,8 @@ use lyon_tessellation::{
     StrokeVertex, VertexBuffers,
 };
 
+pub mod asset;
+
 /// One path command. Points are in the path's own units.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Verb {

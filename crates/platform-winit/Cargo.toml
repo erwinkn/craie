@@ -24,6 +24,9 @@ fontique.workspace = true
 [dev-dependencies]
 taffy.workspace = true
 png.workspace = true
+# Build-time SVG import, for the vector example only (never shipped).
+craie-svg-import = { path = "../../tools/svg-import" }
+craie-vector.workspace = true
 
 # Rust examples live at the repository root (see ../../examples/).
 [[example]]
@@ -49,3 +52,7 @@ path = "../../examples/framebench/main.rs"
 [[example]]
 name = "fontcost"
 path = "../../examples/fontcost/main.rs"
+
+[[example]]
+name = "vector"
+path = "../../examples/vector/main.rs"

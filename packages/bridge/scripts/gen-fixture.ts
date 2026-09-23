@@ -74,5 +74,29 @@ enc.transition(0, {                                 // animation family
 enc.animate(0, "backgroundColor", [0xff00_00ff], { duration: 300, easing: [0.1, 0.2, 0.3, 0.4] })
 enc.animate(0, "gap", [4, 6], { spring: {}, delay: 20 })
 
+// A vector node and a minimal asset (CRV1: a 10 x 10 view box, one
+// solid paint, one nonzero fill of a triangle), written by hand here;
+// crates/vector/src/asset.rs is the format's definition.
+const asset = (() => {
+  const b: number[] = []
+  const u8 = (v: number) => b.push(v & 0xff)
+  const u16 = (v: number) => { u8(v); u8(v >> 8) }
+  const u32 = (v: number) => { u16(v & 0xffff); u16(v >>> 16) }
+  const f32 = (v: number) => { const x = new DataView(new ArrayBuffer(4)); x.setFloat32(0, v, true); for (let i = 0; i < 4; i++) u8(x.getUint8(i)) }
+  u32(0x3156_5243); u16(1); u16(0)            // "CRV1", version 1, flags
+  for (const v of [0, 0, 10, 10]) f32(v)       // view box
+  u32(1); u32(1); u32(4); u32(3)               // paints, items, verbs, points
+  u8(0); u32(0x0080_ffff)                      // solid paint
+  u8(0); u32(0); f32(1)                        // fill item, paint 0, opacity 1
+  for (const v of [1, 0, 0, 1, 0, 0]) f32(v)   // transform
+  u32(0); u32(4); u32(0); u8(1)                // verbs 0..4 from point 0, even-odd
+  for (const v of [0, 1, 1, 4]) u8(v)          // move, line, line, close
+  for (const v of [0, 0, 10, 0, 5, 10]) f32(v) // points
+  return new Uint8Array(b)
+})()
+enc.create(6, 5)                                    // vector
+enc.payload(6, asset)
+enc.place(0, 6, NIL)
+
 await Bun.write(new URL("../test/fixture.bin", import.meta.url).pathname, enc.finish(99n))
 console.log("wrote fixture.bin")
