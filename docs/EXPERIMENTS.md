@@ -78,6 +78,37 @@ scroll moves every row; the native scroll path (one record, 32 bytes)
 is not what it measures. The 5k-row differences are inside the noise
 band. First-draw live bytes: +27.2 MiB before, +28.3 MiB after.
 
+### E11: virtualized list versus a plain column (step 2)
+
+`cargo run --release -p craie-harness --example e11_lists`: a scroller
+at 480x720 @2x holding chat-like texts (2 to 60 words, 14 pt), either
+as a `List` with the harness `ListDriver` playing React, or as a plain
+column of every row. Mount is Ui creation, the item splice, and the
+first range's rows until the range is stable (warm fonts). Loaded
+machine (load average 9 to 12): times are indicative.
+
+| items | list mount | plain mount | scroll (in range) | jump | list heap | plain heap | layout visits |
+|-------|-----------:|------------:|------------------:|-----:|----------:|-----------:|--------------:|
+| 1k    | 25.9 ms | 53.7 ms  | 0.002 ms (plain 0.027) | 1.2 ms | 5.0 MiB  | 15.0 MiB  | 64 (plain 4,001) |
+| 10k   | 48.5 ms | 387.6 ms | 0.006 ms (plain 0.106) | 2.3 ms | 5.1 MiB  | 104.2 MiB | 64 (plain 40,001) |
+| 100k  | 45.0 ms | -        | 0.007 ms               | 2.4 ms | 6.9 MiB  | -         | 64 |
+| 1M    | 88.6 ms | -        | 0.006 ms               | 2.1 ms | 25.0 MiB | -         | 64 |
+
+About 5 MiB of each heap is the text engine's font data. The list adds
+about 21 bytes per item; 27 rows render. Estimates against measured
+heights: mean error 2.4%, p95 25% (a wrap boundary costs a line). After
+a jump to 61% of a 100k list the top item holds its place and the item
+at the viewport bottom moves 14 pt once, when the rows measure.
+
+The list incremental-equals-rebuild test found one bug on its first
+run: a list whose estimates were stale at an unchanged width summed
+fresh estimates for measured items too, so a size probe disagreed with
+the final layout. Measurements now hold at their own width.
+
+The first JS list example found a bug from milestone 1: the encoder
+sent unset margin sides as `auto` instead of 0, so a bubble with only
+`margin.left` was pushed to the right. Unset sides are now 0.
+
 ### E10: span pool versus `Vec` side table
 
 `cargo run --release -p craie-harness --example e10_span_pool`,

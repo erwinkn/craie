@@ -141,8 +141,11 @@ a measurement.
 
 ## 2. Wire and mutation executor
 
-**Current.** CRW2 as targeted, minus the list and animation families
-(steps 2 and 4). Header: magic, version, flags, seq, then counts and
+**Current.** CRW2 as targeted, minus the animation family (step 4).
+The list family (0x90) carries list configuration (overscan, fallback
+extent, row templates), item splices (6 bytes per item: template u16,
+text length u32, borrowed from the buffer), a row's item index, and a
+scroll container's anchor policy. Header: magic, version, flags, seq, then counts and
 per-transaction tables for strings, layout styles (u64 presence mask +
 positional fields), and text spans (16 bytes each). Ops are u8-tagged,
 grouped by family in the high nibble. `wire::decode` yields a
@@ -372,7 +375,41 @@ font data. The scene renderer never requires system font discovery.
 
 **Current.** `overflow: scroll` on a View makes it a scroll container.
 Wheel deltas scroll the nearest scrollable ancestor, clamped to the
-content extent. No virtualization: layout visits every node.
+content extent. A `List` node (step 2) virtualizes inside a scroll
+container:
+
+- The list owns its item count, item descriptions, and one extent per
+  item in a Fenwick store (`core::extents`, f64 prefix sums): offsets,
+  the item at an offset, and updates are O(log n); a splice rebuilds
+  it in O(n). About 21 bytes per item; 2^24 items at most.
+- Estimates are native: each row template gives a fixed extent, a
+  horizontal inset, and a font size; per-size metrics (average advance,
+  line height) come from shaping a sample once. An item's estimate is
+  the fixed extent plus its text length wrapped at the list width. A
+  splice estimates new items at once when the width is known.
+- The list is a leaf to its parent. Its content is its rendered rows:
+  children tagged with an item index, each laid out at the list's
+  content width and placed at its item offset. The final layout pass
+  records their heights as measurements; size probes record nothing.
+  A width change forgets measurements (they were made at another
+  width); rendered rows measure again in the same pass. Rows with no
+  index, a duplicate index, or one past the end are hidden.
+- After layout and scroll, each list reports the item range around
+  its viewport (the nearest vertical scroll container, else the
+  window) as an event, with hysteresis: it reports again only when the
+  viewport plus half the overscan leaves the reported range, and then
+  asks for the viewport plus the whole overscan. The event also names
+  the item of a focused row, so React keeps that row rendered.
+- Anchoring: after every frame each scroller captures its anchor (the
+  top visible item and its offset from the viewport top, and whether
+  it is at its end). After a layout pass, `keep-visible` scrolls so the
+  anchor item keeps its place; `stick-to-end` holds the end when it was
+  there. A splice moves the anchor with its item. Explicit `ScrollTo`
+  commands in the same batch win. Anchor corrections are motion for the
+  snap policy (§8).
+- The React `List` diffs `items` by identity into one splice (common
+  prefix and suffix), keys rows by `keyOf`, and renders the reported
+  range. Rows report their position in the set to assistive technology.
 
 **Target.** A native list node inside a ScrollView.
 
@@ -401,6 +438,13 @@ content extent. No virtualization: layout visits every node.
   explicit.
 - A scroll offset re-clamps when content shrinks below it
   (2026-09-23), as browsers do.
+- Native estimator (2026-09-23, E11). Mean estimate error is 2.4% (p95
+  25%, from wrap boundaries); after a jump into unmeasured items the
+  top item holds and the viewport bottom moves 14 pt once. Six bytes
+  per item cross the bridge. A JS estimator was not built: it would
+  need a copy of font metrics in JS, which the first decision rules out.
+- The anchor is one list item per scroller, taken from the lowest list
+  id that shows an item. Content outside lists does not anchor.
 
 ## 8. Scene
 
@@ -619,7 +663,9 @@ movement without a React round trip.
 
 **Current.** `a11y.rs` projects an AccessKit tree from retained state.
 Roles come from the explicit role field; the facade sets defaults
-(Pressable, TextInput, ScrollView, Text) and a plain View has none.
+(Pressable, TextInput, ScrollView, Text, List, list rows) and a plain
+View has none. A list row reports its position among all items and the
+item count; rows appear in item order.
 Bounds are transform-aware. The whole tree still republishes on any
 a11y-observable change; the semantic dirty queue exists but does not
 drive incremental updates yet. Actions queue back onto the UI thread.
@@ -729,8 +775,14 @@ and `encode_frame` a fixed 56 per frame plus 23 per extra pass on
 Metal (5 more after a write), the same every frame; a copied-bytes counter
 that includes text and span lists; real-GPU checks (upload bytes, 1x
 and 2x pixel readback, half-pixel edges against the resolver, a glyph
-larger than a page); the release-graph
-and layer-map checks; and the E10 bench. `prepare_frame` in
+larger than a page); list tests (only the reported range renders; a
+virtualized list equals a plain column of every row once measured;
+keep-visible under measurement and inserts above, with a no-anchor
+control; stick-to-end; range hysteresis; layout visits per rendered
+row; a focused row stays; seeded splices, edits, and scrolls equal a
+clean rebuild; allocation-free list frames; accessibility positions);
+the release-graph
+and layer-map checks; and the E10 and E11 benches. `prepare_frame` in
 platform-winit is the one frame path for commits and native input;
 accessibility bounds and the IME area publish only after it.
 The host sets the UI clock and wakes at `Ui::next_settle` to snap
