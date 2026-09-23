@@ -1,25 +1,28 @@
-//! Taffy low-level integration over Craie-owned storage.
+//! Layout over Craie-owned storage, through the owned flex engine
+//! (`craie-layout`, ARCHITECTURE.md §4).
 //!
-//! Taffy owns no tree here. It reads children and styles straight out of
-//! the `Host` through its `TraversePartialTree`/`LayoutPartialTree` traits
-//! and writes results into `Layouts`, a parallel per-node store. Per the
-//! gpui-react precedent, dirty propagation is explicit: a node's Taffy
-//! cache key covers only its own inputs, not its children, so a mutation
-//! clears the cache on the node and every ancestor up to the root.
+//! The engine owns no tree here. It reads children and rows straight out
+//! of the `Host` through `LayoutTree` and writes results into `Layouts`, a
+//! parallel per-node store. Dirty propagation is explicit: a node's cache
+//! key covers only its own inputs, not its children, so a mutation clears
+//! the cache on the node and every ancestor up to the root.
 //!
 //! Units: everything in this module is logical (DPI-independent). The
 //! display scale enters only at emit time, when text origins and raster
 //! sizes convert to physical pixels.
 //!
-//! Taffy features are restricted to `flexbox`; block/grid/float/calc are
-//! compiled out until Craie needs them.
+//! The value types (`Size`, `LayoutInput`, `Layout`, the cache) are
+//! Taffy's; its features are restricted to `flexbox`, and block, grid,
+//! float, and calc are compiled out.
 
+use craie_layout::{
+    FlexScratch, LayoutTree, Node, compute_cached, compute_flex, compute_hidden, compute_leaf,
+    compute_root,
+};
 use taffy::util::{MaybeResolve, ResolveOrZero};
 use taffy::{
-    AvailableSpace, Cache, CacheTree, Layout, LayoutFlexboxContainer, LayoutInput, LayoutOutput,
-    LayoutPartialTree, Line, NodeId as TaffyId, Point, RequestedAxis, RoundTree, RunMode,
-    Size as TSize, SizingMode, TraversePartialTree, TraverseTree, compute_cached_layout,
-    compute_flexbox_layout, compute_hidden_layout, compute_leaf_layout, compute_root_layout,
+    AvailableSpace, Cache, Layout, LayoutInput, LayoutOutput, Line, Point, RequestedAxis, RunMode,
+    Size as TSize, SizingMode,
 };
 
 use crate::geom::{Rect, Size};
@@ -90,6 +93,8 @@ pub struct Layouts {
     pub resized: craie_core::dirty::DirtyQueue,
     /// Nodes whose scroll extent changed: their offset is re-clamped.
     pub extents: craie_core::dirty::DirtyQueue,
+    /// The flex engine's reused buffers.
+    scratch: FlexScratch,
 }
 
 fn row_mut<T: Default + Clone>(rows: &mut Vec<T>, i: usize) -> &mut T {
@@ -114,6 +119,7 @@ impl Layouts {
             resized: Default::default(),
             extents: Default::default(),
             cache_misses: 0,
+            scratch: FlexScratch::default(),
         }
     }
 
@@ -162,14 +168,6 @@ impl Default for Layouts {
     }
 }
 
-fn to_taffy(id: NodeId) -> TaffyId {
-    TaffyId::new(id.0 as u64)
-}
-
-fn from_taffy(id: TaffyId) -> NodeId {
-    NodeId(u64::from(id) as u32)
-}
-
 /// Recomputes layout for the tree rooted at `root` (a real node; wrap
 /// multiple roots in a View), then copies results into `Layouts`. Call
 /// `invalidate` first. TEXT leaves are measured through `text` and
@@ -196,15 +194,15 @@ pub fn compute_timed(
         height: AvailableSpace::Definite(available.height),
     };
     let t = std::time::Instant::now();
-    compute_root_layout(&mut view, to_taffy(root), space);
+    compute_root(&mut view, root.0, space);
     let compute_ms = t.elapsed().as_secs_f64() * 1000.0;
     let t = std::time::Instant::now();
-    view.finalize(to_taffy(root));
+    view.finalize(root);
     let round_ms = t.elapsed().as_secs_f64() * 1000.0;
     (compute_ms, round_ms)
 }
 
-/// Clears the Taffy cache for every node in the host's dirty queue and all
+/// Clears the layout cache for every node in the host's dirty queue and all
 /// of its ancestors, then clears the flags. Child changes invalidate the
 /// path to the root because a node's cache key does not include its
 /// children.
@@ -232,8 +230,8 @@ pub fn invalidate(host: &mut Host, store: &mut Layouts) {
     }
 }
 
-/// Taffy's view of the world: host tree + style table + per-node state +
-/// the text engine for leaf measurement.
+/// The engine's view of the world: host tree + layout rows + per-node
+/// state + the text engine for leaf measurement.
 struct TreeView<'a> {
     host: &'a mut Host,
     store: &'a mut Layouts,
@@ -254,12 +252,12 @@ impl TreeView<'_> {
     /// Coordinates stay logical/fractional here — snapping happens on the
     /// physical grid at paint time, so a non-integer display scale never
     /// accumulates rounding error.
-    fn finalize(&mut self, node_id: TaffyId) {
-        let layout = self.get_unrounded_layout(node_id);
-        self.set_final_layout(node_id, &layout);
-        let count = self.child_count(node_id);
+    fn finalize(&mut self, id: NodeId) {
+        let layout = self.get_unrounded_layout(id);
+        self.set_final_layout(id, &layout);
+        let count = self.host.child_count(id);
         for i in 0..count {
-            self.finalize(self.get_child_id(node_id, i));
+            self.finalize(self.host.child_at(id, i));
         }
     }
 
@@ -410,13 +408,7 @@ fn no_calc(_: *const (), _: f32) -> f32 {
 /// is its rendered rows, each laid out at the list's content width and
 /// placed at its item's offset. Only rendered rows are visited.
 impl TreeView<'_> {
-    fn list_layout(
-        &mut self,
-        node_id: TaffyId,
-        inputs: LayoutInput,
-        style: &LayoutRow,
-    ) -> LayoutOutput {
-        let id = from_taffy(node_id);
+    fn list_layout(&mut self, id: NodeId, inputs: LayoutInput, style: &LayoutRow) -> LayoutOutput {
         // A probe (the animation driver's) lays rows out without
         // recording measurements or estimates.
         let commit = inputs.run_mode == RunMode::PerformLayout;
@@ -469,8 +461,8 @@ impl TreeView<'_> {
             },
         };
         let gap = style.gap().height;
-        let mut out = compute_leaf_layout(inputs, style, no_calc, |known, available| {
-            // The content-box width: Taffy resolves padding, border,
+        let mut out = compute_leaf(inputs, style, |known, available| {
+            // The content-box width: the leaf resolves padding, border,
             // min/max, and percentages into the available width. (A
             // known width in a size probe is the border box.)
             let width = match available.width {
@@ -556,8 +548,8 @@ impl TreeView<'_> {
                 .resolve_or_zero(Some(w), no_calc);
             let rw = (w - margin.left - margin.right).max(0.0);
             // A row at the row width, its height from its content.
-            let out = self.compute_child_layout(
-                to_taffy(row),
+            let out = self.compute_child(
+                row.0,
                 LayoutInput {
                     run_mode: if commit {
                         RunMode::PerformLayout
@@ -638,8 +630,8 @@ impl TreeView<'_> {
                 width: (w - margin.left - margin.right).max(0.0),
                 height: extent - margin.top - margin.bottom,
             };
-            self.set_unrounded_layout(
-                to_taffy(row),
+            self.set_layout(
+                row.0,
                 &Layout {
                     order: k as u32,
                     location: Point {
@@ -656,111 +648,59 @@ impl TreeView<'_> {
             );
         }
         for row in hidden {
-            compute_hidden_layout(self, to_taffy(row));
+            compute_hidden(self, row.0);
         }
         size
     }
 }
 
-impl TraversePartialTree for TreeView<'_> {
-    type ChildIter<'a>
-        = std::iter::Map<std::iter::Copied<std::slice::Iter<'a, NodeId>>, fn(NodeId) -> TaffyId>
-    where
-        Self: 'a;
-
-    fn child_ids(&self, parent: TaffyId) -> Self::ChildIter<'_> {
-        self.host
-            .children(from_taffy(parent))
-            .iter()
-            .copied()
-            .map(to_taffy)
+impl LayoutTree for TreeView<'_> {
+    fn row(&self, node: Node) -> &LayoutRow {
+        self.style_of(NodeId(node))
     }
 
-    fn child_count(&self, parent: TaffyId) -> usize {
-        self.host.child_count(from_taffy(parent))
+    fn child_count(&self, node: Node) -> usize {
+        self.host.child_count(NodeId(node))
     }
 
-    fn get_child_id(&self, parent: TaffyId, index: usize) -> TaffyId {
-        let id = self.host.child_at(from_taffy(parent), index);
-        if id.is_nil() {
-            TaffyId::new(u64::MAX)
-        } else {
-            to_taffy(id)
-        }
-    }
-}
-
-impl TraverseTree for TreeView<'_> {}
-
-impl LayoutPartialTree for TreeView<'_> {
-    type CoreContainerStyle<'a>
-        = &'a LayoutRow
-    where
-        Self: 'a;
-    type CustomIdent = String;
-
-    fn get_core_container_style(&self, node_id: TaffyId) -> Self::CoreContainerStyle<'_> {
-        self.style_of(from_taffy(node_id))
+    fn child(&self, node: Node, index: usize) -> Node {
+        self.host.child_at(NodeId(node), index).0
     }
 
-    fn set_unrounded_layout(&mut self, node_id: TaffyId, layout: &Layout) {
-        *row_mut(&mut self.store.unrounded, from_taffy(node_id).0 as usize) = *layout;
-    }
-
-    fn compute_child_layout(&mut self, node_id: TaffyId, inputs: LayoutInput) -> LayoutOutput {
+    fn compute_child(&mut self, node: Node, inputs: LayoutInput) -> LayoutOutput {
         if inputs.run_mode == RunMode::PerformHiddenLayout {
-            return compute_hidden_layout(self, node_id);
+            return compute_hidden(self, node);
         }
-        compute_cached_layout(self, node_id, inputs, |tree, node_id, inputs| {
-            let id = from_taffy(node_id);
+        compute_cached(self, node, inputs, |tree, node, inputs| {
+            let id = NodeId(node);
             let hidden = tree.host.node(id).is_none();
-            // Clone the style: the leaf arm borrows `tree` mutably for the
-            // measure callback while Taffy still holds the style ref.
+            // Copy the row: the leaf arm borrows `tree` mutably for the
+            // measure callback.
             let style = *tree.style_of(id);
             if hidden || style.display() == taffy::Display::None {
-                return compute_hidden_layout(tree, node_id);
+                return compute_hidden(tree, node);
             }
             if tree.host.kind(id) == Some(NodeKind::List) {
-                return tree.list_layout(node_id, inputs, &style);
+                return tree.list_layout(id, inputs, &style);
             }
             if tree.host.child_count(id) > 0 {
                 // Every container is flex for now.
-                compute_flexbox_layout(tree, node_id, inputs)
+                compute_flex(tree, node, inputs)
             } else {
                 let parent = inputs.parent_size;
-                compute_leaf_layout(
-                    inputs,
-                    &style,
-                    |_, _| 0.0,
-                    |known, available| tree.measure(id, known, available, parent),
-                )
+                compute_leaf(inputs, &style, |known, available| {
+                    tree.measure(id, known, available, parent)
+                })
             }
         })
     }
-}
 
-impl LayoutFlexboxContainer for TreeView<'_> {
-    type FlexboxContainerStyle<'a>
-        = &'a LayoutRow
-    where
-        Self: 'a;
-    type FlexboxItemStyle<'a>
-        = &'a LayoutRow
-    where
-        Self: 'a;
-
-    fn get_flexbox_container_style(&self, node_id: TaffyId) -> Self::FlexboxContainerStyle<'_> {
-        self.style_of(from_taffy(node_id))
+    fn set_layout(&mut self, node: Node, layout: &Layout) {
+        *row_mut(&mut self.store.unrounded, node as usize) = *layout;
     }
 
-    fn get_flexbox_child_style(&self, child_node_id: TaffyId) -> Self::FlexboxItemStyle<'_> {
-        self.style_of(from_taffy(child_node_id))
-    }
-}
-
-impl CacheTree for TreeView<'_> {
-    fn cache_get(&mut self, node_id: TaffyId, input: &LayoutInput) -> Option<LayoutOutput> {
-        let hit = row_mut(&mut self.store.cache, from_taffy(node_id).0 as usize).get(input);
+    fn cache_get(&mut self, node: Node, inputs: &LayoutInput) -> Option<LayoutOutput> {
+        let hit = row_mut(&mut self.store.cache, node as usize).get(inputs);
         if hit.is_some() {
             self.store.cache_hits += 1;
         } else {
@@ -769,26 +709,29 @@ impl CacheTree for TreeView<'_> {
         hit
     }
 
-    fn cache_store(&mut self, node_id: TaffyId, input: &LayoutInput, output: LayoutOutput) {
-        row_mut(&mut self.store.cache, from_taffy(node_id).0 as usize).store(input, output)
+    fn cache_store(&mut self, node: Node, inputs: &LayoutInput, output: LayoutOutput) {
+        row_mut(&mut self.store.cache, node as usize).store(inputs, output)
     }
 
-    fn cache_clear(&mut self, node_id: TaffyId) {
-        *row_mut(&mut self.store.cache, from_taffy(node_id).0 as usize) = Cache::default();
+    fn cache_clear(&mut self, node: Node) {
+        *row_mut(&mut self.store.cache, node as usize) = Cache::default();
+    }
+
+    fn scratch(&mut self) -> &mut FlexScratch {
+        &mut self.store.scratch
     }
 }
 
-impl RoundTree for TreeView<'_> {
-    fn get_unrounded_layout(&self, node_id: TaffyId) -> Layout {
+impl TreeView<'_> {
+    fn get_unrounded_layout(&self, id: NodeId) -> Layout {
         self.store
             .unrounded
-            .get(from_taffy(node_id).0 as usize)
+            .get(id.0 as usize)
             .copied()
             .unwrap_or_default()
     }
 
-    fn set_final_layout(&mut self, node_id: TaffyId, layout: &Layout) {
-        let id = from_taffy(node_id);
+    fn set_final_layout(&mut self, id: NodeId, layout: &Layout) {
         if let Some(u) = self.store.unlaid.get_mut(id.0 as usize) {
             *u = false;
         }

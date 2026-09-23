@@ -25,8 +25,11 @@ target shape.
   (was 240). Live heap at 5k rows: 39,493 KiB (38.6 MiB) against 41,157
   KiB just before step 6a and 43.8 MiB at step 1; 2.2 MiB above the
   pre-step-1 baseline.
-- Resolves in: the rest of step 6 (the owned engine can drop what only
-  Taffy's cache and output tables need), or accepted at that size.
+- Step 6c: production runs the owned engine; live heap at 5k rows
+  unchanged (39,494 KiB). The per-node cache and output tables are
+  still Taffy's `Cache` and `Layout`.
+- Resolves in: slimmer per-node cache and output tables in the owned
+  engine (later kernel work), or accepted at this size.
 - Re-test: `cargo run --release -p craie-platform-winit --example
   bench` (live heap, 5k rows), EXPERIMENTS.md "Step 1".
 

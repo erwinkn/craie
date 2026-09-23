@@ -11,9 +11,9 @@ use taffy::geometry::AbsoluteAxis;
 use taffy::util::{MaybeMath, MaybeResolve, ResolveOrZero};
 use taffy::{
     AlignContent, AlignContentKeyword, AlignItems, AlignItemsKeyword, AlignmentSafety,
-    AvailableSpace, Baselines, BoxSizing, Cache, CollapsibleMarginSet, CompactLength, Contain,
-    Dimension, Direction, Layout, LayoutInput, LayoutOutput, Line, Overflow, Point, Rect,
-    RequestedAxis, RunMode, Size, SizingMode,
+    AvailableSpace, Baselines, BoxSizing, CollapsibleMarginSet, CompactLength, Contain, Dimension,
+    Direction, Layout, LayoutInput, LayoutOutput, Line, Overflow, Point, Rect, RequestedAxis,
+    RunMode, Size, SizingMode,
 };
 
 use crate::LayoutRow;
@@ -36,7 +36,9 @@ pub trait LayoutTree {
     fn child(&self, node: Node, index: usize) -> Node;
     fn compute_child(&mut self, node: Node, inputs: LayoutInput) -> LayoutOutput;
     fn set_layout(&mut self, node: Node, layout: &Layout);
-    fn cache(&mut self, node: Node) -> &mut Cache;
+    fn cache_get(&mut self, node: Node, inputs: &LayoutInput) -> Option<LayoutOutput>;
+    fn cache_store(&mut self, node: Node, inputs: &LayoutInput, output: LayoutOutput);
+    fn cache_clear(&mut self, node: Node);
     /// Buffers the flex algorithm reuses between calls.
     fn scratch(&mut self) -> &mut FlexScratch;
 }
@@ -183,17 +185,17 @@ pub fn compute_cached<T: LayoutTree + ?Sized>(
     inputs: LayoutInput,
     compute: impl FnOnce(&mut T, Node, LayoutInput) -> LayoutOutput,
 ) -> LayoutOutput {
-    if let Some(output) = tree.cache(node).get(&inputs) {
+    if let Some(output) = tree.cache_get(node, &inputs) {
         return output;
     }
     let output = compute(tree, node, inputs);
-    tree.cache(node).store(&inputs, output);
+    tree.cache_store(node, &inputs, output);
     output
 }
 
 /// Zero layout for `node` and its subtree (`display: none`).
 pub fn compute_hidden(tree: &mut impl LayoutTree, node: Node) -> LayoutOutput {
-    tree.cache(node).clear();
+    tree.cache_clear(node);
     tree.set_layout(node, &Layout::with_order(0));
     for index in 0..tree.child_count(node) {
         let child = tree.child(node, index);

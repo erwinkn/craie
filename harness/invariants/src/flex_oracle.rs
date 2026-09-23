@@ -176,8 +176,16 @@ impl LayoutTree for OwnedTree {
         self.layouts[node as usize] = *layout;
     }
 
-    fn cache(&mut self, node: Node) -> &mut Cache {
-        &mut self.caches[node as usize]
+    fn cache_get(&mut self, node: Node, inputs: &LayoutInput) -> Option<LayoutOutput> {
+        self.caches[node as usize].get(inputs)
+    }
+
+    fn cache_store(&mut self, node: Node, inputs: &LayoutInput, output: LayoutOutput) {
+        self.caches[node as usize].store(inputs, output)
+    }
+
+    fn cache_clear(&mut self, node: Node) {
+        self.caches[node as usize].clear();
     }
 
     fn scratch(&mut self) -> &mut FlexScratch {

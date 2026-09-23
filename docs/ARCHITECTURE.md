@@ -276,13 +276,14 @@ prove validity.
 
 ## 4. Layout
 
-**Current.** Taffy 0.14 through its low-level traits, reading each
-node's own layout row: a Craie-owned `LayoutRow` (`craie-layout`, 136
+**Current.** Craie's own flex engine (`craie-layout`, steps 6b and
+6c), reading each node's own layout row: a Craie-owned `LayoutRow` (136
 bytes, step 6a) that holds every `taffy::Style` field the flexbox
 build reads (lengths in one tagged `f32` array; grow, shrink, aspect
 ratio, and scrollbar width as `f32`; enums, alignment safety,
-direction, and containment as bytes and flags) and implements Taffy's
-style traits, so no `taffy::Style` is stored per node; transactions
+direction, and containment as bytes and flags), so no `taffy::Style`
+is stored per node (the row also implements Taffy's style traits, for
+the harness's Taffy reference); transactions
 still carry taffy styles, converted when a layout op applies. The row
 drops only `item_is_table` and `item_is_replaced`, which only the
 block and grid algorithms read. Results land in `Layouts` (cache, unrounded
@@ -295,14 +296,19 @@ or a reset style is a flex column whose children do not shrink
 (`flexShrink: 0`; `host::default_style`). Cold layout
 of 10k nodes costs 217 to 567 ms; one streaming append costs 0.65 ms.
 
-An owned flex engine exists beside Taffy (`craie-layout`, step 6b):
-`compute_flex`, `compute_leaf`, `compute_hidden`, `compute_root`, and
-`compute_cached` over a `LayoutTree` the host implements (rows,
-children, its own dispatch, results, per-node cache, and reused item
-and line buffers). It is a port of Taffy 0.14's flex algorithm that
-reads `LayoutRow`s directly, and it equals Taffy bit for bit on the E05
-differential suite. A warm relayout allocates nothing. Production still
-calls Taffy; the switch is step 6c.
+The engine: `compute_flex`, `compute_leaf`, `compute_hidden`,
+`compute_root`, and `compute_cached` over a `LayoutTree` that
+`layout::TreeView` implements (rows, children, its dispatch to hidden,
+list, flex, or leaf layout, results, the per-node cache with hit and
+miss counters, and reused item and line buffers up to 256 items per
+level). It is a port of Taffy 0.14's flex algorithm that reads
+`LayoutRow`s directly, and it equals Taffy bit for bit on the E05
+differential suite. Taffy stays a dependency for its value types and
+cache and as the harness reference; no Taffy algorithm runs in
+production. Against Taffy in the same host (step 6c, `examples/bench`,
+interleaved runs under load): layout times equal within noise, layout
+allocations halved (cold 10k rows 90,203 to 50,207; 500 dirty rows
+8,028 to 4,015), live heap unchanged.
 
 **Target.** A Craie-owned engine over `layout_inputs[]`, the child span
 pool, intrinsic measures, a layout cache, and results (relative
@@ -323,7 +329,8 @@ Public style API: a typed object with CSS property names in camelCase
   generated trees with percentages, baselines, min/max, intrinsic
   sizes, overflow. Step 6b: the general flex engine is bit-equal on
   2,400 generated trees (cold and after three edits each) and on the
-  harness's `Gen` trees; see EXPERIMENTS.md.
+  harness's `Gen` trees; step 6c made it the production path; see
+  EXPERIMENTS.md.
 
 **Decisions.**
 - Virtualize first. The measured cold cost comes from visiting every
@@ -345,6 +352,10 @@ Public style API: a typed object with CSS property names in camelCase
   the tree interface, and the buffers are Craie's. (Step 6b.)
 - The host owns invalidation: the engine never clears a cache except
   in hidden layout, as in Taffy. (Step 6b.)
+- The engine's buffer pool keeps buffers of at most 256 items. Reason:
+  kept buffers hold their peak size (248 bytes per item), and one
+  5,000-child column added 2 MB of live heap at 5k rows; wider
+  containers allocate per call, as Taffy does. (Step 6c.)
 - Block means block-level boxes only. Inline content is always a Text
   paragraph node.
 - RN defaults stay so Marbre's cross-platform kit needs no

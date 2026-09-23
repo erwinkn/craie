@@ -29,6 +29,9 @@ use crate::compute::{
 
 /// Item and line buffers, reused across flex calls. Nested containers
 /// each take one pair, so the pool holds one pair per level of nesting.
+/// A buffer that grew past `KEEP_ITEMS` is dropped, not kept: one wide
+/// container must not hold its peak memory (248 bytes per item) for the
+/// life of the tree. Wider containers allocate per call, as Taffy does.
 #[derive(Default)]
 pub struct FlexScratch {
     items: Vec<Vec<FlexItem>>,
@@ -395,9 +398,18 @@ fn compute_preliminary(
     output
 }
 
+/// The largest buffer the pool keeps, in items.
+const KEEP_ITEMS: usize = 256;
+
 fn give_back(tree: &mut impl LayoutTree, mut items: Vec<FlexItem>, mut lines: Vec<FlexLine>) {
     items.clear();
     lines.clear();
+    if items.capacity() > KEEP_ITEMS {
+        items = Vec::new();
+    }
+    if lines.capacity() > KEEP_ITEMS {
+        lines = Vec::new();
+    }
     let scratch = tree.scratch();
     scratch.items.push(items);
     scratch.lines.push(lines);

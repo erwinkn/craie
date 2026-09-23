@@ -562,6 +562,24 @@ gone with it.
 | 10k   | 103.59 ms | 109.56 ms | 16.62 ms | 17.40 ms | 0 | 48,085 |
 | 50k   | 538.84 ms | 614.06 ms | 17.02 ms | 19.60 ms | 0 | 34,467 |
 
+- Step 6c (production on the owned engine; pooled buffers capped at 256
+  items): E05 again, 1k / 10k / 50k: cold 2.75 / 75.2 / 426.0 ms owned
+  against 3.38 / 86.2 / 467.6 ms Taffy; warm 0.181 / 14.0 / 7.96 ms
+  against 0.420 / 15.4 / 9.80 ms; warm allocations 0 against 931 /
+  48,085 / 34,467.
+- Step 6c in `examples/bench` (the Taffy build at d3d453d, where
+  production still called Taffy, against the owned build), 8
+  interleaved pairs, load average
+  10 to 21, medians (min): cold 10k rows 61.4 (57.1) ms Taffy, 63.5
+  (57.3) ms owned; 500 dirty rows 2.34 (0.36) against 2.33 (0.36) ms;
+  cold transcript 49.9 (49.1) against 53.4 (50.4) ms; stream layout sum
+  144.5 (136.5) against 154.3 (136.3) ms. Equal within noise: text
+  measure, not flex, dominates these layouts. Allocations: cold rows
+  90,203 to 50,207, 500 dirty rows 8,028 to 4,027, cold transcript
+  101,627 to 35,633. Live heap: 39,493 to 39,494 KiB (rows), 37,569 to
+  37,572 KiB (transcript). Without the 256-item cap the heap grew to
+  41,478 KiB: the pool kept the 5,000-row column's item buffer.
+
 ### E14: layout-aware virtualization, list versus a plain column (step 2)
 
 `cargo run --release -p craie-harness --example e14_lists`: a scroller
