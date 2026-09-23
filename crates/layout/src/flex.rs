@@ -29,9 +29,13 @@ use crate::compute::{
 
 /// Item and line buffers, reused across flex calls. Nested containers
 /// each take one pair, so the pool holds one pair per level of nesting.
-/// A buffer that grew past `KEEP_ITEMS` is dropped, not kept: one wide
-/// container must not hold its peak memory (248 bytes per item) for the
-/// life of the tree. Wider containers allocate per call, as Taffy does.
+/// A call takes the smallest buffers that hold its children (best fit:
+/// if the ancestor chain fit before, it fits again), and lines reserve
+/// one per item. So a relayout of containers already laid out allocates
+/// nothing. A buffer that grew past `KEEP_ITEMS` is dropped, not kept:
+/// one wide container must not hold its peak memory (248 bytes per
+/// item) for the life of the tree. Wider containers allocate per call,
+/// as Taffy does.
 #[derive(Default)]
 pub struct FlexScratch {
     items: Vec<Vec<FlexItem>>,
@@ -262,10 +266,12 @@ fn compute_preliminary(
     );
     let dir = constants.dir;
 
-    let mut items = tree.scratch().items.pop().unwrap_or_default();
-    let mut lines = tree.scratch().lines.pop().unwrap_or_default();
-    items.clear();
-    lines.clear();
+    let children = tree.child_count(node);
+    let scratch = tree.scratch();
+    let mut items = take_best_fit(&mut scratch.items, children);
+    let mut lines = take_best_fit(&mut scratch.lines, children.max(1));
+    items.reserve(children);
+    lines.reserve(children.max(1));
 
     // 9.1: items.
     generate_anonymous_flex_items(tree, node, &constants, &mut items);
@@ -400,6 +406,31 @@ fn compute_preliminary(
 
 /// The largest buffer the pool keeps, in items.
 const KEEP_ITEMS: usize = 256;
+
+/// The pool's smallest buffer of capacity `need` or more, else its
+/// largest (to grow), else a new one.
+fn take_best_fit<T>(pool: &mut Vec<Vec<T>>, need: usize) -> Vec<T> {
+    let mut best: Option<usize> = None;
+    for (i, buffer) in pool.iter().enumerate() {
+        let capacity = buffer.capacity();
+        best = match best {
+            None => Some(i),
+            Some(b) => {
+                let current = pool[b].capacity();
+                let better = if current >= need {
+                    capacity >= need && capacity < current
+                } else {
+                    capacity > current
+                };
+                Some(if better { i } else { b })
+            }
+        };
+    }
+    match best {
+        Some(i) => pool.swap_remove(i),
+        None => Vec::new(),
+    }
+}
 
 fn give_back(tree: &mut impl LayoutTree, mut items: Vec<FlexItem>, mut lines: Vec<FlexLine>) {
     items.clear();

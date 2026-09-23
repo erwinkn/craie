@@ -301,14 +301,17 @@ The engine: `compute_flex`, `compute_leaf`, `compute_hidden`,
 `layout::TreeView` implements (rows, children, its dispatch to hidden,
 list, flex, or leaf layout, results, the per-node cache with hit and
 miss counters, and reused item and line buffers up to 256 items per
-level). It is a port of Taffy 0.14's flex algorithm that reads
+level, taken best fit). Laying out again containers it laid out before
+allocates nothing when they have at most 256 children (tested after
+content, style, and viewport changes); a container new to the pool, or
+a wider one, allocates. It is a port of Taffy 0.14's flex algorithm that reads
 `LayoutRow`s directly, and it equals Taffy bit for bit on the E05
 differential suite. Taffy stays a dependency for its value types and
 cache and as the harness reference; no Taffy algorithm runs in
 production. Against Taffy in the same host (step 6c, `examples/bench`,
 interleaved runs under load): layout times equal within noise, layout
 allocations halved (cold 10k rows 90,203 to 50,207; 500 dirty rows
-8,028 to 4,015), live heap unchanged.
+8,028 to 4,027), live heap unchanged.
 
 **Target.** A Craie-owned engine over `layout_inputs[]`, the child span
 pool, intrinsic measures, a layout cache, and results (relative
@@ -328,7 +331,9 @@ Public style API: a typed object with CSS property names in camelCase
 - E05: the owned engine, then specialized kernels, versus Taffy on
   generated trees with percentages, baselines, min/max, intrinsic
   sizes, overflow. Step 6b: the general flex engine is bit-equal on
-  2,400 generated trees (cold and after three edits each) and on the
+  2,400 generated trees (cold and after six edits each: styles,
+  content, moves, viewports), on 28,800 direct calls with every kind of
+  `LayoutInput` (full `LayoutOutput`s compared), and on the
   harness's `Gen` trees; step 6c made it the production path; see
   EXPERIMENTS.md.
 

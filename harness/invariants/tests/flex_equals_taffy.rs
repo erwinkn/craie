@@ -1,5 +1,6 @@
 //! E05: the owned flex engine equals Taffy 0.14 bit for bit, cold and
-//! after edits (warm, cached relayouts), on generated trees.
+//! after edits (warm, cached relayouts), on generated trees; and every
+//! `LayoutOutput` of direct calls under generated inputs.
 
 use craie_core::rng::Rng;
 use craie_harness::flex_oracle::{gen_case, gen_edits};
@@ -13,15 +14,32 @@ fn generated_trees_equal_taffy() {
     for seed in 1..=SEEDS {
         let mut rng = Rng::new(seed);
         let case = gen_case(&mut rng, 60, 5);
-        let edits = gen_edits(&mut rng, &case, 3);
+        let edits = gen_edits(&mut rng, &case, 6);
         if let Err(e) = case.compare(&edits) {
             panic!("seed {seed}: {e}\n{case:#?}");
         }
         compared += 1;
         nodes += case.styles.len();
     }
-    eprintln!("E05: {compared} trees ({nodes} nodes), each cold and after 3 edits: equal");
+    eprintln!("E05: {compared} trees ({nodes} nodes), each cold and after 6 edits: equal");
     assert_eq!(compared, SEEDS);
+}
+
+/// Direct calls: every run mode, sizing mode, requested axis,
+/// definiteness, parent size, and available space, each call twice (the
+/// second from the cache); full outputs and all layouts compared.
+#[test]
+fn direct_outputs_equal_taffy() {
+    let mut calls = 0;
+    for seed in 1..=SEEDS {
+        let mut rng = Rng::new(seed ^ 0x6b6b);
+        let case = gen_case(&mut rng, 40, 5);
+        if let Err(e) = case.compare_outputs(&mut rng, 12) {
+            panic!("seed {seed}: {e}\n{case:#?}");
+        }
+        calls += 12;
+    }
+    eprintln!("E05: {calls} direct calls (each twice): equal");
 }
 
 /// The trees `Gen` builds (Craie's own style mix, as the other oracles
@@ -62,10 +80,15 @@ fn gen_trees_equal_taffy() {
                     case.styles.push(ui.host.style(id).to_taffy());
                     case.parents.push(parent);
                     let seed = id.0;
+                    // Text follows its content, so text edits change it.
+                    let chars =
+                        ui.host
+                            .paragraph(id)
+                            .map_or(seed as usize, |p| p.text.len()) as u32;
                     case.measures.push(match ui.host.kind(id) {
                         Some(NodeKind::Text) | Some(NodeKind::Input) => Measure::Text {
-                            words: 1 + seed % 17,
-                            word: 9.0 + (seed % 7) as f32 * 3.5,
+                            words: 1 + chars / 5 % 30,
+                            word: 9.0 + (chars % 7) as f32 * 3.5,
                             line: 18.0,
                         },
                         Some(NodeKind::Vector) => Measure::Aspect(1.0 + (seed % 3) as f32 * 0.5),

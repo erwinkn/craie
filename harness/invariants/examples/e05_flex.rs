@@ -10,132 +10,45 @@
 //!   cargo run --release -p craie-harness --example e05_flex
 
 use std::alloc::{GlobalAlloc, Layout as AllocLayout, System};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Instant;
 
 use craie_core::rng::Rng;
-use craie_harness::flex_oracle::{FlexCase, Measure, OwnedTree, layout_diff};
-use craie_layout::LayoutRow;
+use craie_harness::flex_oracle::{FlexCase, Measure, OwnedTree, TaffyHost, layout_diff};
 use taffy::{
-    AlignItems, AvailableSpace, Cache, CacheTree, Dimension, FlexDirection, FlexWrap, Layout,
-    LayoutFlexboxContainer, LayoutInput, LayoutOutput, LayoutPartialTree, LengthPercentage,
-    NodeId as TaffyId, Rect, RunMode, Size, Style, TraversePartialTree, TraverseTree,
-    compute_cached_layout, compute_flexbox_layout, compute_hidden_layout, compute_leaf_layout,
-    compute_root_layout,
+    AlignItems, AvailableSpace, Dimension, FlexDirection, FlexWrap, LengthPercentage, Rect, Size,
+    Style,
 };
 
 static ALLOCS: AtomicUsize = AtomicUsize::new(0);
+/// Counting is on only in the counting runs; timed runs pay one relaxed
+/// load per allocation.
+static COUNTING: AtomicBool = AtomicBool::new(false);
 
 struct Counting;
 
+fn count() {
+    if COUNTING.load(Ordering::Relaxed) {
+        ALLOCS.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
 unsafe impl GlobalAlloc for Counting {
     unsafe fn alloc(&self, l: AllocLayout) -> *mut u8 {
-        ALLOCS.fetch_add(1, Ordering::Relaxed);
+        count();
         unsafe { System.alloc(l) }
     }
     unsafe fn dealloc(&self, p: *mut u8, l: AllocLayout) {
         unsafe { System.dealloc(p, l) }
     }
     unsafe fn realloc(&self, p: *mut u8, l: AllocLayout, new: usize) -> *mut u8 {
-        ALLOCS.fetch_add(1, Ordering::Relaxed);
+        count();
         unsafe { System.realloc(p, l, new) }
     }
 }
 
 #[global_allocator]
 static GLOBAL: Counting = Counting;
-
-/// Taffy's algorithm over the owned engine's host, as `craie-ui` drives
-/// Taffy today (its low-level traits).
-struct TaffyHost(OwnedTree);
-
-fn id(node: TaffyId) -> usize {
-    u64::from(node) as usize
-}
-
-fn to_taffy(node: &u32) -> TaffyId {
-    TaffyId::new(*node as u64)
-}
-
-impl TraversePartialTree for TaffyHost {
-    type ChildIter<'a> = std::iter::Map<std::slice::Iter<'a, u32>, fn(&u32) -> TaffyId>;
-
-    fn child_ids(&self, parent: TaffyId) -> Self::ChildIter<'_> {
-        self.0.children[id(parent)].iter().map(to_taffy)
-    }
-
-    fn child_count(&self, parent: TaffyId) -> usize {
-        self.0.children[id(parent)].len()
-    }
-
-    fn get_child_id(&self, parent: TaffyId, index: usize) -> TaffyId {
-        to_taffy(&self.0.children[id(parent)][index])
-    }
-}
-
-impl TraverseTree for TaffyHost {}
-
-impl LayoutPartialTree for TaffyHost {
-    type CoreContainerStyle<'a> = &'a LayoutRow;
-    type CustomIdent = String;
-
-    fn get_core_container_style(&self, node: TaffyId) -> Self::CoreContainerStyle<'_> {
-        &self.0.rows[id(node)]
-    }
-
-    fn set_unrounded_layout(&mut self, node: TaffyId, layout: &Layout) {
-        self.0.layouts[id(node)] = *layout;
-    }
-
-    fn compute_child_layout(&mut self, node: TaffyId, inputs: LayoutInput) -> LayoutOutput {
-        if inputs.run_mode == RunMode::PerformHiddenLayout {
-            return compute_hidden_layout(self, node);
-        }
-        compute_cached_layout(self, node, inputs, |tree, node, inputs| {
-            let row = tree.0.rows[id(node)];
-            if row.display() == taffy::Display::None {
-                compute_hidden_layout(tree, node)
-            } else if !tree.0.children[id(node)].is_empty() {
-                compute_flexbox_layout(tree, node, inputs)
-            } else {
-                let measure = tree.0.measures[id(node)];
-                compute_leaf_layout(
-                    inputs,
-                    &row,
-                    |_, _| 0.0,
-                    |known, available| measure.size(known, available),
-                )
-            }
-        })
-    }
-}
-
-impl LayoutFlexboxContainer for TaffyHost {
-    type FlexboxContainerStyle<'a> = &'a LayoutRow;
-    type FlexboxItemStyle<'a> = &'a LayoutRow;
-
-    fn get_flexbox_container_style(&self, node: TaffyId) -> Self::FlexboxContainerStyle<'_> {
-        &self.0.rows[id(node)]
-    }
-
-    fn get_flexbox_child_style(&self, node: TaffyId) -> Self::FlexboxItemStyle<'_> {
-        &self.0.rows[id(node)]
-    }
-}
-
-impl CacheTree for TaffyHost {
-    fn cache_get(&mut self, node: TaffyId, input: &LayoutInput) -> Option<LayoutOutput> {
-        self.0.caches[id(node)].get(input)
-    }
-
-    fn cache_store(&mut self, node: TaffyId, input: &LayoutInput, output: LayoutOutput) {
-        self.0.caches[id(node)].store(input, output)
-    }
-
-    fn cache_clear(&mut self, node: TaffyId) {
-        self.0.caches[id(node)] = Cache::new();
-    }
-}
 
 /// An app-like tree of exactly `n` nodes: nested rows and columns with
 /// padding and gaps, some wrapping rows, text and image leaves.
@@ -250,56 +163,81 @@ fn same(a: &OwnedTree, b: &OwnedTree) {
 struct Run {
     cold: f64,
     warm: f64,
-    warm_allocs: f64,
+    warm_allocs: usize,
+    warm_allocs_max: usize,
+}
+
+fn layout(tree: OwnedTree, available: Size<AvailableSpace>, owned: bool) -> OwnedTree {
+    if owned {
+        let mut tree = tree;
+        tree.layout(available);
+        tree
+    } else {
+        let mut host = TaffyHost(tree);
+        host.layout(available);
+        host.0
+    }
+}
+
+/// The warm edits: the same leaves and contents for both engines.
+fn edits(case: &FlexCase) -> Vec<(usize, Measure)> {
+    let candidates = leaves(case);
+    let mut rng = Rng::new(7);
+    (0..21)
+        .map(|k| {
+            let leaf = candidates[rng.below(candidates.len() as u32) as usize];
+            let measure = Measure::Text {
+                words: 1 + (k % 23),
+                word: 24.0,
+                line: 18.0,
+            };
+            (leaf, measure)
+        })
+        .collect()
 }
 
 fn measure(case: &FlexCase, owned: bool) -> (Run, OwnedTree) {
     let runs = if case.styles.len() > 20_000 { 5 } else { 9 };
-    let mut cold = Vec::new();
+    let mut cold = Vec::with_capacity(runs);
     let mut last = None;
     for _ in 0..runs {
-        let mut tree = OwnedTree::new(case);
+        let tree = OwnedTree::new(case);
         let t = Instant::now();
-        if owned {
-            tree.layout(case.available);
-        } else {
-            let mut host = TaffyHost(tree);
-            compute_root_layout(&mut host, TaffyId::new(0), case.available);
-            tree = host.0;
-        }
+        let tree = layout(tree, case.available, owned);
         cold.push(t.elapsed().as_secs_f64() * 1e3);
         last = Some(tree);
     }
+    let edits = edits(case);
+    // Timed warm relayouts, counting off.
     let mut tree = last.unwrap();
-    let candidates = leaves(case);
-    let mut rng = Rng::new(7);
-    let mut warm = Vec::new();
-    let mut allocs = Vec::new();
-    for k in 0..21 {
-        let leaf = candidates[rng.below(candidates.len() as u32) as usize];
-        tree.measures[leaf] = Measure::Text {
-            words: 1 + (k % 23),
-            word: 24.0,
-            line: 18.0,
-        };
-        tree.mark_dirty(leaf as u32);
-        let before = ALLOCS.load(Ordering::Relaxed);
+    let mut warm = Vec::with_capacity(edits.len());
+    for (leaf, content) in &edits {
+        tree.measures[*leaf] = *content;
+        tree.mark_dirty(*leaf as u32);
         let t = Instant::now();
-        if owned {
-            tree.layout(case.available);
-        } else {
-            let mut host = TaffyHost(tree);
-            compute_root_layout(&mut host, TaffyId::new(0), case.available);
-            tree = host.0;
-        }
+        tree = layout(tree, case.available, owned);
         warm.push(t.elapsed().as_secs_f64() * 1e3);
-        allocs.push((ALLOCS.load(Ordering::Relaxed) - before) as f64);
     }
+    // Counted warm relayouts on a fresh tree, the same edits.
+    let mut counted = layout(OwnedTree::new(case), case.available, owned);
+    let mut allocs = Vec::with_capacity(edits.len());
+    for (leaf, content) in &edits {
+        counted.measures[*leaf] = *content;
+        counted.mark_dirty(*leaf as u32);
+        let before = ALLOCS.load(Ordering::Relaxed);
+        COUNTING.store(true, Ordering::Relaxed);
+        counted = layout(counted, case.available, owned);
+        COUNTING.store(false, Ordering::Relaxed);
+        let n = ALLOCS.load(Ordering::Relaxed) - before;
+        allocs.push(n);
+    }
+    allocs.sort();
     (
         Run {
             cold: median(cold),
             warm: median(warm),
-            warm_allocs: median(allocs),
+            warm_allocs: allocs[allocs.len() / 2],
+            warm_allocs_max: allocs[allocs.len() - 1],
         },
         tree,
     )
@@ -307,19 +245,24 @@ fn measure(case: &FlexCase, owned: bool) -> (Run, OwnedTree) {
 
 fn main() {
     println!(
-        "| nodes | cold owned | cold Taffy | warm owned | warm Taffy | warm allocs owned | warm allocs Taffy |"
+        "| nodes | cold owned | cold Taffy | warm owned | warm Taffy | warm allocs owned (median / max) | warm allocs Taffy (median / max) |"
     );
-    println!(
-        "|------:|-----------:|-----------:|-----------:|-----------:|------------------:|------------------:|"
-    );
+    println!("|------:|-----------:|-----------:|-----------:|-----------:|------:|------:|");
     for n in [1_000usize, 10_000, 50_000] {
         let case = app_case(n, n as u64);
         let (a, owned_tree) = measure(&case, true);
         let (b, taffy_tree) = measure(&case, false);
         same(&owned_tree, &taffy_tree);
         println!(
-            "| {n} | {:.2} ms | {:.2} ms | {:.3} ms | {:.3} ms | {} | {} |",
-            a.cold, b.cold, a.warm, b.warm, a.warm_allocs, b.warm_allocs
+            "| {n} | {:.2} ms | {:.2} ms | {:.3} ms | {:.3} ms | {} / {} | {} / {} |",
+            a.cold,
+            b.cold,
+            a.warm,
+            b.warm,
+            a.warm_allocs,
+            a.warm_allocs_max,
+            b.warm_allocs,
+            b.warm_allocs_max
         );
     }
 }

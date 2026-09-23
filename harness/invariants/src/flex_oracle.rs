@@ -14,8 +14,8 @@ use craie_layout::{
 use taffy::{
     AlignContent, AlignItems, AlignmentSafety, AvailableSpace, BoxSizing, Cache, ClearState,
     Contain, Dimension, Direction, Display, FlexDirection, FlexWrap, Layout, LayoutInput,
-    LayoutOutput, LengthPercentage, LengthPercentageAuto, Overflow, Point, Position, Rect, RunMode,
-    Size, Style, TaffyTree,
+    LayoutOutput, LayoutPartialTree, LengthPercentage, LengthPercentageAuto, Line, Overflow, Point,
+    Position, Rect, RequestedAxis, RunMode, Size, SizingMode, Style, TaffyTree,
 };
 
 /// A leaf's content: the same function on both sides.
@@ -30,6 +30,10 @@ pub enum Measure {
     Text { words: u32, word: f32, line: f32 },
     /// A width-to-height ratio; 40 px wide when nothing constrains it.
     Aspect(f32),
+    /// Both axes follow the available space, with a different size for
+    /// each kind (definite, min-content, max-content), so a wrong height
+    /// constraint changes the result as a wrong width does.
+    Space(f32),
 }
 
 impl Measure {
@@ -80,8 +84,35 @@ impl Measure {
                     }
                 }
             },
+            Measure::Space(base) => Size {
+                width: known.width.unwrap_or(match available.width {
+                    AvailableSpace::Definite(w) => w.max(0.0).min(base * 3.0),
+                    AvailableSpace::MinContent => base * 0.5,
+                    AvailableSpace::MaxContent => base * 2.0,
+                }),
+                height: known.height.unwrap_or(match available.height {
+                    AvailableSpace::Definite(h) => (h.max(0.0) * 0.5).min(base * 3.0) + 1.0,
+                    AvailableSpace::MinContent => base * 0.25,
+                    AvailableSpace::MaxContent => base * 1.5,
+                }),
+            },
         }
     }
+}
+
+/// A change between two layouts of a `FlexCase`.
+#[derive(Clone, Debug)]
+pub enum Edit {
+    /// A node's style and content.
+    Node(usize, Box<Style>, Measure),
+    /// Moves `node` (not the root) under `parent` at `index`.
+    Move {
+        node: usize,
+        parent: usize,
+        index: usize,
+    },
+    /// A new available space for the root.
+    Viewport(Size<AvailableSpace>),
 }
 
 /// A tree of original styles. Node 0 is the root; `parents[i]` is the
@@ -232,24 +263,83 @@ impl TaffyCase {
 
 impl FlexCase {
     /// Lays the case out on both sides; then, for each of `edits`,
-    /// applies it to both, marks the node dirty, and lays out again.
-    /// Returns the first difference.
-    pub fn compare(&self, edits: &[(usize, Style, Measure)]) -> Result<(), String> {
+    /// applies it to both (the owned host clears caches as `TaffyTree`
+    /// does), and lays out again. Both trees persist across the edits,
+    /// so cached results meet changed styles, content, structure, and
+    /// viewports. Returns the first difference.
+    pub fn compare(&self, edits: &[Edit]) -> Result<(), String> {
         let mut owned = OwnedTree::new(self);
         let mut reference = TaffyCase::new(self);
-        owned.layout(self.available);
-        reference.layout(self.available);
+        let mut available = self.available;
+        owned.layout(available);
+        reference.layout(available);
         self.diff(&owned, &reference, "cold")?;
-        for (k, (node, style, measure)) in edits.iter().enumerate() {
-            owned.rows[*node] = LayoutRow::from(style);
-            owned.measures[*node] = *measure;
-            owned.mark_dirty(*node as Node);
-            let id = reference.nodes[*node];
-            reference.tree.set_style(id, style.clone()).unwrap();
-            reference.tree.set_node_context(id, Some(*measure)).unwrap();
-            owned.layout(self.available);
-            reference.layout(self.available);
-            self.diff(&owned, &reference, &format!("edit {k} (node {node})"))?;
+        for (k, edit) in edits.iter().enumerate() {
+            match edit {
+                Edit::Node(node, style, measure) => {
+                    owned.rows[*node] = LayoutRow::from(&**style);
+                    owned.measures[*node] = *measure;
+                    owned.mark_dirty(*node as Node);
+                    let id = reference.nodes[*node];
+                    reference.tree.set_style(id, (**style).clone()).unwrap();
+                    reference.tree.set_node_context(id, Some(*measure)).unwrap();
+                }
+                Edit::Move {
+                    node,
+                    parent,
+                    index,
+                } => {
+                    let old = owned.parents[*node] as usize;
+                    owned.children[old].retain(|c| *c as usize != *node);
+                    owned.mark_dirty(old as Node);
+                    let index = (*index).min(owned.children[*parent].len());
+                    owned.children[*parent].insert(index, *node as Node);
+                    owned.parents[*node] = *parent as u32;
+                    owned.mark_dirty(*parent as Node);
+                    let tree = &mut reference.tree;
+                    let ids = &reference.nodes;
+                    tree.remove_child(ids[old], ids[*node]).unwrap();
+                    tree.insert_child_at_index(ids[*parent], index, ids[*node])
+                        .unwrap();
+                }
+                Edit::Viewport(space) => available = *space,
+            }
+            owned.layout(available);
+            reference.layout(available);
+            self.diff(&owned, &reference, &format!("edit {k} ({edit:?})"))?;
+        }
+        Ok(())
+    }
+
+    /// Calls `compute_child` directly with generated inputs (every run
+    /// mode, sizing mode, requested axis, definiteness, parent size, and
+    /// available space), on the owned engine and on Taffy's algorithm
+    /// over the same host, each call twice (the second from the cache).
+    /// Compares every `LayoutOutput` field and every node's `Layout`.
+    pub fn compare_outputs(&self, rng: &mut Rng, calls: usize) -> Result<(), String> {
+        let mut owned = OwnedTree::new(self);
+        let mut host = TaffyHost(OwnedTree::new(self));
+        owned.layout(self.available);
+        host.layout(self.available);
+        for k in 0..calls {
+            let node = rng.below(self.styles.len() as u32);
+            let inputs = gen_input(rng);
+            for pass in ["first", "cached"] {
+                let got = owned.compute_child(node, inputs);
+                let want = host.compute_child_layout(taffy::NodeId::new(node as u64), inputs);
+                if let Some(field) = output_diff(&got, &want) {
+                    return Err(format!(
+                        "call {k} ({pass}) node {node} {field}:\n  inputs {inputs:?}\n  owned  {got:?}\n  taffy  {want:?}"
+                    ));
+                }
+                for (i, (a, b)) in owned.layouts.iter().zip(&host.0.layouts).enumerate() {
+                    if let Some(field) = layout_diff(a, b) {
+                        return Err(format!(
+                            "call {k} ({pass}) node {node}, then node {i} {field}:\n  owned  {a:?}\n  taffy  {b:?}"
+                        ));
+                    }
+                }
+            }
         }
         Ok(())
     }
@@ -266,6 +356,37 @@ impl FlexCase {
         }
         Ok(())
     }
+}
+
+/// The first `LayoutOutput` field whose bits differ.
+pub fn output_diff(a: &LayoutOutput, b: &LayoutOutput) -> Option<&'static str> {
+    let bits = |x: Option<f32>| x.map(f32::to_bits);
+    let rect = |a: Rect<f32>, b: Rect<f32>| {
+        [a.left, a.right, a.top, a.bottom]
+            .iter()
+            .zip([b.left, b.right, b.top, b.bottom])
+            .all(|(x, y)| x.to_bits() == y.to_bits())
+    };
+    if a.size.width.to_bits() != b.size.width.to_bits()
+        || a.size.height.to_bits() != b.size.height.to_bits()
+    {
+        return Some("size");
+    }
+    if !rect(a.scrollable_overflow_rect, b.scrollable_overflow_rect) {
+        return Some("scrollable overflow");
+    }
+    if bits(a.baselines.first) != bits(b.baselines.first)
+        || bits(a.baselines.last) != bits(b.baselines.last)
+    {
+        return Some("baselines");
+    }
+    if a.top_margin != b.top_margin || a.bottom_margin != b.bottom_margin {
+        return Some("collapsible margins");
+    }
+    if a.margins_can_collapse_through != b.margins_can_collapse_through {
+        return Some("margins collapse through");
+    }
+    None
 }
 
 /// The first field whose bits differ.
@@ -622,7 +743,8 @@ pub fn gen_style(rng: &mut Rng) -> Style {
 }
 
 pub fn gen_measure(rng: &mut Rng) -> Measure {
-    match rng.below(6) {
+    match rng.below(8) {
+        6 | 7 => Measure::Space(pick(rng, &[10.0, 24.0, 60.0])),
         0 => Measure::Empty,
         1 | 2 => Measure::Fixed(
             (rng.unit() * 80.0).round(),
@@ -684,28 +806,197 @@ pub fn gen_case(rng: &mut Rng, max_nodes: u32, max_depth: u32) -> FlexCase {
     }
 }
 
-/// Style and measure edits for warm relayouts.
-pub fn gen_edits(rng: &mut Rng, case: &FlexCase, count: usize) -> Vec<(usize, Style, Measure)> {
-    (0..count)
-        .map(|_| {
-            let node = rng.below(case.styles.len() as u32) as usize;
-            let mut style = case.styles[node].clone();
-            let measure = if rng.chance(0.5) {
-                gen_measure(rng)
+/// Edits for warm relayouts: styles and content, moves, viewports.
+pub fn gen_edits(rng: &mut Rng, case: &FlexCase, count: usize) -> Vec<Edit> {
+    let mut parents = case.parents.clone();
+    let mut edits = Vec::new();
+    while edits.len() < count {
+        let n = case.styles.len();
+        match rng.below(10) {
+            0..=5 => {
+                let node = rng.below(n as u32) as usize;
+                let mut style = case.styles[node].clone();
+                let measure = if rng.chance(0.5) {
+                    gen_measure(rng)
+                } else {
+                    case.measures[node]
+                };
+                match rng.below(4) {
+                    0 => style = gen_style(rng),
+                    1 => style.size.width = gen_dim(rng),
+                    2 => style.flex_grow = pick(rng, &[0.0, 1.0, 2.0]),
+                    _ => {}
+                }
+                if node == 0 {
+                    style.display = Display::Flex;
+                    style.position = Position::Relative;
+                }
+                edits.push(Edit::Node(node, Box::new(style), measure));
+            }
+            6..=7 if n > 1 => {
+                let node = 1 + rng.below(n as u32 - 1) as usize;
+                let parent = rng.below(n as u32) as usize;
+                // Not under itself.
+                let mut cur = parent;
+                let mut inside = false;
+                loop {
+                    if cur == node {
+                        inside = true;
+                        break;
+                    }
+                    if cur == 0 {
+                        break;
+                    }
+                    cur = parents[cur] as usize;
+                }
+                if inside {
+                    continue;
+                }
+                parents[node] = parent as u32;
+                edits.push(Edit::Move {
+                    node,
+                    parent,
+                    index: rng.below(8) as usize,
+                });
+            }
+            _ => edits.push(Edit::Viewport(gen_available(rng))),
+        }
+    }
+    edits
+}
+
+/// A `LayoutInput` from every regime a parent can ask for.
+pub fn gen_input(rng: &mut Rng) -> LayoutInput {
+    let opt = |rng: &mut Rng| {
+        if rng.chance(0.5) {
+            None
+        } else {
+            Some(gen_length(rng).max(0.0))
+        }
+    };
+    LayoutInput {
+        run_mode: pick(rng, &[RunMode::ComputeSize, RunMode::PerformLayout]),
+        sizing_mode: pick(rng, &[SizingMode::ContentSize, SizingMode::InherentSize]),
+        axis: pick(
+            rng,
+            &[
+                RequestedAxis::Horizontal,
+                RequestedAxis::Vertical,
+                RequestedAxis::Both,
+            ],
+        ),
+        known_dimensions: Size {
+            width: opt(rng),
+            height: opt(rng),
+        },
+        known_dimensions_are_definite: Size {
+            width: rng.chance(0.7),
+            height: rng.chance(0.7),
+        },
+        parent_size: Size {
+            width: opt(rng),
+            height: opt(rng),
+        },
+        available_space: gen_available(rng),
+        vertical_margins_are_collapsible: Line::FALSE,
+    }
+}
+
+/// Taffy's algorithm over an `OwnedTree`'s rows, caches, and measures,
+/// through Taffy's low-level traits (as `craie-ui` drove Taffy before
+/// step 6c).
+pub struct TaffyHost(pub OwnedTree);
+
+fn index(node: taffy::NodeId) -> usize {
+    u64::from(node) as usize
+}
+
+fn to_taffy_id(node: &u32) -> taffy::NodeId {
+    taffy::NodeId::new(*node as u64)
+}
+
+impl TaffyHost {
+    pub fn layout(&mut self, available: Size<AvailableSpace>) {
+        taffy::compute_root_layout(self, taffy::NodeId::new(0), available);
+    }
+}
+
+impl taffy::TraversePartialTree for TaffyHost {
+    type ChildIter<'a> = std::iter::Map<std::slice::Iter<'a, u32>, fn(&u32) -> taffy::NodeId>;
+
+    fn child_ids(&self, parent: taffy::NodeId) -> Self::ChildIter<'_> {
+        self.0.children[index(parent)].iter().map(to_taffy_id)
+    }
+
+    fn child_count(&self, parent: taffy::NodeId) -> usize {
+        self.0.children[index(parent)].len()
+    }
+
+    fn get_child_id(&self, parent: taffy::NodeId, i: usize) -> taffy::NodeId {
+        to_taffy_id(&self.0.children[index(parent)][i])
+    }
+}
+
+impl taffy::TraverseTree for TaffyHost {}
+
+impl taffy::LayoutPartialTree for TaffyHost {
+    type CoreContainerStyle<'a> = &'a LayoutRow;
+    type CustomIdent = String;
+
+    fn get_core_container_style(&self, node: taffy::NodeId) -> Self::CoreContainerStyle<'_> {
+        &self.0.rows[index(node)]
+    }
+
+    fn set_unrounded_layout(&mut self, node: taffy::NodeId, layout: &Layout) {
+        self.0.layouts[index(node)] = *layout;
+    }
+
+    fn compute_child_layout(&mut self, node: taffy::NodeId, inputs: LayoutInput) -> LayoutOutput {
+        if inputs.run_mode == RunMode::PerformHiddenLayout {
+            return taffy::compute_hidden_layout(self, node);
+        }
+        taffy::compute_cached_layout(self, node, inputs, |tree, node, inputs| {
+            let row = tree.0.rows[index(node)];
+            if row.display() == Display::None {
+                taffy::compute_hidden_layout(tree, node)
+            } else if !tree.0.children[index(node)].is_empty() {
+                taffy::compute_flexbox_layout(tree, node, inputs)
             } else {
-                case.measures[node]
-            };
-            match rng.below(4) {
-                0 => style = gen_style(rng),
-                1 => style.size.width = gen_dim(rng),
-                2 => style.flex_grow = pick(rng, &[0.0, 1.0, 2.0]),
-                _ => {}
+                let measure = tree.0.measures[index(node)];
+                taffy::compute_leaf_layout(
+                    inputs,
+                    &row,
+                    |_, _| 0.0,
+                    |known, available| measure.size(known, available),
+                )
             }
-            if node == 0 {
-                style.display = Display::Flex;
-                style.position = Position::Relative;
-            }
-            (node, style, measure)
         })
-        .collect()
+    }
+}
+
+impl taffy::LayoutFlexboxContainer for TaffyHost {
+    type FlexboxContainerStyle<'a> = &'a LayoutRow;
+    type FlexboxItemStyle<'a> = &'a LayoutRow;
+
+    fn get_flexbox_container_style(&self, node: taffy::NodeId) -> Self::FlexboxContainerStyle<'_> {
+        &self.0.rows[index(node)]
+    }
+
+    fn get_flexbox_child_style(&self, node: taffy::NodeId) -> Self::FlexboxItemStyle<'_> {
+        &self.0.rows[index(node)]
+    }
+}
+
+impl taffy::CacheTree for TaffyHost {
+    fn cache_get(&mut self, node: taffy::NodeId, input: &LayoutInput) -> Option<LayoutOutput> {
+        self.0.caches[index(node)].get(input)
+    }
+
+    fn cache_store(&mut self, node: taffy::NodeId, input: &LayoutInput, output: LayoutOutput) {
+        self.0.caches[index(node)].store(input, output)
+    }
+
+    fn cache_clear(&mut self, node: taffy::NodeId) {
+        self.0.caches[index(node)].clear();
+    }
 }

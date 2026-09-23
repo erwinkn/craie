@@ -529,16 +529,31 @@ gone with it.
   field and keyword (sizing keywords, negative and auto margins,
   percentages, min above max, aspect ratios, RTL, safe alignment,
   baselines, wrap and wrap-reverse, absolute insets, scroll gutters,
-  containment, `display: none`) and text-like, fixed, and aspect leaf
-  measures, under definite, min-content, and max-content space. The
-  owned engine lays out `LayoutRow`s; the reference is a `TaffyTree` of
-  the original styles with the same measures. Every node's unrounded
-  `Layout` must be bit-equal (no tolerance), cold and after three
-  edits per tree (warm, cached relayouts; the host clears caches as
-  `TaffyTree` does). 2,400 trees (73,099 nodes) in the suite; a
-  100,000-tree sweep (3,046,378 nodes) was also equal. The harness's
-  `Gen` trees (40 seeds, 13 steps, 520 root subtrees, leaves measured
-  by kind) are equal too.
+  containment, `display: none`) and text-like, fixed, aspect, and
+  two-axis leaf measures (the last gives each kind of available space,
+  in both axes, its own size), under definite, min-content, and
+  max-content space. The owned engine lays out `LayoutRow`s; the
+  reference is a `TaffyTree` of the original styles with the same
+  measures. Every node's unrounded `Layout` must be bit-equal (no
+  tolerance), cold and after six edits per tree on the same two trees
+  (styles and content, moves to a new parent, viewport changes; the
+  host clears caches as `TaffyTree` does). 2,400 trees (73,099 nodes).
+  A 100,000-tree sweep (3,046,378 nodes, three content edits each) was
+  equal at d3d453d.
+- Direct calls: `compute_child` with generated inputs (both run modes,
+  both sizing modes, each requested axis, definiteness flags, parent
+  sizes, and every kind of available space), on the owned engine and
+  on Taffy's algorithm over the same host, each call twice (the second
+  from the cache): 28,800 calls, every `LayoutOutput` field (size,
+  overflow, both baselines, margin fields) and every node's `Layout`
+  equal.
+- The harness's `Gen` trees (40 seeds, 13 steps, 520 root subtrees,
+  leaves measured by kind, text by its length) are equal too. Cache
+  reuse across `Gen`'s structural steps, lists, and animation probes is
+  covered at the `Ui` level since step 6c by the existing oracles
+  (incremental equals clean rebuild, lists against a plain column, the
+  probe tests) and by `tests/layout_row_equals_taffy_style.rs`, which
+  compares production layout with a `TaffyTree` of the original styles.
 - Negative controls, each caught within the first 204 seeds: align-self
   ignored, wrap-reverse as wrap, `safe` ignored, RTL rows as LTR,
   scrollbar gutter dropped, containment keeps baselines, cross auto
@@ -548,25 +563,35 @@ gone with it.
   baselines not clamped, space-evenly off by one, RTL leaf padding
   swapped, hidden-child order lost, self-start not flipped, the
   absolute RTL gutter dropped, stretched cross size definite under
-  wrap, and `fit-content` unresolved.
+  wrap, and `fit-content` unresolved. Added in review round 1: a leaf's
+  available height forced to max-content, `baselines.last` set, hidden
+  layout that keeps the cache, and the width-only shortcut on the wrong
+  axis (all caught by the direct calls or the persistent edits).
+- Allocations (`tests/flex_allocations.rs`, per-thread counting
+  allocator): a relayout after content, style (display kept), and
+  viewport changes allocates nothing: 2,400 warm relayouts over 400
+  generated trees, and a wrapping row whose line count grows after a
+  content change. With the pool taking the last buffer instead of the
+  best fit, or without the line reservation, both tests fail.
 - Cost (`examples/e05_flex.rs`): app-like trees (nested rows and
   columns, padding, gaps, some wrapping rows, text and 32 px leaves),
   both engines over the same host, rows, caches, and measures, so only
   the algorithm differs. Warm: one leaf changes, its cache and its
-  ancestors' clear, relayout. Medians; load average 8 to 14, so times
-  are indicative; the layouts are bit-equal.
+  ancestors' clear, relayout. Timed runs count no allocations; separate
+  runs count them (median / maximum over 21 relayouts). Medians over
+  three runs of the example, load average 6 to 9; the layouts are
+  bit-equal. (The first table of step 6b counted allocations inside
+  the timed runs, which slowed Taffy: its 0.180 against 0.421 ms warm
+  at 1k was mostly that cost.)
 
 | nodes | cold owned | cold Taffy | warm owned | warm Taffy | warm allocations owned | warm allocations Taffy |
-|------:|-----------:|-----------:|-----------:|-----------:|-----:|------:|
-| 1k    | 2.83 ms   | 3.11 ms   | 0.180 ms | 0.421 ms | 0 | 931    |
-| 10k   | 103.59 ms | 109.56 ms | 16.62 ms | 17.40 ms | 0 | 48,085 |
-| 50k   | 538.84 ms | 614.06 ms | 17.02 ms | 19.60 ms | 0 | 34,467 |
+|------:|-----------:|-----------:|-----------:|-----------:|------:|------:|
+| 1k    | 3.70 ms  | 4.10 ms  | 0.281 ms | 0.237 ms | 0 / 0 | 931 / 3,295      |
+| 10k   | 54.76 ms | 62.63 ms | 11.87 ms | 12.96 ms | 0 / 0 | 48,084 / 70,714  |
+| 50k   | 369.1 ms | 425.3 ms | 8.47 ms  | 10.76 ms | 0 / 0 | 34,467 / 261,434 |
 
-- Step 6c (production on the owned engine; pooled buffers capped at 256
-  items): E05 again, 1k / 10k / 50k: cold 2.75 / 75.2 / 426.0 ms owned
-  against 3.38 / 86.2 / 467.6 ms Taffy; warm 0.181 / 14.0 / 7.96 ms
-  against 0.420 / 15.4 / 9.80 ms; warm allocations 0 against 931 /
-  48,085 / 34,467.
+  Cold, the owned engine was faster in 8 of the 9 runs (5 to 20
+  percent); warm times are equal within noise.
 - Step 6c in `examples/bench` (the Taffy build at d3d453d, where
   production still called Taffy, against the owned build), 8
   interleaved pairs, load average
