@@ -521,6 +521,47 @@ gone with it.
   ids per message now and runs again (live heap 37,569 KiB at 2,000
   messages).
 
+### E05: owned flex engine against Taffy (step 6b)
+
+- Differential suite (`harness/invariants/tests/flex_equals_taffy.rs`,
+  oracle in `src/flex_oracle.rs`): generated trees of up to 60 nodes
+  and 5 levels, original `taffy::Style`s that cover every `LayoutRow`
+  field and keyword (sizing keywords, negative and auto margins,
+  percentages, min above max, aspect ratios, RTL, safe alignment,
+  baselines, wrap and wrap-reverse, absolute insets, scroll gutters,
+  containment, `display: none`) and text-like, fixed, and aspect leaf
+  measures, under definite, min-content, and max-content space. The
+  owned engine lays out `LayoutRow`s; the reference is a `TaffyTree` of
+  the original styles with the same measures. Every node's unrounded
+  `Layout` must be bit-equal (no tolerance), cold and after three
+  edits per tree (warm, cached relayouts; the host clears caches as
+  `TaffyTree` does). 2,400 trees (73,099 nodes) in the suite; a
+  100,000-tree sweep (3,046,378 nodes) was also equal. The harness's
+  `Gen` trees (40 seeds, 13 steps, 520 root subtrees, leaves measured
+  by kind) are equal too.
+- Negative controls, each caught within the first 204 seeds: align-self
+  ignored, wrap-reverse as wrap, `safe` ignored, RTL rows as LTR,
+  scrollbar gutter dropped, containment keeps baselines, cross auto
+  margins doubled, absolute auto margins not split, shrink not scaled
+  by the basis, min-content lines not split, percentage gap not
+  resolved again, the column basis floor dropped, scroll-container
+  baselines not clamped, space-evenly off by one, RTL leaf padding
+  swapped, hidden-child order lost, self-start not flipped, the
+  absolute RTL gutter dropped, stretched cross size definite under
+  wrap, and `fit-content` unresolved.
+- Cost (`examples/e05_flex.rs`): app-like trees (nested rows and
+  columns, padding, gaps, some wrapping rows, text and 32 px leaves),
+  both engines over the same host, rows, caches, and measures, so only
+  the algorithm differs. Warm: one leaf changes, its cache and its
+  ancestors' clear, relayout. Medians; load average 8 to 14, so times
+  are indicative; the layouts are bit-equal.
+
+| nodes | cold owned | cold Taffy | warm owned | warm Taffy | warm allocations owned | warm allocations Taffy |
+|------:|-----------:|-----------:|-----------:|-----------:|-----:|------:|
+| 1k    | 2.83 ms   | 3.11 ms   | 0.180 ms | 0.421 ms | 0 | 931    |
+| 10k   | 103.59 ms | 109.56 ms | 16.62 ms | 17.40 ms | 0 | 48,085 |
+| 50k   | 538.84 ms | 614.06 ms | 17.02 ms | 19.60 ms | 0 | 34,467 |
+
 ### E14: layout-aware virtualization, list versus a plain column (step 2)
 
 `cargo run --release -p craie-harness --example e14_lists`: a scroller

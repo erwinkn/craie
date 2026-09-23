@@ -9,6 +9,7 @@
 //! the renderer does, without a GPU, so cost tests can count bytes.
 
 pub mod e01;
+pub mod flex_oracle;
 
 use std::collections::BTreeMap;
 

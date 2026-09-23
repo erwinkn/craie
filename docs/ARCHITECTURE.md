@@ -295,6 +295,15 @@ or a reset style is a flex column whose children do not shrink
 (`flexShrink: 0`; `host::default_style`). Cold layout
 of 10k nodes costs 217 to 567 ms; one streaming append costs 0.65 ms.
 
+An owned flex engine exists beside Taffy (`craie-layout`, step 6b):
+`compute_flex`, `compute_leaf`, `compute_hidden`, `compute_root`, and
+`compute_cached` over a `LayoutTree` the host implements (rows,
+children, its own dispatch, results, per-node cache, and reused item
+and line buffers). It is a port of Taffy 0.14's flex algorithm that
+reads `LayoutRow`s directly, and it equals Taffy bit for bit on the E05
+differential suite. A warm relayout allocates nothing. Production still
+calls Taffy; the switch is step 6c.
+
 **Target.** A Craie-owned engine over `layout_inputs[]`, the child span
 pool, intrinsic measures, a layout cache, and results (relative
 position, border-box size, content-box offsets, overflow extent,
@@ -310,8 +319,11 @@ Public style API: a typed object with CSS property names in camelCase
 `flexShrink: 0`, as in React Native. `block` and `grid` are explicit values.
 
 **Experiments.**
-- E05: specialized kernels versus Taffy on generated trees with
-  percentages, baselines, min/max, intrinsic sizes, overflow.
+- E05: the owned engine, then specialized kernels, versus Taffy on
+  generated trees with percentages, baselines, min/max, intrinsic
+  sizes, overflow. Step 6b: the general flex engine is bit-equal on
+  2,400 generated trees (cold and after three edits each) and on the
+  harness's `Gen` trees; see EXPERIMENTS.md.
 
 **Decisions.**
 - Virtualize first. The measured cold cost comes from visiting every
@@ -320,6 +332,19 @@ Public style API: a typed object with CSS property names in camelCase
   path for each algorithm until the owned one passes its differential
   suite against Taffy in the harness. Taffy may ship for grid for a
   long time.
+- The owned flex engine starts as a port of Taffy's algorithm (the
+  same steps and float operations in the same order), not a new
+  implementation. Reason: the gate is equality with Taffy, and a port
+  can be bit-equal, so the suite needs no tolerance and any difference
+  is a defect. Kernels come later, behind the same suite. (Step 6b.)
+- The owned engine keeps Taffy's value types (`Size`, `Rect`,
+  `AvailableSpace`, `LayoutInput`, `LayoutOutput`, `Layout`) and
+  Taffy's `Cache`. Reason: the cache decides which earlier results a
+  layout reuses, so another cache gives different results; the value
+  types are plain data that `Layouts` already stores. The algorithm,
+  the tree interface, and the buffers are Craie's. (Step 6b.)
+- The host owns invalidation: the engine never clears a cache except
+  in hidden layout, as in Taffy. (Step 6b.)
 - Block means block-level boxes only. Inline content is always a Text
   paragraph node.
 - RN defaults stay so Marbre's cross-platform kit needs no

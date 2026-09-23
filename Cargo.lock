@@ -662,6 +662,7 @@ version = "0.0.0"
 dependencies = [
  "accesskit",
  "craie-core",
+ "craie-layout",
  "craie-render",
  "craie-scene",
  "craie-text",

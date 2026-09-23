@@ -309,6 +309,14 @@ impl LayoutRow {
         self.dim_slot(FLEX_BASIS)
     }
 
+    pub fn flex_grow(&self) -> f32 {
+        self.flex_grow
+    }
+
+    pub fn flex_shrink(&self) -> f32 {
+        self.flex_shrink
+    }
+
     pub fn flex_direction(&self) -> FlexDirection {
         match self.flex_direction {
             1 => FlexDirection::Column,
