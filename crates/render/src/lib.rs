@@ -158,6 +158,8 @@ pub struct Renderer {
     scene_bg: Option<wgpu::BindGroup>,
     atlas: Option<AtlasGpu>,
     layer_pool: Vec<LayerTarget>,
+    /// Viewport uniform bytes last written: an unchanged frame writes none.
+    viewport_bytes: Vec<u8>,
     pub stats: RenderStats,
     /// Bytes uploaded to atlas textures this session (diagnostics).
     pub atlas_upload_bytes: u64,
@@ -207,6 +209,7 @@ impl Renderer {
             scene_bg: None,
             atlas: None,
             layer_pool: Vec::new(),
+            viewport_bytes: Vec::new(),
             stats: RenderStats::default(),
             atlas_upload_bytes: 0,
         }
@@ -408,7 +411,8 @@ impl Renderer {
             }
         }
         let needed = vps.len() as u64 * VIEWPORT_STRIDE;
-        if needed > self.viewport_cap {
+        let rebound = needed > self.viewport_cap;
+        if rebound {
             self.viewport_cap = needed.next_power_of_two();
             self.viewports = gpu.device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("viewports"),
@@ -424,7 +428,11 @@ impl Renderer {
             let at = i * VIEWPORT_STRIDE as usize;
             bytes[at..at + size_of::<Viewport>()].copy_from_slice(bytemuck::bytes_of(v));
         }
-        gpu.queue.write_buffer(&self.viewports, 0, &bytes);
+        if bytes != self.viewport_bytes || rebound {
+            gpu.queue.write_buffer(&self.viewports, 0, &bytes);
+            self.stats.upload_bytes += bytes.len() as u64;
+            self.viewport_bytes = bytes;
+        }
 
         let composite_bgs: Vec<wgpu::BindGroup> = plan
             .iter()
