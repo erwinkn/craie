@@ -278,10 +278,14 @@ prove validity.
 
 **Current.** Taffy 0.14 through its low-level traits, reading each
 node's own layout row: a Craie-owned `LayoutRow` (`craie-layout`, 136
-bytes, step 6a) that holds exactly what the wire can express (lengths
-in one tagged `f32` array, enums as bytes) and implements Taffy's style
-traits, so no `taffy::Style` is stored per node; transactions still
-carry taffy styles, converted when a layout op applies. Results land in `Layouts` (cache, unrounded
+bytes, step 6a) that holds every `taffy::Style` field the flexbox
+build reads (lengths in one tagged `f32` array; grow, shrink, aspect
+ratio, and scrollbar width as `f32`; enums, alignment safety,
+direction, and containment as bytes and flags) and implements Taffy's
+style traits, so no `taffy::Style` is stored per node; transactions
+still carry taffy styles, converted when a layout op applies. The row
+drops only `item_is_table` and `item_is_replaced`, which only the
+block and grid algorithms read. Results land in `Layouts` (cache, unrounded
 layout, final rect, content-box offset); finalize records nodes whose
 origin moved, whose size changed, and whose scroll extent changed. A
 layout pass runs only when the layout queue is non-empty or the

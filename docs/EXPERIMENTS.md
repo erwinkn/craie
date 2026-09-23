@@ -502,12 +502,19 @@ gone with it.
 ### Step 6a: compact layout row
 
 - `LayoutRow` (136 bytes: 25 tagged `f32` lengths, grow, shrink,
-  aspect ratio, enum bytes) replaces the 240-byte `taffy::Style` per
-  node; Taffy reads it through its style traits. Round trips with
-  `taffy::Style` are exact over generated styles; generated trees lay
-  out bit for bit as Taffy's own tree does with the converted styles
-  (`tests/layout_row_equals_taffy_style.rs`; it fails with one trait
-  method changed). Live heap at 5k rows (`examples/bench`): 41,157 KiB
+  aspect ratio, scrollbar width, enum bytes, one flag byte) replaces
+  the 240-byte `taffy::Style` per node; Taffy reads it through its
+  style traits. Round trips with `taffy::Style` are exact over
+  generated styles, NaN payloads and alignment safety included.
+  Review round 1 found that the first row lost alignment safety, RTL
+  direction, scrollbar width, and `Some(NaN)` aspect ratios, and that
+  the first reference test could not see it (it built its reference
+  from the converted row). The test now sends 300 generated trees of
+  original styles through `Ui::apply_txn` and compares them bit for
+  bit with a `TaffyTree` of the same original styles
+  (`tests/layout_row_equals_taffy_style.rs`); it fails when any of
+  direction, scrollbar width, safety, either containment flag, or the
+  aspect flag is dropped. Live heap at 5k rows (`examples/bench`): 41,157 KiB
   before, 39,493 KiB after.
 - The bench's transcript case had failed since the dense-id rule of
   step 1's review (its ids left gaps past the slack); it allocates six

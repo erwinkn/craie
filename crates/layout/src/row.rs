@@ -1,9 +1,9 @@
 use taffy::{
-    AlignContent, AlignContentKeyword, AlignItems, AlignItemsKeyword, BoxGenerationMode, BoxSizing,
-    CoreStyle, Dimension, Direction, Display, ExpandedDimension, ExpandedLengthPercentage,
-    ExpandedLengthPercentageAuto, FlexDirection, FlexWrap, FlexboxContainerStyle, FlexboxItemStyle,
-    JustifyContent, LengthPercentage, LengthPercentageAuto, Overflow, Point, Position, Rect, Size,
-    Style,
+    AlignContent, AlignContentKeyword, AlignItems, AlignItemsKeyword, AlignmentSafety,
+    BoxGenerationMode, BoxSizing, Contain, CoreStyle, Dimension, Direction, Display,
+    ExpandedDimension, ExpandedLengthPercentage, ExpandedLengthPercentageAuto, FlexDirection,
+    FlexWrap, FlexboxContainerStyle, FlexboxItemStyle, JustifyContent, LengthPercentage,
+    LengthPercentageAuto, Overflow, Point, Position, Rect, Size, Style,
 };
 
 const SLOT_COUNT: usize = 25;
@@ -40,6 +40,15 @@ const TAG_PERCENT: u64 = 2;
 const TAG_SPECIAL: u64 = 3;
 
 const TAG_UNSET: u8 = 0xff;
+const TAG_SAFE: u8 = 0x80;
+
+const FLAG_DISPLAY_NONE: u8 = 1 << 0;
+const FLAG_ABSOLUTE: u8 = 1 << 1;
+const FLAG_CONTENT_BOX: u8 = 1 << 2;
+const FLAG_RTL: u8 = 1 << 3;
+const FLAG_ASPECT: u8 = 1 << 4;
+const FLAG_CONTAIN_LAYOUT: u8 = 1 << 5;
+const FLAG_CONTAIN_PAINT: u8 = 1 << 6;
 const DIM_MIN_CONTENT: u32 = 0x7fc0_0001;
 const DIM_MAX_CONTENT: u32 = 0x7fc0_0002;
 const DIM_FIT_CONTENT: u32 = 0x7fc0_0003;
@@ -47,6 +56,11 @@ const DIM_STRETCH: u32 = 0x7fc0_0004;
 const DIM_CONTENT: u32 = 0x7fc0_0005;
 
 /// The layout fields that Craie stores per node.
+///
+/// The row keeps every `taffy::Style` field that the flexbox build of
+/// Taffy reads. It drops `item_is_table` and `item_is_replaced`, because
+/// only the block and grid algorithms read them, and Craie does not
+/// build those algorithms.
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
 pub struct LayoutRow {
@@ -55,8 +69,8 @@ pub struct LayoutRow {
     flex_grow: f32,
     flex_shrink: f32,
     aspect_ratio: f32,
-    display: u8,
-    position: u8,
+    scrollbar_width: f32,
+    flags: u8,
     flex_direction: u8,
     flex_wrap: u8,
     justify_content: u8,
@@ -65,7 +79,6 @@ pub struct LayoutRow {
     align_self: u8,
     overflow_x: u8,
     overflow_y: u8,
-    box_sizing: u8,
     dim_extra: [u8; 3],
 }
 
@@ -80,8 +93,8 @@ impl PartialEq for LayoutRow {
             && self.flex_grow.to_bits() == other.flex_grow.to_bits()
             && self.flex_shrink.to_bits() == other.flex_shrink.to_bits()
             && self.aspect_ratio.to_bits() == other.aspect_ratio.to_bits()
-            && self.display == other.display
-            && self.position == other.position
+            && self.scrollbar_width.to_bits() == other.scrollbar_width.to_bits()
+            && self.flags == other.flags
             && self.flex_direction == other.flex_direction
             && self.flex_wrap == other.flex_wrap
             && self.justify_content == other.justify_content
@@ -90,7 +103,6 @@ impl PartialEq for LayoutRow {
             && self.align_self == other.align_self
             && self.overflow_x == other.overflow_x
             && self.overflow_y == other.overflow_y
-            && self.box_sizing == other.box_sizing
             && self.dim_extra == other.dim_extra
     }
 }
@@ -112,9 +124,9 @@ impl From<&Style> for LayoutRow {
             values: [0.0; SLOT_COUNT],
             flex_grow: style.flex_grow,
             flex_shrink: style.flex_shrink,
-            aspect_ratio: style.aspect_ratio.unwrap_or(f32::NAN),
-            display: display_tag(style.display),
-            position: position_tag(style.position),
+            aspect_ratio: style.aspect_ratio.unwrap_or(0.0),
+            scrollbar_width: style.scrollbar_width,
+            flags: flags_of(style),
             flex_direction: flex_direction_tag(style.flex_direction),
             flex_wrap: flex_wrap_tag(style.flex_wrap),
             justify_content: content_tag(style.justify_content),
@@ -123,7 +135,6 @@ impl From<&Style> for LayoutRow {
             align_self: items_tag(style.align_self),
             overflow_x: overflow_tag(style.overflow.x),
             overflow_y: overflow_tag(style.overflow.y),
-            box_sizing: box_sizing_tag(style.box_sizing),
             dim_extra: [0; 3],
         };
         row.set_lpa_slot(INSET_L, style.inset.left);
@@ -160,7 +171,10 @@ impl LayoutRow {
         Style {
             display: self.display(),
             box_sizing: self.box_sizing(),
+            direction: self.direction(),
             overflow: self.overflow(),
+            scrollbar_width: self.scrollbar_width(),
+            contain: self.contain(),
             position: self.position(),
             inset: self.inset(),
             size: self.size(),
@@ -185,17 +199,39 @@ impl LayoutRow {
     }
 
     pub fn display(&self) -> Display {
-        match self.display {
-            1 => Display::None,
-            _ => Display::Flex,
+        match self.flag(FLAG_DISPLAY_NONE) {
+            true => Display::None,
+            false => Display::Flex,
         }
     }
 
     pub fn position(&self) -> Position {
-        match self.position {
-            1 => Position::Absolute,
-            _ => Position::Relative,
+        match self.flag(FLAG_ABSOLUTE) {
+            true => Position::Absolute,
+            false => Position::Relative,
         }
+    }
+
+    pub fn direction(&self) -> Direction {
+        match self.flag(FLAG_RTL) {
+            true => Direction::Rtl,
+            false => Direction::Ltr,
+        }
+    }
+
+    pub fn scrollbar_width(&self) -> f32 {
+        self.scrollbar_width
+    }
+
+    pub fn contain(&self) -> Contain {
+        let mut contain = Contain::NONE;
+        if self.flag(FLAG_CONTAIN_LAYOUT) {
+            contain |= Contain::LAYOUT;
+        }
+        if self.flag(FLAG_CONTAIN_PAINT) {
+            contain |= Contain::PAINT;
+        }
+        contain
     }
 
     pub fn overflow(&self) -> Point<Overflow> {
@@ -307,13 +343,13 @@ impl LayoutRow {
     }
 
     pub fn aspect_ratio(&self) -> Option<f32> {
-        (!self.aspect_ratio.is_nan()).then_some(self.aspect_ratio)
+        self.flag(FLAG_ASPECT).then_some(self.aspect_ratio)
     }
 
     pub fn box_sizing(&self) -> BoxSizing {
-        match self.box_sizing {
-            1 => BoxSizing::ContentBox,
-            _ => BoxSizing::BorderBox,
+        match self.flag(FLAG_CONTENT_BOX) {
+            true => BoxSizing::ContentBox,
+            false => BoxSizing::BorderBox,
         }
     }
 
@@ -335,6 +371,10 @@ impl LayoutRow {
     pub fn set_gap(&mut self, value: Size<LengthPercentage>) {
         self.set_lp_slot(GAP_W, value.width);
         self.set_lp_slot(GAP_H, value.height);
+    }
+
+    fn flag(&self, flag: u8) -> bool {
+        self.flags & flag != 0
     }
 
     fn tag(&self, slot: usize) -> u64 {
@@ -483,7 +523,7 @@ impl CoreStyle for LayoutRow {
 
     #[inline(always)]
     fn direction(&self) -> Direction {
-        Direction::Ltr
+        self.direction()
     }
 
     #[inline(always)]
@@ -493,7 +533,7 @@ impl CoreStyle for LayoutRow {
 
     #[inline(always)]
     fn scrollbar_width(&self) -> f32 {
-        0.0
+        self.scrollbar_width()
     }
 
     #[inline(always)]
@@ -539,6 +579,11 @@ impl CoreStyle for LayoutRow {
     #[inline(always)]
     fn border(&self) -> Rect<LengthPercentage> {
         self.border()
+    }
+
+    #[inline(always)]
+    fn contain(&self) -> Contain {
+        self.contain()
     }
 }
 
@@ -596,19 +641,21 @@ impl FlexboxItemStyle for LayoutRow {
     }
 }
 
-fn display_tag(value: Display) -> u8 {
-    match value {
-        Display::None => 1,
-        #[allow(unreachable_patterns)]
-        _ => 0,
-    }
-}
-
-fn position_tag(value: Position) -> u8 {
-    match value {
-        Position::Relative => 0,
-        Position::Absolute => 1,
-    }
+fn flags_of(style: &Style) -> u8 {
+    let mut flags = 0;
+    let mut set = |flag, on| {
+        if on {
+            flags |= flag;
+        }
+    };
+    set(FLAG_DISPLAY_NONE, style.display == Display::None);
+    set(FLAG_ABSOLUTE, style.position == Position::Absolute);
+    set(FLAG_CONTENT_BOX, style.box_sizing == BoxSizing::ContentBox);
+    set(FLAG_RTL, style.direction == Direction::Rtl);
+    set(FLAG_ASPECT, style.aspect_ratio.is_some());
+    set(FLAG_CONTAIN_LAYOUT, style.contain.contains(Contain::LAYOUT));
+    set(FLAG_CONTAIN_PAINT, style.contain.contains(Contain::PAINT));
+    flags
 }
 
 fn flex_direction_tag(value: FlexDirection) -> u8 {
@@ -648,30 +695,43 @@ fn overflow_of(tag: u8) -> Overflow {
     }
 }
 
-fn box_sizing_tag(value: BoxSizing) -> u8 {
+fn safety_tag(value: AlignmentSafety) -> u8 {
     match value {
-        BoxSizing::BorderBox => 0,
-        BoxSizing::ContentBox => 1,
+        AlignmentSafety::Unsafe => 0,
+        AlignmentSafety::Safe => TAG_SAFE,
+    }
+}
+
+fn safety_of(tag: u8) -> AlignmentSafety {
+    match tag & TAG_SAFE {
+        0 => AlignmentSafety::Unsafe,
+        _ => AlignmentSafety::Safe,
     }
 }
 
 fn items_tag(value: Option<AlignItems>) -> u8 {
-    match value.map(|value| value.keyword) {
-        None => TAG_UNSET,
-        Some(AlignItemsKeyword::Start) => 0,
-        Some(AlignItemsKeyword::End) => 1,
-        Some(AlignItemsKeyword::FlexStart) => 2,
-        Some(AlignItemsKeyword::FlexEnd) => 3,
-        Some(AlignItemsKeyword::SelfStart) => 4,
-        Some(AlignItemsKeyword::SelfEnd) => 5,
-        Some(AlignItemsKeyword::Center) => 6,
-        Some(AlignItemsKeyword::Baseline) => 7,
-        Some(AlignItemsKeyword::Stretch) => 8,
-    }
+    let Some(value) = value else {
+        return TAG_UNSET;
+    };
+    safety_tag(value.safety)
+        | match value.keyword {
+            AlignItemsKeyword::Start => 0,
+            AlignItemsKeyword::End => 1,
+            AlignItemsKeyword::FlexStart => 2,
+            AlignItemsKeyword::FlexEnd => 3,
+            AlignItemsKeyword::SelfStart => 4,
+            AlignItemsKeyword::SelfEnd => 5,
+            AlignItemsKeyword::Center => 6,
+            AlignItemsKeyword::Baseline => 7,
+            AlignItemsKeyword::Stretch => 8,
+        }
 }
 
 fn items_of(tag: u8) -> Option<AlignItems> {
-    Some(match tag {
+    if tag == TAG_UNSET {
+        return None;
+    }
+    let mut value = match tag & !TAG_SAFE {
         0 => AlignItems::START,
         1 => AlignItems::END,
         2 => AlignItems::FLEX_START,
@@ -682,26 +742,34 @@ fn items_of(tag: u8) -> Option<AlignItems> {
         7 => AlignItems::BASELINE,
         8 => AlignItems::STRETCH,
         _ => return None,
-    })
+    };
+    value.safety = safety_of(tag);
+    Some(value)
 }
 
 fn content_tag(value: Option<AlignContent>) -> u8 {
-    match value.map(|value| value.keyword) {
-        None => TAG_UNSET,
-        Some(AlignContentKeyword::Start) => 0,
-        Some(AlignContentKeyword::End) => 1,
-        Some(AlignContentKeyword::FlexStart) => 2,
-        Some(AlignContentKeyword::FlexEnd) => 3,
-        Some(AlignContentKeyword::Center) => 4,
-        Some(AlignContentKeyword::Stretch) => 5,
-        Some(AlignContentKeyword::SpaceBetween) => 6,
-        Some(AlignContentKeyword::SpaceEvenly) => 7,
-        Some(AlignContentKeyword::SpaceAround) => 8,
-    }
+    let Some(value) = value else {
+        return TAG_UNSET;
+    };
+    safety_tag(value.safety)
+        | match value.keyword {
+            AlignContentKeyword::Start => 0,
+            AlignContentKeyword::End => 1,
+            AlignContentKeyword::FlexStart => 2,
+            AlignContentKeyword::FlexEnd => 3,
+            AlignContentKeyword::Center => 4,
+            AlignContentKeyword::Stretch => 5,
+            AlignContentKeyword::SpaceBetween => 6,
+            AlignContentKeyword::SpaceEvenly => 7,
+            AlignContentKeyword::SpaceAround => 8,
+        }
 }
 
 fn content_of(tag: u8) -> Option<AlignContent> {
-    Some(match tag {
+    if tag == TAG_UNSET {
+        return None;
+    }
+    let mut value = match tag & !TAG_SAFE {
         0 => AlignContent::START,
         1 => AlignContent::END,
         2 => AlignContent::FLEX_START,
@@ -712,7 +780,9 @@ fn content_of(tag: u8) -> Option<AlignContent> {
         7 => AlignContent::SPACE_EVENLY,
         8 => AlignContent::SPACE_AROUND,
         _ => return None,
-    })
+    };
+    value.safety = safety_of(tag);
+    Some(value)
 }
 
 #[cfg(test)]
@@ -733,6 +803,21 @@ mod tests {
             ..Style::default()
         };
         assert_style_eq(&LayoutRow::default().to_taffy(), &want);
+    }
+
+    /// S6A-05: a present aspect ratio keeps its bits, a NaN payload too.
+    #[test]
+    fn aspect_ratio_presence_is_separate_from_its_bits() {
+        for value in [None, Some(0.0), Some(f32::from_bits(0x7fc0_1234))] {
+            let row = LayoutRow::from(&Style {
+                aspect_ratio: value,
+                ..Style::default()
+            });
+            assert_eq!(
+                row.aspect_ratio().map(f32::to_bits),
+                value.map(f32::to_bits)
+            );
+        }
     }
 
     #[test]
@@ -808,15 +893,23 @@ mod tests {
             flex_basis: gen_dim(rng),
             flex_grow: gen_f32(rng),
             flex_shrink: gen_f32(rng),
-            aspect_ratio: if rng.chance(0.25) {
-                None
-            } else {
-                Some(rng.unit() * 8.0 + 0.1)
+            aspect_ratio: match rng.below(4) {
+                0 => None,
+                1 => Some(gen_f32(rng)),
+                _ => Some(rng.unit() * 8.0 + 0.1),
             },
             overflow: Point {
                 x: gen_overflow(rng),
                 y: gen_overflow(rng),
             },
+            scrollbar_width: gen_f32(rng),
+            direction: [Direction::Ltr, Direction::Rtl][rng.below(2) as usize],
+            contain: [
+                Contain::NONE,
+                Contain::LAYOUT,
+                Contain::PAINT,
+                Contain::CONTENT,
+            ][rng.below(4) as usize],
             box_sizing: [BoxSizing::BorderBox, BoxSizing::ContentBox][rng.below(2) as usize],
             ..Style::default()
         }
@@ -870,8 +963,12 @@ mod tests {
         ][rng.below(4) as usize]
     }
 
+    fn gen_safety(rng: &mut Rng) -> AlignmentSafety {
+        [AlignmentSafety::Unsafe, AlignmentSafety::Safe][rng.below(2) as usize]
+    }
+
     fn gen_items(rng: &mut Rng) -> Option<AlignItems> {
-        [
+        let value: Option<AlignItems> = [
             None,
             Some(AlignItems::START),
             Some(AlignItems::END),
@@ -882,11 +979,15 @@ mod tests {
             Some(AlignItems::CENTER),
             Some(AlignItems::BASELINE),
             Some(AlignItems::STRETCH),
-        ][rng.below(10) as usize]
+        ][rng.below(10) as usize];
+        value.map(|mut value| {
+            value.safety = gen_safety(rng);
+            value
+        })
     }
 
     fn gen_content(rng: &mut Rng) -> Option<AlignContent> {
-        [
+        let value: Option<AlignContent> = [
             None,
             Some(AlignContent::START),
             Some(AlignContent::END),
@@ -897,7 +998,11 @@ mod tests {
             Some(AlignContent::SPACE_BETWEEN),
             Some(AlignContent::SPACE_EVENLY),
             Some(AlignContent::SPACE_AROUND),
-        ][rng.below(10) as usize]
+        ][rng.below(10) as usize];
+        value.map(|mut value| {
+            value.safety = gen_safety(rng);
+            value
+        })
     }
 
     fn assert_style_eq(a: &Style, b: &Style) {
@@ -926,6 +1031,9 @@ mod tests {
             other => panic!("{other:?}"),
         }
         assert_eq!(a.overflow, b.overflow);
+        assert_bits(a.scrollbar_width, b.scrollbar_width);
+        assert_eq!(a.direction, b.direction);
+        assert_eq!(a.contain, b.contain);
         assert_eq!(a.box_sizing, b.box_sizing);
     }
 
