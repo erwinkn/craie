@@ -432,6 +432,16 @@ gone with it.
   (a rotation by angle, the shorter way; scales by factor); colors
   premultiplied.
 - The wire fixture (JS encoder, Rust decoder) carries both ops.
+- Framebench, step 3c end (`db18a47`) against step 4 (`b24fa38`),
+  5,000 rows, same wire input, the two binaries alternated (6 runs x 3
+  reps each, half with each build first). Load average 27 to 51 from
+  other applications during the whole measurement, so the spread is
+  wide: first draw 38 to 98 ms on both builds, medians 65.0 ms (3c) and
+  70.2 ms (step 4); with step 4 run first its median was the lower one
+  (60.4 vs 71.5 ms). No change is measurable at this load; update,
+  scroll, and empty draws are inside the same spread (0.12 to 0.25,
+  1.3 to 2.7, 0.06 to 0.34 ms). The driver's idle cost is one emptiness
+  check per render and one per paint decision.
 
 ### E14: layout-aware virtualization, list versus a plain column (step 2)
 
