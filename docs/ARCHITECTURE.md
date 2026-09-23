@@ -93,8 +93,11 @@ crates/scene/           craie-scene: core, bytemuck, etagere
 crates/render/          craie-render: wgpu
   lib.rs                storage-buffer mirrors, draw list, opacity layers
   shaders/              scene.wgsl (rects + glyphs), composite.wgsl
-crates/text/            craie-text: Parley, Swash
-  lib.rs cache.rs       shaping, emit into chunks, GlyphKey -> RasterId
+crates/text/            craie-text: HarfRust, skrifa, unicode-*, Swash
+  paragraph.rs          owned paragraph: analysis, shaping, lines, carets
+  fonts.rs              FontStore, FontSource, RawFonts, pinned fonts
+  lib.rs cache.rs       engine, emit into chunks, GlyphKey -> RasterId
+                        (Parley for inputs until step 3b)
 crates/ui/              craie-ui: core, scene, text, Taffy, accesskit
   mutation.rs           Mutation enum, Transaction + direct-API builder
   wire.rs               CRW2 decode/encode
@@ -105,9 +108,12 @@ crates/ui/              craie-ui: core, scene, text, Taffy, accesskit
   dispatch.rs           hit testing, focus, pointer capture, editing
   ui.rs                 facade; a11y.rs, input.rs, surface.rs, events.rs
   bridge.rs platform.rs Session (commit queue, outbox), platform contract
-crates/platform-winit/  winit 0.30 driver, Window, HostApp, clipboard
+crates/platform-winit/  winit 0.30 driver, Window, HostApp, clipboard,
+                        fonts.rs (SystemFonts: fontique behind FontSource)
 crates/node/            N-API: NativeHost, NativeClient
-harness/invariants/     craie-harness: invariant, cost, graph tests; E10
+harness/invariants/     craie-harness: invariant, cost, graph tests; E01
+                        (Parley oracle), E10, E14
+assets/fonts/           pinned test fonts (OFL), `pinned-fonts` feature
 ```
 
 ---
@@ -289,27 +295,45 @@ Public style API: a typed object with CSS property names in camelCase
 
 ## 5. Text
 
-**Current.** Parley shapes a paragraph's span list into a retained
-`Layout` whose brush is the span index, which is also the span's paint
-slot in the text chunk: a color change patches a paint record and
-never reshapes. Swash rasterizes cache misses; the glyph cache maps
-`GlyphKey` (interned font, coords/synthesis, glyph, size bits,
-quarter-pixel subpixel) to a stable `RasterId` and keeps the key and
-font to re-rasterize an evicted glyph. Glyph instances are chunk-local;
-their subpixel buckets are relative to the chunk origin, which the
-renderer snaps to the device-pixel grid. Retained Parley layouts are
-the memory floor (about 27 MiB for 5k rows). INPUT nodes hold a Parley
-`PlainEditor` each; `TextInput` is uncontrolled (`value` is sent once at
-mount; `setText` replaces the text). Editor reshapes count where
-Parley shapes: each edit, preedit, commit, and finished composition,
-and a dirty layout refreshed before navigation (Parley pinned to
-0.11.1). Validation bounds font sizes to
-`MAX_FONT_SIZE` (2048 logical points). A glyph larger than an atlas
-page renders: it is rasterized at a smaller size that fits, and its
-quad draws the bitmap scaled up (softer, never missing). The cache
-keeps the raster size for re-rasterization. CJK line breaking degrades
-(no ICU4X data). No font fallback stack is configured: a symbol missing
-from the default font (the todo example's `✕`) draws as `.notdef`.
+**Current.** Text nodes lay out through the owned paragraph
+(`craie-text/src/paragraph.rs`, step 3a). `Shaper::shape` runs Unicode
+analysis (graphemes, UAX #14 break opportunities, bidi levels with a
+fast path when no character needs the algorithm, scripts), resolves a
+font per grapheme (the span's primary instance when it covers the
+grapheme, else fallback), splits items on level, script, font, and
+size, and shapes each item with HarfRust 0.12 through a cached shape
+plan per (instance, direction, script). skrifa gives the metrics. A
+`Paragraph` keeps runs (text range, instance, size, level, metrics),
+the glyph placement store (28 bytes per glyph: id, span index, cluster
+byte, advance, offsets, final position), lines, visual segments, and
+one analysis byte per text byte (break opportunity, paragraph
+direction, L1 classes, cluster flags). The glyph placement store is
+the only glyph position store: emission, hit testing, carets, and
+selection rectangles all read it. The glyph cache keeps bitmap
+geometry per `GlyphKey` (instance, glyph, size bits, subpixel) and no
+positions. A glyph's span index is its paint slot, so a color change
+patches a paint record and touches no placement. `rewrap` lays an
+already shaped paragraph out at another width over engine scratch:
+Parley's greedy line breaking and line metrics, then UAX #9 L1 and L2
+per line, in place. A width change does no shaping and, once the
+stores have grown, no allocation. Measured against Parley in E01:
+line breaks, cluster maps, and glyph ids equal on every case. The one
+difference is L1 at soft line ends, which Craie applies and Parley
+does not. A retained paragraph holds 0.39 to 0.76 times Parley's bytes.
+The Text default family is `system-ui` (React Native's default; SF on
+macOS), not Parley's `sans-serif`. INPUT nodes still hold a Parley
+`PlainEditor` each until step 3b. Its contexts are made on first use,
+and its glyphs go through the same font store and glyph cache. `TextInput` is uncontrolled (`value`
+is sent once at mount; `setText` replaces the text). Editor reshapes
+count where Parley shapes: each edit, preedit, commit, and finished
+composition, and a dirty layout refreshed before navigation (Parley
+pinned to 0.11.1). Validation bounds font sizes to `MAX_FONT_SIZE`
+(2048 logical points). A glyph larger than an atlas page renders: it
+is rasterized at a smaller size that fits, and its quad draws the
+bitmap scaled up (softer, never missing). The cache keeps the raster
+size for re-rasterization. Glyph instances are chunk-local; their
+subpixel buckets are relative to the chunk origin, which the renderer
+snaps to the device-pixel grid.
 
 **Target.** Craie owns every persistent representation:
 
@@ -361,9 +385,25 @@ UTF-8 + spans -> Unicode analysis -> font resolution + fallback
 
 ## 6. Fonts
 
-**Current.** Parley's fontique handles discovery and fallback. Font
-identity is `FontData.data.id()` plus face index, interned to a u16 in
-the glyph cache.
+**Current.** `craie-text/src/fonts.rs` owns font identity: a
+`FontStore` interns faces (`FontFaceId`, with units per em, an ASCII
+coverage mask, and HarfRust shaping data built on first use) and
+instances (`FontInstanceId`: face, normalized variation coordinates,
+synthesis). Discovery and fallback come through the `FontSource`
+trait (`select(family, attrs)`, `fallback(char, script, attrs)`),
+which returns font bytes. `RawFonts` is the byte-only source (browser
+profiles, tests): family by name, nearest weight and italic with
+synthesis, fallback by coverage in registration order. The
+`pinned-fonts` feature embeds the harness fonts from `assets/fonts`
+(Noto Sans regular, bold, and italic, Arabic, Hebrew, Devanagari, a JP
+subset, and Symbols 2, under OFL). Tests and the harness lay text out on
+them. On desktop, `craie-platform-winit/src/fonts.rs` implements
+`FontSource` over fontique (generic families, script fallback, then a
+coverage scan as the last resort) and installs it as the default
+source at startup. The engine caches the primary instance per
+(family, attrs) and the fallback per script and per first character.
+Until step 3b, Parley (for inputs) still brings fontique into
+craie-text's graph.
 
 **Target.** `FontFaceId` and `FontInstanceId` (face, variation coords,
 synthesis, features) owned by `craie-text`. Desktop discovery and
@@ -794,11 +834,11 @@ without changing publication rules.
 ## 18. Verification harness
 
 **Current.** `harness/invariants` holds: incremental equals clean
-rebuild over seeded mutation sequences (layout, drawn scene, hit
+rebuild over seeded mutation sequences, on the pinned fonts (layout, drawn scene, hit
 tests, semantics; 8 seeds x 60 steps at 1x and 2x with a moving
 clock, compared at rest, plus resize and
 atlas-pressure cases); the cost invariants that apply today (color
-change, translation, scroll, unchanged frame, tween, atlas
+change, width change without shaping, translation, scroll, unchanged frame, tween, atlas
 relocation, input color, typing shapes with composition controls and
 a layout-identity oracle); allocation tests over the whole frame on a
 real device with a separate budget per phase. Craie's phases (UI
@@ -829,7 +869,14 @@ splices, edits, and scrolls equal a clean rebuild; list frames allocate
 nothing in the UI (always) and in Craie's renderer phases (on a GPU); accessibility
 positions and hidden rows);
 the release-graph
-and layer-map checks; and the E10 and E14 benches. `prepare_frame` in
+and layer-map checks; E01 (the owned paragraph against Parley on the
+pinned fonts: line breaks, cluster maps, and drawn glyph ids exact,
+advances bit-equal, positions and line metrics within a bound derived
+from the f32 additions of each value, L1 lines checked by moving
+Parley's trailing whitespace, and negative controls for each kind of
+difference; unicode-bidi's own L1 + L2 as the reference for line
+order; rewrap equals a fresh layout from every start width); a width
+change does no shapes; and the E01, E10, and E14 benches. `prepare_frame` in
 platform-winit is the one frame path for commits and native input;
 accessibility bounds and the IME area publish only after it.
 The host sets the UI clock and wakes at `Ui::next_settle` to snap

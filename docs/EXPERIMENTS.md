@@ -78,6 +78,127 @@ scroll moves every row; the native scroll path (one record, 32 bytes)
 is not what it measures. The 5k-row differences are inside the noise
 band. First-draw live bytes: +27.2 MiB before, +28.3 MiB after.
 
+### E01: owned paragraph versus Parley (step 3a)
+
+Correctness: `cargo test -p craie-harness --test e01_text`. Cost:
+`cargo run --release -p craie-harness --example e01_text`. Both sides
+get the same pinned font bytes (`assets/fonts`) and the same fallback
+order (Parley through a font stack of the pinned families; Craie
+through `RawFonts` registration order). Eight cases cover the E01
+classes. Wrapped: Latin at 120/240/480 and unbounded, and at 40/90 with
+an overflowing word. Styled: bold, italic, and 24-pt spans, and bold and
+italic Arabic and Hebrew with synthesis. Multilingual: Latin,
+Devanagari conjuncts, Japanese, ✕, and an em dash. The test asserts
+that no case draws `.notdef`. Bidi: an LTR
+paragraph with Hebrew, Arabic, and numbers; an RTL paragraph with
+English and Arabic-Indic digits; a Hebrew paragraph with newlines and
+an empty line. Editable cases are step 3b.
+
+Correctness per case and width (22 layouts):
+
+| case (class)             | line breaks | cluster maps | drawn glyph ids | advances   | worst position or metric / bound |
+|--------------------------|-------------|--------------|-----------------|------------|----------------------------------|
+| latin (wrapped)          | equal       | equal        | equal           | bit-equal  | 0.072                            |
+| latin-narrow (wrapped)   | equal       | equal        | equal           | bit-equal  | 0.069 (largest error 9.8e-4 pt)  |
+| styled (styled)          | equal       | equal        | equal           | bit-equal  | 0.028                            |
+| styled-synth (styled)    | equal       | equal        | equal           | bit-equal  | 0.030                            |
+| multilingual             | equal       | equal        | equal           | bit-equal  | 0.076                            |
+| bidi-ltr (bidi)          | equal       | equal        | equal but 2 L1 lines | bit-equal | 0.039                     |
+| bidi-rtl (bidi)          | equal       | equal        | equal but 3 L1 lines | bit-equal | 0.070                     |
+| hebrew-lines (bidi)      | equal       | equal        | equal           | bit-equal  | 0.064                            |
+
+A cluster map is each glyph group's text range and glyph ids in
+logical order (Parley's ligature continuation clusters merge into
+their group). The bound for a position or metric is the f32 error of
+the additions that produce it on each side (2γₖ·S plus one ulp, with k
+additions and S the sum of term magnitudes). The table gives the worst
+ratio of error to bound. Differences found and kept:
+
+- UAX #9 L1 at soft line ends. Craie moves a line's trailing
+  whitespace to the paragraph level: to the right end in an LTR
+  paragraph, to the left end in an RTL one. Parley keeps it inside the
+  embedded run. So the visible glyphs of 5 wrapped lines differ by
+  one space advance. The test checks these lines by applying L1 to
+  Parley's line: the ids must then be equal and the positions within
+  bound. `line_order_matches_unicode_bidi` checks Craie's line order
+  against unicode-bidi's own L1 and L2, including tabs and numbers.
+- Selection box with negative leading. When a line mixes fonts,
+  Parley's `block_min_coord` clamps the box to ascent plus descent, so
+  it extends above the line box. Craie's line top and its selection
+  rectangles are the line box. Line tops, heights, and baselines agree.
+- Parley's `trailing_whitespace` counts only a visual last run, so on
+  the L1 lines it reads 0 and its width includes the space.
+
+Cost at each case's first bounded width (median of 1,001 interleaved
+calls; host load average 20 to 38 on 18 cores, so absolute times move up to
+2x between runs, but the ratios stayed stable over four runs):
+
+| case         | text B | retained B ours / Parley | cold µs ours / Parley | cold allocs | rewrap µs   | rewrap allocs | edit µs      | edit allocs |
+|--------------|--------|--------------------------|-----------------------|-------------|-------------|---------------|--------------|-------------|
+| latin        | 386    | 13,918 / 18,336          | 78.0 / 92.5           | 11 / 27     | 4.88 / 3.75 | 2 / 2         | 80.4 / 97.2  | 13 / 30     |
+| latin-narrow | 386    | 21,982 / 32,928          | 79.5 / 95.6           | 15 / 31     | 5.38 / 5.21 | 0 / 0         | 84.8 / 103.2 | 15 / 31     |
+| styled       | 70     | 2,674 / 5,796            | 15.5 / 22.5           | 6 / 18      | 0.88 / 0.71 | 2 / 2         | 15.6 / 22.5  | 6 / 18      |
+| styled-synth | 35     | 2,135 / 3,520            | 12.6 / 15.8           | 20 / 16     | 0.42 / 0.46 | 1 / 1         | 12.8 / 16.0  | 20 / 16     |
+| multilingual | 128    | 3,656 / 7,632            | 32.2 / 43.1           | 9 / 33      | 0.62 / 0.92 | 0 / 0         | 32.5 / 43.7  | 21 / 45     |
+| bidi-ltr     | 55     | 3,355 / 6,288            | 20.7 / 25.2           | 24 / 21     | 0.58 / 0.67 | 1 / 1         | 21.8 / 26.9  | 24 / 21     |
+| bidi-rtl     | 96     | 5,900 / 12,560           | 37.2 / 42.6           | 30 / 29     | 1.04 / 1.08 | 0 / 0         | 41.5 / 47.2  | 30 / 29     |
+| hebrew-lines | 72     | 2,696 / 6,864            | 20.5 / 23.6           | 32 / 24     | 0.67 / 0.79 | 0 / 0         | 21.9 / 26.0  | 33 / 27     |
+
+- Retained bytes: what dropping the laid-out paragraph frees.
+  `Paragraph::heap_bytes` gives the same number. Craie holds 0.39 to
+  0.76 times Parley's bytes. The 28-byte glyph row is most of it (Latin:
+  10.8 KB of 13.9 KB).
+- Cold: a new paragraph on a warm engine. Craie takes 0.69 to 0.87
+  times Parley's time. It makes fewer allocations except on bidi text
+  (`BidiInfo` allocates its level and class tables; an LTR-only
+  paragraph skips it).
+- Rewrap (a width change): no shaping on either side, and no
+  allocation once the line and segment stores have grown (the 1 or 2
+  counted allocations are that growth). Craie takes 0.67 to 1.30 times
+  Parley's time. It is slower on Latin at 120 (1.30) and on the styled
+  case (1.24): Craie rebuilds its cluster scratch from the glyph store
+  on each rewrap, and Parley keeps its clusters.
+- Edit (one character inserted in the middle): both lay the paragraph
+  out again. Incremental reflow is E04.
+- Span color: Craie does no layout work (the span index is the paint
+  slot; `costs.rs` asserts zero shapes and zero layouts). Parley stores
+  the brush in the layout's styles, so a new color needs a new layout
+  (the cold cost).
+- A fresh engine's first multilingual layout (font parsing, shaping
+  data, plans): 0.9 to 2.6 ms for Craie, 0.6 to 1.3 ms for Parley (five runs).
+
+Changes that came from this measurement:
+- HarfRust compiled a shape plan on each `shape` call. Plans are now
+  cached per (instance, direction, script). Cold allocations went from
+  137 to 473 down to 6 to 32.
+- `unicode_bidi::visual_runs` clones the levels of the whole paragraph
+  for each line (O(text × lines)). Rewrap now keeps the analysis flags
+  from shaping and does L1 and L2 over the line's clusters, in place.
+  Rewrap allocations went from 33 to 232 down to 0 to 2.
+- Coverage checks parsed the font's cmap for each character. Each face
+  now has an ASCII coverage mask, and the primary instance is
+  resolved once per span.
+- The engine made Parley's `FontContext` (a system font scan, 15 to 47
+  ms) when it was created. It now makes it when an input first needs
+  it.
+
+Framebench, the same React wire dumps replayed by `f622135` and step
+3a back to back (medians of 3 repetitions, system fonts, so step 3a
+draws SF where the baseline drew Helvetica):
+
+| rows  | phase     | step 2   | step 3a  |
+|-------|-----------|----------|----------|
+| 100   | firstDraw | 2.42 ms  | 5.21 ms  |
+| 1,000 | firstDraw | 19.2 ms  | 19.9 ms  |
+| 5,000 | firstDraw | 77.6 ms  | 79.4 ms  |
+| 5,000 | scrollDraw| 2.53 ms  | 2.63 ms  |
+| 5,000 | remove    | 5.21 ms  | 3.34 ms  |
+| 5,000 | first-draw live bytes | +27.7 MiB | +21.2 MiB |
+
+The 100-row first draw includes the one-time font work (fontique
+resolution of system-ui, and SF shaping data and plans). At 1,000 and
+5,000 rows the difference is inside the noise band.
+
 ### E14: layout-aware virtualization, list versus a plain column (step 2)
 
 `cargo run --release -p craie-harness --example e14_lists`: a scroller
