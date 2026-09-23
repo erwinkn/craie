@@ -351,8 +351,13 @@ Carets stop only at grapheme boundaries. Every operation of Parley's
 `PlainEditor` that the input used is kept, with its behavior (E01
 editable cases). An edit shapes once through the engine; a width
 change only rewraps; caret motions allocate nothing. Caret, selection,
-and IME-area geometry read the placements. `TextInput` is uncontrolled
-(`value` is sent once at mount; `setText` replaces the text). Parley is
+and IME-area geometry read the placements. An edit that overlaps the
+preedit ends composing; `set_text` moves the selection onto character
+boundaries at once. Undo snapshots keep full cursors; a composition is
+one undo step from its start to its commit. `TextInput` is uncontrolled
+(`value` is sent once at mount; `setText` replaces the text without an
+`onChangeText` echo); `onChangeText` fires only when the committed text
+changes. Parley is
 not a dependency of any release crate: the harness keeps it as the
 oracle. Validation bounds font sizes to `MAX_FONT_SIZE`
 (2048 logical points). A glyph larger than an atlas page renders: it

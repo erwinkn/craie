@@ -276,17 +276,23 @@ by cluster and by word, visual left and right, word moves, line
 start and end, up and down across soft and hard breaks, text start and
 end, selection versions of each, select all, click, drag, double-click
 word selection and word-wise drag, byte-range selection, and IME
-preedit, commit, and cancel. Six scripts: Latin, a wrapped paragraph
+preedit, commit, and cancel. Seven scripts: Latin, a wrapped paragraph
 at 120 pt, hard breaks with an empty line, bidi in an LTR paragraph and
-in an RTL one, and IME composition (127 steps). After every step the
-buffer (preedit included), the selection's anchor and focus bytes, and
-the preedit range are equal, and the caret draws at the same x (within
-the f32 bound of the line's additions) and at the same line box top.
+in an RTL one, word moves, word selection, and word deletion across
+soft breaks at 40 pt, and IME composition (150 steps, a count the test
+asserts). After every step the buffer (preedit included), the
+selection's anchor and focus bytes, and the preedit range are equal;
+both sides draw a caret or neither does; and the caret draws at the
+same x (within the f32 bound of the line's additions) and at the same
+line box top. `diff_detects_each_difference` proves the comparison
+finds a changed selection, text, preedit, caret presence (either side),
+caret x, and caret line.
 
 Known difference, asserted exactly
-(`caret_stops_at_graphemes_where_parley_splits`): Parley puts a caret
-between e and a combining acute, and inside the ligature of a ZWJ
-family; Backspace there leaves an orphan mark. Craie's caret stops only
+(`caret_stops_at_graphemes_where_parley_splits`, both traces literal,
+repeats included): Parley puts a caret between e and a combining
+acute, and inside the ligature of a ZWJ family; Backspace there leaves
+an orphan mark. Craie's caret stops only
 at grapheme boundaries (UAX #29); Backspace after a combining mark
 removes the mark (one code point, as Parley), and after an emoji the
 whole grapheme.
@@ -323,6 +329,20 @@ Found while porting:
   `default_instance_raster_does_not_inherit_coords` (a 1.9 KB variable
   Noto Emoji subset, `assets/fonts/NotoEmoji-Var-Test.ttf`) fails
   without the fix.
+
+Review round 1 (Astra, own thread) found, and the round fixed with
+tests: `set_text` could leave the selection inside a character (now
+clamped onto boundaries at once); an edit overlapping the preedit could
+leave its range inside a character (now it ends composing); the IME
+undo step lost the text a composition replaced (now recorded when
+composition starts, with the commit in the same step); word moves
+stopped at soft line breaks (neighbours now cross lines, as Parley's);
+`onChangeText` fired on caret moves (now only when the committed text
+changes; a JS `setText` does not echo); undo dropped cursor affinity
+(snapshots keep full cursors). `editing_never_leaves_char_boundaries`
+runs 24 seeds of 300 random operations over multibyte, bidi, emoji,
+and mark text, and asserts both cursors and the preedit range stay on
+character boundaries.
 
 The text demo lost an inline monospace span: a paragraph has one family
 (its code line is all monospace). Parley's line-height override is
