@@ -36,6 +36,9 @@ pub const VERSION: u16 = 1;
 pub const MAX_ITEMS: usize = 1 << 16;
 pub const MAX_POINTS: usize = 1 << 22;
 pub const MAX_STOPS: usize = 64;
+/// Commands all items expand to together (items may share a verb
+/// range, so this bounds the decoded paths, not the bytes).
+pub const MAX_EXPANDED_VERBS: usize = 1 << 20;
 
 /// How an item draws its path.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -212,6 +215,7 @@ pub fn decode(buf: &[u8]) -> Result<Asset, AssetError> {
         point: usize,
     }
     let mut raw = Vec::with_capacity(ni);
+    let mut expanded = 0usize;
     for _ in 0..ni {
         let kind = r.u8()?;
         let paint = r.u32()? as usize;
@@ -226,6 +230,10 @@ pub fn decode(buf: &[u8]) -> Result<Asset, AssetError> {
         let (vs, vn, ps) = (r.u32()? as usize, r.u32()? as usize, r.u32()? as usize);
         if vs.checked_add(vn).is_none_or(|e| e > nv) || ps > npt {
             return Err(AssetError::Invalid("path range"));
+        }
+        expanded += vn;
+        if expanded > MAX_EXPANDED_VERBS {
+            return Err(AssetError::Invalid("paths expand past the limit"));
         }
         let style = match kind {
             0 => ItemStyle::Fill(match r.u8()? {
@@ -520,6 +528,53 @@ mod tests {
                 }
             }
         }
+        // Items sharing one verb range cannot expand past the limit (a
+        // small asset must not decode into huge paths).
+        let mut shared = sample();
+        shared.items[0].path = Path::new();
+        for _ in 0..1000 {
+            shared.items[0].path.line_to(1.0, 1.0);
+        }
+        let one = encode(&Asset {
+            items: vec![shared.items[0].clone()],
+            ..shared.clone()
+        });
+        // Repoint many items at the same 1,000 verbs by hand: header,
+        // then patch the item count and append copies of the item row.
+        let item_at = {
+            let mut r = Reader { buf: &one, pos: 0 };
+            r.take(40).unwrap();
+            for _ in 0..3 {
+                match r.u8().unwrap() {
+                    0 => {
+                        r.u32().unwrap();
+                    }
+                    1 => {
+                        r.take(40).unwrap();
+                        let n = r.u16().unwrap() as usize;
+                        r.take(n * 8).unwrap();
+                    }
+                    _ => {
+                        r.take(36).unwrap();
+                        let n = r.u16().unwrap() as usize;
+                        r.take(n * 8).unwrap();
+                    }
+                }
+            }
+            r.pos
+        };
+        let row = &one[item_at..item_at + 46];
+        let copies = MAX_EXPANDED_VERBS / 1000 + 2;
+        let mut many = one[..item_at].to_vec();
+        for _ in 0..copies {
+            many.extend_from_slice(row);
+        }
+        many.extend_from_slice(&one[item_at + 46..]);
+        many[28..32].copy_from_slice(&(copies as u32).to_le_bytes());
+        assert_eq!(
+            decode(&many),
+            Err(AssetError::Invalid("paths expand past the limit"))
+        );
         // A count claiming more than the bytes hold fails before
         // allocating for it.
         let mut b = bytes.clone();

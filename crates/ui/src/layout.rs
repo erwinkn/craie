@@ -298,11 +298,26 @@ impl TreeView<'_> {
             };
         }
         if node.kind == NodeKind::Vector {
-            // The view box is the intrinsic size (aspect kept).
+            // The view box is the intrinsic content size (aspect kept). A
+            // sized axis (known, or set in the style) is its content box:
+            // Taffy's `known` is the border box, `available` the content
+            // box of a sized axis.
             let Some(a) = self.host.vectors.get(&id.0).and_then(|v| v.asset.as_ref()) else {
                 return TSize::ZERO;
             };
-            let [width, height] = crate::vector::intrinsic(a.view_box, [known.width, known.height]);
+            let size = self.style_of(id).size;
+            let content = |known: Option<f32>, set: bool, avail: AvailableSpace| {
+                (known.is_some() || set)
+                    .then(|| avail.into_option())
+                    .flatten()
+            };
+            let [width, height] = crate::vector::intrinsic(
+                a.view_box,
+                [
+                    content(known.width, !size.width.is_auto(), available.width),
+                    content(known.height, !size.height.is_auto(), available.height),
+                ],
+            );
             return TSize { width, height };
         }
         if node.kind != NodeKind::Text {

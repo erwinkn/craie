@@ -437,7 +437,18 @@ impl Scene {
                             run = Some(run.map_or(b, |rb| rb.union(&b)));
                             &mut run_cmds
                         } else {
-                            if run.is_some_and(|rb| rb.intersects(&b)) {
+                            // Disjoint in whole pixels, with a pixel
+                            // of margin: no pixel both touch.
+                            let px = |r: Rect| {
+                                let (x0, y0) = (r.origin.x.floor() - 1.0, r.origin.y.floor() - 1.0);
+                                Rect::new(
+                                    x0,
+                                    y0,
+                                    r.max_x().ceil() + 1.0 - x0,
+                                    r.max_y().ceil() + 1.0 - y0,
+                                )
+                            };
+                            if run.is_some_and(|rb| px(rb).intersects(&px(b))) {
                                 close_run(&mut cmds, &mut run, &mut run_cmds, screen);
                             }
                             &mut cmds
@@ -645,9 +656,10 @@ impl Scene {
                                     // its distance from the start and the
                                     // gradient's length; for a radial one,
                                     // its offset from the center and the
-                                    // radius. So the tolerance bounds how
-                                    // far any gradient feature (a hard stop
-                                    // too) moves on screen, at any scale.
+                                    // radius mapped to the screen. So the
+                                    // tolerance bounds how far any gradient
+                                    // feature (a hard stop too) moves on
+                                    // screen, at any scale.
                                     let f = |k: usize| f32::from_bits(words[at + 1 + k]);
                                     let m = |k: usize| f32::from_bits(words[at + 5 + k]);
                                     let g = [
@@ -679,20 +691,41 @@ impl Scene {
                                             geometry.extend([t, 0.0]);
                                         }
                                     } else {
-                                        // Device px per gradient unit.
-                                        let tdet = (m(0) * m(3) - m(1) * m(2)).abs();
-                                        let k = if tdet > 1e-24 {
-                                            (det.abs() / tdet).sqrt()
+                                        // Through the full mapping from
+                                        // gradient space to device px (D =
+                                        // world x gradient-to-local): the
+                                        // offset from the center, and the
+                                        // radius along both axes. Any axis
+                                        // scale moves features as far on
+                                        // screen as these vectors move.
+                                        let tdet = m(0) * m(3) - m(1) * m(2);
+                                        if tdet.abs() > 1e-24 {
+                                            // Inverse of [[m0, m2], [m1, m3]].
+                                            let inv = [
+                                                m(3) / tdet,
+                                                -m(1) / tdet,
+                                                -m(2) / tdet,
+                                                m(0) / tdet,
+                                            ];
+                                            let dmap = |x: f32, y: f32| {
+                                                let lx = inv[0] * x + inv[2] * y;
+                                                let ly = inv[1] * x + inv[3] * y;
+                                                [a * lx + c * ly, b * lx + d * ly]
+                                            };
+                                            let r = f(2);
+                                            geometry.extend(dmap(g[0] - f(0), g[1] - f(1)));
+                                            geometry.extend(dmap(r, 0.0));
+                                            geometry.extend(dmap(0.0, r));
                                         } else {
-                                            1.0
-                                        };
-                                        // Offset from the center and the
-                                        // radius, in device px.
-                                        geometry.extend([
-                                            (g[0] - f(0)) * k,
-                                            (g[1] - f(1)) * k,
-                                            f(2) * k,
-                                        ]);
+                                            geometry.extend([
+                                                g[0] - f(0),
+                                                g[1] - f(1),
+                                                f(2),
+                                                0.0,
+                                                0.0,
+                                                0.0,
+                                            ]);
+                                        }
                                     }
                                     mix(head as u64 | 1 << 40);
                                     if last_paint == Some(v.paint) {
@@ -1222,6 +1255,37 @@ mod tests {
         };
         assert!(same(&hard(0.0), &hard(0.001)));
         assert!(!same(&hard(0.0), &hard(-0.6)), "hard stop moved");
+        // S5B-08: a radial gradient under unequal axis scales (100 and
+        // 0.01): a 0.006 shift of its center moves a hard stop 0.6 px.
+        let radial = |shift: f32| {
+            let mut s = Scene::new();
+            let root = s.transforms.alloc(Affine::IDENTITY, NONE);
+            s.transforms.set_order(vec![root]);
+            let mut w = ChunkWriter::new();
+            let slot = w.gradient(&crate::chunk::GradientPaint {
+                kind: crate::prim::gradient::RADIAL,
+                geometry: [0.32 + shift, 32.0, 0.3, 0.0],
+                // Local to gradient: x / 100, y * 100.
+                to_gradient: [0.01, 0.0, 0.0, 100.0, 0.0, 0.0],
+                stops: vec![(0.0, r), (0.5, r), (0.5, b), (1.0, b)],
+            });
+            let v = [[0.0, 0.0], [64.0, 0.0], [64.0, 64.0], [0.0, 64.0]];
+            assert!(w.mesh(&v, &[0, 1, 2, 0, 2, 3], slot, true));
+            s.commit_chunk(0, &mut w);
+            s.set_placement(
+                0,
+                Placement {
+                    offset: [0.0, 0.0],
+                    transform: root,
+                    clip: NONE,
+                },
+            );
+            s.set_order(vec![OrderItem::Chunk(0)], vec![]);
+            s.transforms.derive();
+            s
+        };
+        assert!(same(&radial(0.0), &radial(0.0)));
+        assert!(!same(&radial(0.0), &radial(0.006)), "radial stop moved");
         let (a, b2) = (square(64.0, 1.0), square(32.0, 2.0));
         assert!(a.resolve(&|_| 0)[0].bounds == b2.resolve(&|_| 0)[0].bounds);
         assert!(!same(&a, &b2), "gradient space");
@@ -1286,6 +1350,10 @@ mod tests {
                 })
                 .collect()
         };
+        // S5B-02: a rect that starts in the pixel column where the first
+        // mesh ends (x 16.3 against 16) shares a pixel: it ends the run.
+        let k = kinds(&build(16.3));
+        assert_eq!(k.iter().filter(|&&k| k == "begin").count(), 2);
         // Disjoint (x 40..48): the rect first, then one run of both.
         let k = kinds(&build(40.0));
         assert_eq!(k.first(), Some(&"rects"));

@@ -63,6 +63,15 @@ pub fn intrinsic(view_box: [f32; 4], known: [Option<f32>; 2]) -> [f32; 2] {
     }
 }
 
+/// The largest factor by which `m` stretches a length (its largest
+/// singular value).
+fn max_stretch(m: &Affine) -> f32 {
+    let [a, b, c, d, _, _] = m.0;
+    let half = (a * a + b * b + c * c + d * d) * 0.5;
+    let det = a * d - b * c;
+    (half + (half * half - det * det).max(0.0).sqrt()).sqrt()
+}
+
 /// `alpha` of a 0xRRGGBBAA color scaled by `opacity`.
 fn fade(color: u32, opacity: f32) -> u32 {
     let a = ((color & 0xFF) as f32 * opacity).round().clamp(0.0, 255.0) as u32;
@@ -78,20 +87,41 @@ fn prepare(asset: &Asset, content: Rect, scale: f32) -> Vec<Prepared> {
         if !(det > 1e-12 && det.is_finite()) {
             continue;
         }
-        // Device px per item unit (geometric mean of the axes).
-        let px = det.sqrt() * scale;
-        let tolerance = (TOLERANCE_PX / px).max(1e-4);
+        // Fills (and strokes under a similarity: equal axes, no shear)
+        // tessellate in chunk space, where the tolerance is a quarter
+        // device px whatever the asset's units. Other strokes must
+        // tessellate in item space (a stroke's width follows the
+        // transform): there the tolerance is a quarter device px over
+        // the transform's largest stretch.
+        let [a, b, c, d, _, _] = m.0;
+        let k = (a * a + b * b).sqrt();
+        let similar = (a - d).abs() <= 1e-4 * k && (b + c).abs() <= 1e-4 * k;
+        let chunk_tolerance = TOLERANCE_PX / scale;
         let mesh = match it.style {
-            ItemStyle::Fill(rule) => craie_vector::fill(&it.path, rule, tolerance),
-            ItemStyle::Stroke(s) => craie_vector::stroke(&it.path, &s, tolerance),
+            ItemStyle::Fill(rule) => {
+                craie_vector::fill(&it.path.transformed(&m), rule, chunk_tolerance)
+            }
+            ItemStyle::Stroke(s) if similar => {
+                let s = craie_vector::Stroke {
+                    width: s.width * k,
+                    ..s
+                };
+                craie_vector::stroke(&it.path.transformed(&m), &s, chunk_tolerance)
+            }
+            ItemStyle::Stroke(s) => {
+                let tolerance = chunk_tolerance / max_stretch(&m);
+                craie_vector::stroke(&it.path, &s, tolerance).map(|mut mesh| {
+                    for v in &mut mesh.vertices {
+                        let p = m.apply(craie_core::geom::Point::new(v[0], v[1]));
+                        *v = [p.x, p.y];
+                    }
+                    mesh
+                })
+            }
         };
-        let Ok(mut mesh) = mesh else { continue };
+        let Ok(mesh) = mesh else { continue };
         if mesh.indices.is_empty() {
             continue;
-        }
-        for v in &mut mesh.vertices {
-            let p = m.apply(craie_core::geom::Point::new(v[0], v[1]));
-            *v = [p.x, p.y];
         }
         let paint = match &asset.paints[it.paint] {
             Paint::Solid(c) => Prepaint::Solid(fade(*c, it.opacity)),
@@ -349,5 +379,137 @@ mod node_tests {
         assert_ne!(items(&ui), before, "a new size tessellates");
         let r = ui.layouts.data(NodeId(1)).rect;
         assert_eq!((r.size.width, r.size.height), (96.0, 48.0));
+    }
+}
+
+#[cfg(test)]
+mod review_tests {
+    use super::node_tests::red_box;
+    use crate::geom::Size;
+    use crate::host::NodeId;
+    use crate::mutation::{NodeKind, Transaction};
+    use crate::ui::Ui;
+    use craie_core::geom::Affine;
+    use craie_vector::asset::{Asset, Item, ItemStyle, encode};
+    use craie_vector::{FillRule, Paint, Path};
+
+    const NIL: u32 = u32::MAX;
+
+    fn one(asset: Vec<u8>, style: taffy::Style, scale: f32) -> Ui {
+        let mut ui = Ui::new(scale);
+        let mut t = Transaction::new(1);
+        let column = taffy::Style {
+            flex_direction: taffy::FlexDirection::Column,
+            align_items: Some(taffy::AlignItems::START),
+            ..taffy::Style::default()
+        };
+        t.create(0, NodeKind::View)
+            .layout(0, &column)
+            .place(NIL, 0, NIL);
+        t.create(1, NodeKind::Vector)
+            .layout(1, &style)
+            .payload(1, asset)
+            .place(0, 1, NIL);
+        ui.apply_txn(&t).unwrap();
+        ui.render(Size::new(300.0, 300.0));
+        ui
+    }
+
+    fn sized(w: f32, h: Option<f32>) -> taffy::Style {
+        taffy::Style {
+            size: taffy::Size {
+                width: taffy::Dimension::length(w),
+                height: h.map_or(taffy::Dimension::auto(), taffy::Dimension::length),
+            },
+            ..taffy::Style::default()
+        }
+    }
+
+    fn circle(view: f32, style: ItemStyle, transform: Affine) -> Vec<u8> {
+        encode(&Asset {
+            view_box: [0.0, 0.0, view, view],
+            paints: vec![Paint::Solid(0xFFFF_FFFF)],
+            items: vec![Item {
+                path: Path::circle(view / 2.0, view / 2.0, view / 2.0),
+                style,
+                paint: 0,
+                opacity: 1.0,
+                transform,
+            }],
+        })
+    }
+
+    /// Triangle area of the node's meshes, chunk units.
+    fn area(ui: &Ui) -> f64 {
+        ui.vector_meshes[&1]
+            .items
+            .iter()
+            .map(|p| p.mesh.area())
+            .sum()
+    }
+
+    /// S5B-05: a set width is the border box: padding comes off before
+    /// the aspect ratio gives the height (24 x 12 at width 48, padding 5:
+    /// content 38 x 19, box 48 x 29).
+    #[test]
+    fn padding_comes_off_before_the_aspect() {
+        let mut s = sized(48.0, None);
+        s.padding = taffy::Rect {
+            left: taffy::LengthPercentage::length(5.0),
+            right: taffy::LengthPercentage::length(5.0),
+            top: taffy::LengthPercentage::length(5.0),
+            bottom: taffy::LengthPercentage::length(5.0),
+        };
+        let ui = one(red_box(), s, 1.0);
+        let r = ui.layouts.data(NodeId(1)).rect;
+        assert_eq!((r.size.width, r.size.height), (48.0, 29.0));
+    }
+
+    /// S5B-06: the tolerance holds in device px whatever the asset's
+    /// units (a circle in a 0.0002 view box shown 200 wide) and under a
+    /// stretching item transform (a stroked circle scaled 100 x 1).
+    #[test]
+    fn tolerance_holds_in_device_pixels() {
+        let ui = one(
+            circle(0.0002, ItemStyle::Fill(FillRule::NonZero), Affine::IDENTITY),
+            sized(200.0, Some(200.0)),
+            1.0,
+        );
+        let exact = std::f64::consts::PI * 100.0 * 100.0;
+        // Flattening loses less than perimeter x tolerance (0.25 px).
+        let lost = exact - area(&ui);
+        assert!(
+            lost >= 0.0 && lost < 2.0 * std::f64::consts::PI * 100.0 * 0.25,
+            "{lost}"
+        );
+        // Strokes under a stretching transform tessellate in item space
+        // at a quarter device px over the largest stretch: that stretch
+        // is the matrix's largest singular value.
+        let close = |m: Affine, want: f32| (super::max_stretch(&m) - want).abs() < 1e-4 * want;
+        assert!(close(Affine::scale(100.0, 1.0), 100.0));
+        assert!(close(
+            Affine::rotate(0.7).mul(&Affine::scale(3.0, 0.5)),
+            3.0
+        ));
+        // A shear [1 1; 0 1]: the golden ratio.
+        assert!(close(Affine([1.0, 0.0, 1.0, 1.0, 0.0, 0.0]), 1.618_034));
+    }
+
+    /// S5B-04: a display-scale change re-tessellates vector chunks (the
+    /// tolerance is in device px): the meshes equal a fresh build's.
+    #[test]
+    fn scale_changes_retessellate() {
+        let asset = circle(24.0, ItemStyle::Fill(FillRule::NonZero), Affine::IDENTITY);
+        let mut ui = one(asset.clone(), sized(96.0, None), 1.0);
+        let at_1x = ui.vector_meshes[&1].items[0].mesh.vertices.len();
+        ui.scale = 2.0;
+        ui.render(Size::new(300.0, 300.0));
+        let fresh = one(asset, sized(96.0, None), 2.0);
+        let (now, want) = (
+            ui.vector_meshes[&1].items[0].mesh.vertices.len(),
+            fresh.vector_meshes[&1].items[0].mesh.vertices.len(),
+        );
+        assert!(want > at_1x);
+        assert_eq!(now, want);
     }
 }

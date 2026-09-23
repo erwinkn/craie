@@ -33,6 +33,8 @@ impl Report {
 
 /// Imports SVG (or SVGZ) bytes.
 pub fn import(svg: &[u8]) -> Result<(Asset, Report), String> {
+    let mut report = Report::default();
+    prescan(svg, &mut report)?;
     let tree = usvg::Tree::from_data(svg, &usvg::Options::default()).map_err(|e| e.to_string())?;
     let size = tree.size();
     let mut asset = Asset {
@@ -40,9 +42,45 @@ pub fn import(svg: &[u8]) -> Result<(Asset, Report), String> {
         paints: Vec::new(),
         items: Vec::new(),
     };
-    let mut report = Report::default();
     group(tree.root(), 1.0, &mut asset, &mut report);
     Ok((asset, report))
+}
+
+/// Reports what usvg drops while it normalizes (so the tree never shows
+/// it): text (no fonts at build time), images inside `foreignObject`, and
+/// `vector-effect`, from the source document.
+fn prescan(svg: &[u8], report: &mut Report) -> Result<(), String> {
+    let text = if svg.starts_with(&[0x1f, 0x8b]) {
+        let raw = usvg::decompress_svgz(svg).map_err(|e| e.to_string())?;
+        String::from_utf8(raw).map_err(|e| e.to_string())?
+    } else {
+        std::str::from_utf8(svg)
+            .map_err(|e| e.to_string())?
+            .to_string()
+    };
+    let doc = usvg::roxmltree::Document::parse_with_options(
+        &text,
+        usvg::roxmltree::ParsingOptions {
+            allow_dtd: true,
+            ..Default::default()
+        },
+    )
+    .map_err(|e| e.to_string())?;
+    for node in doc.descendants().filter(|n| n.is_element()) {
+        match node.tag_name().name() {
+            "text" | "tspan" | "textPath" => report.note("text (skipped; outline it first)"),
+            "image" => report.note("image (skipped)"),
+            "foreignObject" => report.note("foreignObject (skipped)"),
+            _ => {}
+        }
+        let styled = node
+            .attribute("style")
+            .is_some_and(|s| s.contains("vector-effect"));
+        if node.attribute("vector-effect").is_some() || styled {
+            report.note("vector-effect (ignored)");
+        }
+    }
+    Ok(())
 }
 
 fn affine(t: usvg::Transform) -> Affine {
@@ -63,10 +101,8 @@ fn group(g: &usvg::Group, opacity: f32, asset: &mut Asset, report: &mut Report) 
         report.note("blend mode (drawn normal)");
     }
     let own = g.opacity().get();
-    if own < 1.0 && g.children().len() > 1 {
-        report.note("group opacity over several children (folded into each)");
-    }
     let opacity = opacity * own;
+    let before = asset.items.len();
     for child in g.children() {
         match child {
             usvg::Node::Group(g) => group(g, opacity, asset, report),
@@ -74,6 +110,11 @@ fn group(g: &usvg::Group, opacity: f32, asset: &mut Asset, report: &mut Report) 
             usvg::Node::Image(_) => report.note("image (skipped)"),
             usvg::Node::Text(_) => report.note("text (skipped; outline it first)"),
         }
+    }
+    // Folding a group's opacity into its items is exact for one item;
+    // two or more may overlap (a fill and its own stroke do).
+    if own < 1.0 && asset.items.len() - before > 1 {
+        report.note("group opacity over several painted items (folded into each)");
     }
 }
 
@@ -119,7 +160,11 @@ fn path(p: &usvg::Path, opacity: f32, asset: &mut Asset, report: &mut Report) {
         let style = ItemStyle::Stroke(Stroke {
             width: s.width().get(),
             join: match s.linejoin() {
-                usvg::LineJoin::Miter | usvg::LineJoin::MiterClip => LineJoin::Miter,
+                usvg::LineJoin::Miter => LineJoin::Miter,
+                usvg::LineJoin::MiterClip => {
+                    report.note("miter-clip join (drawn as miter)");
+                    LineJoin::Miter
+                }
                 usvg::LineJoin::Round => LineJoin::Round,
                 usvg::LineJoin::Bevel => LineJoin::Bevel,
             },
@@ -157,6 +202,9 @@ fn paint(p: &usvg::Paint, report: &mut Report) -> Option<Paint> {
     let stops = |g: &usvg::BaseGradient, report: &mut Report| {
         if g.spread_method() != usvg::SpreadMethod::Pad {
             report.note("gradient spread other than pad (drawn padded)");
+        }
+        if g.stops().len() > craie_vector::asset::MAX_STOPS {
+            report.note("gradient with more than 64 stops (truncated)");
         }
         g.stops()
             .iter()
@@ -307,6 +355,34 @@ mod tests {
         // it draws nothing).
         assert_eq!(a.items.len(), 4, "still drawn");
         for want in ["clip-path", "group opacity", "stroke-dasharray"] {
+            assert!(
+                r.unsupported.iter().any(|u| u.starts_with(want)),
+                "{want}: {r:?}"
+            );
+        }
+        // What usvg drops before the tree (S5B-03), a fill and stroke
+        // under one opacity (S5B-07), too many stops (S5B-09), and
+        // miter-clip joins (S5B-10).
+        let stops: String = (0..65)
+            .map(|k| format!(r#"<stop offset="{}" stop-color="red"/>"#, k as f32 / 64.0))
+            .collect();
+        let (_, r) = load(&format!(
+            r##"<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20">
+                <defs><linearGradient id="many">{stops}</linearGradient></defs>
+                <text x="2" y="12">Hi</text>
+                <rect width="10" height="10" fill="red" stroke="blue" opacity="0.5"/>
+                <path d="M0 0 L10 1 L0 2" stroke="black" fill="none" stroke-linejoin="miter-clip"
+                      stroke-miterlimit="1" vector-effect="non-scaling-stroke"/>
+                <rect y="12" width="4" height="4" fill="url(#many)"/>
+            </svg>"##
+        ));
+        for want in [
+            "text",
+            "vector-effect",
+            "group opacity",
+            "gradient with more than 64 stops",
+            "miter-clip",
+        ] {
             assert!(
                 r.unsupported.iter().any(|u| u.starts_with(want)),
                 "{want}: {r:?}"

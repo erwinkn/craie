@@ -160,11 +160,14 @@ Reviewer minors and nitpicks not fixed yet.
 - Source: step 5b implementation (own finding).
 - Where: tools/svg-import/src/lib.rs (`Report`).
 - Claim: clip paths and masks (drawn unclipped), filters, blend modes,
-  patterns, images, text (outline it first), stroke dashes (drawn
-  solid), spreads other than pad, radial focal points (drawn centered),
-  and group opacity over overlapping children (folded into each item)
-  are not represented. The importer reports each one and fails unless
-  `--lenient`.
+  patterns, images and `foreignObject`, text (outline it first; found
+  in the source, since usvg drops it without fonts), stroke dashes
+  (drawn solid), `miter-clip` joins (drawn as miter), `vector-effect`
+  (ignored), spreads other than pad, radial focal points (drawn
+  centered), gradients past 64 stops (truncated), and group opacity
+  over two or more painted items (folded into each; a fill and its own
+  stroke count) are not represented. The importer reports each one and
+  fails unless `--lenient`.
 - Why deferred: section 9's initial profile names clips, images, and
   group opacity; they need scene support (path clips, image resources,
   isolated groups inside a chunk) beyond meshes.
@@ -227,3 +230,9 @@ Reviewer minors and nitpicks not fixed yet.
 - S5A-19 (seams where disjoint content split a run) and S5A-20
   (gradient tolerance near hard stops): fixed after step 5a round 4;
   reviewed with the 5b range (which starts at `e9200c7`).
+- S5B-01..10 (expanded path bound in asset decoding, pixel-conservative
+  run merging, pre-scan for what usvg drops, vector chunks on scale
+  changes, content-box intrinsic sizing, device-px tolerance at any
+  asset scale, group opacity over painted items, radial oracle through
+  the full mapping, stop truncation and miter-clip reports): fixed in
+  step 5b round 1.

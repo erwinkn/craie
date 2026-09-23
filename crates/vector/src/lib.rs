@@ -257,7 +257,7 @@ pub fn fill(path: &Path, rule: FillRule, tolerance: f32) -> Result<Mesh, TessErr
         return Err(TessError);
     }
     let mut out: VertexBuffers<[f32; 2], u32> = VertexBuffers::new();
-    let options = FillOptions::tolerance(tolerance.max(1e-4)).with_fill_rule(match rule {
+    let options = FillOptions::tolerance(tolerance.max(1e-9)).with_fill_rule(match rule {
         FillRule::NonZero => lyon_tessellation::FillRule::NonZero,
         FillRule::EvenOdd => lyon_tessellation::FillRule::EvenOdd,
     });
@@ -293,7 +293,7 @@ pub fn stroke(path: &Path, s: &Stroke, tolerance: f32) -> Result<Mesh, TessError
         return Err(TessError);
     }
     let mut out: VertexBuffers<[f32; 2], u32> = VertexBuffers::new();
-    let options = StrokeOptions::tolerance(tolerance.max(1e-4))
+    let options = StrokeOptions::tolerance(tolerance.max(1e-9))
         .with_line_width(s.width)
         .with_miter_limit(s.miter_limit.max(1.0))
         .with_line_join(match s.join {

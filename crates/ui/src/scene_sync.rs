@@ -239,8 +239,9 @@ impl Ui {
         self.scene.scale = self.scale;
         self.scene.clear = crate::scene::Color(self.clear);
 
-        // A scale change re-rasterizes every glyph chunk and remaps the
-        // root record; geometry in logical units is unaffected.
+        // A scale change re-rasterizes every glyph chunk, re-tessellates
+        // every vector chunk (its tolerance is in device px), and remaps
+        // the root record; other geometry in logical units is unaffected.
         if self.sync.scale != self.scale {
             self.sync.scale = self.scale;
             self.scene
@@ -248,7 +249,10 @@ impl Ui {
                 .set_local(self.sync.root_rec, Affine::scale(self.scale, self.scale));
             for i in 0..self.host.slot_count() {
                 let id = NodeId(i as u32);
-                if matches!(self.host.kind(id), Some(NodeKind::Text | NodeKind::Input)) {
+                if matches!(
+                    self.host.kind(id),
+                    Some(NodeKind::Text | NodeKind::Input | NodeKind::Vector)
+                ) {
                     self.host.dirty.content.push(id.0);
                 }
             }
