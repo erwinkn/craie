@@ -117,6 +117,9 @@ impl SceneSync {
     }
 }
 
+/// Extent of a clip along an axis whose overflow is visible.
+const UNBOUNDED: f32 = 1.0e7;
+
 /// Walk context: the space children draw in.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Ctx {
@@ -293,7 +296,13 @@ impl Ui {
                     }
                 }
             }
-            for (i, s) in self.sync.spaces.iter().enumerate() {
+            for (i, s) in self.sync.spaces.iter_mut().enumerate() {
+                // A node outside the drawn tree holds no layer and no clip:
+                // those tables were just rebuilt without it.
+                if s.claimed != epoch {
+                    s.layer = NONE;
+                    s.clip_rec = NONE;
+                }
                 if s.self_rec != NONE || s.content_rec != NONE {
                     self.sync.owners.push(i as u32);
                 }
@@ -350,8 +359,7 @@ impl Ui {
     /// Updates one node's placement, records, and clip; returns the
     /// context its children draw in (`None` when it draws nothing).
     fn visit_node(&mut self, id: NodeId, ctx: Ctx, topo: bool, out: &mut Topo) -> Option<Ctx> {
-        let node = self.host.node(id)?;
-        let kind = node.kind;
+        self.host.node(id)?;
         let style = self.host.style(id);
         if style.display == taffy::Display::None {
             return None;
@@ -437,17 +445,7 @@ impl Ui {
         // record.
         let mut child_clip = ctx.clip;
         if clips {
-            let rect = Rect::new(
-                offset[0] + data.clip_box.origin.x,
-                offset[1] + data.clip_box.origin.y,
-                data.clip_box.size.width,
-                data.clip_box.size.height,
-            );
-            let radius = if kind.has_box() {
-                self.host.paint[id.index()].radius
-            } else {
-                0.0
-            };
+            let (rect, radius) = self.clip_shape(id, offset, &data);
             if topo {
                 s.clip_rec = out.clips.len() as u32;
                 out.clips.push(ClipRecord {
@@ -540,6 +538,35 @@ impl Ui {
         b.intersects(region) || (b.size.width == 0.0 && b.size.height == 0.0)
     }
 
+    /// The clip a node imposes on its children, in its own space at
+    /// `offset`: its padding box, unbounded along an axis whose overflow
+    /// is visible, rounded by its corner radius.
+    pub(crate) fn clip_shape(
+        &self,
+        id: NodeId,
+        offset: [f32; 2],
+        data: &LayoutData,
+    ) -> (Rect, f32) {
+        let style = self.host.style(id);
+        let (x0, x1) = if style.overflow.x == taffy::Overflow::Visible {
+            (-UNBOUNDED, UNBOUNDED)
+        } else {
+            let x = offset[0] + data.clip_box.origin.x;
+            (x, x + data.clip_box.size.width)
+        };
+        let (y0, y1) = if style.overflow.y == taffy::Overflow::Visible {
+            (-UNBOUNDED, UNBOUNDED)
+        } else {
+            let y = offset[1] + data.clip_box.origin.y;
+            (y, y + data.clip_box.size.height)
+        };
+        let radius = match self.host.kind(id) {
+            Some(k) if k.has_box() => self.host.paint[id.index()].radius,
+            _ => 0.0,
+        };
+        (Rect::new(x0, y0, x1 - x0, y1 - y0), radius)
+    }
+
     /// Patches the paint records of a chunk whose colors changed.
     fn patch_paint(&mut self, id: NodeId) {
         let Some(kind) = self.host.kind(id) else {
@@ -566,6 +593,13 @@ impl Ui {
         };
         let data = self.layouts.data(id);
         self.space_mut(id).built = layout_key(&data);
+        // A radius change reshapes the clip this node imposes.
+        let clip_rec = self.sync.spaces[id.index()].clip_rec;
+        if clip_rec != NONE && clip_rec < self.scene.clips.len() as u32 {
+            let offset = self.scene.placement(id.0).offset;
+            let (rect, radius) = self.clip_shape(id, offset, &data);
+            self.scene.clips.set_rect(clip_rec, rect, radius);
+        }
         let mut w = std::mem::take(&mut self.sync.writer);
         w.clear();
         if kind.has_box() {
@@ -665,15 +699,24 @@ impl Ui {
         }
         let origin = Point::new(cx, cy);
         if empty && !state.placeholder.is_empty() {
-            let defaults = [StyleProperty::FontSize(state.font_size)];
-            let spec = ParagraphSpec {
-                text: &state.placeholder,
-                defaults: &defaults,
-                spans: &[],
-            };
-            let layout = self.text.layout_paragraph(&spec, Some(content_w));
+            let bits = content_w.to_bits();
+            if state
+                .placeholder_layout
+                .as_ref()
+                .is_none_or(|(w, _)| *w != bits)
+            {
+                let defaults = [StyleProperty::FontSize(state.font_size)];
+                let spec = ParagraphSpec {
+                    text: &state.placeholder,
+                    defaults: &defaults,
+                    spans: &[],
+                };
+                let layout = self.text.layout_paragraph(&spec, Some(content_w));
+                state.placeholder_layout = Some((bits, layout));
+            }
+            let layout = &state.placeholder_layout.as_ref().unwrap().1;
             self.text.emit(
-                &layout,
+                layout,
                 origin,
                 scale,
                 Some(ph_slot),

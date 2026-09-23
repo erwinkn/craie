@@ -62,6 +62,10 @@ impl NodeId {
 /// Root sentinel: children of ROOT are top-level nodes.
 pub const ROOT: NodeId = NodeId::NIL;
 
+/// Node ids index dense stores, so they are bounded: 2^24 slots. The
+/// bridge allocates ids densely from zero and recycles them.
+pub const MAX_NODES: u32 = 1 << 24;
+
 /// Per-node flag bits.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[repr(transparent)]

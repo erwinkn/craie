@@ -10,7 +10,7 @@
 use std::collections::HashMap;
 
 use crate::text::parley::style::StyleProperty;
-use crate::text::parley::{Generation, PlainEditor};
+use crate::text::parley::{self, Generation, PlainEditor};
 
 use crate::clipboard::{Clipboard, MemoryClipboard};
 use crate::geom::Size;
@@ -44,6 +44,9 @@ pub struct InputState {
     /// Whether the last undo entry was produced by character insertion —
     /// consecutive inserts coalesce; anything else splits the entry.
     coalescing_insert: bool,
+    /// Shaped placeholder and the wrap width it was shaped at. Dropped
+    /// when the placeholder or the font size changes.
+    pub placeholder_layout: Option<(u32, parley::Layout<PaintSlot>)>,
 }
 
 impl InputState {
@@ -64,6 +67,7 @@ impl InputState {
             undo: Vec::new(),
             redo: Vec::new(),
             coalescing_insert: false,
+            placeholder_layout: None,
         }
     }
 
@@ -207,6 +211,8 @@ impl Inputs {
     }
 
     /// Creates or reconfigures an input node.
+    /// Returns whether the change affects layout (size, placeholder,
+    /// wrapping); a color-only change does not.
     pub fn configure(
         &mut self,
         id: u32,
@@ -214,9 +220,18 @@ impl Inputs {
         color: u32,
         placeholder: &str,
         multiline: bool,
-    ) {
+    ) -> bool {
         match self.map.get_mut(&id) {
             Some(state) => {
+                // The color lives in the chunk's paint record, not in
+                // the editor's layout.
+                state.color = color;
+                let metrics = state.font_size != font_size
+                    || state.placeholder != placeholder
+                    || state.multiline != multiline;
+                if !metrics {
+                    return false;
+                }
                 if state.font_size != font_size {
                     state.font_size = font_size;
                     state
@@ -224,20 +239,20 @@ impl Inputs {
                         .edit_styles()
                         .insert(StyleProperty::FontSize(font_size));
                 }
-                // The color lives in the chunk's paint record, not in
-                // the editor's layout.
-                state.color = color;
                 if state.placeholder != placeholder {
                     placeholder.clone_into(&mut state.placeholder);
                 }
                 state.multiline = multiline;
+                state.placeholder_layout = None;
                 state.invalidate();
+                true
             }
             None => {
                 self.map.insert(
                     id,
                     InputState::new(font_size, color, placeholder.to_string(), multiline),
                 );
+                true
             }
         }
     }

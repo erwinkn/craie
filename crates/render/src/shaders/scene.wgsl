@@ -149,7 +149,9 @@ fn vs_main(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> 
 fn clip_coverage(dev: vec2<f32>, first: u32) -> f32 {
     var cov = 1.0;
     var id = first;
-    for (var i = 0u; i < 16u && id != NONE; i = i + 1u) {
+    // Parents precede children in the table, so the chain ends; the
+    // bound only guards against corrupt data.
+    for (var i = 0u; i < 65536u && id != NONE; i = i + 1u) {
         let c = clips[id];
         let lp = vec2<f32>(c.ia * dev.x + c.ic * dev.y + c.ie, c.ib * dev.x + c.id * dev.y + c.if_);
         let lo = vec2<f32>(c.x0, c.y0);

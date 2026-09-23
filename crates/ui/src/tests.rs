@@ -928,3 +928,192 @@ fn roles_are_explicit() {
     assert_eq!(role(0), accesskit::Role::GenericContainer);
     assert_eq!(role(1), accesskit::Role::Button);
 }
+
+// ---- review regressions ----
+
+fn sized(w: f32, h: f32) -> taffy::Style {
+    taffy::Style {
+        size: taffy::Size {
+            width: taffy::Dimension::length(w),
+            height: taffy::Dimension::length(h),
+        },
+        flex_shrink: 0.0,
+        ..taffy::Style::default()
+    }
+}
+
+#[test]
+fn node_ids_are_bounded() {
+    let mut ui = Ui::new(1.0);
+    let mut t = Transaction::new(1);
+    t.create(crate::host::MAX_NODES, NodeKind::View);
+    assert!(ui.apply_txn(&t).is_err());
+    assert_eq!(
+        ui.host.slot_count(),
+        0,
+        "a rejected id must not grow the stores"
+    );
+}
+
+/// Removing and recreating a parent orphans its old children: placing
+/// before one of them under the new parent is invalid.
+#[test]
+fn removed_parent_orphans_children_in_validation() {
+    let mut ui = Ui::new(1.0);
+    let mut t = Transaction::new(1);
+    t.create(0, NodeKind::View)
+        .append(NIL, 0)
+        .create(1, NodeKind::View)
+        .append(0, 1)
+        .create(2, NodeKind::View);
+    ui.apply_txn(&t).unwrap();
+    let mut t = Transaction::new(2);
+    t.remove(0)
+        .create(0, NodeKind::View)
+        .append(NIL, 0)
+        .place(0, 2, 1);
+    assert!(ui.apply_txn(&t).is_err());
+}
+
+/// A radius change on a clipping node reshapes its children's clip.
+#[test]
+fn radius_change_updates_child_clip() {
+    let mut ui = Ui::new(1.0);
+    let mut clip = sized(100.0, 100.0);
+    clip.overflow = taffy::Point {
+        x: taffy::Overflow::Hidden,
+        y: taffy::Overflow::Hidden,
+    };
+    let mut t = Transaction::new(1);
+    t.create(0, NodeKind::View)
+        .layout(0, &clip)
+        .fill(0, 0x2233_44FF)
+        .append(NIL, 0);
+    t.create(1, NodeKind::View)
+        .layout(1, &sized(100.0, 100.0))
+        .fill(1, 0xFF00_00FF)
+        .append(0, 1);
+    ui.apply_txn(&t).unwrap();
+    ui.render(Size::new(200.0, 200.0));
+    let mut t = Transaction::new(2);
+    t.paint(0, None, Some(20.0), None);
+    ui.apply_txn(&t).unwrap();
+    ui.render(Size::new(200.0, 200.0));
+    let child = resolved(ui.scene())
+        .into_iter()
+        .find(|p| p.color == 0xFF00_00FF)
+        .unwrap();
+    assert_eq!(child.clip_radius, 20.0);
+}
+
+/// `overflow: { x: visible, y: hidden }` clips only the y axis, for
+/// drawing and for hits.
+#[test]
+fn clip_applies_per_axis() {
+    let mut ui = Ui::new(1.0);
+    let mut clip = sized(100.0, 100.0);
+    clip.overflow = taffy::Point {
+        x: taffy::Overflow::Visible,
+        y: taffy::Overflow::Hidden,
+    };
+    let mut t = Transaction::new(1);
+    t.create(0, NodeKind::View).layout(0, &clip).append(NIL, 0);
+    t.create(1, NodeKind::View)
+        .layout(1, &sized(300.0, 300.0))
+        .fill(1, 0xFF00_00FF)
+        .append(0, 1);
+    ui.apply_txn(&t).unwrap();
+    ui.render(Size::new(400.0, 400.0));
+    // Past the right edge: visible and hittable. Past the bottom: not.
+    assert_eq!(ui.hit_test(250.0, 50.0), Some(NodeId(1)));
+    assert_eq!(ui.hit_test(50.0, 250.0), None);
+    let child = resolved(ui.scene())
+        .into_iter()
+        .find(|p| p.color == 0xFF00_00FF)
+        .unwrap();
+    let c = child.clip.unwrap();
+    assert!(c.size.width > 1.0e6, "x is unbounded: {c:?}");
+    assert_eq!(c.size.height, 100.0);
+}
+
+/// A rounded clip: a point in the cut corner does not hit the child.
+#[test]
+fn hit_test_follows_rounded_clip() {
+    let mut ui = Ui::new(1.0);
+    let mut clip = sized(100.0, 100.0);
+    clip.overflow = taffy::Point {
+        x: taffy::Overflow::Hidden,
+        y: taffy::Overflow::Hidden,
+    };
+    let mut t = Transaction::new(1);
+    t.create(0, NodeKind::View)
+        .layout(0, &clip)
+        .paint(0, None, Some(40.0), None)
+        .append(NIL, 0);
+    t.create(1, NodeKind::View)
+        .layout(1, &sized(100.0, 100.0))
+        .append(0, 1);
+    ui.apply_txn(&t).unwrap();
+    ui.render(Size::new(200.0, 200.0));
+    assert_eq!(ui.hit_test(50.0, 50.0), Some(NodeId(1)));
+    assert_eq!(
+        ui.hit_test(2.0, 2.0),
+        None,
+        "the corner is outside the rounded clip"
+    );
+}
+
+/// A scroll command in the batch that grows the content clamps against
+/// the new extent.
+#[test]
+fn scroll_command_clamps_after_its_batch_layout() {
+    let mut ui = Ui::new(1.0);
+    let mut s = sized(100.0, 100.0);
+    s.overflow = taffy::Point {
+        x: taffy::Overflow::Scroll,
+        y: taffy::Overflow::Scroll,
+    };
+    s.flex_direction = taffy::FlexDirection::Column;
+    let mut t = Transaction::new(1);
+    t.create(0, NodeKind::View).layout(0, &s).append(NIL, 0);
+    t.create(1, NodeKind::View)
+        .layout(1, &sized(100.0, 100.0))
+        .append(0, 1);
+    ui.apply_txn(&t).unwrap();
+    ui.render(Size::new(200.0, 200.0));
+    let mut t = Transaction::new(2);
+    t.layout(1, &sized(100.0, 300.0))
+        .command(0, Command::ScrollTo(0.0, 150.0));
+    ui.apply_txn(&t).unwrap();
+    ui.render(Size::new(200.0, 200.0));
+    assert_eq!(ui.scroll_offset(NodeId(0)), [0.0, 150.0]);
+}
+
+/// Registering a painter after its surfaces rendered redraws them.
+#[test]
+fn registering_a_painter_rebuilds_its_surfaces() {
+    let mut ui = Ui::new(1.0);
+    let mut t = Transaction::new(1);
+    t.create(0, NodeKind::Surface)
+        .layout(0, &sized(50.0, 50.0))
+        .surface(0, 42, [0; 4])
+        .append(NIL, 0);
+    ui.apply_txn(&t).unwrap();
+    ui.render(Size::new(200.0, 200.0));
+    assert!(resolved(ui.scene()).is_empty());
+    ui.register_surface(
+        42,
+        Box::new(|_, r, out| {
+            out.push(surface::Quad {
+                x: r.origin.x,
+                y: r.origin.y,
+                w: 10.0,
+                h: 10.0,
+                color: 0x00FF_00FF,
+                ..surface::Quad::default()
+            })
+        }),
+    );
+    ui.render(Size::new(200.0, 200.0));
+    assert!(resolved(ui.scene()).iter().any(|p| p.color == 0x00FF_00FF));
+}

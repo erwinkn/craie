@@ -466,6 +466,11 @@ impl Scene {
                     } else {
                         self.clips.world_bounds(&self.transforms, p.clip)
                     };
+                    let clip_radius = if p.clip == NONE {
+                        0.0
+                    } else {
+                        self.clips.get(p.clip).radius
+                    };
                     for s in c.segments() {
                         match s.kind {
                             SegKind::Rects => {
@@ -486,6 +491,7 @@ impl Scene {
                                         params: [r.radius, r.border_width],
                                         opacity: o,
                                         clip,
+                                        clip_radius,
                                     });
                                 }
                             }
@@ -504,6 +510,7 @@ impl Scene {
                                         params: [0.0; 2],
                                         opacity: o,
                                         clip,
+                                        clip_radius,
                                     });
                                 }
                             }
@@ -528,6 +535,8 @@ pub struct Resolved {
     pub params: [f32; 2],
     pub opacity: f32,
     pub clip: Option<Rect>,
+    /// Corner radius of the innermost clip.
+    pub clip_radius: f32,
 }
 
 impl Resolved {
@@ -544,6 +553,7 @@ impl Resolved {
             && self.aux == o.aux
             && self.params == o.params
             && (self.opacity - o.opacity).abs() <= 1e-6
+            && self.clip_radius == o.clip_radius
             && near(self.bounds, o.bounds)
             && match (self.clip, o.clip) {
                 (None, None) => true,

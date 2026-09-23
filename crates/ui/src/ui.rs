@@ -66,6 +66,8 @@ pub struct Ui {
     relayout: bool,
     /// Scene-side bookkeeping (spaces, records, scratch).
     pub(crate) sync: SceneSync,
+    /// `ScrollTo` commands waiting for the layout after their batch.
+    pub(crate) pending_scrolls: Vec<(NodeId, f32, f32)>,
     /// Display scale factor (physical / logical).
     pub scale: f32,
     /// Background clear color, 0xRRGGBBAA.
@@ -100,6 +102,7 @@ impl Ui {
             laid_out: None,
             relayout: false,
             sync,
+            pending_scrolls: Vec::new(),
             scale,
             clear: 0x1415_18FF,
             seq: 0,
@@ -129,6 +132,12 @@ impl Ui {
     /// box.
     pub fn register_surface(&mut self, kind: u32, painter: SurfacePainter) {
         self.surface_painters.insert(kind, painter);
+        // Surfaces of this kind drew with the previous painter (or none).
+        for (&id, s) in &self.host.surfaces {
+            if s.kind == kind {
+                self.host.dirty.content.push(id);
+            }
+        }
         self.force_paint = true;
     }
 
@@ -148,7 +157,10 @@ impl Ui {
                 self.host.dirty.semantic.push(id.0);
             }
             Command::ScrollTo(x, y) => {
-                self.scroll_to(id, *x, *y);
+                // The batch may change the extent: clamp against the
+                // layout that follows it.
+                self.pending_scrolls.push((id, *x, *y));
+                self.force_paint = true;
             }
         }
     }
@@ -370,10 +382,19 @@ impl Ui {
     /// viewport changed; returns whether it ran.
     pub fn layout(&mut self, size: Size) -> bool {
         if self.host.dirty.layout.is_empty() && self.laid_out == Some(size) {
+            self.apply_pending_scrolls();
             return false;
         }
         self.layout_timed(size);
         true
+    }
+
+    fn apply_pending_scrolls(&mut self) {
+        for (id, x, y) in std::mem::take(&mut self.pending_scrolls) {
+            if self.host.is_live(id) {
+                self.scroll_to(id, x, y);
+            }
+        }
     }
 
     /// Unconditional layout pass, instrumented: returns (root-layout ms,
@@ -398,6 +419,7 @@ impl Ui {
             total.0 += c;
             total.1 += r;
         }
+        self.apply_pending_scrolls();
         // Content that shrank below a scroll offset pulls the offset back
         // into range, as browsers do.
         for id in self.layouts.extents.take() {

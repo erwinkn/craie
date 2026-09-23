@@ -9,7 +9,7 @@
 
 use std::collections::HashMap;
 
-use crate::host::{Host, NodeId};
+use crate::host::{Host, MAX_NODES, NodeId};
 use crate::mutation::{Command, Mutation, NIL, NodeKind, TextSpan, Transaction};
 use crate::ui::Ui;
 use crate::wire::WireError;
@@ -51,6 +51,9 @@ struct Overlay<'h> {
     host: &'h Host,
     kinds: HashMap<u32, Option<NodeKind>>,
     parents: HashMap<u32, u32>,
+    /// Nodes removed earlier in the transaction: children still linked
+    /// to them in the host are detached.
+    removed: std::collections::HashSet<u32>,
 }
 
 impl Overlay<'_> {
@@ -68,10 +71,11 @@ impl Overlay<'_> {
     fn parent(&self, id: u32) -> u32 {
         match self.parents.get(&id) {
             Some(p) => *p,
-            None => self
-                .host
-                .node(NodeId(id))
-                .map_or(NodeId::DETACHED.0, |n| n.parent),
+            None => match self.host.node(NodeId(id)) {
+                Some(n) if self.removed.contains(&n.parent) => NodeId::DETACHED.0,
+                Some(n) => n.parent,
+                None => NodeId::DETACHED.0,
+            },
         }
     }
 }
@@ -82,6 +86,7 @@ pub fn validate(host: &Host, txn: &Transaction<'_>) -> Result<(), WireError> {
         host,
         kinds: HashMap::new(),
         parents: HashMap::new(),
+        removed: std::collections::HashSet::new(),
     };
     let need_live = |o: &Overlay, id: u32, why: &'static str| {
         if o.live(id) {
@@ -93,8 +98,10 @@ pub fn validate(host: &Host, txn: &Transaction<'_>) -> Result<(), WireError> {
     for m in &txn.mutations {
         match m {
             Mutation::Create { id, kind } => {
-                if *id >= NodeId::DETACHED.0 {
-                    return Err(invalid("create at a reserved id"));
+                // Ids index dense stores: a bound keeps one op from
+                // growing them without limit.
+                if *id >= MAX_NODES {
+                    return Err(invalid("create beyond the node id limit"));
                 }
                 if o.live(*id) {
                     return Err(invalid("create over a live node"));
@@ -140,6 +147,7 @@ pub fn validate(host: &Host, txn: &Transaction<'_>) -> Result<(), WireError> {
                 need_live(&o, *id, "remove of an absent node")?;
                 o.kinds.insert(*id, None);
                 o.parents.insert(*id, NodeId::DETACHED.0);
+                o.removed.insert(*id);
             }
             Mutation::Layout { id, style } => {
                 need_live(&o, *id, "layout on an absent node")?;
@@ -251,6 +259,7 @@ impl Ui {
                         *slot = None;
                     }
                 }
+                self.pending_scrolls.retain(|(n, _, _)| *n != node);
             }
             Mutation::Layout { id, style } => {
                 let node = NodeId(*id);
@@ -392,12 +401,18 @@ impl Ui {
                 placeholder,
                 multiline,
             } => {
-                self.inputs
-                    .configure(*id, *font_size, *color, placeholder, *multiline);
-                self.host.mark_layout(NodeId(*id));
+                let metrics =
+                    self.inputs
+                        .configure(*id, *font_size, *color, placeholder, *multiline);
+                if metrics {
+                    self.host.mark_layout(NodeId(*id));
+                    self.host.revs.text_metrics.bump();
+                } else {
+                    // Color only: the chunk's paint changes, no layout.
+                    self.host.revs.paint.bump();
+                }
                 self.host.dirty.content.push(*id);
                 self.host.dirty.semantic.push(*id);
-                self.host.revs.text_metrics.bump();
             }
             Mutation::Role { id, role } => {
                 let i = &mut self.host.interaction[*id as usize];

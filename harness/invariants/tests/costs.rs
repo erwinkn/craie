@@ -209,3 +209,26 @@ fn atlas_relocation_does_no_paragraph_layouts() {
     );
     assert_eq!(ui.counters().shapes, shapes, "relocation must not reshape");
 }
+
+/// An input's color-only config change rebuilds its chunk but runs no
+/// layout and shapes nothing.
+#[test]
+fn input_color_change_does_no_layouts() {
+    let mut ui = Ui::new(1.0);
+    let mut t = Transaction::new(1);
+    let mut s = taffy::Style::default();
+    s.size = taffy::Size {
+        width: taffy::Dimension::length(200.0),
+        height: taffy::Dimension::length(30.0),
+    };
+    t.create(0, NodeKind::Input)
+        .layout(0, &s)
+        .input_config(0, 16.0, 0xFFFF_FFFF, "type", false)
+        .append(NIL, 0);
+    ui.apply_txn(&t).unwrap();
+    ui.render(VIEW);
+    let mut t = Transaction::new(2);
+    t.input_config(0, 16.0, 0xFF00_00FF, "type", false);
+    let c = frame(&mut ui, &t);
+    assert_eq!((c.layout_passes, c.shapes), (0, 0), "{c:?}");
+}

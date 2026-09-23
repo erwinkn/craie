@@ -385,12 +385,19 @@ impl Gen {
             };
         }
         if r.chance(0.15) {
-            let o = if r.chance(0.5) {
-                taffy::Overflow::Scroll
-            } else {
-                taffy::Overflow::Hidden
+            let pick = |r: &mut Rng| match r.below(3) {
+                0 => taffy::Overflow::Scroll,
+                1 => taffy::Overflow::Hidden,
+                _ => taffy::Overflow::Visible,
             };
-            s.overflow = taffy::Point { x: o, y: o };
+            let (x, y) = (pick(r), pick(r));
+            // At least one axis clips.
+            let y = if x == taffy::Overflow::Visible && y == taffy::Overflow::Visible {
+                taffy::Overflow::Hidden
+            } else {
+                y
+            };
+            s.overflow = taffy::Point { x, y };
         }
         if r.chance(0.08) {
             s.display = taffy::Display::None;

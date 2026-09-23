@@ -75,7 +75,9 @@ export interface Transport {
   onEvent?(cb: (ev: UiEvent) => void): void
 }
 
-const MAX_ID = 0xffff_fffd
+/** Native bounds node ids (they index dense stores): mirror host.rs
+ * `MAX_NODES`. */
+const MAX_ID = 1 << 24
 
 /** "#rgb" / "#rrggbb" / "#rrggbbaa" / number -> 0xRRGGBBAA. */
 export function color(v: string | number | undefined, fallback = 0): number {

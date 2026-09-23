@@ -12,6 +12,22 @@ use crate::input::KeyAction;
 use crate::mutation::NodeKind;
 use crate::ui::Ui;
 
+/// Whether `p` lies inside `r` with corners rounded by `radius` (the
+/// same rounded-rect shape the renderer draws and clips with).
+fn in_rounded(p: Point, r: &Rect, radius: f32) -> bool {
+    if !r.contains(p) {
+        return false;
+    }
+    let rad = radius.min(r.size.width / 2.0).min(r.size.height / 2.0);
+    if rad <= 0.0 {
+        return true;
+    }
+    let cx = p.x.clamp(r.origin.x + rad, r.max_x() - rad);
+    let cy = p.y.clamp(r.origin.y + rad, r.max_y() - rad);
+    let (dx, dy) = (p.x - cx, p.y - cy);
+    dx * dx + dy * dy <= rad * rad
+}
+
 impl Ui {
     /// Ancestor chain of `id`, deepest first (inclusive).
     fn path_to(&self, id: NodeId) -> Vec<NodeId> {
@@ -86,7 +102,8 @@ impl Ui {
         }
         let clips = style.overflow.x != taffy::Overflow::Visible
             || style.overflow.y != taffy::Overflow::Visible;
-        if !clips || data.clip_box.contains(q) {
+        let (clip, radius) = self.clip_shape(id, [0.0, 0.0], &data);
+        if !clips || in_rounded(q, &clip, radius) {
             let [sx, sy] = self.scroll_offset_if_scrolls(id);
             let cp = Point::new(q.x + sx, q.y + sy);
             // Children paint above their parent and later siblings above
@@ -97,9 +114,12 @@ impl Ui {
                 }
             }
         }
-        Rect::new(0.0, 0.0, size.width, size.height)
-            .contains(q)
-            .then_some(id)
+        let own_radius = if self.host.kind(id).is_some_and(|k| k.has_box()) {
+            self.host.paint[id.index()].radius
+        } else {
+            0.0
+        };
+        in_rounded(q, &Rect::new(0.0, 0.0, size.width, size.height), own_radius).then_some(id)
     }
 
     /// Focusable nodes in document order (for Tab traversal).
