@@ -276,6 +276,71 @@ mod tests {
         }
     }
 
+    /// Appends grow the Fenwick tree in place: append into a populated,
+    /// measured tree across power-of-two sizes, measure old and new items,
+    /// splice in the middle (a rebuild), append again. Every step equals
+    /// a linear model and a tree rebuilt from scratch.
+    #[test]
+    fn appends_match_model_across_powers_of_two() {
+        let mut e = Extents::new();
+        let mut model: Vec<f64> = Vec::new();
+        let check = |e: &Extents, model: &[f64], what: &str| {
+            let mut acc = 0.0;
+            for (i, v) in model.iter().enumerate() {
+                assert!(
+                    (e.offset(i) as f64 - acc).abs() < 1e-3,
+                    "{what}: offset {i}"
+                );
+                acc += v;
+            }
+            assert!((e.total() as f64 - acc).abs() < 1e-3, "{what}: total");
+            let mut fresh = Extents::new();
+            fresh.splice(0..0, model.iter().map(|&v| v as f32));
+            assert_eq!(fresh.tree.len(), e.tree.len(), "{what}");
+            for (j, (a, b)) in e.tree.iter().zip(&fresh.tree).enumerate() {
+                assert!((a - b).abs() < 1e-6, "{what}: node {j}: {a} vs {b}");
+            }
+        };
+        let append = |e: &mut Extents, model: &mut Vec<f64>, to: usize| {
+            let from = model.len();
+            let vals: Vec<f32> = (from..to).map(|i| 10.0 + (i % 7) as f32 + 0.25).collect();
+            e.splice(from..from, vals.iter().copied());
+            model.extend(vals.iter().map(|&v| v as f64));
+        };
+        // Across 1, 2, 4, 8, 16, 32, 64 (one item at a time and in runs).
+        for to in [1, 2, 3, 4, 5, 8, 9, 16, 17, 31, 32, 33, 64, 65] {
+            append(&mut e, &mut model, to);
+            check(&e, &model, &format!("append to {to}"));
+        }
+        // Measure old and new items.
+        for (i, v) in [
+            (0usize, 3.5f32),
+            (7, 40.0),
+            (15, 0.5),
+            (16, 22.0),
+            (63, 1.0),
+            (64, 9.0),
+        ] {
+            e.measure(i, v);
+            model[i] = v as f64;
+        }
+        check(&e, &model, "measured");
+        // A middle splice (rebuild), then appends across the next power.
+        e.splice(20..25, [5.0, 6.0]);
+        model.splice(20..25, [5.0, 6.0]);
+        check(&e, &model, "middle splice");
+        e.splice(3..3, [1.0; 4]);
+        model.splice(3..3, [1.0; 4]);
+        check(&e, &model, "middle insert");
+        let n = model.len();
+        append(&mut e, &mut model, n + 70);
+        e.measure(n + 5, 77.0);
+        model[n + 5] = 77.0;
+        check(&e, &model, "append after splices, measured");
+        // The item measured at 16 moved to 20 with the insert at 3.
+        assert!(e.is_measured(20) && e.is_measured(n + 5) && !e.is_measured(n + 6));
+    }
+
     /// Gap-aware offsets and lookup equal a linear model with gaps.
     #[test]
     fn gaps_match_linear_model() {

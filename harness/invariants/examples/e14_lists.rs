@@ -385,6 +385,51 @@ fn native_cost(ids: &[u32]) -> (f64, f64) {
     (mount, ms(t1) * 1000.0 / fresh.len() as f64)
 }
 
+/// A 1M-item list (sequential ids): bulk replacement of half the items
+/// (one splice, the linear index merge), and single appends with a fresh
+/// id above every existing one (the bridge's case) or below them (an
+/// O(n) index memmove). (bulk ms, high append us, low append us)
+fn update_costs() -> (f64, f64, f64) {
+    let n = 1_000_000u32;
+    let desc = |id: u32| ItemDesc {
+        template: 0,
+        text_len: 20,
+        id,
+        unchanged: false,
+    };
+    let mut ui = Ui::new(1.0);
+    let mut t = Transaction::new(1);
+    t.create(1, NodeKind::List).append(NIL, 1).list_splice(
+        1,
+        0,
+        0,
+        &(0..n).map(|i| desc(2 * i + 2)).collect::<Vec<_>>(),
+    );
+    ui.apply_txn(&t).unwrap();
+    let fresh: Vec<ItemDesc> = (0..n / 2).map(|i| desc(3_000_000 + i)).collect();
+    let mut t = Transaction::new(2);
+    t.list_splice(1, n / 4, n / 2, &fresh);
+    let t0 = Instant::now();
+    ui.apply_txn(&t).unwrap();
+    let bulk = ms(t0);
+    let append = |ui: &mut Ui, ids: &[u32], seq: u64| {
+        let t0 = Instant::now();
+        for (k, &id) in ids.iter().enumerate() {
+            let len = ui.host.lists.get(1).unwrap().len();
+            let mut t = Transaction::new(seq + k as u64);
+            t.list_splice(1, len, 0, &[desc(id)]);
+            ui.apply_txn(&t).unwrap();
+        }
+        ms(t0) * 1000.0 / ids.len() as f64
+    };
+    let high: Vec<u32> = (0..100).map(|k| 4_000_000 + k).collect();
+    // Odd ids below every even id: each lands at the index's front.
+    let low: Vec<u32> = (0..100).map(|k| 2 * k + 1).rev().collect();
+    let h = append(&mut ui, &high, 10);
+    let l = append(&mut ui, &low, 1_000);
+    (bulk, h, l)
+}
+
 fn identity_costs() {
     println!();
     println!("identity index: build + query all (ms), and the native splice path");
@@ -472,5 +517,15 @@ fn main() {
         p95 * 100.0
     );
     println!("bridge bytes per item: 11 (template u16, text length u32, id u32, flags u8)");
+    println!(
+        "element bytes per item: ItemDesc {} + extents {} (f32 size, bool measured, f64 tree) + index 4 = {}",
+        std::mem::size_of::<ItemDesc>(),
+        4 + 1 + 8,
+        std::mem::size_of::<ItemDesc>() + 13 + 4
+    );
     identity_costs();
+    let (bulk, high, low) = update_costs();
+    println!(
+        "1M list: replace 500k items in one splice {bulk:.1} ms; append with a high id {high:.0} us, with a low id {low:.0} us"
+    );
 }

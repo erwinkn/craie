@@ -1919,3 +1919,43 @@ fn list_item_flags_are_strict() {
         }
     }
 }
+
+/// The identity index's merge update equals a rebuilt index for bulk
+/// removals and additions (the linear path) and for a few (in place).
+#[test]
+fn id_index_update_matches_rebuild() {
+    use crate::list::IdIndex;
+    let mut rng = craie_core::rng::Rng::new(11);
+    for round in 0..200 {
+        let mut ids: Vec<u32> = (0..rng.below(300)).map(|_| rng.below(2_000)).collect();
+        ids.sort_unstable();
+        ids.dedup();
+        let mut ix = IdIndex::build(ids.iter().copied());
+        let many = round % 2 == 0;
+        let take = if many {
+            ids.len() / 2
+        } else {
+            ids.len().min(3)
+        };
+        let removed: Vec<u32> = ids
+            .iter()
+            .copied()
+            .filter(|_| rng.chance(0.5))
+            .take(take)
+            .collect();
+        let mut kept: Vec<u32> = ids
+            .iter()
+            .copied()
+            .filter(|i| !removed.contains(i))
+            .collect();
+        let added: Vec<u32> = (0..if many { 40 } else { 3 })
+            .map(|k| 2_000 + k * 7 + rng.below(5))
+            .filter(|i| !kept.contains(i))
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        ix.update(&removed, &added);
+        kept.extend(&added);
+        assert_eq!(ix, IdIndex::build(kept), "round {round}");
+    }
+}

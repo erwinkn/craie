@@ -224,7 +224,6 @@ fn oracle_with(list_style: taffy::Style, what: &str, exact: bool) {
         reference.push(acc);
         acc += h as f64 + gap;
     }
-    let content_end = acc - gap;
     for i in 0..n as usize {
         let (r, ours) = (reference[i], content_top + l.offset(i));
         let plain_y = plain.layouts.data(NodeId(100 + i as u32)).rect.origin.y;
@@ -247,31 +246,67 @@ fn oracle_with(list_style: taffy::Style, what: &str, exact: bool) {
             );
         }
     }
-    // The list box and the sibling after it: one or two more additions.
-    let k = 3 * n as usize + 3;
-    let bottom = ui.layouts.data(NodeId(LIST)).rect.size.height - content_top - l.total();
+    // The list box and the sibling after it, from the style and the
+    // reference content alone (not from either path's result): a definite
+    // height is the box; else insets plus the rows plus the gaps that size
+    // the box (a percentage gap without a definite height sizes nothing,
+    // as flex does). Every term is nonnegative, so each path's sum is
+    // within gamma(additions) of the sum of the terms' magnitudes.
+    use taffy::util::{MaybeResolve, ResolveOrZero};
+    let pw = Some(VIEW.width);
+    let pad = list_style.padding.resolve_or_zero(pw, |_, _| 0.0);
+    let border = list_style.border.resolve_or_zero(pw, |_, _| 0.0);
+    let (top, bottom) = (
+        (pad.top + border.top) as f64,
+        (pad.bottom + border.bottom) as f64,
+    );
+    let rows: f64 = (0..n)
+        .map(|i| plain.layouts.data(NodeId(100 + i)).rect.size.height as f64)
+        .sum();
+    let sizing_gap = list_style
+        .gap
+        .height
+        .maybe_resolve(None, |_, _| 0.0)
+        .unwrap_or(0.0) as f64;
+    let box_ref = match list_style
+        .size
+        .height
+        .maybe_resolve(Some(VIEW.height), |_, _| 0.0)
+    {
+        Some(h) => h as f64,
+        None => top + rows + (n - 1) as f64 * sizing_gap + bottom,
+    };
+    // Additions: the rows and gaps, then insets. The list sums its rows
+    // in f64 (one rounding) and adds insets: 8 f32 operations at most.
+    let k = 2 * n as usize + 4;
     let (a, b) = (
         ui.layouts.data(NodeId(LIST)).rect,
         plain.layouts.data(NodeId(LIST)).rect,
     );
-    let r = content_end + bottom as f64;
-    assert!(
-        within(a.size.height, r, gamma(5) * r),
-        "{what}: height {a:?}"
+    assert_eq!(
+        (a.origin.y, b.origin.y),
+        (0.0, 0.0),
+        "{what}: the list starts the scroller"
     );
     assert!(
-        within(b.size.height, r, gamma(k + 1) * r),
-        "{what}: plain height {b:?}"
+        within(a.size.height, box_ref, gamma(8) * box_ref),
+        "{what}: height {a:?} vs {box_ref}"
+    );
+    assert!(
+        within(b.size.height, box_ref, gamma(k) * box_ref),
+        "{what}: plain height {b:?} vs {box_ref}"
     );
     let (sa, sb) = (
         ui.layouts.data(NodeId(sibling)).rect.origin.y,
         plain.layouts.data(NodeId(sibling)).rect.origin.y,
     );
-    let r = a.origin.y as f64 + r;
-    assert!(within(sa, r, gamma(6) * r), "{what}: sibling {sa} vs {r}");
     assert!(
-        within(sb, r, gamma(k + 2) * r),
-        "{what}: plain sibling {sb} vs {r}"
+        within(sa, box_ref, gamma(9) * box_ref),
+        "{what}: sibling {sa} vs {box_ref}"
+    );
+    assert!(
+        within(sb, box_ref, gamma(k + 1) * box_ref),
+        "{what}: plain sibling {sb} vs {box_ref}"
     );
     if exact {
         assert!(
@@ -1336,5 +1371,71 @@ fn percentage_gap_follows_min_max_height() {
             plain.layouts.data(NodeId(LIST)).rect.size,
             "{what}: list box"
         );
+    }
+}
+
+/// Appends that grow the extents tree in place, through a list: appends
+/// across power-of-two sizes into a measured list (rows at the end render
+/// and measure), a middle splice, then appends again. Each step equals a
+/// clean rebuild at rest.
+#[test]
+fn appends_equal_rebuild_across_powers_of_two() {
+    let (mut ui, mut d) = mount(5, 100.0);
+    let mut t = Transaction::new(2);
+    t.scroll_anchor(SCROLLER, Anchor::StickToEnd);
+    ui.apply_txn(&t).unwrap();
+    d.settle(&mut ui, VIEW, &text, 8);
+    let mut n = 5u32;
+    let mut seq = 10;
+    let mut now = 0.0;
+    let mut check = |ui: &mut Ui, what: &str| {
+        now += 1.0;
+        ui.set_time(now);
+        ui.settle();
+        ui.render(VIEW);
+        craie_harness::check_list_index(ui).unwrap();
+        let clean = craie_harness::rebuild(ui, VIEW);
+        craie_harness::compare(ui, &clean, VIEW, 0.01)
+            .unwrap_or_else(|m| panic!("{what}: {}", m.0));
+    };
+    let mut append_to = |ui: &mut Ui, d: &mut ListDriver, n: &mut u32, to: u32, seq: &mut u64| {
+        *seq += 1;
+        let mut t = Transaction::new(*seq);
+        // Fresh identities: after the middle splice, positions and ids
+        // no longer coincide.
+        t.list_splice(
+            LIST,
+            *n,
+            0,
+            &(*n..to)
+                .map(|i| desc_as(i, 10_000 + *seq as u32 * 1_000 + i))
+                .collect::<Vec<_>>(),
+        );
+        ui.apply_txn(&t).unwrap();
+        *n = to;
+        let end = ui.layouts.data(NodeId(SCROLLER)).scroll_extent[1];
+        ui.scroll_to(NodeId(SCROLLER), 0.0, end + 1e6);
+        d.settle(ui, VIEW, &text, 8);
+    };
+    for to in [8, 9, 16, 17, 32, 33, 64, 65] {
+        append_to(&mut ui, &mut d, &mut n, to, &mut seq);
+        check(&mut ui, &format!("append to {to}"));
+    }
+    assert!(
+        ui.host.lists.get(LIST).unwrap().extents.is_measured(64),
+        "new items measured"
+    );
+    // A middle splice (a rebuild of the tree), then appends again.
+    seq += 1;
+    let mut t = Transaction::new(seq);
+    t.list_splice(LIST, 20, 5, &[desc_as(900, 900), desc_as(901, 901)]);
+    d.spliced(&mut t, 20, 5, 2);
+    ui.apply_txn(&t).unwrap();
+    n = n - 5 + 2;
+    d.settle(&mut ui, VIEW, &text, 8);
+    check(&mut ui, "middle splice");
+    for to in [n + 1, 128, 129] {
+        append_to(&mut ui, &mut d, &mut n, to, &mut seq);
+        check(&mut ui, &format!("append to {to} after the splice"));
     }
 }

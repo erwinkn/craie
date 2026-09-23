@@ -73,7 +73,10 @@ impl IdIndex {
     }
 
     /// Removes `removed` (present ids) and adds `added` (absent ids);
-    /// NIL is ignored in both.
+    /// NIL is ignored in both. With n ids, r removed, and a added:
+    /// O(r·n + a·n) memmoves for a few ids (r + a <= 16), else one linear
+    /// merge, O(n + r log r + a log a): the old index, the sorted removals,
+    /// and the sorted additions are scanned together once.
     pub fn update(&mut self, removed: &[u32], added: &[u32]) {
         let removed: Vec<u32> = removed.iter().copied().filter(|&i| i != NIL).collect();
         let added: Vec<u32> = added.iter().copied().filter(|&i| i != NIL).collect();
@@ -93,16 +96,19 @@ impl IdIndex {
         }
         let gone = IdIndex::build(removed);
         let new = IdIndex::build(added);
-        let mut out = Vec::with_capacity(self.0.len() - gone.len() + new.len());
-        let mut a = new.0.iter().copied().peekable();
-        for x in self.0.iter().copied().filter(|x| !gone.contains(*x)) {
-            while let Some(&y) = a.peek() {
-                if y < x {
-                    out.push(y);
-                    a.next();
-                } else {
-                    break;
-                }
+        let mut out = Vec::with_capacity(self.0.len() + new.len() - gone.len().min(self.0.len()));
+        let (mut g, mut a) = (
+            gone.0.iter().copied().peekable(),
+            new.0.iter().copied().peekable(),
+        );
+        for x in self.0.iter().copied() {
+            // Skip removals below x (absent ids), drop x if removed.
+            while g.next_if(|&r| r < x).is_some() {}
+            if g.next_if_eq(&x).is_some() {
+                continue;
+            }
+            while let Some(y) = a.next_if(|&y| y < x) {
+                out.push(y);
             }
             out.push(x);
         }

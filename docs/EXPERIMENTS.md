@@ -94,9 +94,12 @@ machine (load average 9 to 12): times are indicative.
 | 100k  | 35.7 ms | -        | 0.003 ms               | 1.1 ms | 8.1 MiB  | -         | 64 |
 | 1M    | 90.0 ms | -        | 0.006 ms               | 2.3 ms | 33.2 MiB | -         | 64 |
 
-About 5 MiB of each heap is the text engine's font data. The list adds
-about 29 bytes per item: descriptions (16), extents (13 with the tree),
-and the sorted identity index (4). 27 rows render.
+About 5 MiB of each heap is the text engine's font data. Element bytes
+per item: `ItemDesc` 12 (`size_of`, measured), extents 13 (f32 size,
+bool measured, f64 tree node), and the sorted identity index 4: 29 in
+all. The measured live bytes per item at 1M (28.4 = (33.2 - 5.0) MiB /
+1M) include no spare capacity beyond that here; a list grown by many
+splices can hold up to 2x per vector in capacity. 27 rows render.
 
 Identity index, build plus one query per id (ms), and the native path
 (one splice mounting the list, then single-item appends):
@@ -110,9 +113,14 @@ Identity index, build plus one query per id (ms), and the native path
 
 The multiplicative hash (round 2) degrades on chosen patterns (30x at
 4,096 ids, 36x at 1M strided): wire ids are adversarial, so it went.
-The sorted vector has no pattern to aim at, costs 4 bytes per id, and
-merges in O(n + k log k) per splice. Before the append path, one
-append to a 1M list took 3.8 ms (a full Fenwick rebuild). Estimates against measured
+The sorted vector has no pattern to aim at and costs 4 bytes per id.
+An update with n ids, r removed, and a added is one linear merge,
+O(n + r log r + a log a), or in place for a few ids (r + a <= 16):
+O((r + a) n) memmoves. On a 1M list, replacing 500k items in one splice
+takes 57 ms. An append costs 7 µs with a fresh id above every existing
+one (the bridge's increasing ids) and 140 µs with a low id (a memmove
+of the index). Before the append path, one append to a 1M list took
+3.8 ms (a full Fenwick rebuild). Estimates against measured
 heights: mean error 2.4%, p95 25% (a wrap boundary costs a line). After
 a jump to 61% of a 100k list the top item holds its place and the item
 at the viewport bottom moves 14 pt once, when the rows measure.
