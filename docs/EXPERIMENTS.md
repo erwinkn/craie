@@ -6,6 +6,122 @@ reason it landed. Proposals live in `ARCHITECTURE.md`, in the
 only when it has a measured result. Decisions in `ARCHITECTURE.md`
 override older entries below.
 
+## Step 1 — crate split, CRW2, retained scene (2026-09-23)
+
+Conditions: the shared M5 Max ran under heavy load (load average 12 to
+93). Wall-clock varies about 40 percent run to run, so baseline
+(`f26c22b`) and step 1 (`e61b9da`) ran back to back, three repetitions
+each, and the table gives medians. Allocation counts, bytes, and
+primitive counts are exact.
+
+### Wire
+
+| transaction              | CRW1      | CRW2, no span interning | CRW2      |
+|--------------------------|-----------|-------------------------|-----------|
+| 5k-row mount             | 683,073 B | 743,072 B               | 663,088 B |
+| 2k-message transcript    | 371,692 B | 423,181 B               | 351,229 B |
+
+A paragraph op plus a 16-byte span row costs more than CRW1's
+set_text + text_props. Interning span lists per transaction, like
+styles, recovers it: most paragraphs share one style.
+
+### `examples/bench` (5k uniform rows, 10,001 nodes; transcript 10,501)
+
+| phase                          | baseline            | step 1              |
+|--------------------------------|---------------------|---------------------|
+| decode + apply                 | 2.0 ms, 10,121 allocs | 7.1 ms*, 10,212 allocs |
+| layout, cold                   | 650 ms, 746,811 allocs | 688 ms, 746,834 allocs |
+| paint, cold                    | 3.9 ms, 263 allocs  | 3.7 ms, 360 allocs  |
+| paint, warm unchanged          | 0.10 ms, 12 allocs  | 0.00 ms, 0 allocs   |
+| layout, warm unchanged         | 0.12 ms             | 0.00 ms (skipped)   |
+| layout, 500 dirty texts        | 43 ms, 67,013 allocs | 27 ms, 67,027 allocs |
+| paint, 500 dirty texts         | 0.40 ms             | 0.41 ms             |
+| chunks built, cold             | n/a                 | 70 of 10,001        |
+| first upload                   | 84 KB instances + 121 KB atlas | 207 KB tables + 121 KB atlas |
+| warm upload                    | 84 KB (every draw)  | 0 bytes             |
+| draw submit, warm              | 0.83 ms             | 0.31 ms             |
+| transcript: paint per token    | 0.092 ms            | 0.013 ms            |
+| transcript: layout per token   | 2.53 ms             | 2.62 ms             |
+| live heap, 5k rows             | 36.4 MiB            | 43.8 MiB            |
+
+\* decode + apply wall-clock is noise-dominated (1.7 to 8.6 ms across
+all six runs); its allocation count moved by 0.9 percent.
+
+The live heap grew 7.4 MiB. Struct sizes account for about 5.3 MiB:
+dense per-node host rows cost 348 bytes (layout 240, paragraph 48,
+spatial 36, paint 16, interaction 8) and scene bookkeeping 180 bytes
+(chunk 92, node space 72, placement 16), against about 70 bytes per
+node before. The layout row is the decision "layout inputs are
+per-node rows"; a compact owned row arrives with the owned flex engine.
+
+Why the warm and streaming paths improved: an unchanged frame skips
+layout and does no scene work at all; a text change rebuilds one chunk;
+a layout move patches placements of moved subtrees only.
+
+### `examples/framebench` (real React commits, medians of medians)
+
+| rows  | phase        | baseline | step 1 |
+|-------|--------------|----------|--------|
+| 100   | firstDraw    | 7.45 ms  | 3.08 ms |
+| 100   | update.draw  | 0.194 ms | 0.157 ms |
+| 100   | scroll.draw  | 0.349 ms | 0.066 ms |
+| 1,000 | firstDraw    | 33.2 ms  | 16.9 ms |
+| 1,000 | scroll.draw  | 0.899 ms | 0.543 ms |
+| 5,000 | firstDraw    | 98.6 ms  | 69.7 ms |
+| 5,000 | update.draw  | 0.220 ms | 0.231 ms |
+| 5,000 | scroll.draw  | 2.67 ms  | 2.79 ms |
+| 5,000 | remove       | 3.35 ms  | 3.50 ms |
+| 5,000 | emptyDraw    | 0.211 ms | 0.253 ms |
+
+Framebench scrolls by changing `marginTop` (a layout change), so its
+scroll moves every row; the native scroll path (one record, 32 bytes)
+is not what it measures. The 5k-row differences are inside the noise
+band. First-draw live bytes: +27.2 MiB before, +28.3 MiB after.
+
+### E10: span pool versus `Vec` side table
+
+`cargo run --release -p craie-harness --example e10_span_pool`,
+100,000 nodes. Bytes include the per-node slot (a `Vec` is 24 bytes,
+a span 8).
+
+| workload                  | Vec: B/node, allocs | pool: B/node, allocs | walk (Vec / pool) |
+|---------------------------|---------------------|----------------------|-------------------|
+| wide (one parent)         | 29.2, 17            | 18.5, 39             | 0.23 / 0.32 ms    |
+| deep (a chain)            | 40.0, 100,000       | 13.2, 17             | 0.41 / 0.25 ms    |
+| tiny containers (0-3)     | 32.0, 49,972        | 13.2, 20             | 0.99 / 0.90 ms    |
+| huge lists (10 x 10k)     | 30.6, 134           | 18.5, 35             | 0.17 / 0.16 ms    |
+| reorder churn (200k moves)| 26.0, 4,510         | 10.7, 56             | 0.51 / 0.17 ms    |
+
+The pool uses 37 to 67 percent fewer bytes and up to 5,800 times fewer
+allocations; traversal is equal or faster except on one very wide
+list. The pool ships for child lists and chunk ranges.
+
+### Harness findings
+
+The incremental-equals-clean-rebuild suite found two bugs on its first
+runs, both fixed:
+
+- A scene whose world matrices were derived before `prepare` kept a
+  stale draw list: chunks that had scrolled away stayed in it. The list
+  now keys on the world and clip revisions.
+- Scroll offsets did not re-clamp when content shrank below them.
+
+The atlas-pressure case showed that pinning the previous frame's
+visible set grew the atlas past its budget during scrolls; pinning now
+happens at use and before drawing. A real-GPU check measured the
+uploads: unchanged frame 0 bytes, fill change 4 bytes (a whole paint
+span before `SpanPool::set_at`), scroll 32 bytes.
+
+### Visual checks
+
+`cargo run --example text -- --screenshot` and `--example app` render
+through the new renderer. The app demo adds a rotated bordered card, an
+isolated opacity group whose squares overlap without darkening, a
+rounded clip with scrolled content (scrolling rebuilt no chunk), and a
+payload-fed bars surface. Against the baseline image, only centered
+labels differ: bounding boxes within one device pixel, from chunk-origin
+snapping.
+
 ## Pass 3 — interaction, extension, accessibility
 
 Decisions that shaped the interactive layer:

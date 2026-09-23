@@ -46,14 +46,18 @@ Target crate graph. Arrows point from dependent to dependency.
 ```
 craie-node (N-API)          harness/* (dev only)
       |                           |
+      v                           v
 craie-platform-winit  ----->  craie-ui  ----->  craie-text
       |                           |                 |
-      +-------------------->  craie-scene  <--------+
+      v                           v                 |
+craie-render (wgpu)  ------>  craie-scene  <--------+
                                   |
-                              craie-render (wgpu)
-                                  |
+                                  v
                               craie-core
 ```
+
+The renderer reads the scene's pools and tables; the scene knows
+nothing of wgpu, so another submitter (E11) can reuse it.
 
 - `craie-core`: handles, generations, geometry, revisions, dirty queues,
   span pool, counters. No knowledge of React, winit, wgpu, fonts, or
@@ -70,33 +74,51 @@ craie-platform-winit  ----->  craie-ui  ----->  craie-text
 - `craie-node`: N-API bridge between the React worker and the UI thread.
 - `craie-vector`, `craie-svg`: appear when lyon lands.
 
-Current state: everything sits in one crate, `crates/craie`, with
-`crates/node` for N-API. The file map is:
+Current state: the crate graph above, without `vector` and `svg`. The
+file map is:
 
 ```
-bridge.rs     bounded commit queue + ack/event outbox (Session)
-wire.rs       CRW1 decode, validate, apply
-ui.rs         facade: apply -> layout -> paint; dispatch, focus, scroll
-host/         20-byte NodeHeader arena, per-kind side tables
-layout/       Taffy low-level traits over host storage
-scene.rs      one ordered Vec<Instance>, rects and glyphs unified
-text/         Parley layout -> Swash raster -> glyph cache -> atlas
-input.rs      Parley PlainEditor per INPUT node
-events.rs     normalized events + outbound frame encoding
-custom.rs     registered painters for CUSTOM nodes
-a11y.rs       AccessKit projection, full republish
-gpu/          wgpu: one instanced pipeline, one growable buffer
-platform/     winit 0.31-beta window, Wait control flow
-app.rs        session -> ui -> surface -> present
+crates/core/            craie-core: no dependencies
+  geom.rs               Point, Size, Rect, RectPx, Affine
+  span.rs               SpanPool<T>: capacity-classed lists, dirty ranges
+  dirty.rs              DirtyQueue (bitset dedupe), DirtyRanges
+  rev.rs counters.rs    Rev stamps, cost Counters
+  rng.rs                pinned-seed xorshift for model tests
+crates/scene/           craie-scene: core, bytemuck, etagere
+  prim.rs               RectInstance, GlyphInstance, Color, Segment
+  chunk.rs              Chunk, ChunkWriter, Placement, PaintSlot
+  space.rs              transform records (world derived), clip records
+  scene.rs              pools, placements, draw order, layers, prepare()
+  atlas.rs              RasterAtlas: RasterId, residency, pages, eviction
+crates/render/          craie-render: wgpu
+  lib.rs                storage-buffer mirrors, draw list, opacity layers
+  shaders/              scene.wgsl (rects + glyphs), composite.wgsl
+crates/text/            craie-text: Parley, Swash
+  lib.rs cache.rs       shaping, emit into chunks, GlyphKey -> RasterId
+crates/ui/              craie-ui: core, scene, text, Taffy, accesskit
+  mutation.rs           Mutation enum, Transaction + direct-API builder
+  wire.rs               CRW2 decode/encode
+  executor.rs           validate + apply: revisions, dirty queues
+  host.rs               16-byte headers, per-node stores, child spans
+  layout.rs             Taffy over host rows; moved/resized tracking
+  scene_sync.rs         host + layout -> chunks, placements, records
+  dispatch.rs           hit testing, focus, pointer capture, editing
+  ui.rs                 facade; a11y.rs, input.rs, surface.rs, events.rs
+  bridge.rs platform.rs Session (commit queue, outbox), platform contract
+crates/platform-winit/  winit 0.30 driver, Window, HostApp, clipboard
+crates/node/            N-API: NativeHost, NativeClient
+harness/invariants/     craie-harness: invariant, cost, graph tests; E10
 ```
 
 ---
 
 ## 1. Workspace and crates
 
-**Current.** One library crate plus the N-API crate. No feature flags.
-No WASM target. `ui.rs` is 2,100 lines and owns apply, layout, paint,
-dispatch, focus, and scroll.
+**Current.** The crate graph of the layer map (core, scene, render,
+text, ui, platform-winit, node) plus `harness/invariants`. `craie-core`
+has no dependencies. `scripts/ci.sh` runs `cargo check --target
+wasm32-unknown-unknown` on core, scene, render, and text, and the
+harness asserts the layer map and the release graphs.
 
 **Target.** The crate graph above. Desktop-only facilities never enter
 `core`, `scene`, `render`, or `text`. CI runs `cargo check --target
@@ -114,17 +136,21 @@ a measurement.
   `harness/`. Reference libraries (Taffy, Parley, HarfBuzz, browser
   renderers) enter only as dev-dependencies. CI asserts they are absent
   from release dependency graphs.
+- `craie-render` depends on `craie-scene`, not the reverse (2026-09-23).
+  The scene is portable data; the renderer is one consumer of it.
 
 ## 2. Wire and mutation executor
 
-**Current.** CRW1: magic, version, flags, seq, string table, then flat
-u8-tagged ops. Ops: create, set_text, text_props, set_style, place,
-detach, remove, hidden, paint, props, input_props, custom, label,
-command, style definition (u64 presence mask + positional fields). A
-transaction is validated fully before any op applies. Styles are
-interned by canonical JSON key in a JS map that lives forever, and
-native stores one `taffy::Style` per wire style id. A `hidden` op and
-`display: none` both hide a node.
+**Current.** CRW2 as targeted, minus the list and animation families
+(steps 2 and 4). Header: magic, version, flags, seq, then counts and
+per-transaction tables for strings, layout styles (u64 presence mask +
+positional fields), and text spans (16 bytes each). Ops are u8-tagged,
+grouped by family in the high nibble. `wire::decode` yields a
+`Transaction` of `Mutation`s; the Rust builder produces the same type;
+`Ui::execute` validates the whole transaction, then applies it with no
+callbacks. Both encoders intern styles and span lists per transaction.
+Detach stays a structure op: React unlinks a deleted subtree in the
+mutation phase and frees each node later.
 
 **Target.** CRW2. The decoder produces a semantic mutation enum. One
 executor consumes that enum from the JS transaction and from the Rust
@@ -158,16 +184,19 @@ scrollTo).
 - The ack-gated id free list is removed. JS recycles ids immediately.
   Outbound events carry the node generation and JS drops stale ones.
   The ack remains only to resolve `flush()`.
+- Span lists intern per transaction like styles (2026-09-23): most
+  paragraphs share one style, and without interning CRW2 cost 9% more
+  bytes than CRW1 on the 5k-row mount (see `EXPERIMENTS.md`).
 
 ## 3. Host tree and storage
 
-**Current.** `NodeHeader` is 20 bytes: parent, aux row, style id, kind
-with a hidden bit, generation, flags. Ids are JS-assigned arena
-indices. Children live in a `Vec<NodeId>` side table parallel to the
-arena. Sparse per-kind rows: `TextRow` (text, font size, color),
-`ViewRow` (fill, radius, border). Truly sparse state (listeners,
-focusability, scroll offsets, labels) lives in id-keyed maps on `Ui`.
-Dirty tracking is a queue; a flag on the header dedupes pushes.
+**Current.** As targeted. `NodeHeader` is 16 bytes: parent, child
+span, kind, flags, generation. Dense per-node stores: `layout`
+(`taffy::Style`, 240 bytes), `spatial` (transform, opacity, scroll
+offset), `paint`, `paragraphs` (UTF-8 + span list), `interaction`
+(listeners, focusable, role). Labels and surface payloads are id-keyed
+maps. The nine revisions live on the host; dirty queues (layout,
+content, paint, spatial, semantic) are `DirtyQueue`s.
 
 **Target.** The same arena shape with per-usage stores:
 
@@ -200,16 +229,19 @@ prove validity.
 - One span pool serves both child lists and chunk ranges.
 - The paragraph style is the span list. `TextRow` loses font size and
   color; span zero carries the base style.
+- Dense per-node stores cost about 348 bytes per node today, 240 of
+  them the `taffy::Style` row (2026-09-23). A compact Craie-owned row
+  replaces it with the owned flex engine (step 6).
 
 ## 4. Layout
 
-**Current.** Taffy 0.14 through its low-level traits over host storage.
-Results land in `Layouts`, a per-node store (cache, unrounded layout,
-final rect, content-box offset). Everything is in logical units. A
-mutation clears the Taffy cache on the node and its ancestors. Text
-leaves are measured through Parley in the leaf callback. Cold layout of
-10k nodes costs 217 to 567 ms; warm unchanged costs 0.06 ms; one
-streaming append costs 0.65 ms.
+**Current.** Taffy 0.14 through its low-level traits, reading each
+node's own layout row. Results land in `Layouts` (cache, unrounded
+layout, final rect, content-box offset); finalize records nodes whose
+origin moved, whose size changed, and whose scroll extent changed. A
+layout pass runs only when the layout queue is non-empty or the
+viewport changed, so an unchanged frame does zero layouts. Cold layout
+of 10k nodes costs 217 to 567 ms; one streaming append costs 0.65 ms.
 
 **Target.** A Craie-owned engine over `layout_inputs[]`, the child span
 pool, intrinsic measures, a layout cache, and results (relative
@@ -243,15 +275,17 @@ React Native. `block` and `grid` are explicit values.
 
 ## 5. Text
 
-**Current.** Parley lays out a `ParagraphSpec` into a retained
-`Layout`; Swash rasterizes cache misses; the glyph cache keys on
-interned font id, interned coords/synthesis, glyph id, exact size bits,
-and quarter-pixel subpixel buckets. Each text node keeps a
-`MeasuredText` (shaped layout) and an `EmittedText` batch of
-physical-pixel instances keyed on scale, origin, and color. Retained
-Parley layouts are the memory floor: about 27 MiB for 5k rows. INPUT
-nodes hold a Parley `PlainEditor` each. CJK line breaking degrades
-because ICU4X segmentation data is not bundled.
+**Current.** Parley shapes a paragraph's span list into a retained
+`Layout` whose brush is the span index, which is also the span's paint
+slot in the text chunk: a color change patches a paint record and
+never reshapes. Swash rasterizes cache misses; the glyph cache maps
+`GlyphKey` (interned font, coords/synthesis, glyph, size bits,
+quarter-pixel subpixel) to a stable `RasterId` and keeps the key and
+font to re-rasterize an evicted glyph. Glyph instances are chunk-local;
+their subpixel buckets are relative to the chunk origin, which the
+renderer snaps to the device-pixel grid. Retained Parley layouts are
+the memory floor (about 27 MiB for 5k rows). INPUT nodes hold a Parley
+`PlainEditor` each. CJK line breaking degrades (no ICU4X data).
 
 **Target.** Craie owns every persistent representation:
 
@@ -349,15 +383,23 @@ content extent. No virtualization: layout visits every node.
   metrics or extents copy lives in JS.
 - The list is not its own scroller. Wrapping it in a ScrollView is
   explicit.
+- A scroll offset re-clamps when content shrinks below it
+  (2026-09-23), as browsers do.
 
 ## 8. Scene
 
-**Current.** One `Vec<Instance>` in document order, rebuilt by a
-pre-order walk each repaint. `Instance` is 80 bytes and unifies rect
-fills, borders, corner radii, glyph quads, and a per-instance clip
-rect. Coordinates are physical pixels with absolute origins. One draw
-call. The warm walk costs 0.03 ms for 10k nodes; 1,101 instances reach
-the GPU after viewport culling.
+**Current.** As targeted, except images, paths, meshes, and group
+opacity by multiply-through (only isolated layers exist). One chunk per
+node (id = node id) in `RectInstance` (40 B) and `GlyphInstance` (20 B)
+pools plus a paint pool, with up to four same-kind segments in paint
+order. A placement table (offset, transform record, clip) positions
+each chunk. Transform records exist for the window root, scroll
+content, and transformed subtrees; all other nodes draw in their
+nearest record's space at an offset. The draw order, layer table,
+record evaluation order, and clip records are rebuilt by one walk when
+structure or clip topology changes; layout moves revisit only moved
+subtrees. Chunks build on demand within half a viewport of the screen.
+`prepare` culls, merges contiguous segments, and wraps opacity layers.
 
 **Target.** A persistent retained drawing representation.
 
@@ -396,6 +438,20 @@ Scene
   because owned paragraph output must target them.
 - Draw order is a derived cache rebuilt when `structure_rev` changes,
   not incrementally patched state. The measured walk is cheap.
+- Transform records exist only for the window root, scroll content,
+  and transformed subtrees; every other chunk is an offset in its
+  nearest record's space (2026-09-23). A scroll patches one record and
+  uploads 32 bytes; a layout move patches placements of moved subtrees.
+- Chunk origins snap to the device-pixel grid under axis-aligned
+  transforms; glyph subpixel buckets are relative to the chunk origin
+  (2026-09-23). A moved chunk reuses every raster. Text at a fractional
+  origin lands up to half a device pixel from its unsnapped position.
+- Chunks build on demand within half a viewport of the screen; farther
+  chunks wait and build in the frame they come into range (2026-09-23).
+  Cold paint then scales with what is near the screen, as it did with
+  emit-time culling.
+- The draw list keys on the world and clip revisions, not on who
+  derived them (a stale list was the first bug the harness found).
 - Correct painter order always wins over draw-call count.
 
 ## 9. Vectors and SVG
@@ -424,10 +480,13 @@ fills, strokes, gradients, transforms, clips, images, group opacity.
 
 ## 10. Glyph atlas and resources
 
-**Current.** etagere-packed 2048x2048 pages, R8 and RGBA, CPU mirrors
-with dirty rects, dirty-region uploads. A page cap plus an LRU over
-glyph entries. Allocation failure evicts least-recently-used
-allocations and marks cache entries absent.
+**Current.** `RasterAtlas` in craie-scene: stable `RasterId`s, a
+residency table the GPU reads, etagere-packed 2048x2048 R8 and RGBA
+pages with CPU mirrors and dirty-rect uploads. Rasters are stamped as
+chunks use them; `prepare` stamps every raster of every visible chunk
+and re-rasterizes the missing ones before drawing. Eviction takes the
+least recently used unstamped raster (a linear scan); when everything
+is stamped, pages grow past the cap (`over_budget_pages`).
 
 **Target.** Stable `RasterId` with separate residency (atlas, rect,
 generation). Drawing records reference the id, never baked atlas
@@ -446,12 +505,21 @@ in-flight bytes separately. Budgets are runtime configuration.
 **Decisions.**
 - Add visible working-set pinning during the scene rework. Keep LRU
   until a benchmark shows its cost.
+- Pin at use and before drawing, not the previous frame's visible set
+  (2026-09-23). Pinning last frame's set during a scroll grew the atlas
+  past its budget instead of evicting glyphs leaving the screen;
+  `prepare` already guarantees every visible raster is resident.
 
 ## 11. GPU renderer
 
-**Current.** wgpu 30. One device, one instanced pipeline, one growable
-vertex buffer, atlas texture arrays. One draw call per frame. Colors
-decode from sRGB to linear at emit; blending happens in linear.
+**Current.** wgpu 30. Storage-buffer mirrors of the scene pools and
+tables (rects, glyphs, paints, placements, worlds, clips, raster
+residency) take dirty-range uploads; an unchanged frame uploads zero
+bytes. One pipeline draws both kinds (instance-index bit 31 selects the
+pool) with one draw per merged run. Opacity layers render into pooled
+offscreen targets and composite with their opacity. Clips test in
+their own space in the fragment stage. Colors decode from sRGB to
+linear in the shader; blending happens in linear.
 
 **Target.** wgpu stays the native GPU abstraction. Craie owns pipeline
 layouts, shaders, buffer layout, upload policy, and pass construction.
@@ -521,9 +589,12 @@ movement without a React round trip.
 ## 14. Accessibility
 
 **Current.** `a11y.rs` projects an AccessKit tree from retained state.
-Roles are inferred from listeners and overflow. The whole tree
-republishes on any a11y-observable change. Actions queue back onto the
-UI thread. The adapter is a vendored fork patched for winit 0.31 beta.
+Roles come from the explicit role field; the facade sets defaults
+(Pressable, TextInput, ScrollView, Text) and a plain View has none.
+Bounds are transform-aware. The whole tree still republishes on any
+a11y-observable change; the semantic dirty queue exists but does not
+drive incremental updates yet. Actions queue back onto the UI thread.
+The adapter is upstream `accesskit_winit` 0.34.
 
 **Target.** No separate semantic store. The AccessKit `TreeUpdate` is
 projected from the host node, the label table, and the layout store,
@@ -544,10 +615,11 @@ its own internal copy because the platform requires it.
 
 ## 15. Platform and window
 
-**Current.** winit 0.31.0-beta.3 confined to `platform/winit.rs`,
-`ControlFlow::Wait`, frames only on `RedrawRequested`. Wake wraps
-`EventLoopProxy::wake_up`. `martensite-accesskit-winit` 0.18 (fork).
-One window.
+**Current.** winit 0.30.13 confined to `craie-platform-winit`,
+`ControlFlow::Wait`, frames only on `RedrawRequested`. The wake is a
+unit user event. `craie_ui::platform` holds the contract: `WindowId`
+and `PlatformWindow` (surface size, scale, frame request, text input);
+the clipboard seam is `craie_ui::clipboard::Clipboard`. One window.
 
 **Target.** A small platform contract: frame request, surface size,
 display scale, cursor, clipboard, text input, timers, asset services,
@@ -569,14 +641,12 @@ event loop, the window, the device, or the render target.
 
 ## 16. Bridge and JS runtime
 
-**Current.** One process. The main thread owns the winit loop and the
-retained `Ui`. React runs in a Node `worker_thread` and calls
-`NativeClient.submit(bytes)`, which copies the transaction into a
-bounded queue and wakes the loop. One threadsafe function delivers
-`ack | events` frames. JS holds removed ids until ack. Apps bundle with
-esbuild and run under Node because Bun cannot require N-API addons in
-workers. Decode plus apply is 0.5 ms for 10k nodes; the session copy is
-0.01 ms for 683 KB.
+**Current.** As targeted. One process; React runs in a Node
+`worker_thread` and submits CRW2 bytes through `NativeClient.submit`.
+One threadsafe function delivers `ack | events` frames. JS recycles
+ids at once and mirrors each slot's generation; events carry the
+generation and JS drops stale ones; the ack only resolves `flush()`.
+Payload ops copy typed-array bytes once. Protocol version 2.
 
 **Target.** The same transport with CRW2 payloads. The bridge exposes
 `submit` and `subscribe` only, so an embedded JS engine could replace
@@ -593,7 +663,9 @@ bytes for surfaces, copied once, atomic with the commit.
 ## 17. Scheduling
 
 **Current.** Everything runs synchronously on the UI thread inside the
-frame: apply, layout, shaping, raster, paint, upload, submit.
+frame: apply, layout (only when inputs changed), chunk updates near the
+viewport, residency, upload of dirty ranges, submit. Cost counters
+exist (`craie_core::counters`).
 
 **Target.** Single-owner, demand-driven preparation with one frame
 path: apply mutations, run text and layout work, update spatial state,
@@ -611,10 +683,15 @@ without changing publication rules.
 
 ## 18. Verification harness
 
-**Current.** `cargo test` covers host, wire validation, layout,
-dispatch, input editing, a11y projection, atlas eviction, and one
-cross-language wire fixture. `bun test` covers the encoder and the
-reconciler. Benchmarks live in `examples/bench` and
+**Current.** `harness/invariants` holds: incremental equals clean
+rebuild over seeded mutation sequences (layout, drawn scene, hit
+tests, semantics; 8 seeds x 60 steps at 1x and 2x, plus resize and
+atlas-pressure cases); the cost invariants that apply today (color
+change, translation, scroll, unchanged frame, tween, atlas
+relocation), one of them on a real GPU; the release-graph and
+layer-map checks; and the E10 bench. Crate tests cover the span pool,
+scene, host, wire, executor, dispatch, editing, and a11y. `bun test`
+covers the encoder and the reconciler. Benchmarks: `examples/bench`,
 `examples/framebench`.
 
 **Target.** `harness/` crates with:
@@ -640,7 +717,8 @@ reconciler. Benchmarks live in `examples/bench` and
 
 ## 19. WASM and browser
 
-**Current.** No WASM build.
+**Current.** No WASM build; `cargo check --target
+wasm32-unknown-unknown` passes for core, scene, render, and text.
 
 **Target.** Build profiles from `core + scene + render` for a tiny
 surface up to `+ ui + react` for the full runtime. Browser text uses

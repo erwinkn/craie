@@ -71,25 +71,33 @@ await runApp(new URL("./app.tsx", import.meta.url),
 ### Elements
 
 - `<View>` — flex container, scrollable via `overflow: "scroll"`.
-- `<Text>` — text leaf (string child or `text` prop).
+- `<Pressable>` — a `View` with the button role and `onPress`.
+- `<Text>` — paragraph (string child or `text` prop); `fontSize`,
+  `color`, `fontWeight`, `fontStyle`.
 - `<TextInput>` — editable text: caret, selection, clipboard, undo, IME.
-- `<ScrollView>` — `View` alias for `overflow: "scroll"`.
-- `<Custom>` — payload node painted by a `runApp(..., { painters })`
-  callback, for content the host doesn't ship.
+- `<ScrollView>` — `View` with `overflow: "scroll"` and the scroll-view
+  role.
+- `<Surface>` / `<Bars>` — native drawing nodes fed by typed-array
+  payloads (`<Bars values={new Float32Array(...)} color="#6dc7ff" />`).
+  No JS runs at paint time; Rust hosts register more kinds.
 
 Event props (`onPointerDown/Move/Up`, `onKeyDown/Up`, `onFocus/Blur`,
 `onChangeText`, `onSubmit`, `onScroll`) attach per node; pointer events
-carry coordinates relative to the listening node. `focusable` and
-`accessibilityLabel` feed focus traversal and the AccessKit tree.
+carry coordinates relative to the listening node. `focusable`,
+`accessibilityLabel`, and `accessibilityRole` feed focus traversal and
+the AccessKit tree; native never infers a role from listeners.
 
 `style` is an RN-ish object (`flexDirection`, `padding`, `gap`,
 `alignItems`, `justifyContent`, `width`/`height` as `number | "50%" |
 "auto"`, `flexGrow`, …) — see `StyleProps` in `packages/bridge/src/wire.ts`.
-Identical styles intern to one native definition.
+`transform` (an RN-style list) and `opacity` travel in their own spatial
+op and never relayout. `hidden` sends `display: none`.
 
 ## Tests
 
 ```sh
-cargo test                 # host, wire, layout + JS-fixture decode
+cargo test                 # crates + harness (incremental = clean rebuild,
+                           # cost invariants, release graph, layer map)
 bun test --cwd packages/bridge   # encoder golden bytes + reconciler ops
+scripts/ci.sh              # everything, plus the wasm32 check
 ```
