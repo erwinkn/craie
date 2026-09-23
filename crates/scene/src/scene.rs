@@ -9,7 +9,7 @@
 
 use craie_core::counters::Counters;
 use craie_core::dirty::DirtyRanges;
-use craie_core::geom::{Affine, Rect, Size};
+use craie_core::geom::{Rect, Size};
 use craie_core::span::SpanPool;
 
 use crate::atlas::{RasterAtlas, RasterId};
@@ -293,12 +293,10 @@ impl Scene {
         cmds.clear();
         visible.clear();
         // Clip world bounds, once per clip.
-        let clip_bounds: Vec<Rect> = (0..self.clips.len() as u32)
-            .map(|i| {
-                self.clips
-                    .world_bounds(&self.transforms, i)
-                    .unwrap_or(Rect::ZERO)
-            })
+        // Clip world bounds, once per clip. `None` bounds nothing (a clip
+        // chain with only open-axis records).
+        let clip_bounds: Vec<Option<Rect>> = (0..self.clips.len() as u32)
+            .map(|i| self.clips.world_bounds(&self.transforms, i))
             .collect();
         // Open layers: (cmd index of BeginLayer, accumulated bounds).
         let mut layers: Vec<(usize, Option<Rect>)> = Vec::new();
@@ -358,7 +356,9 @@ impl Scene {
                     let mut b = self.chunk_world_bounds(id);
                     let clip = self.placements[id as usize].clip;
                     if clip != NONE {
-                        b = b.intersect(&clip_bounds[clip as usize]);
+                        if let Some(c) = clip_bounds[clip as usize] {
+                            b = b.intersect(&c);
+                        }
                     }
                     if !b.intersects(&screen) {
                         continue;
@@ -457,10 +457,28 @@ impl Scene {
                         continue;
                     }
                     let p = self.placements[id as usize];
-                    let w = self
-                        .transforms
-                        .world(p.transform)
-                        .mul(&Affine::translate(p.offset[0], p.offset[1]));
+                    // Mirror the shader: the chunk origin (and snapping
+                    // rect edges) round to device pixels in an
+                    // axis-aligned space that snaps.
+                    let world = self.transforms.world(p.transform);
+                    let snap = world.is_axis_aligned() && self.transforms.snaps(p.transform);
+                    let mut origin =
+                        world.apply(craie_core::geom::Point::new(p.offset[0], p.offset[1]));
+                    if snap {
+                        origin = craie_core::geom::Point::new(origin.x.round(), origin.y.round());
+                    }
+                    let mut lin = world;
+                    lin.0[4] = origin.x;
+                    lin.0[5] = origin.y;
+                    let w = lin;
+                    let snap_rect = |r: Rect| {
+                        if !snap {
+                            return r;
+                        }
+                        let x0 = r.origin.x.round();
+                        let y0 = r.origin.y.round();
+                        Rect::new(x0, y0, r.max_x().round() - x0, r.max_y().round() - y0)
+                    };
                     let clip = if p.clip == NONE {
                         None
                     } else {
@@ -479,9 +497,15 @@ impl Scene {
                                 for r in rs {
                                     let local =
                                         Rect::new(r.rect[0], r.rect[1], r.rect[2], r.rect[3]);
+                                    let b = w.map_rect(&local);
+                                    let b = if r.flags & RectInstance::FLAG_SNAP != 0 {
+                                        snap_rect(b)
+                                    } else {
+                                        b
+                                    };
                                     out.push(Resolved {
                                         kind: 0,
-                                        bounds: w.map_rect(&local),
+                                        bounds: b,
                                         color: self.paints.backing()[r.fill as usize],
                                         aux: if r.border == NO_PAINT {
                                             0

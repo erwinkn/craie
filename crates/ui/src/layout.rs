@@ -96,7 +96,7 @@ fn row_mut<T: Default + Clone>(rows: &mut Vec<T>, i: usize) -> &mut T {
 impl Layouts {
     pub fn new() -> Layouts {
         Layouts {
-            default: Style::default(),
+            default: crate::host::default_style(),
             passes: 0,
             cache: Vec::new(),
             unrounded: Vec::new(),

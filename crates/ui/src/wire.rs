@@ -264,13 +264,22 @@ fn overflow_tag(o: Overflow) -> u8 {
     }
 }
 
-fn overflow_of(tag: u8) -> Overflow {
-    match tag {
+fn overflow_of(tag: u8) -> Result<Overflow, WireError> {
+    Ok(match tag {
+        0 => Overflow::Visible,
         1 => Overflow::Clip,
         2 => Overflow::Hidden,
         3 => Overflow::Scroll,
-        _ => Overflow::Visible,
+        _ => return Err(WireError::BadRef("style field")),
+    })
+}
+
+/// An alignment keyword: `UNSET` or a tag `parse` knows.
+fn keyword<T>(tag: u8, parse: fn(u8) -> Option<T>) -> Result<Option<T>, WireError> {
+    if tag == kw::UNSET {
+        return Ok(None);
     }
+    parse(tag).map(Some).ok_or(WireError::BadRef("style field"))
 }
 
 /// Serializes a style's full record (mask = ALL) — the canonical form
@@ -835,7 +844,7 @@ impl<'a> Reader<'a> {
         match self.u8()? {
             0 => Ok(LengthPercentage::length(self.f32()?)),
             1 => Ok(LengthPercentage::percent(self.f32()?)),
-            _ => Err(WireError::Truncated),
+            _ => Err(WireError::BadRef("style field")),
         }
     }
 
@@ -843,7 +852,8 @@ impl<'a> Reader<'a> {
         match self.u8()? {
             0 => Ok(LengthPercentageAuto::length(self.f32()?)),
             1 => Ok(LengthPercentageAuto::percent(self.f32()?)),
-            _ => Ok(LengthPercentageAuto::auto()),
+            2 => Ok(LengthPercentageAuto::auto()),
+            _ => Err(WireError::BadRef("style field")),
         }
     }
 
@@ -858,7 +868,8 @@ impl<'a> Reader<'a> {
             6 => Dimension::fit_content_percent(self.f32()?),
             7 => Dimension::fit_content(),
             8 => Dimension::stretch(),
-            _ => Dimension::content(),
+            9 => Dimension::content(),
+            _ => return Err(WireError::BadRef("style field")),
         })
     }
 
@@ -880,46 +891,55 @@ impl<'a> Reader<'a> {
         })
     }
 
+    /// Decodes a style over the Craie default (React Native: column).
+    /// Unknown mask bits and tags reject the transaction.
     fn style(&mut self, mask: u64) -> Result<Style, WireError> {
-        let mut s = Style::default();
+        if mask & !field::ALL != 0 {
+            return Err(WireError::BadRef("style field"));
+        }
+        let mut s = crate::host::default_style();
         if mask & field::DISPLAY != 0 {
             s.display = match self.u8()? {
+                0 => Display::Flex,
                 1 => Display::None,
-                _ => Display::Flex,
+                _ => return Err(WireError::BadRef("style field")),
             };
         }
         if mask & field::POSITION != 0 {
             s.position = match self.u8()? {
+                0 => Position::Relative,
                 1 => Position::Absolute,
-                _ => Position::Relative,
+                _ => return Err(WireError::BadRef("style field")),
             };
         }
         if mask & field::FLEX_DIRECTION != 0 {
             s.flex_direction = match self.u8()? {
+                0 => FlexDirection::Row,
                 1 => FlexDirection::Column,
                 2 => FlexDirection::RowReverse,
                 3 => FlexDirection::ColumnReverse,
-                _ => FlexDirection::Row,
+                _ => return Err(WireError::BadRef("style field")),
             };
         }
         if mask & field::FLEX_WRAP != 0 {
             s.flex_wrap = match self.u8()? {
+                0 => FlexWrap::NoWrap,
                 1 => FlexWrap::Wrap,
                 2 => FlexWrap::WrapReverse,
-                _ => FlexWrap::NoWrap,
+                _ => return Err(WireError::BadRef("style field")),
             };
         }
         if mask & field::JUSTIFY_CONTENT != 0 {
-            s.justify_content = content_of(self.u8()?);
+            s.justify_content = keyword(self.u8()?, content_of)?;
         }
         if mask & field::ALIGN_ITEMS != 0 {
-            s.align_items = items_of(self.u8()?);
+            s.align_items = keyword(self.u8()?, items_of)?;
         }
         if mask & field::ALIGN_CONTENT != 0 {
-            s.align_content = content_of(self.u8()?);
+            s.align_content = keyword(self.u8()?, content_of)?;
         }
         if mask & field::ALIGN_SELF != 0 {
-            s.align_self = items_of(self.u8()?);
+            s.align_self = keyword(self.u8()?, items_of)?;
         }
         if mask & field::GAP != 0 {
             s.gap = TSize {
@@ -972,8 +992,8 @@ impl<'a> Reader<'a> {
         }
         if mask & field::OVERFLOW != 0 {
             s.overflow = taffy::Point {
-                x: overflow_of(self.u8()?),
-                y: overflow_of(self.u8()?),
+                x: overflow_of(self.u8()?)?,
+                y: overflow_of(self.u8()?)?,
             };
         }
         Ok(s)

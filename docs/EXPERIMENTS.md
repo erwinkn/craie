@@ -112,6 +112,20 @@ happens at use and before drawing. A real-GPU check measured the
 uploads: unchanged frame 0 bytes, fill change 4 bytes (a whole paint
 span before `SpanPool::set_at`), scroll 32 bytes.
 
+### Review round 1 (GPT-6 Astra)
+
+Ten findings and two spec deviations, all valid, all fixed with
+regression tests. The notable ones: at 1x the window root's identity
+matrix never reached the GPU (the GPU tests ran at 2x); native input
+(wheel, typing, assistive actions) did not reach scene preparation
+without a JS commit, a defect carried from the base; `setText` alone did
+not wake the redraw gate; fixed-size text redrew its old paragraph;
+TextInput still applied later `value` props (§5 says uncontrolled);
+views defaulted to rows (§4 says React Native columns). Snapping became
+a per-record policy so transformed content moves by fractions. The
+allocation test measures 0 allocations for an unchanged frame and 1 for
+a color or transform patch.
+
 ### Visual checks
 
 `cargo run --example text -- --screenshot` and `--example app` render

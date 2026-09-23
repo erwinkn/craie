@@ -285,7 +285,7 @@ impl Ui {
             Mutation::Layout { id, style } => {
                 let node = NodeId(*id);
                 let new = if *style == NIL {
-                    taffy::Style::default()
+                    crate::host::default_style()
                 } else {
                     txn.styles[*style as usize].clone()
                 };
@@ -397,6 +397,7 @@ impl Ui {
                 if text_changed {
                     p.text.clear();
                     p.text.push_str(text);
+                    self.host.copied_bytes += text.len() as u64;
                 }
                 if metrics_changed || colors_changed {
                     p.spans.clear();
@@ -428,12 +429,13 @@ impl Ui {
                 if metrics {
                     self.host.mark_layout(NodeId(*id));
                     self.host.revs.text_metrics.bump();
+                    self.host.dirty.content.push(*id);
+                    self.host.dirty.semantic.push(*id);
                 } else {
-                    // Color only: the chunk's paint changes, no layout.
+                    // Color only: patch the chunk's paint records.
                     self.host.revs.paint.bump();
+                    self.host.dirty.paint.push(*id);
                 }
-                self.host.dirty.content.push(*id);
-                self.host.dirty.semantic.push(*id);
             }
             Mutation::Role { id, role } => {
                 let i = &mut self.host.interaction[*id as usize];
@@ -448,6 +450,7 @@ impl Ui {
                     self.host.labels.remove(id).is_some()
                 } else if self.host.labels.get(id).map(|l| &**l) != Some(&**text) {
                     self.host.labels.insert(*id, (**text).into());
+                    self.host.copied_bytes += text.len() as u64;
                     true
                 } else {
                     false
@@ -484,6 +487,7 @@ impl Ui {
                 if s.payload[..] != bytes[..] {
                     s.payload.clear();
                     s.payload.extend_from_slice(bytes);
+                    self.host.copied_bytes += bytes.len() as u64;
                     self.host.revs.resource.bump();
                     self.host.dirty.content.push(*id);
                 }

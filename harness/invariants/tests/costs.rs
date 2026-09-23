@@ -232,3 +232,32 @@ fn input_color_change_does_no_layouts() {
     let c = frame(&mut ui, &t);
     assert_eq!((c.layout_passes, c.shapes), (0, 0), "{c:?}");
 }
+
+/// A non-empty input: a color-only change patches paint records; the
+/// editor's buffer is not reshaped.
+#[test]
+fn nonempty_input_color_change_does_no_shapes() {
+    let mut ui = Ui::new(1.0);
+    let mut t = Transaction::new(1);
+    let mut s = taffy::Style::default();
+    s.size = taffy::Size {
+        width: taffy::Dimension::length(200.0),
+        height: taffy::Dimension::length(30.0),
+    };
+    t.create(0, NodeKind::Input)
+        .layout(0, &s)
+        .input_config(0, 16.0, 0xFFFF_FFFF, "", false)
+        .command(0, craie_ui::mutation::Command::SetText("typed".into()))
+        .append(NIL, 0);
+    ui.apply_txn(&t).unwrap();
+    ui.render(VIEW);
+    let mut t = Transaction::new(2);
+    t.input_config(0, 16.0, 0xFF00_00FF, "", false);
+    let c = frame(&mut ui, &t);
+    assert_eq!(
+        (c.layout_passes, c.shapes, c.chunks_built),
+        (0, 0, 0),
+        "{c:?}"
+    );
+    assert!(c.paints_patched > 0, "{c:?}");
+}

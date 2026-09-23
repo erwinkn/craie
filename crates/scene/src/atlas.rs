@@ -39,6 +39,8 @@ pub struct AtlasStats {
     pub evictions: u64,
     /// Pages allocated past the cap because the pinned set did not fit.
     pub over_budget_pages: u32,
+    /// Rasters too large for a page: never resident, drawn as nothing.
+    pub oversized: u64,
 }
 
 /// Where a raster lives, plus its pixel size. Size is known even while
@@ -141,6 +143,11 @@ impl RasterAtlas {
         self.epoch
     }
 
+    /// Whether a `w`×`h` raster fits a page with its gutter.
+    pub fn fits(&self, w: u32, h: u32) -> bool {
+        w + GUTTER * 2 <= self.page_size && h + GUTTER * 2 <= self.page_size
+    }
+
     /// Registers a raster of `w`×`h` pixels. Not resident until `insert`.
     pub fn new_id(&mut self, w: u16, h: u16, color: bool) -> RasterId {
         let id = self.entries.len() as u32;
@@ -191,6 +198,12 @@ impl RasterAtlas {
         if w == 0 || h == 0 || self.entries[id.0 as usize].resident {
             return;
         }
+        if !self.fits(w, h) {
+            // No page can hold it: report, never panic after a
+            // transaction was accepted. Callers skip such rasters.
+            self.stats.oversized += 1;
+            return;
+        }
         let bpp = if color { 4 } else { 1 };
         let slot = loop {
             if let Some(slot) = self.alloc(color, w, h, false) {
@@ -198,9 +211,10 @@ impl RasterAtlas {
             }
             if !self.evict_one(color) {
                 self.stats.over_budget_pages += 1;
+                // `fits` holds, so a fresh page takes it.
                 break self
                     .alloc(color, w, h, true)
-                    .expect("raster larger than an atlas page");
+                    .expect("a raster that fits a page fits a fresh page");
             }
         };
         let page_size = self.page_size;
@@ -415,6 +429,16 @@ mod tests {
         assert!(ids.iter().all(|id| atlas.entry(*id).resident));
         assert_eq!(atlas.alpha_pages(), 2);
         assert_eq!(atlas.stats.over_budget_pages, 1);
+    }
+
+    /// A raster no page can hold is reported, not a panic.
+    #[test]
+    fn oversized_raster_is_reported_not_fatal() {
+        let mut atlas = RasterAtlas::new();
+        let id = atlas.new_id(2047, 1, false);
+        atlas.insert(id, &vec![1u8; 2047]);
+        assert!(!atlas.entry(id).resident);
+        assert_eq!(atlas.stats.oversized, 1);
     }
 
     /// Eviction keeps the id and its size; re-insert restores residency

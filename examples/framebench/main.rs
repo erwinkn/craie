@@ -185,7 +185,7 @@ impl GpuSide {
     fn draw(&mut self, ui: &mut Ui) {
         self.renderer.prepare(&self.gpu, ui.scene_mut());
         self.renderer
-            .draw(&self.gpu, &self.view, self.w, self.h, ui.scene());
+            .draw(&self.gpu, &self.view, self.w, self.h, ui.scene_mut());
     }
 }
 

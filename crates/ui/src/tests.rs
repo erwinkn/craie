@@ -1031,6 +1031,9 @@ fn clip_applies_per_axis() {
     let clip = ui.scene().clips.get(0);
     assert_eq!(clip.open, [true, false]);
     assert_eq!(clip.rect.size.height, 100.0);
+    // The child is drawn: an open-axis clip must not cull it.
+    let drawn = ui.scene().resolve_drawn(&|r| r.0 as u64);
+    assert!(drawn.iter().any(|p| p.color == 0xFF00_00FF), "child culled");
 }
 
 /// A rounded clip: a point in the cut corner does not hit the child.
@@ -1164,4 +1167,130 @@ fn node_ids_stay_dense() {
         t.create(100 + k * 4000, NodeKind::View);
     }
     assert!(ui.apply_txn(&t).is_err());
+}
+
+// ---- Astra review, round 1 ----
+
+/// A fixed-size text node skips measurement; its update must still
+/// redraw the new paragraph.
+#[test]
+fn fixed_size_text_redraws_after_update() {
+    let mut ui = Ui::new(1.0);
+    let mut t = Transaction::new(1);
+    t.create(0, NodeKind::Text)
+        .layout(0, &sized(200.0, 40.0))
+        .text(0, "A", 20.0, 0xFFFF_FFFF)
+        .append(NIL, 0);
+    ui.apply_txn(&t).unwrap();
+    ui.render(Size::new(300.0, 100.0));
+    let before = glyphs(ui.scene());
+    let mut t = Transaction::new(2);
+    t.text(0, "BBBB", 20.0, 0xFFFF_FFFF);
+    ui.apply_txn(&t).unwrap();
+    ui.render(Size::new(300.0, 100.0));
+    assert_eq!(before, 1);
+    assert_eq!(glyphs(ui.scene()), 4, "the old paragraph is still drawn");
+}
+
+/// A lone SetText command makes an idle UI owe a paint.
+#[test]
+fn set_text_command_needs_paint() {
+    let mut ui = Ui::new(1.0);
+    let mut t = Transaction::new(1);
+    t.create(0, NodeKind::Input)
+        .layout(0, &sized(200.0, 30.0))
+        .input_config(0, 16.0, 0xFFFF_FFFF, "", false)
+        .append(NIL, 0);
+    ui.apply_txn(&t).unwrap();
+    ui.render(Size::new(300.0, 100.0));
+    assert!(!ui.needs_paint());
+    let mut t = Transaction::new(2);
+    t.command(0, Command::SetText("new".into()));
+    ui.apply_txn(&t).unwrap();
+    assert!(ui.needs_paint(), "the redraw gate must see the command");
+    ui.render(Size::new(300.0, 100.0));
+    assert_eq!(glyphs(ui.scene()), 3);
+}
+
+/// Malformed style tags and mask bits reject the whole transaction; host
+/// state and the applied sequence stay unchanged.
+#[test]
+fn malformed_style_rejects_transaction() {
+    let mut ui = Ui::new(1.0);
+    let mut t = Transaction::new(1);
+    t.create(0, NodeKind::View).append(NIL, 0);
+    ui.apply_txn(&t).unwrap();
+    let before = ui.host.style(NodeId(0)).clone();
+    let seq = ui.seq;
+    let mut t = Transaction::new(7);
+    t.layout(0, &sized(10.0, 10.0));
+    let good = wire::encode(&t);
+    // The style table starts after the 28-byte header (no strings). Its
+    // first 8 bytes are the mask; the next byte is the DISPLAY tag.
+    let mut bad_tag = good.clone();
+    bad_tag[36] = 2;
+    let mut bad_mask = good.clone();
+    bad_mask[28 + 7] |= 0x80;
+    for buf in [bad_tag, bad_mask] {
+        assert!(ui.apply(&buf).is_err());
+        assert_eq!(*ui.host.style(NodeId(0)), before);
+        assert_eq!(ui.seq, seq);
+    }
+    assert!(ui.apply(&good).is_ok());
+}
+
+/// A View that sends no style lays its children out in a column, as in
+/// React Native; so does a partial style and a reset.
+#[test]
+fn views_default_to_column() {
+    let mut ui = Ui::new(1.0);
+    let mut t = Transaction::new(1);
+    t.create(0, NodeKind::View).append(NIL, 0);
+    for i in 1..=2 {
+        t.create(i, NodeKind::View)
+            .layout(i, &sized(20.0, 20.0))
+            .append(0, i);
+    }
+    ui.apply_txn(&t).unwrap();
+    ui.render(Size::new(200.0, 200.0));
+    assert_eq!(ui.layouts.data(NodeId(2)).rect.origin.y, 20.0);
+    assert_eq!(ui.layouts.data(NodeId(2)).rect.origin.x, 0.0);
+    // Reset to defaults: still a column.
+    let mut t = Transaction::new(2);
+    t.push(Mutation::Layout { id: 0, style: NIL });
+    ui.apply_txn(&t).unwrap();
+    ui.render(Size::new(200.0, 200.0));
+    assert_eq!(ui.layouts.data(NodeId(2)).rect.origin.y, 20.0);
+}
+
+/// A transformed subtree places its chunks fractionally: slow motion
+/// moves the drawn text by fractions, not in whole-pixel steps. Chunks
+/// in untransformed space still snap.
+#[test]
+fn transformed_chunks_move_fractionally() {
+    let mut ui = Ui::new(1.0);
+    let mut t = Transaction::new(1);
+    t.create(0, NodeKind::View).append(NIL, 0);
+    t.create(1, NodeKind::Text)
+        .text(1, "move", 16.0, 0xFFFF_FFFF)
+        .append(0, 1);
+    ui.apply_txn(&t).unwrap();
+    ui.render(Size::new(300.0, 100.0));
+    let x0 = resolved(ui.scene())[0].bounds.origin.x;
+    assert_eq!(x0, x0.round(), "static text snaps");
+    let mut xs = Vec::new();
+    for step in 1..=5 {
+        let mut t = Transaction::new(1 + step);
+        t.transform(1, craie_core::Affine::translate(step as f32 * 0.1, 0.0));
+        ui.apply_txn(&t).unwrap();
+        ui.render(Size::new(300.0, 100.0));
+        xs.push(resolved(ui.scene())[0].bounds.origin.x - x0);
+    }
+    for (i, dx) in xs.iter().enumerate() {
+        let want = (i + 1) as f32 * 0.1;
+        assert!(
+            (dx - want).abs() < 1e-3,
+            "step {i}: moved {dx}, want {want}"
+        );
+    }
 }

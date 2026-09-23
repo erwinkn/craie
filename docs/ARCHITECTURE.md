@@ -149,6 +149,9 @@ grouped by family in the high nibble. `wire::decode` yields a
 `Transaction` of `Mutation`s; the Rust builder produces the same type;
 `Ui::execute` validates the whole transaction, then applies it with no
 callbacks. Both encoders intern styles and span lists per transaction.
+The decoder rejects unknown style tags and mask bits; node ids are
+bounded (2^24) and dense (a batch may reach only the slots in use plus
+the nodes it creates, plus 4,096).
 Detach stays a structure op: React unlinks a deleted subtree in the
 mutation phase and frees each node later.
 
@@ -240,7 +243,9 @@ node's own layout row. Results land in `Layouts` (cache, unrounded
 layout, final rect, content-box offset); finalize records nodes whose
 origin moved, whose size changed, and whose scroll extent changed. A
 layout pass runs only when the layout queue is non-empty or the
-viewport changed, so an unchanged frame does zero layouts. Cold layout
+viewport changed, so an unchanged frame does zero layouts. React
+Native defaults hold natively: a node with no style, a partial style,
+or a reset style is a flex column (`host::default_style`). Cold layout
 of 10k nodes costs 217 to 567 ms; one streaming append costs 0.65 ms.
 
 **Target.** A Craie-owned engine over `layout_inputs[]`, the child span
@@ -285,7 +290,9 @@ font to re-rasterize an evicted glyph. Glyph instances are chunk-local;
 their subpixel buckets are relative to the chunk origin, which the
 renderer snaps to the device-pixel grid. Retained Parley layouts are
 the memory floor (about 27 MiB for 5k rows). INPUT nodes hold a Parley
-`PlainEditor` each. CJK line breaking degrades (no ICU4X data).
+`PlainEditor` each; `TextInput` is uncontrolled (`value` is sent once at
+mount; `setText` replaces the text). CJK line breaking degrades (no
+ICU4X data).
 
 **Target.** Craie owns every persistent representation:
 
@@ -442,10 +449,13 @@ Scene
   and transformed subtrees; every other chunk is an offset in its
   nearest record's space (2026-09-23). A scroll patches one record and
   uploads 32 bytes; a layout move patches placements of moved subtrees.
-- Chunk origins snap to the device-pixel grid under axis-aligned
-  transforms; glyph subpixel buckets are relative to the chunk origin
-  (2026-09-23). A moved chunk reuses every raster. Text at a fractional
-  origin lands up to half a device pixel from its unsnapped position.
+- Snapping is a policy of the transform record (2026-09-23, revised
+  after review). The window root and scroll content snap chunk origins
+  and rect edges to device pixels, so static text is crisp and a moved
+  chunk reuses every raster. A transformed subtree's record does not
+  snap: its chunks move by fractions, so slow motion never steps.
+  Glyph subpixel buckets stay relative to the chunk origin in both
+  cases. The animation driver (step 4) may snap a record at rest.
 - Chunks build on demand within half a viewport of the screen; farther
   chunks wait and build in the frame they come into range (2026-09-23).
   Cold paint then scales with what is near the screen, as it did with
@@ -486,7 +496,8 @@ pages with CPU mirrors and dirty-rect uploads. Rasters are stamped as
 chunks use them; `prepare` stamps every raster of every visible chunk
 and re-rasterizes the missing ones before drawing. Eviction takes the
 least recently used unstamped raster (a linear scan); when everything
-is stamped, pages grow past the cap (`over_budget_pages`).
+is stamped, pages grow past the cap (`over_budget_pages`). A raster
+larger than a page is skipped and counted (`oversized`).
 
 **Target.** Stable `RasterId` with separate residency (atlas, rect,
 generation). Drawing records reference the id, never baked atlas
@@ -688,8 +699,11 @@ rebuild over seeded mutation sequences (layout, drawn scene, hit
 tests, semantics; 8 seeds x 60 steps at 1x and 2x, plus resize and
 atlas-pressure cases); the cost invariants that apply today (color
 change, translation, scroll, unchanged frame, tween, atlas
-relocation), one of them on a real GPU; the release-graph and
-layer-map checks; and the E10 bench. Crate tests cover the span pool,
+relocation, input color), an allocation test (unchanged frame 0
+allocations, a patch at most 1) and a copied-bytes counter; real-GPU
+checks (upload bytes, a 1x and 2x pixel readback); the release-graph
+and layer-map checks; and the E10 bench. `prepare_frame` in
+platform-winit is the one frame path for commits and native input. Crate tests cover the span pool,
 scene, host, wire, executor, dispatch, editing, and a11y. `bun test`
 covers the encoder and the reconciler. Benchmarks: `examples/bench`,
 `examples/framebench`.

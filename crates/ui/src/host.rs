@@ -62,6 +62,16 @@ impl NodeId {
 /// Root sentinel: children of ROOT are top-level nodes.
 pub const ROOT: NodeId = NodeId::NIL;
 
+/// Layout inputs of a node that sends none, and the base every style
+/// decodes over: React Native defaults (flex, column, stretch), so a
+/// cross-platform kit needs no normalization (ARCHITECTURE.md §4).
+pub fn default_style() -> Style {
+    Style {
+        flex_direction: taffy::FlexDirection::Column,
+        ..Style::default()
+    }
+}
+
 /// Node ids index dense stores, so they are bounded: 2^24 slots. The
 /// bridge allocates ids densely from zero and recycles them.
 pub const MAX_NODES: u32 = 1 << 24;
@@ -246,6 +256,8 @@ pub struct Host {
     pub surfaces: HashMap<u32, SurfaceData>,
     pub revs: Revs,
     pub dirty: DirtyQueues,
+    /// Bytes copied from transactions into host stores (cost counter).
+    pub copied_bytes: u64,
 }
 
 impl Default for Host {
@@ -270,6 +282,7 @@ impl Host {
             surfaces: HashMap::new(),
             revs: Revs::default(),
             dirty: DirtyQueues::default(),
+            copied_bytes: 0,
         }
     }
 
@@ -347,7 +360,7 @@ impl Host {
         let n = id.index() + 1;
         if self.nodes.len() < n {
             self.nodes.resize(n, NodeHeader::EMPTY);
-            self.layout.resize_with(n, Style::default);
+            self.layout.resize_with(n, default_style);
             self.spatial.resize(n, Spatial::default());
             self.paint.resize(n, BoxPaint::default());
             self.paragraphs.resize_with(n, Paragraph::default);
@@ -372,7 +385,7 @@ impl Host {
         };
         // A recycled slot starts from defaults: nothing of the previous
         // occupant may leak into the new node.
-        self.layout[i] = Style::default();
+        self.layout[i] = default_style();
         self.spatial[i] = Spatial::default();
         self.paint[i] = BoxPaint::default();
         let p = &mut self.paragraphs[i];

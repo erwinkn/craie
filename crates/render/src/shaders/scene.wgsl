@@ -75,10 +75,16 @@ fn linear(w: WorldI, v: vec2<f32>) -> vec2<f32> {
     return vec2<f32>(w.a * v.x + w.c * v.y, w.b * v.x + w.d * v.y);
 }
 
-// Chunk origin in device px, snapped when the world is axis-aligned.
+// Snap to the device-pixel grid: an axis-aligned world whose space
+// snaps (bit 1). Spaces that move by fractions keep fractional origins.
+fn snaps(w: WorldI) -> bool {
+    return (w.flags & 3u) == 3u;
+}
+
+// Chunk origin in device px.
 fn chunk_origin(w: WorldI, p: PlacementI) -> vec2<f32> {
     let o = apply(w, vec2<f32>(p.ox, p.oy));
-    if ((w.flags & 1u) != 0u) {
+    if (snaps(w)) {
         return round(o);
     }
     return o;
@@ -101,7 +107,7 @@ fn vs_main(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> 
         if (aligned) {
             var p0 = origin + linear(w, vec2<f32>(r.x, r.y));
             var p1 = origin + linear(w, vec2<f32>(r.x + r.w, r.y + r.h));
-            if ((r.flags & 1u) != 0u) {
+            if ((r.flags & 1u) != 0u && snaps(w)) {
                 // Snap edges so fills land crisp at any scale.
                 p0 = round(p0);
                 p1 = round(p1);

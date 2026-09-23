@@ -56,13 +56,11 @@ export interface HostNode {
   suspended: boolean
   /** Children appended before this node got an id; replayed on materialize. */
   initial: HostNode[]
-  /** Last buffer the native input reported; `value` commands that match
-   * it are echoes of native edits and are not sent back. */
-  nativeText?: string
   focus(): void
   blur(): void
   scrollTo(x: number, y: number): void
-  /** Replaces an input node's buffer (the `value` command). */
+  /** Replaces an input node's buffer. Inputs are uncontrolled: this
+   * command is the only way to change the text after mount. */
   setText(text: string): void
 }
 
@@ -250,7 +248,6 @@ export class CraieHost {
         this.root.cmd(this, (e, id) => e.cmdScrollTo(id, x, y))
       },
       setText(text: string) {
-        this.nativeText = text
         this.root.cmd(this, (e, id) => e.cmdSetText(id, text))
       },
     }
@@ -293,10 +290,7 @@ export class CraieHost {
       case EVENT_KIND.keyUp: p.onKeyUp?.({ ...e, key: ev.key, char: ev.text }); break
       case EVENT_KIND.focus: p.onFocus?.(e); break
       case EVENT_KIND.blur: p.onBlur?.(e); break
-      case EVENT_KIND.change:
-        n.nativeText = ev.text
-        p.onChangeText?.(ev.text)
-        break
+      case EVENT_KIND.change: p.onChangeText?.(ev.text); break
       case EVENT_KIND.submit: p.onSubmit?.(ev.text); break
       case EVENT_KIND.scroll: p.onScroll?.({ target: n, x: ev.a, y: ev.b }); break
     }
@@ -435,8 +429,10 @@ export class CraieHost {
     }
 
     if (n.kind === 2) {
-      // INPUT config; the buffer itself only moves through `value`
-      // commands (echoes of native edits are filtered by nativeText).
+      // INPUT config. The input is uncontrolled (ARCHITECTURE.md §5):
+      // `value` is the initial text, sent once at mount; later changes
+      // go through the `setText` command, so native edits are never
+      // overwritten by a stale prop.
       const fs = props.fontSize ?? 14
       const color32 = color(props.color, 0xffff_ffff)
       const ph = props.placeholder ?? ""
@@ -450,12 +446,7 @@ export class CraieHost {
       ) {
         enc.inputConfig(id, fs, color32, ph, multiline)
       }
-      if (
-        typeof props.value === "string" &&
-        props.value !== oldProps.value &&
-        props.value !== n.nativeText
-      ) {
-        n.nativeText = props.value
+      if (!mounted && typeof props.value === "string" && props.value !== "") {
         enc.cmdSetText(id, props.value)
       }
     }

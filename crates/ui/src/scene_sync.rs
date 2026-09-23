@@ -383,6 +383,9 @@ impl Ui {
             if spatial.transformed() {
                 if s.self_rec == NONE {
                     s.self_rec = self.scene.transforms.alloc(Affine::IDENTITY, NONE);
+                    // A transformed subtree moves by fractions: keep its
+                    // placement fractional so motion stays smooth.
+                    self.scene.transforms.set_snap(s.self_rec, false);
                 }
             } else if s.self_rec != NONE {
                 self.scene.transforms.free(s.self_rec);
@@ -577,6 +580,16 @@ impl Ui {
             let p = self.host.paint[id.index()];
             self.scene.set_paint(id.0, PaintSlot(0), p.fill);
             self.scene.set_paint(id.0, PaintSlot(1), p.border_color);
+            if kind == NodeKind::Input
+                && let Some(state) = self.inputs.get(id.0)
+            {
+                // Slots 2 text, 3 placeholder (half alpha), 5 caret.
+                let c = state.color;
+                self.scene.set_paint(id.0, PaintSlot(2), c);
+                self.scene
+                    .set_paint(id.0, PaintSlot(3), (c & !0xFF) | ((c & 0xFF) / 2));
+                self.scene.set_paint(id.0, PaintSlot(5), c);
+            }
         }
     }
 
@@ -636,10 +649,17 @@ impl Ui {
         // paragraph shaped for another width is stale: rewrap now.
         let content_w = (data.rect.size.width - data.insets[0]).max(0.0);
         let slot = id.index();
-        let stale = match self.texts.get(slot).and_then(Option::as_ref) {
-            Some(m) => m.wrap_bits != content_w.to_bits(),
-            None => true,
-        };
+        // Layout may skip measuring a leaf whose size is fixed, so the
+        // TEXT flag (content or metrics changed) is checked here too.
+        let text_dirty = self
+            .host
+            .node(id)
+            .is_some_and(|n| n.flags.contains(crate::host::NodeFlags::TEXT));
+        let stale = text_dirty
+            || match self.texts.get(slot).and_then(Option::as_ref) {
+                Some(m) => m.wrap_bits != content_w.to_bits(),
+                None => true,
+            };
         if stale {
             let layout = crate::layout::shape_paragraph(&mut self.text, p, Some(content_w));
             if slot >= self.texts.len() {
@@ -649,6 +669,9 @@ impl Ui {
                 layout,
                 wrap_bits: content_w.to_bits(),
             });
+            if let Some(n) = self.host.node_mut(id) {
+                n.flags.clear(crate::host::NodeFlags::TEXT);
+            }
         }
         let m = self.texts[slot].as_ref().unwrap();
         self.text.emit(
@@ -671,7 +694,7 @@ impl Ui {
         let Some(state) = self.inputs.get_mut(id.0) else {
             return;
         };
-        state.editor.set_width(Some(content_w));
+        state.set_width(content_w);
         let text_slot = w.paint(state.color);
         let alpha = (state.color & 0xFF) / 2;
         let ph_slot = w.paint((state.color & !0xFF) | alpha);
@@ -720,9 +743,7 @@ impl Ui {
                 w,
             );
         } else {
-            let layout = state
-                .editor
-                .layout(&mut self.text.font_cx, &mut self.text.layout_cx);
+            let layout = state.layout(&mut self.text);
             self.text.emit(
                 layout,
                 origin,

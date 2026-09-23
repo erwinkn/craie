@@ -23,7 +23,7 @@ use craie_ui::ui::Ui;
 pub fn snapshot(ui: &Ui) -> Transaction<'static> {
     let host = &ui.host;
     let mut t = Transaction::new(1);
-    let default = taffy::Style::default();
+    let default = craie_ui::host::default_style();
     for i in 0..host.slot_count() {
         let id = NodeId(i as u32);
         let Some(node) = host.node(id) else { continue };

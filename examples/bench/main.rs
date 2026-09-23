@@ -296,7 +296,7 @@ fn bench_gpu(ui: &mut Ui) {
     );
 
     let t = Timer::start();
-    renderer.draw(&gpu, &view, w, h, ui.scene());
+    renderer.draw(&gpu, &view, w, h, ui.scene_mut());
     report(&t.stop("draw submit (first)"));
     eprintln!(
         "  {:>26}: {} draw calls, {} passes",
@@ -316,7 +316,7 @@ fn bench_gpu(ui: &mut Ui) {
     // unchanged scene uploads nothing.
     let t = Timer::start();
     renderer.prepare(&gpu, ui.scene_mut());
-    renderer.draw(&gpu, &view, w, h, ui.scene());
+    renderer.draw(&gpu, &view, w, h, ui.scene_mut());
     report(&t.stop("draw submit (warm)"));
     eprintln!(
         "  {:>26}: {} bytes",

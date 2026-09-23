@@ -266,7 +266,7 @@ fn demo_txn() -> Vec<u8> {
 fn dump_scene(
     gpu: &Gpu,
     renderer: &mut Renderer,
-    scene: &craie_scene::Scene,
+    scene: &mut craie_scene::Scene,
     w: u32,
     h: u32,
     format: wgpu::TextureFormat,
@@ -372,8 +372,7 @@ fn run_screenshot(path: &str, w: u32, h: u32, scale: f32) {
         "[craie] upload: {} bytes ({} atlas)",
         renderer.stats.upload_bytes, renderer.atlas_upload_bytes
     );
-    let scene = ui.scene();
-    dump_scene(&gpu, &mut renderer, scene, w, h, format, path);
+    dump_scene(&gpu, &mut renderer, ui.scene_mut(), w, h, format, path);
 }
 
 fn main() {

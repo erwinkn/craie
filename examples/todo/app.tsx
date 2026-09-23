@@ -100,7 +100,6 @@ function Row({
 
 function App({ initial }: { initial: Todo[] }) {
   const [todos, setTodos] = useState(initial)
-  const [draft, setDraft] = useState("")
   const nextId = useRef(initial.reduce((m, t) => Math.max(m, t.id), 0) + 1)
   const input = useRef<HostNode | null>(null)
 
@@ -110,7 +109,8 @@ function App({ initial }: { initial: Todo[] }) {
     const trimmed = text.trim()
     if (!trimmed) return
     setTodos((ts) => [...ts, { id: nextId.current++, text: trimmed, done: false }])
-    setDraft("")
+    // Uncontrolled input: clear it with a command.
+    input.current?.setText("")
   }
   const toggle = (id: number) =>
     setTodos((ts) => ts.map((t) => (t.id === id ? { ...t, done: !t.done } : t)))
@@ -127,8 +127,6 @@ function App({ initial }: { initial: Todo[] }) {
       <Text fontSize={24} color={FG}>todo</Text>
       <TextInput
         ref={input}
-        value={draft}
-        onChangeText={setDraft}
         onSubmit={add}
         placeholder="What needs doing?"
         fontSize={14}

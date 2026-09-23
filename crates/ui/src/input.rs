@@ -80,6 +80,24 @@ impl InputState {
         }
     }
 
+    /// Sets the wrap width; unchanged widths leave the shaped buffer
+    /// alone (`PlainEditor::set_width` always dirties it).
+    pub fn set_width(&mut self, width: f32) {
+        if self.width != Some(width) {
+            self.width = Some(width);
+            self.editor.set_width(Some(width));
+        }
+    }
+
+    /// The editor's layout, reshaping only when dirty. Reshapes count in
+    /// `TextEngine::shapes`.
+    pub fn layout(&mut self, text: &mut TextEngine) -> &crate::text::parley::Layout<PaintSlot> {
+        if self.editor.try_layout().is_none() {
+            text.shapes += 1;
+        }
+        self.editor.layout(&mut text.font_cx, &mut text.layout_cx)
+    }
+
     /// Marks the editor layout dirty (`set_width` is the public
     /// invalidation path; re-setting the same width still dirties).
     fn invalidate(&mut self) {
@@ -270,10 +288,9 @@ impl Inputs {
             return Size::ZERO;
         };
         let width = width.max(0.0);
-        state.width = Some(width);
-        state.editor.set_width(Some(width));
-        let layout = state.editor.layout(&mut text.font_cx, &mut text.layout_cx);
+        state.set_width(width);
         let line = state.font_size * 1.25;
+        let layout = state.layout(text);
         Size::new(layout.width(), layout.height().max(line))
     }
 

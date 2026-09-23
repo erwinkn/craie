@@ -349,10 +349,19 @@ impl Renderer {
 
     /// Encodes and submits the scene's draw list into `view`, a target of
     /// `width` x `height` device pixels. Call `prepare` first.
-    pub fn draw(&mut self, gpu: &Gpu, view: &TextureView, width: u32, height: u32, scene: &Scene) {
+    /// Uniform bytes written here count in `scene.counters.upload_bytes`.
+    pub fn draw(
+        &mut self,
+        gpu: &Gpu,
+        view: &TextureView,
+        width: u32,
+        height: u32,
+        scene: &mut Scene,
+    ) {
         self.stats.draw_calls = 0;
         self.stats.passes = 0;
         self.stats.layers = 0;
+        let mut uniform_bytes = 0u64;
         let cmds = &scene.draw_list().cmds;
         let page = scene.atlas.page_size() as f32;
         let base = Viewport {
@@ -431,6 +440,7 @@ impl Renderer {
         if bytes != self.viewport_bytes || rebound {
             gpu.queue.write_buffer(&self.viewports, 0, &bytes);
             self.stats.upload_bytes += bytes.len() as u64;
+            uniform_bytes += bytes.len() as u64;
             self.viewport_bytes = bytes;
         }
 
@@ -487,6 +497,7 @@ impl Renderer {
             &mut layer_ix,
         );
         gpu.queue.submit([encoder.finish()]);
+        scene.counters.upload_bytes += uniform_bytes;
     }
 
     fn rebind(&mut self, gpu: &Gpu) {

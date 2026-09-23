@@ -142,8 +142,9 @@ export interface TextInputProps extends ListenerProps {
   focusable?: boolean
   /** Accessibility name announced by assistive technology. */
   accessibilityLabel?: string
-  /** Controlled value; native sends `onChangeText` for edits and accepts
-   * external replacement when the prop actually changes. */
+  /** Initial text. Inputs are uncontrolled: later `value` changes are
+   * ignored; call `setText` on the node ref to replace the text.
+   * Native reports edits through `onChangeText`. */
   value?: string
   onChangeText?: (text: string) => void
   onSubmit?: (text: string) => void

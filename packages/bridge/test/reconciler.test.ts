@@ -169,3 +169,22 @@ test("bars surface sends kind, params, and payload bytes", async () => {
   const payload = ops.find(o => o.tag === 0x71)!
   expect(new Float32Array(payload.bytes!.buffer)).toEqual(values)
 })
+
+test("TextInput is uncontrolled: value is initial only", async () => {
+  const t = new FakeTransport()
+  const root = createRoot(t)
+  const { TextInput } = await import("../src/index.js")
+  function App({ value }: { value: string }) {
+    return createElement(TextInput, { value })
+  }
+  root.renderSync(createElement(App, { value: "A" }))
+  await tick()
+  const mount = t.ops(0).filter(o => o.tag === 0x80 && o.f[0] === 2)
+  expect(mount.map(o => o.s)).toEqual(["A"])
+  // Native edits produced "AB"; a later prop must not overwrite them.
+  t.frames.length = 0
+  root.renderSync(createElement(App, { value: "C" }))
+  await tick()
+  const later = t.frames.flatMap(f => readFrame(f).ops).filter(o => o.tag === 0x80)
+  expect(later).toEqual([])
+})

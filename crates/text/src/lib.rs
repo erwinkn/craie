@@ -203,7 +203,12 @@ impl TextEngine {
                     };
                     self.cache.stats.rasters += 1;
                     let p = rastered.image.placement;
+                    // Zero-area glyphs draw nothing; a glyph larger than an
+                    // atlas page is skipped (counted in the atlas stats).
                     let raster = if p.width == 0 || p.height == 0 {
+                        None
+                    } else if !atlas.fits(p.width, p.height) {
+                        atlas.stats.oversized += 1;
                         None
                     } else {
                         let id = atlas.new_id(p.width as u16, p.height as u16, rastered.color);

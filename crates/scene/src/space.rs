@@ -24,6 +24,11 @@ pub const NONE: u32 = u32::MAX;
 pub struct TransformRecord {
     pub local: Affine,
     pub parent: u32,
+    /// Chunks in this space snap their origin (and rect edges) to the
+    /// device-pixel grid. Off for spaces that move by fractions (a
+    /// transformed subtree), so motion stays smooth. Inherited: a
+    /// record snaps only if its ancestors do.
+    pub snap: bool,
 }
 
 /// World matrix row as the GPU reads it: 32 bytes.
@@ -31,7 +36,8 @@ pub struct TransformRecord {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Pod, Zeroable)]
 pub struct WorldGpu {
     pub m: [f32; 6],
-    /// Bit 0: axis-aligned (placements snap to device pixels).
+    /// Bit 0: axis-aligned. Bit 1: snap chunk origins and rect edges to
+    /// device pixels (only meaningful when axis-aligned).
     pub flags: u32,
     pub _pad: u32,
 }
@@ -42,6 +48,8 @@ pub struct Transforms {
     live: Vec<bool>,
     free: Vec<u32>,
     world: Vec<Affine>,
+    /// Derived: the record and all its ancestors snap.
+    snap_world: Vec<bool>,
     gpu: Vec<WorldGpu>,
     gpu_dirty: DirtyRanges,
     /// Evaluation order: parents before children. Set by the owner.
@@ -55,19 +63,46 @@ pub struct Transforms {
 
 impl Transforms {
     pub fn alloc(&mut self, local: Affine, parent: u32) -> u32 {
-        let rec = TransformRecord { local, parent };
+        let rec = TransformRecord {
+            local,
+            parent,
+            snap: true,
+        };
         self.stale = true;
         self.writes += 1;
-        if let Some(id) = self.free.pop() {
+        // A NaN world never equals a derived one: the first `derive`
+        // writes and uploads the row even when it is the identity.
+        let unset = Affine([f32::NAN; 6]);
+        let id = if let Some(id) = self.free.pop() {
             self.records[id as usize] = rec;
             self.live[id as usize] = true;
-            return id;
+            self.world[id as usize] = unset;
+            id
+        } else {
+            self.records.push(rec);
+            self.live.push(true);
+            self.world.push(unset);
+            self.snap_world.push(true);
+            self.gpu.push(WorldGpu::default());
+            (self.records.len() - 1) as u32
+        };
+        id
+    }
+
+    /// Sets whether chunks in this space snap to the pixel grid.
+    pub fn set_snap(&mut self, id: u32, snap: bool) {
+        let r = &mut self.records[id as usize];
+        if r.snap != snap {
+            r.snap = snap;
+            self.stale = true;
+            // Force the row out even if the matrix is unchanged.
+            self.world[id as usize] = Affine([f32::NAN; 6]);
         }
-        self.records.push(rec);
-        self.live.push(true);
-        self.world.push(Affine::IDENTITY);
-        self.gpu.push(WorldGpu::default());
-        (self.records.len() - 1) as u32
+    }
+
+    /// Whether chunks in this space snap (derived; valid after `derive`).
+    pub fn snaps(&self, id: u32) -> bool {
+        self.snap_world[id as usize]
     }
 
     pub fn free(&mut self, id: u32) {
@@ -117,16 +152,18 @@ impl Transforms {
         let mut changed = false;
         for &id in &self.order {
             let r = self.records[id as usize];
-            let w = if r.parent == NONE {
-                r.local
+            let (w, snap) = if r.parent == NONE {
+                (r.local, r.snap)
             } else {
-                self.world[r.parent as usize].mul(&r.local)
+                let p = r.parent as usize;
+                (self.world[p].mul(&r.local), r.snap && self.snap_world[p])
             };
-            if self.world[id as usize] != w {
+            if self.world[id as usize] != w || self.snap_world[id as usize] != snap {
                 self.world[id as usize] = w;
+                self.snap_world[id as usize] = snap;
                 self.gpu[id as usize] = WorldGpu {
                     m: w.0,
-                    flags: w.is_axis_aligned() as u32,
+                    flags: w.is_axis_aligned() as u32 | (snap as u32) << 1,
                     _pad: 0,
                 };
                 self.gpu_dirty.add(id as usize..id as usize + 1);

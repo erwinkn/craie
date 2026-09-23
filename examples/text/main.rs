@@ -324,7 +324,9 @@ impl platform::App for Demo {
             _ => return,
         };
         let view = frame.texture.create_view(&Default::default());
-        inner.renderer.draw(&inner.gpu, &view, w, h, &inner.scene);
+        inner
+            .renderer
+            .draw(&inner.gpu, &view, w, h, &mut inner.scene);
         window.pre_present_notify();
         inner.gpu.queue.present(frame);
         inner.frames += 1;
@@ -374,7 +376,7 @@ fn run_screenshot(path: &str, w: u32, h: u32, scale: f32) {
         view_formats: &[],
     });
     let view = target.create_view(&Default::default());
-    renderer.draw(&gpu, &view, w, h, &scene);
+    renderer.draw(&gpu, &view, w, h, &mut scene);
 
     // Readback: texture -> 256-aligned buffer -> PNG.
     let row_bytes = w * 4;

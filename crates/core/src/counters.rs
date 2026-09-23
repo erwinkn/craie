@@ -21,8 +21,12 @@ pub struct Counters {
     pub transforms_written: u64,
     /// Draw-order rebuilds.
     pub draw_orders: u64,
-    /// Bytes handed to the GPU for upload (instances, tables, atlas).
+    /// Bytes handed to the GPU for upload (instances, tables, atlas,
+    /// uniforms).
     pub upload_bytes: u64,
+    /// Bytes copied from transactions into retained host state (text,
+    /// labels, payloads).
+    pub copied_bytes: u64,
 }
 
 impl Counters {
@@ -38,6 +42,7 @@ impl Counters {
             transforms_written: self.transforms_written - earlier.transforms_written,
             draw_orders: self.draw_orders - earlier.draw_orders,
             upload_bytes: self.upload_bytes - earlier.upload_bytes,
+            copied_bytes: self.copied_bytes - earlier.copied_bytes,
         }
     }
 }

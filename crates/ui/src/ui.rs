@@ -152,6 +152,7 @@ impl Ui {
             }
             Command::SetText(text) => {
                 self.inputs.set_text(id.0, text);
+                self.host.revs.text_content.bump();
                 self.host.mark_layout(id);
                 self.host.dirty.content.push(id.0);
                 self.host.dirty.semantic.push(id.0);
@@ -348,7 +349,16 @@ impl Ui {
     /// True when applied mutations or native interaction can change
     /// pixels.
     pub fn needs_paint(&self) -> bool {
-        if self.force_paint {
+        // Queued work counts even when no revision moved (commands,
+        // native edits).
+        let d = &self.host.dirty;
+        if self.force_paint
+            || !d.layout.is_empty()
+            || !d.content.is_empty()
+            || !d.paint.is_empty()
+            || !d.spatial.is_empty()
+            || !self.pending_scrolls.is_empty()
+        {
             return true;
         }
         let Some(p) = self.painted else { return true };
@@ -449,6 +459,7 @@ impl Ui {
         c.shapes = self.text.shapes;
         c.rasters = self.text.cache.stats.rasters;
         c.transforms_written = self.scene.transforms.writes;
+        c.copied_bytes = self.host.copied_bytes;
         c
     }
 

@@ -70,6 +70,28 @@ impl HostApp {
     }
 }
 
+/// The one frame path: when the UI owes a paint, lay out, update the
+/// scene, and upload what changed (an unchanged frame uploads nothing).
+/// `surface` is in physical pixels. Returns whether anything was
+/// prepared.
+pub fn prepare_frame(
+    ui: &mut Ui,
+    renderer: &mut Renderer,
+    gpu: &Gpu,
+    surface: (u32, u32),
+    scale: f32,
+) -> bool {
+    let (w, h) = surface;
+    if !ui.needs_paint() || w == 0 || h == 0 {
+        return false; // idle, or minimized (resize repaints)
+    }
+    ui.scale = scale;
+    // Layout and the scene viewport are logical; the surface is physical.
+    ui.render(Size::new(w as f32 / scale, h as f32 / scale));
+    renderer.prepare(gpu, ui.scene_mut());
+    true
+}
+
 impl Inner {
     /// Drains the session into the retained UI, then lays out + repaints
     /// once if anything can change pixels.
@@ -85,22 +107,11 @@ impl Inner {
                 }
             }
         }
-        if !self.ui.needs_paint() {
-            return;
-        }
         let (w, h) = window.size();
-        if w == 0 || h == 0 {
-            return; // minimized; the resize/occluded path repaints
-        }
         let scale = window.scale_factor() as f32;
-        self.ui.scale = scale;
-        // Layout and the scene viewport are logical; the surface is physical.
-        self.ui
-            .render(Size::new(w as f32 / scale, h as f32 / scale));
-        // Upload only what the scene changed; an unchanged frame uploads
-        // nothing.
-        self.renderer.prepare(&self.gpu, self.ui.scene_mut());
-        window.request_redraw();
+        if prepare_frame(&mut self.ui, &mut self.renderer, &self.gpu, (w, h), scale) {
+            window.request_redraw();
+        }
     }
 
     /// Publishes a fresh semantic tree when a11y-observable state
@@ -165,6 +176,9 @@ impl App for HostApp {
             }
             Inner::flush_out(&mut inner.ui, window, &self.session);
             Inner::publish_a11y(&mut inner.ui, window, &self.a11y);
+            if inner.ui.needs_paint() {
+                window.request_redraw();
+            }
         }
         false
     }
@@ -206,6 +220,17 @@ impl App for HostApp {
         if w == 0 || h == 0 {
             return; // minimized / zero-sized surface
         }
+        // Native interaction (wheel, editing, focus, assistive actions)
+        // changes state without a commit: prepare it here, on the one
+        // frame path, before drawing.
+        let scale = window.scale_factor() as f32;
+        prepare_frame(
+            &mut inner.ui,
+            &mut inner.renderer,
+            &inner.gpu,
+            (w, h),
+            scale,
+        );
         let frame = match inner.surface.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(frame)
             | wgpu::CurrentSurfaceTexture::Suboptimal(frame) => frame,
@@ -221,8 +246,65 @@ impl App for HostApp {
         let view = frame.texture.create_view(&Default::default());
         inner
             .renderer
-            .draw(&inner.gpu, &view, w, h, inner.ui.scene());
+            .draw(&inner.gpu, &view, w, h, inner.ui.scene_mut());
         window.pre_present_notify();
         inner.gpu.queue.present(frame);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use craie_ui::events::Event;
+    use craie_ui::host::NodeId;
+    use craie_ui::mutation::{NIL, NodeKind, Transaction};
+
+    /// Native interaction with no JS commit reaches the frame: a wheel
+    /// scroll makes the UI owe a paint, and the frame path prepares it
+    /// (one world matrix uploaded) before drawing.
+    #[test]
+    fn native_input_reaches_the_frame_path() {
+        let Some(gpu) = Gpu::try_headless() else {
+            eprintln!("no GPU adapter: skipped");
+            return;
+        };
+        let mut renderer = Renderer::new(&gpu, wgpu::TextureFormat::Rgba8UnormSrgb);
+        let mut ui = Ui::new(1.0);
+        let mut s = taffy::Style::default();
+        s.size.width = taffy::Dimension::length(200.0);
+        s.size.height = taffy::Dimension::length(100.0);
+        s.overflow = taffy::Point {
+            x: taffy::Overflow::Scroll,
+            y: taffy::Overflow::Scroll,
+        };
+        let mut row = taffy::Style::default();
+        row.size.width = taffy::Dimension::length(200.0);
+        row.size.height = taffy::Dimension::length(300.0);
+        row.flex_shrink = 0.0;
+        let mut t = Transaction::new(1);
+        t.create(0, NodeKind::View).layout(0, &s).append(NIL, 0);
+        t.create(1, NodeKind::View)
+            .layout(1, &row)
+            .fill(1, 0x3344_55FF)
+            .append(0, 1);
+        ui.apply_txn(&t).unwrap();
+        assert!(prepare_frame(&mut ui, &mut renderer, &gpu, (200, 200), 1.0));
+        assert!(
+            !prepare_frame(&mut ui, &mut renderer, &gpu, (200, 200), 1.0),
+            "idle"
+        );
+        ui.dispatch(&Event::Wheel {
+            x: 10.0,
+            y: 10.0,
+            dx: 0.0,
+            dy: 40.0,
+        });
+        assert!(ui.needs_paint());
+        assert!(prepare_frame(&mut ui, &mut renderer, &gpu, (200, 200), 1.0));
+        assert_eq!(ui.scroll_offset(NodeId(0)), [0.0, 40.0]);
+        assert_eq!(
+            renderer.stats.upload_bytes,
+            size_of::<craie_scene::WorldGpu>() as u64
+        );
     }
 }
