@@ -170,6 +170,37 @@ fn scripts() -> Vec<Script> {
             ],
         ),
         (
+            "wrapped-words",
+            "one two three four five six",
+            16.0,
+            Some(40.0),
+            vec![
+                Move(TextStart),
+                Move(WordRight),
+                Move(WordRight),
+                Move(WordRight),
+                Move(WordRight),
+                Move(WordRight),
+                Move(WordRight),
+                Move(WordLeft),
+                Move(WordLeft),
+                Move(WordLeft),
+                Move(WordLeft),
+                Select(WordRight),
+                Select(WordRight),
+                Select(WordLeft),
+                WordAt(10.0, 30.0),
+                Extend(30.0, 60.0),
+                WordAt(20.0, 50.0),
+                Move(TextEnd),
+                BackspaceWord,
+                BackspaceWord,
+                Move(TextStart),
+                DeleteWord,
+                DeleteWord,
+            ],
+        ),
+        (
             "compose",
             "ab",
             16.0,
@@ -191,49 +222,86 @@ fn scripts() -> Vec<Script> {
     ]
 }
 
+/// What one side shows after a step: its edit state, and its caret (x
+/// and line box top), if drawn.
+#[derive(Clone, Debug)]
+struct Observed {
+    state: EditState,
+    caret: Option<(f32, f32)>,
+}
+
+fn observe_ours(ed: &craie_text::editor::Editor) -> Observed {
+    Observed {
+        state: e01::state_ours(ed),
+        caret: ed.caret_rect(0.0).map(|c| (c.0, c.1)),
+    }
+}
+
+fn observe_parley(ed: &parley::PlainEditor<u16>) -> Observed {
+    let caret = ed.cursor_geometry(0.0).map(|g| {
+        // Parley's caret starts at the line's selection box
+        // (`block_min_coord`, clamped with negative leading); the line box
+        // top is the comparable value (E01).
+        let line = ed
+            .try_layout()
+            .unwrap()
+            .lines()
+            .find(|l| l.metrics().block_min_coord == g.y0 as f32)
+            .expect("caret line");
+        let m = line.metrics();
+        (g.x0 as f32, m.baseline - m.ascent - m.leading * 0.5)
+    });
+    Observed {
+        state: e01::state_parley(ed),
+        caret,
+    }
+}
+
+/// The difference between two sides, if any: the edit state exactly,
+/// whether a caret is drawn, and the caret x within `bound` (the f32
+/// bound of a line's additions: every cluster edge sums the advances
+/// before it) and its line box top.
+fn diff(a: &Observed, b: &Observed, bound: f32) -> Option<String> {
+    if a.state != b.state {
+        return Some(format!(
+            "state\n  ours   {:?}\n  parley {:?}",
+            a.state, b.state
+        ));
+    }
+    match (a.caret, b.caret) {
+        (None, None) => None,
+        (Some(c), Some(g)) => {
+            let off = (c.0 - g.0).abs() > bound || (c.1 - g.1).abs() > 1e-3 * (1.0 + g.1.abs());
+            off.then(|| format!("caret ours {c:?} parley {g:?}"))
+        }
+        (c, g) => Some(format!("caret presence ours {c:?} parley {g:?}")),
+    }
+}
+
+/// The caret x bound for `ed`'s layout.
+fn caret_bound(ed: &craie_text::editor::Editor, x: f32) -> f32 {
+    let n = ed.layout().glyphs.len() + 4;
+    let s = ed.layout().width + x.abs();
+    2.0 * (n as f32 * f32::EPSILON / 2.0) * s + s * f32::EPSILON
+}
+
 #[test]
 fn owned_editor_matches_parley() {
     let mut engine = e01::engine();
     let mut oracle = Oracle::new();
     let mut failures: Vec<String> = Vec::new();
+    let mut steps_run = 0;
     for (name, text, size, width, steps) in scripts() {
         let mut ours = e01::editor(text, size, width, &mut engine);
         let mut theirs = oracle.editor(text, size, width);
         for (k, op) in steps.iter().enumerate() {
             e01::apply_ours(&mut ours, &mut engine, op);
             oracle.apply(&mut theirs, op);
-            let (a, b): (EditState, EditState) =
-                (e01::state_ours(&ours), e01::state_parley(&theirs));
-            if a != b {
-                failures.push(format!(
-                    "{name} step {k} {op:?}:\n  ours   {a:?}\n  parley {b:?}"
-                ));
-                continue;
-            }
-            // The caret draws at the same place: x within the f32 bound of
-            // a line's additions (every cluster edge sums the advances
-            // before it), and the same line box top.
-            if let (Some(c), Some(g)) = (ours.caret_rect(0.0), theirs.cursor_geometry(0.0)) {
-                // Parley's caret starts at the line's selection box
-                // (`block_min_coord`, clamped with negative leading); the
-                // line box top is the comparable value (E01).
-                let layout = theirs.try_layout().unwrap();
-                let line = layout
-                    .lines()
-                    .find(|l| l.metrics().block_min_coord == g.y0 as f32)
-                    .expect("caret line");
-                let m = line.metrics();
-                let (x, y) = (g.x0 as f32, m.baseline - m.ascent - m.leading * 0.5);
-                let n = ours.layout().glyphs.len() + 4;
-                let s_x = ours.layout().width + x.abs();
-                let bound = 2.0 * (n as f32 * f32::EPSILON / 2.0) * s_x + s_x * f32::EPSILON;
-                if (c.0 - x).abs() > bound || (c.1 - y).abs() > 1e-3 * (1.0 + y.abs()) {
-                    failures.push(format!(
-                        "{name} step {k} {op:?}: caret ours {:?} parley {:?}",
-                        (c.0, c.1),
-                        (x, y)
-                    ));
-                }
+            steps_run += 1;
+            let (a, b) = (observe_ours(&ours), observe_parley(&theirs));
+            let bound = caret_bound(&ours, b.caret.map_or(0.0, |c| c.0));
+            if let Some(d) = diff(&a, &b, bound) {
+                failures.push(format!("{name} step {k} {op:?}: {d}"));
             }
         }
     }
@@ -241,6 +309,44 @@ fn owned_editor_matches_parley() {
         eprintln!("{f}");
     }
     assert!(failures.is_empty(), "{} differences", failures.len());
+    assert_eq!(steps_run, 150, "every scripted step ran");
+}
+
+/// Negative controls: `diff` finds each kind of difference.
+#[test]
+fn diff_detects_each_difference() {
+    let base = Observed {
+        state: EditState {
+            text: "ab".into(),
+            anchor: 1,
+            focus: 1,
+            compose: None,
+        },
+        caret: Some((10.0, 0.0)),
+    };
+    assert!(diff(&base, &base, 1e-4).is_none());
+    let mut m = base.clone();
+    m.state.focus = 2;
+    assert!(diff(&m, &base, 1e-4).is_some(), "selection");
+    let mut m = base.clone();
+    m.state.text = "abc".into();
+    assert!(diff(&m, &base, 1e-4).is_some(), "text");
+    let mut m = base.clone();
+    m.state.compose = Some(0..1);
+    assert!(diff(&m, &base, 1e-4).is_some(), "preedit");
+    let mut m = base.clone();
+    m.caret = None;
+    assert!(diff(&m, &base, 1e-4).is_some(), "caret presence");
+    assert!(
+        diff(&base, &m, 1e-4).is_some(),
+        "caret presence, other side"
+    );
+    let mut m = base.clone();
+    m.caret = Some((10.01, 0.0));
+    assert!(diff(&m, &base, 1e-4).is_some(), "caret x");
+    let mut m = base.clone();
+    m.caret = Some((10.0, 0.5));
+    assert!(diff(&m, &base, 1e-4).is_some(), "caret line");
 }
 
 /// Carets stop at graphemes (UAX #29), where Parley differs: moving right
@@ -268,13 +374,14 @@ fn caret_stops_at_graphemes_where_parley_splits() {
         a.push(e01::state_ours(&ours).focus);
         b.push(e01::state_parley(&theirs).focus);
     }
-    a.dedup();
-    b.dedup();
-    assert_eq!(a, graphemes, "ours stops at each grapheme");
-    assert!(
-        b.iter().any(|i| !graphemes.contains(i)),
-        "Parley no longer splits: {b:?}"
-    );
+    // The exact traces, repeats at the end included. Ours: every grapheme
+    // start, then the text end. Parley: also 1 (between e and its
+    // accent) and 9, 12, 16 (inside the family's ligature).
+    assert_eq!(a, [0, 3, 4, 5, 23, 24, 25, 25, 25]);
+    assert_eq!(b, [0, 1, 3, 4, 5, 9, 12, 16, 19]);
+    let mut stops = a.clone();
+    stops.dedup();
+    assert_eq!(stops, graphemes, "ours stops at each grapheme");
 
     let at = |i: u32| {
         let mut ed = e01::editor(text, 16.0, None, &mut e01::engine());

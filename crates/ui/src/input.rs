@@ -9,19 +9,20 @@
 
 use std::collections::HashMap;
 
-use crate::text::editor::{Editor, Motion};
+use crate::text::editor::{Cursor, Editor, Motion};
 use crate::text::paragraph::Paragraph;
 
 use crate::clipboard::{Clipboard, MemoryClipboard};
 use crate::geom::Size;
 use crate::text::TextEngine;
 
-/// A snapshot of buffer + selection for undo.
+/// A snapshot of buffer + selection (full cursors, affinity included)
+/// for undo.
 #[derive(Clone)]
 struct Snapshot {
     text: String,
-    anchor: u32,
-    focus: u32,
+    anchor: Cursor,
+    focus: Cursor,
 }
 
 pub struct InputState {
@@ -39,6 +40,10 @@ pub struct InputState {
     /// Whether the last undo entry was produced by character insertion —
     /// consecutive inserts coalesce; anything else splits the entry.
     coalescing_insert: bool,
+    /// An undo entry was recorded when the current composition started:
+    /// preedit updates, a clear before commit, and the commit are one
+    /// undo step with it.
+    compose_undo: bool,
     /// Shaped placeholder and the wrap width it is laid out at. Dropped
     /// when the placeholder or the font size changes; a width change
     /// rewraps it.
@@ -57,6 +62,7 @@ impl InputState {
             undo: Vec::new(),
             redo: Vec::new(),
             coalescing_insert: false,
+            compose_undo: false,
             placeholder_layout: None,
         }
     }
@@ -65,8 +71,8 @@ impl InputState {
         let sel = self.editor.selection();
         Snapshot {
             text: self.editor.raw_text().to_string(),
-            anchor: sel.anchor.index,
-            focus: sel.focus.index,
+            anchor: sel.anchor,
+            focus: sel.focus,
         }
     }
 
@@ -96,22 +102,20 @@ impl InputState {
         self.coalescing_insert = coalesce;
     }
 
-    /// Restores a snapshot (one reshape).
+    /// Restores a snapshot (one reshape), cursors with their affinity.
     fn restore(&mut self, text: &mut TextEngine, snap: Snapshot) {
         self.editor.set_text(&snap.text);
-        let len = snap.text.len() as u32;
         self.editor.refresh(text);
-        self.editor
-            .select_byte_range(snap.anchor.min(len), snap.focus.min(len));
+        self.editor.set_selection_cursors(snap.anchor, snap.focus);
     }
 }
 
 /// All live text inputs, keyed by node id.
 pub struct Inputs {
     map: HashMap<u32, InputState>,
-    /// Buffer generation last reported to JS — `onChangeText` fires only
-    /// when this differs.
-    notified: HashMap<u32, u64>,
+    /// Committed text last reported to JS (or set by it): `onChangeText`
+    /// fires only when the committed text differs.
+    notified: HashMap<u32, String>,
     /// Copy/cut/paste target. The platform installs the system clipboard.
     pub clipboard: Box<dyn Clipboard>,
 }
@@ -219,6 +223,7 @@ impl Inputs {
                     id,
                     InputState::new(font_size, color, placeholder.to_string(), multiline),
                 );
+                self.notified.insert(id, String::new());
                 true
             }
         }
@@ -259,16 +264,29 @@ impl Inputs {
         }
     }
 
-    /// Whether the buffer changed since JS was last notified; marks the
-    /// current generation notified and returns the committed text.
+    /// Whether the committed text changed since JS was last notified;
+    /// marks it notified and returns it. Selection moves, layout, and the
+    /// preedit alone never count.
     pub fn take_change(&mut self, id: u32) -> Option<String> {
         let state = self.map.get(&id)?;
-        let generation = state.editor.generation();
-        if self.notified.get(&id) == Some(&generation) {
+        if self
+            .notified
+            .get(&id)
+            .is_some_and(|t| state.editor.text_is(t))
+        {
             return None;
         }
-        self.notified.insert(id, generation);
-        Some(state.editor.text())
+        let text = state.editor.text();
+        self.notified.insert(id, text.clone());
+        Some(text)
+    }
+
+    /// Marks the current committed text as known to JS (after a `setText`
+    /// command, which JS issued: no echo).
+    pub fn mark_notified(&mut self, id: u32) {
+        if let Some(state) = self.map.get(&id) {
+            self.notified.insert(id, state.editor.text());
+        }
     }
 
     /// Applies an editing/pointer action to an input. Returns true when
@@ -286,6 +304,8 @@ impl Inputs {
         let Some(state) = self.map.get_mut(&id) else {
             return false;
         };
+        // A key action ends any composition's undo grouping.
+        state.compose_undo = false;
         // Insertions and cuts only replace the selection: they read no
         // layout, and their reshape makes it clean.
         let reads_layout = !matches!(
@@ -432,6 +452,12 @@ impl Inputs {
             state.editor.clear_compose(text);
             return;
         }
+        if !state.editor.is_composing() {
+            // The composition replaces the selection: record it now; the
+            // commit joins this entry.
+            state.record_undo(false);
+            state.compose_undo = true;
+        }
         let n = preedit.len();
         let cursor = cursor.map(|(a, b)| (a.min(n) as u32, b.min(n) as u32));
         state.editor.set_compose(text, preedit, cursor);
@@ -442,7 +468,9 @@ impl Inputs {
         let Some(state) = self.map.get_mut(&id) else {
             return;
         };
-        state.record_undo(false);
+        if !std::mem::take(&mut state.compose_undo) {
+            state.record_undo(false);
+        }
         state.editor.insert_or_replace_selection(text, s);
     }
 
@@ -451,6 +479,7 @@ impl Inputs {
     /// underline goes away).
     pub fn finish_compose(&mut self, text: &mut TextEngine, id: u32) {
         if let Some(state) = self.map.get_mut(&id) {
+            state.compose_undo = false;
             state.editor.finish_compose(text);
         }
     }

@@ -643,3 +643,149 @@ fn default_instance_raster_does_not_inherit_coords() {
     assert_ne!(bold, fresh, "the axis changes the outline");
     assert_eq!(render(&mut r, &[]), fresh);
 }
+
+/// A selection inside a character after `set_text` is moved onto a
+/// boundary at once: typing before or after the next layout is safe.
+#[test]
+fn set_text_keeps_the_selection_on_boundaries() {
+    use crate::editor::Editor;
+    let mut e = engine();
+    for refresh in [false, true] {
+        let mut ed = Editor::new(16.0);
+        ed.set_text("ab");
+        ed.refresh(&mut e);
+        ed.select_byte_range(1, 1);
+        ed.set_text("é");
+        if refresh {
+            ed.refresh(&mut e);
+        }
+        ed.insert_or_replace_selection(&mut e, "x");
+        assert_eq!(ed.raw_text(), "xé");
+        let mut ed = Editor::new(16.0);
+        ed.set_text("abcd");
+        ed.refresh(&mut e);
+        ed.select_byte_range(1, 4);
+        ed.set_text("€");
+        if refresh {
+            ed.refresh(&mut e);
+        }
+        // 1..4 clamps to 0..3: all of "€" stays selected.
+        ed.insert_or_replace_selection(&mut e, "y");
+        assert_eq!(ed.raw_text(), "y");
+    }
+}
+
+/// An edit that overlaps the preedit ends composing, so the preedit range
+/// never lands inside a character: compose "ab" with (0, 1) selected, then
+/// paste "€".
+#[test]
+fn an_edit_overlapping_the_preedit_ends_composing() {
+    use crate::editor::Editor;
+    let mut e = engine();
+    let mut ed = Editor::new(16.0);
+    ed.refresh(&mut e);
+    ed.set_compose(&mut e, "ab", Some((0, 1)));
+    assert_eq!(ed.raw_compose(), Some(0..2));
+    ed.insert_or_replace_selection(&mut e, "€");
+    assert_eq!(ed.raw_text(), "€b");
+    assert_eq!(ed.raw_compose(), None);
+    assert_eq!(ed.text(), "€b");
+    // An edit before the preedit shifts it.
+    let mut ed = Editor::new(16.0);
+    ed.set_text("xy");
+    ed.refresh(&mut e);
+    ed.select_byte_range(2, 2);
+    ed.set_compose(&mut e, "かな", Some((6, 6)));
+    ed.select_byte_range(0, 1);
+    ed.insert_or_replace_selection(&mut e, "€€");
+    assert_eq!(ed.raw_text(), "€€yかな");
+    assert_eq!(ed.raw_compose(), Some(7..13));
+    assert_eq!(ed.text(), "€€y");
+}
+
+/// Seeded operation sequences over multibyte, bidi, emoji, and mark text:
+/// after every step both cursors and the preedit range sit on character
+/// boundaries within the buffer, and every text query and geometry call
+/// succeeds.
+#[test]
+fn editing_never_leaves_char_boundaries() {
+    use crate::editor::{Editor, Motion};
+    use craie_core::rng::Rng;
+    let pieces = [
+        "a",
+        "é",
+        "e\u{301}",
+        "€",
+        "שלום",
+        "مرحبا",
+        "👨\u{200D}👩\u{200D}👧",
+        " ",
+        "\n",
+        "かな",
+        "1\u{20E3}",
+    ];
+    let motions = [
+        Motion::Left,
+        Motion::Right,
+        Motion::WordLeft,
+        Motion::WordRight,
+        Motion::LineStart,
+        Motion::LineEnd,
+        Motion::Up,
+        Motion::Down,
+        Motion::TextStart,
+        Motion::TextEnd,
+    ];
+    let mut e = engine();
+    for seed in 1..=24u64 {
+        let mut rng = Rng::new(seed);
+        let mut ed = Editor::new(15.0);
+        ed.set_width(Some(60.0));
+        ed.refresh(&mut e);
+        for step in 0..300 {
+            let piece = pieces[rng.below(pieces.len() as u32) as usize];
+            let len = ed.raw_text().len() as u32;
+            match rng.below(14) {
+                0..=2 => ed.insert_or_replace_selection(&mut e, piece),
+                3 => ed.backdelete(&mut e),
+                4 => ed.delete(&mut e),
+                5 => ed.backdelete_word(&mut e),
+                6 => ed.delete_word(&mut e),
+                7 => ed.motion(
+                    motions[rng.below(motions.len() as u32) as usize],
+                    rng.chance(0.5),
+                ),
+                8 => {
+                    let cursor = (rng.below(4), rng.below(4));
+                    ed.set_compose(&mut e, "かな", rng.chance(0.8).then_some(cursor));
+                }
+                9 => ed.clear_compose(&mut e),
+                10 => ed.finish_compose(&mut e),
+                11 => ed.select_byte_range(rng.below(len + 2), rng.below(len + 2)),
+                12 => ed.set_text(&pieces[..=rng.below(pieces.len() as u32) as usize].concat()),
+                _ => ed.move_to_point(rng.unit() * 80.0, rng.unit() * 60.0),
+            }
+            ed.refresh(&mut e);
+            let b = ed.raw_text();
+            let ok = |i: u32| (i as usize) <= b.len() && b.is_char_boundary(i as usize);
+            let s = ed.selection();
+            assert!(
+                ok(s.anchor.index) && ok(s.focus.index),
+                "seed {seed} step {step}: {s:?} in {b:?}"
+            );
+            if let Some(c) = ed.raw_compose() {
+                assert!(
+                    ok(c.start) && ok(c.end) && c.start <= c.end,
+                    "seed {seed} step {step}: {c:?} in {b:?}"
+                );
+            }
+            let _ = (
+                ed.text(),
+                ed.selected_text(),
+                ed.caret_rect(1.0),
+                ed.selection_rects(),
+                ed.ime_area(),
+            );
+        }
+    }
+}

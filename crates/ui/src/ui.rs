@@ -185,6 +185,8 @@ impl Ui {
             }
             Command::SetText(text) => {
                 self.inputs.set_text(id.0, text);
+                // JS set it: no `onChangeText` echo.
+                self.inputs.mark_notified(id.0);
                 self.host.revs.text_content.bump();
                 self.host.mark_layout(id);
                 self.host.dirty.content.push(id.0);

@@ -146,6 +146,21 @@ impl Editor {
         }
     }
 
+    /// Whether the committed text (the buffer without the preedit) is
+    /// `text`, without allocating.
+    pub fn text_is(&self, text: &str) -> bool {
+        match &self.compose {
+            Some(c) => {
+                let (a, b) = (
+                    &self.buffer[..c.start as usize],
+                    &self.buffer[c.end as usize..],
+                );
+                text.len() == a.len() + b.len() && text.starts_with(a) && text.ends_with(b)
+            }
+            None => self.buffer == text,
+        }
+    }
+
     pub fn selection(&self) -> &Selection {
         &self.selection
     }
@@ -185,6 +200,9 @@ impl Editor {
         self.show_cursor = true;
         self.shape_dirty = true;
         self.generation += 1;
+        // Valid at once (an edit before the next layout slices the buffer
+        // with it); cluster boundaries follow at the next layout.
+        self.clamp_selection();
     }
 
     pub fn set_font_size(&mut self, size: f32) {
@@ -255,20 +273,27 @@ impl Editor {
         &self.layout
     }
 
+    /// Moves both cursors onto the buffer: at most its length and on a
+    /// character boundary, and on a cluster boundary when the layout is
+    /// current. Drops the drag granularity and the vertical goal.
     fn clamp_selection(&mut self) {
-        let len = self.len();
-        let clamp = |c: Cursor| {
-            if c.index > len {
+        let clamp = |ed: &Editor, c: Cursor| {
+            let mut i = c.index.min(ed.len());
+            while !ed.buffer.is_char_boundary(i as usize) {
+                i -= 1;
+            }
+            if ed.shape_dirty {
                 Cursor {
-                    index: len,
-                    affinity: Affinity::Upstream,
+                    index: i,
+                    affinity: c.affinity,
                 }
             } else {
-                c
+                ed.cursor_at_byte(i, c.affinity)
             }
         };
-        self.selection.anchor = clamp(self.selection.anchor);
-        self.selection.focus = clamp(self.selection.focus);
+        let anchor = clamp(self, self.selection.anchor);
+        let focus = clamp(self, self.selection.focus);
+        self.selection = Selection::new(anchor, focus);
     }
 
     fn len(&self) -> u32 {
@@ -465,9 +490,20 @@ impl Editor {
     }
 
     /// The clusters left and right of a cursor, in visual order.
+    /// Across a line boundary, the neighbour is the other line's
+    /// nearest cluster (word moves continue through soft and hard breaks,
+    /// as Parley's cluster navigation does).
     fn visual_neighbours(&self, c: Cursor) -> (Option<VisualCluster>, Option<VisualCluster>) {
         let s = self.slot(c);
-        (s.left, s.right)
+        let left = s.left.or_else(|| {
+            s.line
+                .checked_sub(1)
+                .and_then(|l| self.layout.line_clusters(l).last())
+        });
+        let right = s
+            .right
+            .or_else(|| self.layout.line_clusters(s.line + 1).next());
+        (left, right)
     }
 
     /// Right cluster by cluster to the end of a word: where a word starts
@@ -782,6 +818,14 @@ impl Editor {
         self.set_selection(s);
     }
 
+    /// Restores a selection of full cursors (undo), each moved onto a
+    /// valid cluster boundary of the current layout.
+    pub fn set_selection_cursors(&mut self, anchor: Cursor, focus: Cursor) {
+        self.selection = Selection::new(anchor, focus);
+        self.clamp_selection();
+        self.generation += 1;
+    }
+
     /// Selects bytes `anchor..focus` (no-op off char boundaries).
     pub fn select_byte_range(&mut self, anchor: u32, focus: u32) {
         let ok = |i: u32| self.buffer.is_char_boundary(i as usize);
@@ -802,35 +846,21 @@ impl Editor {
         self.refresh(engine);
     }
 
-    /// Moves or trims the preedit range after `old` became `new_len`
-    /// bytes long (Parley's rule).
+    /// Keeps the preedit range on the buffer after bytes `old` became
+    /// `new_len` bytes: an edit before it shifts it, an edit after it
+    /// leaves it, and an edit that overlaps it ends composing (its text
+    /// stays as committed text). A shifted range keeps its character
+    /// boundaries.
     fn update_compose(&mut self, old: Range<u32>, new_len: u32) {
-        let old_len = old.end - old.start;
-        if new_len == old_len {
-            return;
-        }
-        let Some(c) = &mut self.compose else {
+        let Some(c) = self.compose.clone() else {
             return;
         };
-        if c.end <= old.start {
-            return;
-        }
-        if c.start >= old.end {
-            if new_len > old_len {
-                let d = new_len - old_len;
-                *c = c.start + d..c.end + d;
-            } else {
-                let d = old_len - new_len;
-                *c = c.start - d..c.end - d;
-            }
-            return;
-        }
-        if new_len < old_len {
-            if c.start >= old.start + new_len {
-                self.compose = None;
-                return;
-            }
-            c.end = c.end.min(old.start + new_len);
+        let removed = old.end - old.start;
+        if old.end <= c.start {
+            self.compose = Some(c.start - removed + new_len..c.end - removed + new_len);
+        } else if old.start < c.end {
+            self.compose = None;
+            self.show_cursor = true;
         }
     }
 

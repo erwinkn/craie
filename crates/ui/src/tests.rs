@@ -1959,3 +1959,149 @@ fn id_index_update_matches_rebuild() {
         assert_eq!(ix, IdIndex::build(kept), "round {round}");
     }
 }
+
+/// A focused input `width` points wide holding `text`.
+fn focused_input(text: &str, width: f32, multiline: bool) -> Ui {
+    let mut t = Transaction::new(1);
+    let s = taffy::Style {
+        size: taffy::Size {
+            width: taffy::Dimension::length(width),
+            height: taffy::Dimension::length(80.0),
+        },
+        ..taffy::Style::default()
+    };
+    let st1 = t.style(&s);
+    t.create(0, NodeKind::Input);
+    t.push(Mutation::Layout { id: 0, style: st1 });
+    t.input_config(0, 16.0, 0xFFFF_FFFF, "", multiline);
+    t.interaction(0, mask::INPUT, true);
+    t.place(NIL, 0, NIL);
+    t.seq = 1;
+    let mut ui = Ui::new(1.0);
+    ui.apply(&wire::encode(&t)).unwrap();
+    ui.render(Size::new(800.0, 600.0));
+    ui.dispatch(&Event::PointerDown {
+        x: 5.0,
+        y: 5.0,
+        button: Button::Primary,
+        mods: Mods::default(),
+    });
+    for ch in text.chars() {
+        let s = ch.to_string();
+        ui.dispatch(&Event::KeyDown(KeyInput {
+            key: Key::Unknown,
+            text: Some(s.clone()),
+            char: Some(s),
+            mods: Mods::default(),
+        }));
+    }
+    ui.render(Size::new(800.0, 600.0));
+    ui
+}
+
+fn key(ui: &mut Ui, key: Key, ch: Option<&str>, mods: Mods) {
+    ui.dispatch(&Event::KeyDown(KeyInput {
+        key,
+        text: None,
+        char: ch.map(str::to_string),
+        mods,
+    }));
+}
+
+fn meta() -> Mods {
+    Mods {
+        meta: true,
+        ..Mods::default()
+    }
+}
+
+/// A composition that replaces a selection is one undo step with its
+/// commit: select all of "hello", preedit, the empty preedit platforms
+/// send before a commit, commit "かな"; Undo restores "hello".
+#[test]
+fn composition_undo_restores_the_replaced_text() {
+    let mut ui = focused_input("hello", 300.0, false);
+    key(&mut ui, Key::Unknown, Some("a"), meta());
+    ui.dispatch(&Event::ImePreedit {
+        text: "か".into(),
+        cursor: Some((3, 3)),
+    });
+    ui.dispatch(&Event::ImePreedit {
+        text: String::new(),
+        cursor: None,
+    });
+    ui.dispatch(&Event::ImeCommit("かな".into()));
+    assert_eq!(ui.inputs.text(0), "かな");
+    key(&mut ui, Key::Unknown, Some("z"), meta());
+    assert_eq!(ui.inputs.text(0), "hello");
+}
+
+/// `onChangeText` fires for committed-text changes only: not for caret
+/// moves, selection, copy, or a preedit alone.
+#[test]
+fn change_events_only_for_text_changes() {
+    let mut ui = focused_input("ab", 300.0, false);
+    let changes = |ui: &mut Ui| -> Vec<String> {
+        ui.take_events()
+            .into_iter()
+            .filter(|e| e.kind == out_kind::CHANGE)
+            .map(|e| e.text)
+            .collect()
+    };
+    assert_eq!(changes(&mut ui), ["a", "ab"]);
+    key(&mut ui, Key::Left, None, Mods::default());
+    key(
+        &mut ui,
+        Key::Left,
+        None,
+        Mods {
+            shift: true,
+            ..Mods::default()
+        },
+    );
+    key(&mut ui, Key::Unknown, Some("c"), meta());
+    ui.dispatch(&Event::ImePreedit {
+        text: "か".into(),
+        cursor: Some((3, 3)),
+    });
+    assert_eq!(changes(&mut ui), Vec::<String>::new());
+    ui.dispatch(&Event::ImeCommit("か".into()));
+    assert!(!changes(&mut ui).is_empty());
+}
+
+/// Undo restores the caret's affinity: at the end of a soft-wrapped
+/// first line (End), type, then undo: the caret is back at that line's
+/// end, not at the next line's start.
+#[test]
+fn undo_restores_caret_affinity() {
+    let mut ui = focused_input("aaaa bbbb cccc", 60.0, true);
+    key(&mut ui, Key::Unknown, Some("a"), meta());
+    key(
+        &mut ui,
+        Key::Left,
+        None,
+        Mods {
+            meta: true,
+            ..Mods::default()
+        },
+    );
+    key(&mut ui, Key::End, None, Mods::default());
+    ui.render(Size::new(800.0, 600.0));
+    let caret = |ui: &Ui| ui.inputs.get(0).unwrap().editor.caret_rect(1.0).unwrap();
+    let before = caret(&ui);
+    ui.dispatch(&Event::KeyDown(KeyInput {
+        key: Key::Unknown,
+        text: Some("x".into()),
+        char: Some("x".into()),
+        mods: Mods::default(),
+    }));
+    key(&mut ui, Key::Unknown, Some("z"), meta());
+    ui.render(Size::new(800.0, 600.0));
+    assert_eq!(ui.inputs.text(0), "aaaa bbbb cccc");
+    let after = caret(&ui);
+    assert_eq!((after.0, after.1), (before.0, before.1), "caret line and x");
+    assert!(
+        before.1 == 0.0,
+        "the caret starts on the first line: {before:?}"
+    );
+}

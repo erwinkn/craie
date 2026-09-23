@@ -33,6 +33,9 @@ use paragraph::{HIDDEN, Paragraph, Resolve, Shaper, TextSpec, WrapScratch};
 
 pub use swash;
 
+/// Fallback candidates per cluster text.
+type ClusterCandidates = HashMap<Box<str>, Vec<FontInstanceId>>;
+
 /// Font resolution over the platform's `FontSource`: the primary face per
 /// (family, style) and fallback faces per cluster, cached.
 pub struct Fonts {
@@ -45,7 +48,7 @@ pub struct Fonts {
     /// cluster, in its priority order. A cluster picks the first candidate
     /// covering all of it, so the answer depends on the cluster alone,
     /// never on text laid out before.
-    candidates: HashMap<(ScriptTag, FontAttrs, bool), HashMap<Box<str>, Vec<FontInstanceId>>>,
+    candidates: HashMap<(ScriptTag, FontAttrs, bool), ClusterCandidates>,
 }
 
 impl Fonts {
