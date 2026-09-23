@@ -143,9 +143,11 @@ a measurement.
 
 **Current.** CRW2 as targeted, minus the animation family (step 4).
 The list family (0x90) carries list configuration (overscan, fallback
-extent, row templates), item splices (6 bytes per item: template u16,
-text length u32, borrowed from the buffer), a row's item index, and a
-scroll container's anchor policy. Header: magic, version, flags, seq, then counts and
+extent, row templates), item splices (10 bytes per item: template
+u16, text length u32, identity u32, borrowed from the buffer), a row's
+item index, and a scroll container's anchor policy. Validation tracks
+each list's item count through the batch; creating or removing a node
+resets it. Header: magic, version, flags, seq, then counts and
 per-transaction tables for strings, layout styles (u64 presence mask +
 positional fields), and text spans (16 bytes each). Ops are u8-tagged,
 grouped by family in the high nibble. `wire::decode` yields a
@@ -379,9 +381,14 @@ content extent. A `List` node (step 2) virtualizes inside a scroll
 container:
 
 - The list owns its item count, item descriptions, and one extent per
-  item in a Fenwick store (`core::extents`, f64 prefix sums): offsets,
-  the item at an offset, and updates are O(log n); a splice rebuilds
-  it in O(n). About 21 bytes per item; 2^24 items at most.
+  item in a Fenwick store (`core::extents`, f64 prefix sums and f64
+  deltas): offsets, the item at an offset, and updates are O(log n); a
+  splice rebuilds it in O(n). The list's row gap enters offsets and
+  lookups arithmetically (a prefix of k items holds k gaps), not as a
+  second store. About 25 bytes per item; 2^24 items at most.
+- Items have identity: the bridge interns each item's React key to a
+  u32. An item that moves within a splice unchanged keeps its extent
+  and measurement; an edited one is estimated again.
 - Estimates are native: each row template gives a fixed extent, a
   horizontal inset, and a font size; per-size metrics (average advance,
   line height) come from shaping a sample once. An item's estimate is
@@ -391,20 +398,32 @@ container:
   children tagged with an item index, each laid out at the list's
   content width and placed at its item offset. The final layout pass
   records their heights as measurements; size probes record nothing.
+  Both use the content-box width Taffy resolves (padding, border,
+  min/max, percentages), so a probe and the final layout agree.
   A width change forgets measurements (they were made at another
   width); rendered rows measure again in the same pass. Rows with no
-  index, a duplicate index, or one past the end are hidden.
+  index, a duplicate index, or one past the end are hidden, from layout
+  and from accessibility alike (`Host::list_row_shown`). A new fallback
+  or new templates re-estimate unmeasured items.
 - After layout and scroll, each list reports the item range around
   its viewport (the nearest vertical scroll container, else the
   window) as an event, with hysteresis: it reports again only when the
   viewport plus half the overscan leaves the reported range, and then
-  asks for the viewport plus the whole overscan. The event also names
-  the item of a focused row, so React keeps that row rendered.
+  asks for the viewport plus the whole overscan. The viewport maps into
+  the list through the transforms paint and hit testing use (each
+  node's origin and transform, and scroll offsets in between). The
+  event names the focused row's item by index and identity, and the
+  list's splice revision; a list reports again after every splice.
+  React keeps the focused item's row by key and applies ranges only
+  from the current revision.
 - Anchoring: after every frame each scroller captures its anchor (the
   top visible item and its offset from the viewport top, and whether
   it is at its end). After a layout pass, `keep-visible` scrolls so the
   anchor item keeps its place; `stick-to-end` holds the end when it was
-  there. A splice moves the anchor with its item. Explicit `ScrollTo`
+  there. A splice moves the anchor with its item: to its new place
+  when it moved, to the splice start only when it was removed.
+  Positions go through the same transforms as the range. Explicit
+  `ScrollTo`
   commands in the same batch win. Anchor corrections are motion for the
   snap policy (§8).
 - The React `List` diffs `items` by identity into one splice (common
@@ -438,9 +457,9 @@ container:
   explicit.
 - A scroll offset re-clamps when content shrinks below it
   (2026-09-23), as browsers do.
-- Native estimator (2026-09-23, E11). Mean estimate error is 2.4% (p95
+- Native estimator (2026-09-23, E14). Mean estimate error is 2.4% (p95
   25%, from wrap boundaries); after a jump into unmeasured items the
-  top item holds and the viewport bottom moves 14 pt once. Six bytes
+  top item holds and the viewport bottom moves 14 pt once. Ten bytes
   per item cross the bridge. A JS estimator was not built: it would
   need a copy of font metrics in JS, which the first decision rules out.
 - The anchor is one list item per scroller, taken from the lowest list
@@ -665,7 +684,8 @@ movement without a React round trip.
 Roles come from the explicit role field; the facade sets defaults
 (Pressable, TextInput, ScrollView, Text, List, list rows) and a plain
 View has none. A list row reports its position among all items and the
-item count; rows appear in item order.
+item count; rows appear in item order, and rows layout hides are not
+published.
 Bounds are transform-aware. The whole tree still republishes on any
 a11y-observable change; the semantic dirty queue exists but does not
 drive incremental updates yet. Actions queue back onto the UI thread.
@@ -777,12 +797,17 @@ that includes text and span lists; real-GPU checks (upload bytes, 1x
 and 2x pixel readback, half-pixel edges against the resolver, a glyph
 larger than a page); list tests (only the reported range renders; a
 virtualized list equals a plain column of every row once measured;
-keep-visible under measurement and inserts above, with a no-anchor
-control; stick-to-end; range hysteresis; layout visits per rendered
-row; a focused row stays; seeded splices, edits, and scrolls equal a
-clean rebuild; allocation-free list frames; accessibility positions);
+padded, bordered, gapped, and max-width lists with a following
+sibling; keep-visible under measurement, inserts above, and reorders
+across the viewport, with a no-anchor control; stick-to-end; range
+hysteresis; transforms on the list and on an ancestor, checked by hit
+testing; a fallback change against a rebuild; layout visits per
+rendered row; a focused row stays and survives splices above; seeded
+splices, edits, and scrolls equal a clean rebuild; list frames through
+the whole renderer allocate nothing in Craie phases; accessibility
+positions and hidden rows);
 the release-graph
-and layer-map checks; and the E10 and E11 benches. `prepare_frame` in
+and layer-map checks; and the E10 and E14 benches. `prepare_frame` in
 platform-winit is the one frame path for commits and native input;
 accessibility bounds and the IME area publish only after it.
 The host sets the UI clock and wakes at `Ui::next_settle` to snap

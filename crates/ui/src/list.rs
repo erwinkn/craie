@@ -22,12 +22,13 @@ use std::ops::Range;
 use craie_core::extents::Extents;
 
 use crate::events::out_kind;
-use crate::geom::Size;
+use crate::geom::{Point, Rect, Size};
 use crate::host::NodeId;
 use crate::mutation::{Anchor, ItemDesc, ItemTemplate, NIL};
 use crate::scene::PaintSlot;
 use crate::text::parley::style::StyleProperty;
 use crate::text::{ParagraphSpec, TextEngine};
+use craie_core::Affine;
 
 /// Upper bound on a list's item count: bounds the per-item stores
 /// (about 19 bytes per item), and keeps item indices exact in the f32
@@ -50,11 +51,20 @@ pub struct ListState {
     /// Content width the estimates and measurements were made at (NaN
     /// before the first layout).
     pub width: f32,
-    /// Templates changed: estimates are stale.
+    /// Templates or the fallback changed: estimates are stale.
     pub stale: bool,
-    /// Last reported item range, and the item kept rendered for focus.
+    /// Resolved gap between rows (logical points), from the last layout.
+    pub gap: f32,
+    /// Splices applied: range events carry it so JS can tell which item
+    /// order an event's indices refer to.
+    pub revision: u32,
+    /// Last reported item range, and the item kept rendered for focus
+    /// (index and identity).
     pub reported: Range<u32>,
     pub keep: u32,
+    pub keep_id: u32,
+    /// Items changed since the last report: report again.
+    pub resend: bool,
 }
 
 impl Default for ListState {
@@ -67,8 +77,12 @@ impl Default for ListState {
             fallback: 0.0,
             width: f32::NAN,
             stale: false,
+            gap: 0.0,
+            revision: 0,
             reported: 0..0,
             keep: NIL,
+            keep_id: NIL,
+            resend: false,
         }
     }
 }
@@ -80,6 +94,21 @@ impl ListState {
 
     pub fn is_empty(&self) -> bool {
         self.descs.is_empty()
+    }
+
+    /// Offset of item `i` in the list's content, gaps included.
+    pub fn offset(&self, i: usize) -> f32 {
+        self.extents.offset_gap(i, self.gap)
+    }
+
+    /// Content height: every item, with gaps between them.
+    pub fn total(&self) -> f32 {
+        self.extents.total_gap(self.gap)
+    }
+
+    /// The item at content offset `y` (a gap belongs to the item above).
+    pub fn item_at(&self, y: f32) -> usize {
+        self.extents.index_at_gap(y, self.gap)
     }
 }
 
@@ -136,16 +165,24 @@ impl Lists {
     ) {
         let l = self.map.entry(id).or_default();
         l.overscan = overscan;
-        l.fallback = fallback;
+        // Unmeasured items estimated from the fallback or the templates
+        // are stale when either changes; measurements stay.
+        if l.fallback != fallback {
+            l.fallback = fallback;
+            l.stale = true;
+        }
         if l.templates != templates {
             l.templates = templates.to_vec();
             l.stale = true;
         }
     }
 
-    /// Replaces items `at..at + remove` with `items`. New items are
-    /// estimated at the list's width when it is known (else at the next
-    /// layout). Captured anchors on this list follow their item.
+    /// Replaces items `at..at + remove` with `items`. An item that moves
+    /// within the splice unchanged (same id and description removed and
+    /// inserted) keeps its extent and measurement; other new items are estimated at the list's width
+    /// when it is known (else at the next layout). A captured anchor
+    /// follows its item: to its new place when it moved, to the splice
+    /// start only when it was removed.
     pub(crate) fn splice(
         &mut self,
         text: &mut TextEngine,
@@ -155,10 +192,40 @@ impl Lists {
         items: &[u8],
     ) {
         let l = self.map.entry(id).or_default();
+        let n = l.descs.len() as u32;
+        // Validation guarantees the range; clamp rather than panic.
+        debug_assert!(at <= n && remove <= n - at.min(n), "splice out of range");
+        let at = at.min(n);
+        let remove = remove.min(n - at);
+        let range = at as usize..(at + remove) as usize;
         let (width, fallback) = (l.width, l.fallback);
         let templates = l.templates.clone();
-        let mut estimates = Vec::with_capacity(items.len() / ItemDesc::BYTES);
-        for d in ItemDesc::iter(items) {
+        // Removed items by identity: (old index, description, extent,
+        // measured).
+        let removed: HashMap<u32, (u32, ItemDesc, f32, bool)> = range
+            .clone()
+            .filter(|&i| l.descs[i].id != NIL)
+            .map(|i| {
+                let d = l.descs[i];
+                (
+                    d.id,
+                    (i as u32, d, l.extents.size(i), l.extents.is_measured(i)),
+                )
+            })
+            .collect();
+        let mut new_items = Vec::with_capacity(items.len() / ItemDesc::BYTES);
+        // Old index -> new index of items that moved within the splice.
+        let mut moved: HashMap<u32, u32> = HashMap::new();
+        for (k, d) in ItemDesc::iter(items).enumerate() {
+            if let Some(&(old, before, e, m)) = removed.get(&d.id) {
+                moved.insert(old, at + k as u32);
+                // Unchanged, it keeps its extent; edited, it is estimated
+                // again (its row, if rendered, measures it).
+                if before == d {
+                    new_items.push((e, m));
+                    continue;
+                }
+            }
             let e = match templates.get(d.template as usize) {
                 Some(t) if width.is_finite() => {
                     let m = if t.font_size > 0.0 {
@@ -170,23 +237,27 @@ impl Lists {
                 }
                 _ => fallback,
             };
-            estimates.push(e);
+            new_items.push((e, false));
         }
         let l = self.map.get_mut(&id).unwrap();
-        let range = at as usize..(at + remove) as usize;
-        let inserted = estimates.len();
+        let inserted = new_items.len();
         l.descs.splice(range.clone(), ItemDesc::iter(items));
-        l.extents.splice(range, estimates);
+        l.extents.splice_items(range, new_items);
         if !width.is_finite() {
             l.stale = true;
         }
+        l.revision = l.revision.wrapping_add(1);
+        l.resend = true;
         let shift = inserted as i64 - remove as i64;
         for s in self.saved.values_mut().filter(|s| s.list == id) {
             if s.index >= at + remove {
                 s.index = (s.index as i64 + shift) as u32;
             } else if s.index >= at {
-                // The anchor item went away: anchor to what replaced it.
-                s.index = at;
+                s.index = match moved.get(&s.index) {
+                    Some(&to) => to,
+                    // The anchor item went away: anchor to its place.
+                    None => at,
+                };
             }
         }
     }
@@ -284,17 +355,19 @@ impl Lists {
         text: &mut TextEngine,
         id: u32,
         width: f32,
+        gap: f32,
         rows: &[(u32, f32)],
     ) -> f32 {
         let Some(l) = self.map.get(&id) else {
             return 0.0;
         };
+        let gaps = l.descs.len().saturating_sub(1) as f32 * gap;
         if l.width == width && !l.stale {
             let mut t = l.extents.total();
             for &(i, e) in rows {
                 t += e - l.extents.size(i as usize);
             }
-            return t;
+            return t + gaps;
         }
         let sizes: Vec<f32> = l.templates.iter().map(|t| t.font_size).collect();
         let metrics: Vec<(f32, f32)> = sizes
@@ -324,7 +397,7 @@ impl Lists {
         for &(i, e) in rows {
             t += (e - item(i as usize)) as f64;
         }
-        t as f32
+        t as f32 + gaps
     }
 }
 
@@ -339,63 +412,129 @@ pub fn estimate(t: &ItemTemplate, (advance, line): (f32, f32), text_len: u32, wi
     t.base + lines * line
 }
 
-/// Where a list sits in its viewport: the scroll container (NIL: the
-/// window), the list's content top in that container's border box, and
-/// the visible span in list content coordinates.
+/// Where a list sits in its viewport (the nearest vertical scroll
+/// container, else the window), through the same transforms paint and
+/// hit testing use.
 struct Placement {
     scroller: NodeId,
-    content_top: f32,
-    /// Visible part of the list's content, `v0..v1` (may extend past it).
-    v0: f32,
-    v1: f32,
-    /// The scroller's viewport top in its border box (padding top).
-    viewport_top: f32,
+    /// List border box -> scroller border box with the scroller's own
+    /// offset not applied (window coordinates for the window). Composes
+    /// each node's layout origin and transform, and the offsets of
+    /// scroll containers in between.
+    to_view: Affine,
+    /// The list's content-box origin in its border box.
+    content: [f32; 2],
+    /// The viewport in the scroller's border box (its padding box).
+    viewport: Rect,
     scroll: [f32; 2],
     max_scroll: f32,
+    /// Visible part of the list's content, `v0..v1` (may extend past it;
+    /// empty when the list maps to nothing).
+    v0: f32,
+    v1: f32,
+}
+
+impl Placement {
+    /// Where the top of item offset `y` sits below the viewport top.
+    fn view_y(&self, y: f32) -> f32 {
+        let p = self
+            .to_view
+            .apply(Point::new(self.content[0], self.content[1] + y));
+        p.y - self.scroll[1] - self.viewport.origin.y
+    }
 }
 
 /// Distance under which an anchor correction is noise, not motion.
 const ANCHOR_EPS: f32 = 1e-3;
 
+/// A node's border box -> its parent's border box (as `scene_sync`).
+fn node_local(origin: Point, t: Affine, size: Size) -> Affine {
+    Affine::translate(origin.x, origin.y)
+        .mul(&t.about(Point::new(size.width / 2.0, size.height / 2.0)))
+}
+
+impl crate::host::Host {
+    /// Whether list row `row` is laid out and published: its index is in
+    /// range, it is displayed, and no earlier displayed row of the list
+    /// has the same index. Layout and accessibility share this rule.
+    pub fn list_row_shown(&self, list: NodeId, row: NodeId) -> bool {
+        let Some(l) = self.lists.get(list.0) else {
+            return false;
+        };
+        let shown = |r: NodeId| {
+            self.list_index[r.index()] < l.len() && self.style(r).display != taffy::Display::None
+        };
+        if !shown(row) {
+            return false;
+        }
+        let index = self.list_index[row.index()];
+        for &c in self.children(list) {
+            if c == row {
+                return true;
+            }
+            if shown(c) && self.list_index[c.index()] == index {
+                return false;
+            }
+        }
+        false
+    }
+}
+
 impl crate::ui::Ui {
-    /// The list's viewport: the nearest vertical scroll container above
-    /// it, else the window.
     fn list_placement(&self, list: NodeId, window: Size) -> Option<Placement> {
         self.host.node(list)?;
         let data = self.layouts.data(list);
-        let mut top = data.rect.origin.y + data.content[1];
+        let local = |id: NodeId| {
+            let d = self.layouts.data(id);
+            node_local(
+                d.rect.origin,
+                self.host.spatial[id.index()].transform,
+                d.rect.size,
+            )
+        };
+        let mut to_view = local(list);
         let mut cur = self.host.parent(list);
-        loop {
+        let (scroller, viewport, scroll, max_scroll) = loop {
             if !cur.is_node() {
-                // The window: root-level coordinates, no scroll.
-                return Some(Placement {
-                    scroller: NodeId::NIL,
-                    content_top: top,
-                    v0: -top,
-                    v1: window.height - top,
-                    viewport_top: 0.0,
-                    scroll: [0.0; 2],
-                    max_scroll: 0.0,
-                });
+                let view = Rect::new(0.0, 0.0, window.width, window.height);
+                break (NodeId::NIL, view, [0.0; 2], 0.0);
             }
-            if self.host.style(cur).overflow.y == taffy::Overflow::Scroll {
+            let style = self.host.style(cur);
+            let offset = self.host.spatial[cur.index()].scroll;
+            if style.overflow.y == taffy::Overflow::Scroll {
                 let d = self.layouts.data(cur);
-                let scroll = self.host.spatial[cur.index()].scroll;
-                let view_top = d.clip_box.origin.y;
-                let v0 = view_top + scroll[1] - top;
-                return Some(Placement {
-                    scroller: cur,
-                    content_top: top,
-                    v0,
-                    v1: v0 + d.clip_box.size.height,
-                    viewport_top: view_top,
-                    scroll,
-                    max_scroll: d.scroll_extent[1],
-                });
+                break (cur, d.clip_box, offset, d.scroll_extent[1]);
             }
-            top += self.layouts.data(cur).rect.origin.y;
+            if style.overflow.x == taffy::Overflow::Scroll {
+                to_view = Affine::translate(-offset[0], -offset[1]).mul(&to_view);
+            }
+            to_view = local(cur).mul(&to_view);
             cur = self.host.parent(cur);
-        }
+        };
+        // The visible region, unscrolled, mapped back into the list.
+        let seen = Rect::new(
+            viewport.origin.x + scroll[0],
+            viewport.origin.y + scroll[1],
+            viewport.size.width,
+            viewport.size.height,
+        );
+        let (v0, v1) = match to_view.invert() {
+            Some(inv) => {
+                let r = inv.map_rect(&seen);
+                (r.origin.y - data.content[1], r.max_y() - data.content[1])
+            }
+            None => (f32::INFINITY, f32::NEG_INFINITY),
+        };
+        Some(Placement {
+            scroller,
+            to_view,
+            content: data.content,
+            viewport,
+            scroll,
+            max_scroll,
+            v0,
+            v1,
+        })
     }
 
     /// After a layout pass: every scroller with a captured anchor scrolls
@@ -432,8 +571,8 @@ impl crate::ui::Ui {
                     if p.scroller != sc || s.index >= l.len() {
                         continue;
                     }
-                    let item_top = p.content_top + l.extents.offset(s.index as usize);
-                    item_top - p.viewport_top - s.delta
+                    // The scroll that puts the item `delta` below the top.
+                    p.scroll[1] + p.view_y(l.offset(s.index as usize)) - s.delta
                 }
             };
             let cur = self.host.spatial[sc.index()].scroll;
@@ -447,7 +586,7 @@ impl crate::ui::Ui {
 
     /// After every frame's layout and scroll: captures each scroller's
     /// anchor, and reports each list's range when the viewport left the
-    /// rendered range (or focus moved to another row).
+    /// rendered range, the items changed, or focus moved to another row.
     pub(crate) fn sync_lists(&mut self, window: Size) {
         if self.host.lists.map.is_empty() {
             return;
@@ -468,18 +607,17 @@ impl crate::ui::Ui {
             let keep = self.focused_row(list);
             let l = &self.host.lists.map[&id];
             let count = l.len();
-            let total = l.extents.total();
-            let visible = count > 0 && p.v1 > 0.0 && p.v0 < total;
+            let total = l.total();
+            let visible = count > 0 && p.v1 > 0.0 && p.v0 < total && p.v0 <= p.v1;
 
             if p.scroller.is_node() && !anchored.contains(&p.scroller.0) {
                 let at_end = p.scroll[1] >= p.max_scroll - 0.5;
                 let saved = if visible {
-                    let index = l.extents.index_at(p.v0.max(0.0));
-                    let item_top = p.content_top + l.extents.offset(index);
+                    let index = l.item_at(p.v0.max(0.0));
                     Saved {
                         list: id,
                         index: index as u32,
-                        delta: item_top - (p.viewport_top + p.scroll[1]),
+                        delta: p.view_y(l.offset(index)),
                         at_end,
                     }
                 } else {
@@ -490,8 +628,7 @@ impl crate::ui::Ui {
                         at_end,
                     }
                 };
-                // A scroller showing no list item keeps an item anchor
-                // captured earlier from another list only if one exists.
+                // A scroller showing no list item keeps no item anchor.
                 if visible || !self.host.lists.saved.contains_key(&p.scroller.0) {
                     self.host.lists.saved.insert(p.scroller.0, saved);
                 } else if let Some(s) = self.host.lists.saved.get_mut(&p.scroller.0) {
@@ -506,11 +643,11 @@ impl crate::ui::Ui {
             let l = &self.host.lists.map[&id];
             let over = l.overscan;
             let range = |a: f32, b: f32| -> std::ops::Range<u32> {
-                if count == 0 || b <= 0.0 || a >= total {
+                if count == 0 || b <= 0.0 || a >= total || a > b {
                     return 0..0;
                 }
-                let first = l.extents.index_at(a.max(0.0)) as u32;
-                let last = l.extents.index_at(b.min(total - 1e-3).max(0.0)) as u32;
+                let first = l.item_at(a.max(0.0)) as u32;
+                let last = l.item_at(b.min(total - 1e-3).max(0.0)) as u32;
                 first..(last + 1).min(count)
             };
             let need = range(p.v0 - over * 0.5, p.v1 + over * 0.5);
@@ -521,14 +658,27 @@ impl crate::ui::Ui {
             } else {
                 reported.clone()
             };
-            if next != reported || keep != l.keep {
+            let keep_id = if keep == NIL {
+                NIL
+            } else {
+                l.descs.get(keep as usize).map_or(NIL, |d| d.id)
+            };
+            // After a splice the event goes out even with the same range:
+            // it names the item order (revision) its indices refer to.
+            if next != reported || keep != l.keep || keep_id != l.keep_id || l.resend {
                 let l = self.host.lists.map.get_mut(&id).unwrap();
                 l.reported = next.clone();
                 l.keep = keep;
+                l.keep_id = keep_id;
+                l.resend = false;
+                let revision = l.revision;
                 let mut e = self.event(out_kind::LIST_RANGE, list);
                 e.a = next.start as f32;
                 e.b = next.end as f32;
                 e.x = if keep == NIL { -1.0 } else { keep as f32 };
+                // f32-exact: the revision modulo 2^24.
+                e.y = (revision & 0xFF_FFFF) as f32;
+                e.key = keep_id;
                 self.pending_events.push(e);
             }
         }
@@ -544,7 +694,11 @@ impl crate::ui::Ui {
         while cur.is_node() {
             let parent = self.host.parent(cur);
             if parent == list {
-                return self.host.list_index[cur.index()];
+                return if self.host.list_row_shown(list, cur) {
+                    self.host.list_index[cur.index()]
+                } else {
+                    NIL
+                };
             }
             cur = parent;
         }

@@ -1,4 +1,4 @@
-//! E11: virtualized list versus a plain column of every row, and the
+//! E14 (layout-aware virtualization): virtualized list versus a plain column of every row, and the
 //! native estimator's accuracy (ARCHITECTURE.md §7).
 //!
 //! For each item count: mount (one splice + the rows of the first
@@ -9,7 +9,7 @@
 //! of the native estimate against the measured row height, and the
 //! first-frame anchoring error after a jump into unmeasured items.
 //!
-//!   cargo run --release -p craie-harness --example e11_lists
+//!   cargo run --release -p craie-harness --example e14_lists
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -103,6 +103,7 @@ fn virtualized(n: u32) -> Virtual {
         .map(|i| ItemDesc {
             template: 0,
             text_len: text(i).chars().count() as u32,
+            id: i,
         })
         .collect();
     let base = live();
@@ -163,7 +164,7 @@ fn virtualized(n: u32) -> Virtual {
     d.settle(&mut ui, VIEW, &text, 8);
     let jump_ms = ms(t2);
     let l = ui.host.lists.get(1).unwrap();
-    let y_measured = l.extents.offset(bottom as usize) - ui.scroll_offset(NodeId(0))[1];
+    let y_measured = l.offset(bottom as usize) - ui.scroll_offset(NodeId(0))[1];
     Virtual {
         mount_ms,
         scroll_ms,
@@ -239,6 +240,7 @@ fn estimate_error() -> (f32, f32) {
                 .map(|i| ItemDesc {
                     template: 0,
                     text_len: text(i).chars().count() as u32,
+                    id: i,
                 })
                 .collect::<Vec<_>>(),
         )
@@ -269,7 +271,7 @@ fn estimate_error() -> (f32, f32) {
 }
 
 fn main() {
-    println!("E11 virtualized list vs plain column (480x720 @2x, chat texts)");
+    println!("E14 virtualized list vs plain column (480x720 @2x, chat texts)");
     println!(
         "{:>9} | {:>10} {:>9} {:>9} {:>10} {:>6} {:>7} | {:>10} {:>9} {:>10} {:>8}",
         "items",
@@ -326,5 +328,5 @@ fn main() {
         mean * 100.0,
         p95 * 100.0
     );
-    println!("bridge bytes per item: 6 (template u16 + text length u32)");
+    println!("bridge bytes per item: 10 (template u16, text length u32, id u32)");
 }

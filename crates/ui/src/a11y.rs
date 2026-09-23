@@ -208,7 +208,9 @@ impl Ui {
         let mut kids: Vec<A11yId> = Vec::new();
         let mut children: Vec<NodeId> = self.host.children(id).to_vec();
         if kind == NodeKind::List {
-            // Rows in item order, whatever order they were placed in.
+            // Only the rows layout shows (an index in range, not a
+            // duplicate), in item order whatever order they were placed in.
+            children.retain(|&c| self.host.list_row_shown(id, c));
             children.sort_by_key(|c| self.host.list_index[c.index()]);
         }
         for child in children {

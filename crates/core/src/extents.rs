@@ -33,13 +33,21 @@ impl Extents {
     /// Replaces items `range` with `estimates` (items after it shift).
     /// Measurements of other items survive. O(n) (one rebuild).
     pub fn splice(&mut self, range: Range<usize>, estimates: impl IntoIterator<Item = f32>) {
+        self.splice_items(range, estimates.into_iter().map(|e| (e, false)));
+    }
+
+    /// `splice` with (extent, measured) per new item: an item moved
+    /// within one splice keeps its measurement. O(n) (one rebuild).
+    pub fn splice_items(
+        &mut self,
+        range: Range<usize>,
+        items: impl IntoIterator<Item = (f32, bool)>,
+    ) {
         let n = self.size.len();
         let range = range.start.min(n)..range.end.min(n).max(range.start.min(n));
-        let before = self.size.len();
-        self.size.splice(range.clone(), estimates);
-        let inserted = self.size.len() + range.len() - before;
-        self.measured
-            .splice(range, std::iter::repeat_n(false, inserted));
+        let (size, measured): (Vec<f32>, Vec<bool>) = items.into_iter().unzip();
+        self.size.splice(range.clone(), size);
+        self.measured.splice(range, measured);
         self.rebuild();
     }
 
@@ -94,15 +102,17 @@ impl Extents {
         self.measured.iter().filter(|m| **m).count()
     }
 
-    /// Records a measurement. Returns the change in extent.
+    /// Records a measurement. Returns the change in extent. The delta is
+    /// taken in f64: an f32 difference of widely differing values rounds
+    /// and would leave the tree off until a rebuild.
     pub fn measure(&mut self, i: usize, v: f32) -> f32 {
         self.measured[i] = true;
-        let d = v - self.size[i];
+        let d = v as f64 - self.size[i] as f64;
         if d != 0.0 {
             self.size[i] = v;
-            self.add(i, d as f64);
+            self.add(i, d);
         }
-        d
+        d as f32
     }
 
     /// Sum of items `0..i`: the offset of item `i`. O(log n).
@@ -141,6 +151,51 @@ impl Extents {
         pos.min(n - 1)
     }
 
+    /// Offset of item `i` with `gap` between items: `offset(i) + i·gap`.
+    pub fn offset_gap(&self, i: usize, gap: f32) -> f32 {
+        let i = i.min(self.size.len());
+        (self.offset_f64(i) + i as f64 * gap as f64) as f32
+    }
+
+    /// Total extent with `gap` between items (none after the last).
+    pub fn total_gap(&self, gap: f32) -> f32 {
+        let n = self.size.len();
+        (self.offset_f64(n) + n.saturating_sub(1) as f64 * gap as f64) as f32
+    }
+
+    /// `index_at` with `gap` between items: the item whose span (with
+    /// the gap after it) contains `y`. O(log n): a prefix of `k` items
+    /// holds `k` gaps, so the descent adds `step · gap` per step.
+    pub fn index_at_gap(&self, y: f32, gap: f32) -> usize {
+        let n = self.size.len();
+        if n == 0 {
+            return 0;
+        }
+        let g = gap as f64;
+        let mut pos = 0usize;
+        let mut rem = y as f64;
+        let mut step = n.next_power_of_two();
+        while step > 0 {
+            let next = pos + step;
+            if next <= n && self.tree[next] + step as f64 * g <= rem {
+                pos = next;
+                rem -= self.tree[next] + step as f64 * g;
+            }
+            step >>= 1;
+        }
+        pos.min(n - 1)
+    }
+
+    fn offset_f64(&self, i: usize) -> f64 {
+        let mut j = i.min(self.size.len());
+        let mut s = 0.0;
+        while j > 0 {
+            s += self.tree[j];
+            j -= j & j.wrapping_neg();
+        }
+        s
+    }
+
     /// Heap bytes held (capacity), for memory accounting.
     pub fn heap_bytes(&self) -> usize {
         self.size.capacity() * 4 + self.measured.capacity() + self.tree.capacity() * 8
@@ -169,22 +224,60 @@ mod tests {
                 model.splice(at..at + rm, add);
             } else if !model.is_empty() {
                 let i = rng.below(model.len() as u32) as usize;
-                let v = 5.0 + rng.below(80) as f32;
+                // Fractional, and sometimes far from the old value.
+                let v = match rng.below(4) {
+                    0 => 1.0e6 * rng.unit(),
+                    1 => 0.01 + rng.unit(),
+                    _ => 5.0 + rng.below(80) as f32 + rng.unit(),
+                };
                 e.measure(i, v);
                 model[i] = v;
             }
             if round % 50 == 0 || round == 399 {
-                let mut acc = 0.0f32;
-                for (i, v) in model.iter().enumerate() {
-                    assert!((e.offset(i) - acc).abs() < 1e-2, "offset {i}");
-                    assert_eq!(e.index_at(acc + v / 2.0), i);
-                    acc += v;
+                // The model sums in f64; offsets agree to f32 precision.
+                let mut acc = 0.0f64;
+                for (i, &v) in model.iter().enumerate() {
+                    let tol = 1e-6 * acc.max(1.0) + 1e-3;
+                    assert!((e.offset(i) as f64 - acc).abs() < tol, "offset {i}");
+                    if v > 1.0 {
+                        assert_eq!(e.index_at((acc + v as f64 / 2.0) as f32), i);
+                    }
+                    acc += v as f64;
                 }
-                assert!((e.total() - acc).abs() < 1e-2);
+                assert!((e.total() as f64 - acc).abs() < 1e-6 * acc.max(1.0) + 1e-3);
                 assert_eq!(e.index_at(-5.0), 0);
-                assert_eq!(e.index_at(acc + 100.0), model.len() - 1);
+                assert_eq!(e.index_at(acc as f32 + 100.0), model.len() - 1);
             }
         }
+    }
+
+    /// Gap-aware offsets and lookup equal a linear model with gaps.
+    #[test]
+    fn gaps_match_linear_model() {
+        let sizes = [10.0f32, 25.5, 3.0, 40.0, 7.25];
+        let mut e = Extents::new();
+        e.splice(0..0, sizes);
+        let g = 6.0;
+        let mut acc = 0.0f32;
+        for (i, v) in sizes.iter().enumerate() {
+            assert_eq!(e.offset_gap(i, g), acc);
+            assert_eq!(e.index_at_gap(acc + v / 2.0, g), i);
+            // The gap after an item belongs to it.
+            assert_eq!(e.index_at_gap(acc + v + g / 2.0, g), i);
+            acc += v + g;
+        }
+        assert_eq!(e.total_gap(g), acc - g);
+    }
+
+    /// A measurement far below the old extent updates the sums exactly
+    /// (an f32 delta would round 0.01 - 1e6 to -1e6).
+    #[test]
+    fn wide_measurement_keeps_sums() {
+        let mut e = Extents::new();
+        e.splice(0..0, [1.0e6, 5.0]);
+        e.measure(0, 0.01);
+        assert!((e.total() - 5.01).abs() < 1e-4, "{}", e.total());
+        assert!((e.offset(1) - 0.01).abs() < 1e-6);
     }
 
     #[test]

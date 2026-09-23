@@ -155,22 +155,28 @@ pub struct ItemTemplate {
     pub font_size: f32,
 }
 
-/// One item description: its template and its text length in chars.
+/// One item description: its template, its text length in chars, and
+/// a stable identity (the bridge interns the item's React key; NIL: none).
+/// Identity lets an item that moves within a splice keep its measured
+/// extent, a scroll anchor, and a focused row.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ItemDesc {
     pub template: u16,
     pub text_len: u32,
+    pub id: u32,
 }
 
 impl ItemDesc {
-    /// Wire size of one description (template u16, text length u32).
-    pub const BYTES: usize = 6;
+    /// Wire size of one description (template u16, text length u32,
+    /// id u32).
+    pub const BYTES: usize = 10;
 
     /// Decodes packed descriptions (`BYTES` each, little endian).
     pub fn iter(bytes: &[u8]) -> impl Iterator<Item = ItemDesc> + '_ {
         bytes.chunks_exact(Self::BYTES).map(|c| ItemDesc {
             template: u16::from_le_bytes([c[0], c[1]]),
             text_len: u32::from_le_bytes([c[2], c[3], c[4], c[5]]),
+            id: u32::from_le_bytes([c[6], c[7], c[8], c[9]]),
         })
     }
 
@@ -180,6 +186,7 @@ impl ItemDesc {
         for d in items {
             out.extend_from_slice(&d.template.to_le_bytes());
             out.extend_from_slice(&d.text_len.to_le_bytes());
+            out.extend_from_slice(&d.id.to_le_bytes());
         }
         out
     }

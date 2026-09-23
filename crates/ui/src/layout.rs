@@ -342,20 +342,26 @@ impl TreeView<'_> {
         let parent_w = inputs.parent_size.width;
         let inset = style.padding.resolve_or_zero(parent_w, no_calc)
             + style.border.resolve_or_zero(parent_w, no_calc);
+        // Row gap between items (a percentage of an indefinite height
+        // resolves to nothing).
+        let gap = style.gap.height.resolve_or_zero(None, no_calc);
         compute_leaf_layout(inputs, style, no_calc, |known, available| {
-            let width = known.width.or(match available.width {
+            // The content-box width: Taffy resolves padding, border,
+            // min/max, and percentages into the available width. (A
+            // known width in a size probe is the border box.)
+            let width = match available.width {
                 AvailableSpace::Definite(w) => Some(w),
-                _ => None,
-            });
+                _ => known.width.map(|w| (w - inset.left - inset.right).max(0.0)),
+            };
             match width {
                 Some(w) => TSize {
                     width: w,
-                    height: self.list_rows(id, w, commit, [inset.left, inset.top]),
+                    height: self.list_rows(id, w, gap, commit, [inset.left, inset.top]),
                 },
                 // An intrinsic-size probe: no width to wrap rows at.
                 None => TSize {
                     width: 0.0,
-                    height: self.host.lists.get(id.0).map_or(0.0, |l| l.extents.total()),
+                    height: self.host.lists.get(id.0).map_or(0.0, |l| l.total()),
                 },
             }
         })
@@ -365,7 +371,7 @@ impl TreeView<'_> {
     /// returns the list's content height. With `commit` (final layout)
     /// the rows' heights become measurements and each row is placed at
     /// `origin` + its item offset; otherwise nothing is recorded.
-    fn list_rows(&mut self, id: NodeId, w: f32, commit: bool, origin: [f32; 2]) -> f32 {
+    fn list_rows(&mut self, id: NodeId, w: f32, gap: f32, commit: bool, origin: [f32; 2]) -> f32 {
         let count = self.host.lists.get(id.0).map_or(0, |l| l.len());
         if commit {
             self.host.lists.estimate(self.text, id.0, w);
@@ -430,19 +436,17 @@ impl TreeView<'_> {
         }
         if !commit {
             let measured: Vec<(u32, f32)> = rows.iter().map(|r| (r.1, r.2)).collect();
-            return self.host.lists.total_at(self.text, id.0, w, &measured);
+            return self.host.lists.total_at(self.text, id.0, w, gap, &measured);
         }
         let Some(list) = self.host.lists.map.get_mut(&id.0) else {
             return 0.0;
         };
+        list.gap = gap;
         for r in &rows {
             list.extents.measure(r.1 as usize, r.2);
         }
-        let offsets: Vec<f32> = rows
-            .iter()
-            .map(|r| list.extents.offset(r.1 as usize))
-            .collect();
-        let total = list.extents.total();
+        let offsets: Vec<f32> = rows.iter().map(|r| list.offset(r.1 as usize)).collect();
+        let total = list.total();
         for (k, (r, y)) in rows.iter().zip(offsets).enumerate() {
             let (row, _, extent, margin, overflow) = *r;
             let st = self.style_of(row);

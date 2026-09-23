@@ -255,7 +255,8 @@ export interface ListProps<T> {
 interface Range {
   first: number
   end: number
-  keep: number
+  /** Key of the item kept rendered for focus. */
+  keepKey?: unknown
 }
 
 /** A virtualized list. Put it inside a ScrollView: native lays out only
@@ -266,8 +267,15 @@ export function List<T>(props: ListProps<T>) {
   const [range, setRange] = useState<Range>(() => ({
     first: 0,
     end: Math.min(items.length, initialCount),
-    keep: -1,
   }))
+  const onRange = (e: { first: number; end: number; keepKey?: unknown; current: boolean }) =>
+    setRange((r) => ({
+      // Indices from an older item order are dropped: native reports
+      // again for the current one.
+      first: e.current ? e.first : r.first,
+      end: e.current ? e.end : r.end,
+      keepKey: e.keepKey,
+    }))
   const row = (i: number) =>
     createElement(
       "view",
@@ -277,14 +285,22 @@ export function List<T>(props: ListProps<T>) {
   const rows: ReactNode[] = []
   const end = Math.min(range.end, items.length)
   for (let i = range.first; i < end; i++) rows.push(row(i))
-  if (range.keep >= 0 && range.keep < items.length && (range.keep < range.first || range.keep >= end)) {
-    rows.push(row(range.keep))
+  // The focused item by identity, wherever items moved it.
+  if (range.keepKey !== undefined) {
+    const keep = keyIndex(items, keyOf, range.keepKey)
+    if (keep >= 0 && (keep < range.first || keep >= end)) rows.push(row(keep))
   }
   return createElement(
     "list",
-    { accessibilityRole: "list", ...rest, items, onRange: setRange },
+    { accessibilityRole: "list", ...rest, items, keyOf, onRange },
     rows,
   )
+}
+
+/** Index of the item with `key`, or -1. */
+function keyIndex<T>(items: readonly T[], keyOf: (item: T, i: number) => unknown, key: unknown) {
+  for (let i = 0; i < items.length; i++) if (keyOf(items[i]!, i) === key) return i
+  return -1
 }
 
 export function TextInput(props: TextInputProps) {

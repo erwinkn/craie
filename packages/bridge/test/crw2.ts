@@ -89,7 +89,7 @@ export function readFrame(buf: Uint8Array): Frame {
       case 0x91: { // list splice: at, remove, count, descs
         op.f.push(u32(), u32())
         const n = u32(); op.f.push(n)
-        for (let i = 0; i < n; i++) op.f.push(u16(), u32())
+        for (let i = 0; i < n; i++) op.f.push(u16(), u32(), u32())
         break
       }
       case 0x92: op.f.push(u32()); break // list index

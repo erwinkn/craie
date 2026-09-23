@@ -1,6 +1,6 @@
 import { test, expect } from "bun:test"
 import { createElement } from "react"
-import { createRoot, View, Text, ScrollView, Pressable, Bars, List, ROLE } from "../src/index.js"
+import { createRoot, View, Text, TextInput, ScrollView, Pressable, Bars, List, ROLE } from "../src/index.js"
 import type { Transport, UiEvent } from "../src/host.js"
 import { readFrame } from "./crw2.js"
 
@@ -216,7 +216,7 @@ test("List sends config and items, renders the reported range, diffs splices", a
   expect(config.f).toEqual([300, 44, 8, 0, 14])
   const splice = ops.find(o => o.tag === 0x91)!
   expect(splice.f.slice(0, 3)).toEqual([0, 0, 1000])
-  expect(splice.f.slice(3, 5)).toEqual([0, "item 0".length])
+  expect(splice.f.slice(3, 6)).toEqual([0, "item 0".length, 0]) // template, length, id
   expect(ops.find(o => o.tag === 0x93)!.f).toEqual([1]) // stick-to-end
   // Initial rows 0..5, each tagged with its item index.
   expect(ops.filter(o => o.tag === 0x92).map(o => o.f[0])).toEqual([0, 1, 2, 3, 4])
@@ -224,7 +224,8 @@ test("List sends config and items, renders the reported range, diffs splices", a
   // Native reports a range: React renders exactly those rows (and the
   // kept focused item).
   t.frames.length = 0
-  t.eventCb!({ kind: 14, node: listId, generation: 0, x: 900, y: 0, a: 500, b: 503, key: 0, text: "" })
+  // keep = item 900 (its id is 900: keys interned in order); revision 1.
+  t.eventCb!({ kind: 14, node: listId, generation: 0, x: 900, y: 1, a: 500, b: 503, key: 900, text: "" })
   // The commit and React's deletion pass may seal separately: collect
   // every frame after both ran.
   for (let i = 0; i < 5; i++) await tick()
@@ -250,4 +251,83 @@ test("List sends config and items, renders the reported range, diffs splices", a
   await tick()
   const pre = t.ops().filter(o => o.tag === 0x91)
   expect(pre.map(o => o.f.slice(0, 3))).toEqual([[0, 0, 3]])
+})
+
+test("List keeps the focused item's row across splices by identity", async () => {
+  const t = new FakeTransport()
+  const root = createRoot(t)
+  type Item = { id: number }
+  const make = (from: number, n: number) => Array.from({ length: n }, (_, i) => ({ id: from + i }))
+  let items: Item[] = make(0, 1000)
+  const App = ({ items }: { items: Item[] }) =>
+    createElement(ScrollView, null,
+      createElement(List<Item>, {
+        items,
+        keyOf: (it) => it.id,
+        initialCount: 0,
+        renderItem: (it) =>
+          createElement(TextInput, { value: `item ${it.id}`, accessibilityLabel: `in ${it.id}` }),
+      }))
+  const ops = () => t.frames.flatMap(f => readFrame(f).ops)
+  const settle = async () => { for (let i = 0; i < 5; i++) await tick() }
+  root.renderSync(createElement(App, { items }))
+  await settle()
+  const listId = ops().find(o => o.tag === 0x01 && o.f[0] === 4)!.id
+  let revision = 1
+  const range = (a: number, b: number, keepIndex: number, keepId: number, y = revision) =>
+    t.eventCb!({ kind: 14, node: listId, generation: 0, x: keepIndex, y, a, b, key: keepId, text: "" })
+
+  // Native: rows 500..503 visible, item 900 (id 900) focused.
+  t.frames.length = 0
+  range(500, 503, 900, 900)
+  await settle()
+  const rowOf = (index: number) => ops().filter(o => o.tag === 0x92 && o.f[0] === index).at(-1)!.id
+  const row = rowOf(900)
+  const input = ops().find(o => o.tag === 0x02 && o.f[0] === row)!.id
+  const survives = (what: string, index: number) => {
+    const all = ops()
+    expect(all.some(o => o.tag === 0x04 && (o.id === row || o.id === input))).toBe(false)
+    expect(all.some(o => o.tag === 0x01 && (o.id === row || o.id === input))).toBe(false)
+    expect(all.filter(o => o.tag === 0x92 && o.id === row).map(o => o.f[0])).toEqual([index])
+    void what
+  }
+
+  // Prepend three items: the focused row moves to index 903.
+  t.frames.length = 0
+  items = [...make(-3, 3), ...items]
+  root.renderSync(createElement(App, { items }))
+  await settle()
+  revision++
+  survives("prepend", 903)
+  // A late event from the old item order: its indices are dropped, its
+  // kept identity still holds (no rows for 600..603 appear).
+  t.frames.length = 0
+  range(600, 603, 900, 900, revision - 1)
+  await settle()
+  expect(ops().some(o => o.tag === 0x92 && o.f[0] === 600)).toBe(false)
+  expect(ops().some(o => o.tag === 0x04 && o.id === row)).toBe(false)
+
+  // Remove ten items before it: index 893.
+  t.frames.length = 0
+  items = items.slice(10)
+  root.renderSync(createElement(App, { items }))
+  await settle()
+  revision++
+  survives("removal before", 893)
+
+  // Reorder: move it to the front.
+  t.frames.length = 0
+  const focused = items[893]!
+  items = [focused, ...items.slice(0, 893), ...items.slice(894)]
+  root.renderSync(createElement(App, { items }))
+  await settle()
+  revision++
+  survives("reorder", 0)
+
+  // Remove the focused item itself: its row goes.
+  t.frames.length = 0
+  items = items.slice(1)
+  root.renderSync(createElement(App, { items }))
+  await settle()
+  expect(ops().some(o => o.tag === 0x04 && o.id === row)).toBe(true)
 })

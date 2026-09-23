@@ -47,6 +47,16 @@ export interface UiEvent {
   text: string
 }
 
+/** Item identity bookkeeping of a list node: React keys interned to
+ * u32 ids (the wire's item identity) and the splices sent. */
+export interface ListKeys {
+  ids: Map<unknown, number>
+  keys: Map<number, unknown>
+  next: number
+  /** Splices sent; native counts the same and stamps range events. */
+  revision: number
+}
+
 export interface HostNode {
   id: number
   /** Generation of `id` this node occupies (mirrors native). */
@@ -60,6 +70,8 @@ export interface HostNode {
   suspended: boolean
   /** Children appended before this node got an id; replayed on materialize. */
   initial: HostNode[]
+  /** List nodes only. */
+  list?: ListKeys
   focus(): void
   blur(): void
   scrollTo(x: number, y: number): void
@@ -297,9 +309,17 @@ export class CraieHost {
       case EVENT_KIND.change: p.onChangeText?.(ev.text); break
       case EVENT_KIND.submit: p.onSubmit?.(ev.text); break
       case EVENT_KIND.scroll: p.onScroll?.({ target: n, x: ev.a, y: ev.b }); break
-      case EVENT_KIND.listRange:
-        p.onRange?.({ first: ev.a, end: ev.b, keep: ev.x })
+      case EVENT_KIND.listRange: {
+        // The kept (focused) item by identity: its index may be stale by
+        // the time this arrives. Indices apply only to the item order
+        // native saw, the current revision; native reports again after
+        // every splice.
+        const keys = n.list
+        const keepKey = ev.key === NIL || !keys ? undefined : keys.keys.get(ev.key)
+        const current = !keys || ev.y === (keys.revision & 0xff_ffff)
+        p.onRange?.({ first: ev.a, end: ev.b, keepKey, current })
         break
+      }
     }
   }
 
@@ -460,9 +480,41 @@ export class CraieHost {
           before[before.length - 1 - suf] === items[items.length - 1 - suf]
         ) suf++
         const remove = before.length - pre - suf
-        const describe: (item: any) => ItemDesc = props.describe ?? (() => ({}))
-        const added = items.slice(pre, items.length - suf).map(describe)
-        if (remove > 0 || added.length > 0) enc.listSplice(id, pre, remove, added)
+        const added = items.slice(pre, items.length - suf)
+        if (remove > 0 || added.length > 0) {
+          // Identity: each item's key interned to an id, so an item that
+          // moves within the splice keeps its anchor, measurement, and
+          // focused row natively.
+          const keys = (n.list ??= { ids: new Map(), keys: new Map(), next: 0, revision: 0 })
+          const keyOf: (item: any, index: number) => unknown = props.keyOf ?? ((_: any, i: number) => i)
+          const describe: (item: any) => ItemDesc = props.describe ?? (() => ({}))
+          const intern = (key: unknown) => {
+            let v = keys.ids.get(key)
+            if (v === undefined) {
+              v = keys.next++
+              keys.ids.set(key, v)
+              keys.keys.set(v, key)
+            }
+            return v
+          }
+          const addedKeys = new Set<unknown>()
+          const descs = added.map((item, k) => {
+            const key = keyOf(item, pre + k)
+            addedKeys.add(key)
+            return { ...describe(item), id: intern(key) }
+          })
+          for (let i = pre; i < before.length - suf; i++) {
+            const key = keyOf(before[i], i)
+            if (addedKeys.has(key)) continue
+            const v = keys.ids.get(key)
+            if (v !== undefined) {
+              keys.ids.delete(key)
+              keys.keys.delete(v)
+            }
+          }
+          enc.listSplice(id, pre, remove, descs)
+          keys.revision++
+        }
       }
     }
 

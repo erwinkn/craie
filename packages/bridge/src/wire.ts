@@ -60,10 +60,12 @@ export interface ListTemplate {
   fontSize?: number
 }
 /** An item's description for native estimates: its template and text
- * length in characters. */
+ * length in characters. `id` is the item's identity (the bridge interns
+ * the item's key); NIL for none. */
 export interface ItemDesc {
   template?: number
   textLength?: number
+  id?: number
 }
 
 // Field mask bits — mirror wire.rs `spatial_field` / `paint_field`.
@@ -116,7 +118,8 @@ export const EVENT_KIND = {
   change: 11,
   submit: 12,
   scroll: 13,
-  /** A list's rendered range: a = first, b = end, x = kept item (-1). */
+  /** A list's rendered range: a = first, b = end, x = kept item index
+   * (-1), y = the list's splice revision (mod 2^24), key = kept item id. */
   listRange: 14,
 } as const
 
@@ -670,7 +673,7 @@ export class Encoder {
       b.f32(t.fontSize ?? 0)
     }
   }
-  /** Replaces items `at..at + remove` with `items` (6 bytes each). */
+  /** Replaces items `at..at + remove` with `items` (10 bytes each). */
   listSplice(id: number, at: number, remove: number, items: readonly ItemDesc[]) {
     const b = this.ops
     b.u8(Op.ListSplice)
@@ -678,10 +681,11 @@ export class Encoder {
     b.u32(at)
     b.u32(remove)
     b.u32(items.length)
-    b.reserve(items.length * 6)
+    b.reserve(items.length * 10)
     for (const d of items) {
       b.u16(d.template ?? 0)
       b.u32(d.textLength ?? 0)
+      b.u32(d.id ?? NIL)
     }
   }
   /** Tags a list row with its item index (NIL clears). */

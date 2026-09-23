@@ -742,10 +742,12 @@ fn wire_roundtrip_is_exact() {
                 crate::mutation::ItemDesc {
                     template: 0,
                     text_len: 42,
+                    id: 7,
                 },
                 crate::mutation::ItemDesc {
                     template: 3,
                     text_len: 70_000,
+                    id: NIL,
                 },
             ],
         )
@@ -1677,6 +1679,7 @@ fn list_ops_validate_atomically() {
     let item = ItemDesc {
         template: 0,
         text_len: 5,
+        id: NIL,
     };
     let mut ui = Ui::new(1.0);
     let mut t = Transaction::new(1);
@@ -1734,4 +1737,48 @@ fn list_ops_validate_atomically() {
     let mut buf = wire::encode(&t);
     *buf.last_mut().unwrap() = 7;
     assert!(wire::decode(&buf).is_err());
+}
+
+/// A list removed and re-created at the same id in one batch starts
+/// empty in validation too: a splice sized for the old list rejects the
+/// whole batch (no partial apply, no panic), through the direct API and
+/// the wire; a splice sized for the new list applies.
+#[test]
+fn list_count_resets_on_id_reuse() {
+    use crate::mutation::ItemDesc;
+    let item = ItemDesc {
+        template: 0,
+        text_len: 5,
+        id: NIL,
+    };
+    let batch = |at: u32| {
+        let mut t = Transaction::new(2);
+        t.create(1, NodeKind::List)
+            .list_splice(1, 0, 0, &[item; 3])
+            .append(0, 1)
+            .remove(1)
+            .create(1, NodeKind::List)
+            .append(0, 1)
+            .list_splice(1, at, 0, &[item]);
+        t
+    };
+    for wire_path in [false, true] {
+        let mut ui = Ui::new(1.0);
+        let mut t = Transaction::new(1);
+        t.create(0, NodeKind::View).append(NIL, 0);
+        ui.apply_txn(&t).unwrap();
+        let apply = |ui: &mut Ui, t: &Transaction| {
+            if wire_path {
+                ui.apply(&wire::encode(t)).map(|_| ())
+            } else {
+                ui.apply_txn(t).map(|_| ())
+            }
+        };
+        assert!(apply(&mut ui, &batch(3)).is_err(), "wire {wire_path}");
+        assert!(ui.host.node(NodeId(1)).is_none(), "atomic: nothing applied");
+        assert_eq!(ui.seq, 1);
+        apply(&mut ui, &batch(0)).unwrap();
+        assert_eq!(ui.host.lists.get(1).unwrap().len(), 1);
+        ui.render(Size::new(100.0, 100.0));
+    }
 }

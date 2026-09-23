@@ -803,6 +803,26 @@ impl ListDriver {
         true
     }
 
+    /// Renumbers rendered rows as keyed React rows follow their items:
+    /// `to(old)` is the item's new index, or None when it was removed.
+    pub fn remap(&mut self, t: &mut Transaction<'_>, to: &dyn Fn(u32) -> Option<u32>) {
+        let old = std::mem::take(&mut self.rows);
+        for (i, id) in old {
+            match to(i) {
+                Some(j) => {
+                    if j != i {
+                        t.list_index(id, j);
+                    }
+                    self.rows.insert(j, id);
+                }
+                None => {
+                    t.remove(id);
+                    self.free.push(id);
+                }
+            }
+        }
+    }
+
     /// Renumbers rendered rows after a splice (as keyed React rows do):
     /// rows of removed items go; later rows shift by `inserted - removed`.
     pub fn spliced(&mut self, t: &mut Transaction<'_>, at: u32, removed: u32, inserted: u32) {

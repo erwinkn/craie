@@ -26,10 +26,16 @@ fn text(i: u32) -> String {
         .join(" ")
 }
 
+/// Item `i`'s description; its identity is `i` unless given.
 fn desc(i: u32) -> ItemDesc {
+    desc_as(i, i)
+}
+
+fn desc_as(i: u32, id: u32) -> ItemDesc {
     ItemDesc {
         template: 0,
         text_len: text(i).chars().count() as u32,
+        id,
     }
 }
 
@@ -89,10 +95,10 @@ fn mount_renders_the_visible_range_only() {
     let l = ui.host.lists.get(LIST).unwrap();
     // The list is as tall as all its items; rows sit at their offsets.
     let list_h = ui.layouts.data(NodeId(LIST)).rect.size.height;
-    assert!((list_h - l.extents.total()).abs() < 1e-2, "{list_h}");
+    assert!((list_h - l.total()).abs() < 1e-2, "{list_h}");
     for (&i, &id) in &d.rows {
         let y = ui.layouts.data(NodeId(id)).rect.origin.y;
-        assert!((y - l.extents.offset(i as usize)).abs() < 1e-3, "row {i}");
+        assert!((y - l.offset(i as usize)).abs() < 1e-3, "row {i}");
         assert!(l.extents.is_measured(i as usize));
         assert_eq!(
             ui.layouts.data(NodeId(id)).rect.size.height,
@@ -101,7 +107,7 @@ fn mount_renders_the_visible_range_only() {
     }
     // The scroller can reach the end of all items.
     let extent = ui.layouts.data(NodeId(SCROLLER)).scroll_extent[1];
-    assert!((extent - (l.extents.total() - VIEW.height)).abs() < 1e-2);
+    assert!((extent - (l.total() - VIEW.height)).abs() < 1e-2);
 }
 
 /// Scrolls to `y` and lets the list render its new range.
@@ -111,12 +117,39 @@ fn scroll(ui: &mut Ui, d: &mut ListDriver, y: f32) {
 }
 
 /// The oracle: once every item has rendered (and been measured), each
-/// item's offset equals its row's position in a plain column holding
-/// every row, and the list is exactly as tall. At 1x and 2x.
-#[test]
-fn virtualized_equals_plain_column() {
-    let n = 300;
-    let (mut ui, mut d) = mount(n, 100.0);
+/// row sits where it sits in a plain column holding every row with the
+/// same box style (padding, border, row gap), the list is as tall, and
+/// a sibling after it lands in the same place.
+fn oracle(list_style: taffy::Style, what: &str) {
+    let n = 200;
+    let sibling = 2;
+    let tail = |t: &mut Transaction| {
+        t.create(sibling, NodeKind::View)
+            .layout(
+                sibling,
+                &taffy::Style {
+                    size: taffy::Size {
+                        width: taffy::Dimension::length(50.0),
+                        height: taffy::Dimension::length(30.0),
+                    },
+                    ..craie_ui::host::default_style()
+                },
+            )
+            .append(SCROLLER, sibling);
+    };
+    let mut ui = Ui::new(2.0);
+    let mut d = ListDriver::new(LIST, 100, FONT);
+    let mut t = Transaction::new(1);
+    t.create(SCROLLER, NodeKind::View)
+        .layout(SCROLLER, &scroller_style())
+        .append(NIL, SCROLLER);
+    t.create(LIST, NodeKind::List)
+        .layout(LIST, &list_style)
+        .list_config(LIST, 100.0, 20.0, &[d.template()])
+        .list_splice(LIST, 0, 0, &(0..n).map(desc).collect::<Vec<_>>())
+        .append(SCROLLER, LIST);
+    tail(&mut t);
+    ui.apply_txn(&t).unwrap();
     d.settle(&mut ui, VIEW, &text, 8);
     // Scroll through the whole list: every row renders once.
     let mut y = 0.0;
@@ -128,7 +161,7 @@ fn virtualized_equals_plain_column() {
     assert_eq!(
         l.extents.measured_count(),
         n as usize,
-        "every item measured"
+        "{what}: all measured"
     );
 
     let mut plain = Ui::new(2.0);
@@ -136,30 +169,88 @@ fn virtualized_equals_plain_column() {
     t.create(SCROLLER, NodeKind::View)
         .layout(SCROLLER, &scroller_style())
         .append(NIL, SCROLLER);
-    t.create(LIST, NodeKind::View).append(SCROLLER, LIST);
+    t.create(LIST, NodeKind::View)
+        .layout(LIST, &list_style)
+        .append(SCROLLER, LIST);
     for i in 0..n {
         t.create(100 + i, NodeKind::Text)
             .text(100 + i, text(i), FONT, 0xFFFF_FFFF)
             .append(LIST, 100 + i);
     }
+    tail(&mut t);
     plain.apply_txn(&t).unwrap();
     plain.render(VIEW);
+    let content_top = ui.layouts.data(NodeId(LIST)).content[1];
     for i in 0..n {
         let want = plain.layouts.data(NodeId(100 + i)).rect.origin.y;
-        let got = l.extents.offset(i as usize);
-        assert!((got - want).abs() < 1e-2, "item {i}: {got} vs {want}");
+        let got = content_top + l.offset(i as usize);
+        assert!(
+            (got - want).abs() < 1e-2,
+            "{what}: item {i}: {got} vs {want}"
+        );
     }
-    let want = plain.layouts.data(NodeId(LIST)).rect.size.height;
-    assert!((ui.layouts.data(NodeId(LIST)).rect.size.height - want).abs() < 1e-2);
+    let a = ui.layouts.data(NodeId(LIST)).rect;
+    let b = plain.layouts.data(NodeId(LIST)).rect;
+    assert!(
+        (a.size.height - b.size.height).abs() < 1e-2,
+        "{what}: height {a:?} vs {b:?}"
+    );
+    let a = ui.layouts.data(NodeId(sibling)).rect.origin;
+    let b = plain.layouts.data(NodeId(sibling)).rect.origin;
+    assert!((a.y - b.y).abs() < 1e-2, "{what}: sibling {a:?} vs {b:?}");
     // Rendered rows are laid out exactly like their plain twins.
     for (&i, &id) in &d.rows {
         let a = ui.layouts.data(NodeId(id)).rect;
         let b = plain.layouts.data(NodeId(100 + i)).rect;
         assert!(
-            (a.origin.y - b.origin.y).abs() < 1e-2 && a.size == b.size,
-            "row {i}"
+            (a.origin.y - b.origin.y).abs() < 1e-2
+                && (a.origin.x - b.origin.x).abs() < 1e-2
+                && a.size == b.size,
+            "{what}: row {i}: {a:?} vs {b:?}"
         );
     }
+}
+
+#[test]
+fn virtualized_equals_plain_column() {
+    use taffy::{LengthPercentage as LP, Rect};
+    let base = craie_ui::host::default_style();
+    oracle(base.clone(), "plain");
+    let padded = taffy::Style {
+        padding: Rect {
+            left: LP::length(20.0),
+            right: LP::length(20.0),
+            top: LP::length(12.0),
+            bottom: LP::length(8.0),
+        },
+        border: Rect {
+            left: LP::length(3.0),
+            right: LP::length(3.0),
+            top: LP::length(1.0),
+            bottom: LP::length(1.0),
+        },
+        ..base.clone()
+    };
+    oracle(padded.clone(), "padded");
+    let gapped = taffy::Style {
+        gap: taffy::Size {
+            width: LP::length(0.0),
+            height: LP::length(10.0),
+        },
+        ..base.clone()
+    };
+    oracle(gapped.clone(), "gap");
+    oracle(
+        taffy::Style {
+            gap: gapped.gap,
+            max_size: taffy::Size {
+                width: taffy::LengthPercentageAuto::length(260.0),
+                height: taffy::LengthPercentageAuto::auto(),
+            },
+            ..padded
+        },
+        "padded, gap, max width",
+    );
 }
 
 /// Scrolling within the rendered range re-renders nothing and lays out
@@ -183,7 +274,7 @@ fn scrolling_reports_ranges_with_hysteresis() {
     d.settle(&mut ui, VIEW, &text, 8);
     assert_ne!(d.rows.keys().next().copied(), first);
     let l = ui.host.lists.get(LIST).unwrap();
-    let top = l.extents.index_at(scroll_y(&ui)) as u32;
+    let top = l.item_at(scroll_y(&ui)) as u32;
     assert!(d.rows.contains_key(&top), "the top visible item renders");
     assert!(d.rows.len() < 80);
 }
@@ -191,7 +282,7 @@ fn scrolling_reports_ranges_with_hysteresis() {
 /// Screen y of item `i` from the list's extents (rendered or not).
 fn item_y(ui: &Ui, i: u32) -> f32 {
     let l = ui.host.lists.get(LIST).unwrap();
-    ui.layouts.data(NodeId(LIST)).rect.origin.y + l.extents.offset(i as usize) - scroll_y(ui)
+    ui.layouts.data(NodeId(LIST)).rect.origin.y + l.offset(i as usize) - scroll_y(ui)
 }
 
 /// Keep-visible: when rows above the viewport measure differently from
@@ -247,7 +338,7 @@ fn keep_visible_holds_the_top_item() {
             .index_at(scroll_y(&ui)) as u32;
         let before = row_y(&ui, &d, top);
         let mut t = Transaction::new(3000);
-        let added: Vec<ItemDesc> = (0..50).map(|i| desc(i + 7)).collect();
+        let added: Vec<ItemDesc> = (0..50).map(|i| desc_as(i + 7, 1_000_000 + i)).collect();
         t.list_splice(LIST, 10, 0, &added);
         d.spliced(&mut t, 10, 0, 50);
         ui.apply_txn(&t).unwrap();
@@ -360,6 +451,9 @@ fn list_incremental_equals_rebuild() {
             ui.scale = scale;
             // Item texts, edited in place by the steps.
             let mut texts: Vec<String> = (0..400).map(text).collect();
+            // Item identities, parallel to `texts`.
+            let mut ids: Vec<u32> = (0..400).collect();
+            let mut next_id = 1_000_000;
             let mut now = 0.0;
             d.settle(&mut ui, VIEW, &|i| texts[i as usize].clone(), 8);
             for step in 0..40u64 {
@@ -374,16 +468,22 @@ fn list_incremental_equals_rebuild() {
                         let add: Vec<String> = (0..rng.below(5))
                             .map(|k| text(step as u32 * 13 + k))
                             .collect();
+                        let new_ids: Vec<u32> =
+                            (0..add.len() as u32).map(|k| next_id + k).collect();
+                        next_id += add.len() as u32;
                         let descs: Vec<ItemDesc> = add
                             .iter()
-                            .map(|s| ItemDesc {
+                            .zip(&new_ids)
+                            .map(|(s, &id)| ItemDesc {
                                 template: 0,
                                 text_len: s.chars().count() as u32,
+                                id,
                             })
                             .collect();
                         t.list_splice(LIST, at, rm, &descs);
                         d.spliced(&mut t, at, rm, add.len() as u32);
                         texts.splice(at as usize..(at + rm) as usize, add);
+                        ids.splice(at as usize..(at + rm) as usize, new_ids);
                     }
                     1 if !d.rows.is_empty() => {
                         // Edit a rendered row's text (and its description).
@@ -398,6 +498,7 @@ fn list_incremental_equals_rebuild() {
                             &[ItemDesc {
                                 template: 0,
                                 text_len: s.chars().count() as u32,
+                                id: ids[i as usize],
                             }],
                         );
                         texts[i as usize] = s;
@@ -456,4 +557,291 @@ fn rows_report_their_place_in_the_list() {
         let index = pos as u32 - 1;
         assert_eq!(*k, craie_ui::a11y::aid(NodeId(d.rows[&index])));
     }
+}
+
+/// The range follows paint and hit testing through transforms on the
+/// list and on an ancestor between the list and its scroller: every
+/// point of the viewport the list covers hits a rendered row.
+#[test]
+fn transforms_pick_the_visible_rows() {
+    use craie_core::geom::Affine;
+    const WRAP: u32 = 2;
+    // (case, list transform, wrapper transform, scroll offset). Scales
+    // apply about the box center; each scroll shows part of the list.
+    let cases: [(&str, Option<Affine>, Option<Affine>, f32); 5] = [
+        (
+            "list up 10k",
+            Some(Affine::translate(0.0, -10_000.0)),
+            None,
+            2_000.0,
+        ),
+        (
+            "wrapper up 8k",
+            None,
+            Some(Affine::translate(0.0, -8_000.0)),
+            2_000.0,
+        ),
+        (
+            "list at half scale",
+            Some(Affine::scale(0.5, 0.5)),
+            None,
+            45_000.0,
+        ),
+        (
+            "wrapper at double scale",
+            None,
+            Some(Affine::scale(2.0, 2.0)),
+            2_000.0,
+        ),
+        (
+            "both",
+            Some(Affine::translate(0.0, -3_000.0)),
+            Some(Affine::scale(1.5, 1.5)),
+            2_000.0,
+        ),
+    ];
+    for (what, on_list, on_wrap, at) in cases {
+        let mut ui = Ui::new(2.0);
+        let mut d = ListDriver::new(LIST, 100, FONT);
+        let mut t = Transaction::new(1);
+        t.create(SCROLLER, NodeKind::View)
+            .layout(SCROLLER, &scroller_style())
+            .append(NIL, SCROLLER);
+        t.create(WRAP, NodeKind::View).append(SCROLLER, WRAP);
+        t.create(LIST, NodeKind::List)
+            .list_config(LIST, 100.0, 20.0, &[d.template()])
+            .list_splice(LIST, 0, 0, &(0..3_000).map(desc).collect::<Vec<_>>())
+            .append(WRAP, LIST);
+        if let Some(m) = on_list {
+            t.transform(LIST, m);
+        }
+        if let Some(m) = on_wrap {
+            t.transform(WRAP, m);
+        }
+        ui.apply_txn(&t).unwrap();
+        d.settle(&mut ui, VIEW, &text, 8);
+        scroll(&mut ui, &mut d, at);
+        let mut hits = 0;
+        for k in 0..20 {
+            let (x, y) = (
+                VIEW.width * 0.5,
+                5.0 + k as f32 * (VIEW.height - 10.0) / 19.0,
+            );
+            let Some(hit) = ui.hit_test(x, y) else {
+                continue;
+            };
+            // The list's own box hit: the list covers the point, and no
+            // row does.
+            if hit == NodeId(LIST) {
+                panic!("{what}: ({x}, {y}) shows the list with no row rendered");
+            }
+            if ui.host.parent(hit) == NodeId(LIST) {
+                hits += 1;
+            }
+        }
+        assert!(hits >= 10, "{what}: only {hits} of 20 points hit rows");
+        assert!(d.rows.len() < 120, "{what}: {} rows", d.rows.len());
+    }
+}
+
+/// A new fallback estimate re-estimates unmeasured items (measurements
+/// stay) and matches a clean rebuild.
+#[test]
+fn fallback_change_reestimates() {
+    let (mut ui, mut d) = mount(3_000, 100.0);
+    // Template 5 does not exist: every item takes the fallback.
+    let mut t = Transaction::new(2);
+    t.list_splice(
+        LIST,
+        0,
+        3_000,
+        &(0..3_000)
+            .map(|i| ItemDesc {
+                template: 5,
+                ..desc(i)
+            })
+            .collect::<Vec<_>>(),
+    );
+    ui.apply_txn(&t).unwrap();
+    d.settle(&mut ui, VIEW, &text, 8);
+    let measured = ui.host.lists.get(LIST).unwrap().extents.measured_count();
+    assert!(measured > 0);
+    let mut t = Transaction::new(3);
+    t.list_config(LIST, 100.0, 88.0, &[d.template()]);
+    ui.apply_txn(&t).unwrap();
+    d.settle(&mut ui, VIEW, &text, 8);
+    let l = ui.host.lists.get(LIST).unwrap();
+    for i in 0..3_000 {
+        if !l.extents.is_measured(i) {
+            assert_eq!(l.extents.size(i), 88.0, "item {i}");
+        }
+    }
+    assert_eq!(l.extents.measured_count(), measured, "measurements stay");
+    ui.set_time(10.0);
+    ui.settle();
+    ui.render(VIEW);
+    let clean = craie_harness::rebuild(&ui, VIEW);
+    craie_harness::compare(&ui, &clean, VIEW, 0.01).unwrap_or_else(|m| panic!("{}", m.0));
+}
+
+/// Rows layout hides (an index past the end, a duplicate index) are not
+/// published to assistive technology, including right after the item
+/// count shrinks and before React answers.
+#[test]
+fn hidden_rows_stay_out_of_semantics() {
+    let (mut ui, mut d) = mount(50, 100.0);
+    d.settle(&mut ui, VIEW, &text, 8);
+    let published = |ui: &Ui| -> Vec<(accesskit::NodeId, usize)> {
+        let tree = ui.a11y_tree(VIEW);
+        let (_, list) = tree
+            .nodes
+            .iter()
+            .find(|(id, _)| *id == craie_ui::a11y::aid(NodeId(LIST)))
+            .unwrap()
+            .clone();
+        list.children()
+            .iter()
+            .map(|k| {
+                let (_, n) = tree.nodes.iter().find(|(id, _)| id == k).unwrap();
+                (*k, n.position_in_set().unwrap())
+            })
+            .collect()
+    };
+    let rows = d.rows.len();
+    assert_eq!(published(&ui).len(), rows);
+    // Shrink to 3 items; the rows past the end stay until React answers.
+    let mut t = Transaction::new(40);
+    t.list_splice(LIST, 3, 47, &[]);
+    ui.apply_txn(&t).unwrap();
+    ui.render(VIEW);
+    let p = published(&ui);
+    assert_eq!(p.len(), 3, "only rows 0..3 remain published");
+    assert!(p.iter().all(|&(_, pos)| pos <= 3));
+    // A duplicate index: only the first row with it is published.
+    let (a, b) = (d.rows[&0], d.rows[&1]);
+    let mut t = Transaction::new(41);
+    t.list_index(b, 0);
+    ui.apply_txn(&t).unwrap();
+    ui.render(VIEW);
+    let p = published(&ui);
+    assert_eq!(p.iter().filter(|&&(_, pos)| pos == 1).count(), 1);
+    assert!(p.iter().any(|&(k, _)| k == craie_ui::a11y::aid(NodeId(a))));
+    assert!(!p.iter().any(|&(k, _)| k == craie_ui::a11y::aid(NodeId(b))));
+    // A row with no index is not published either.
+    let mut t = Transaction::new(42);
+    t.list_index(b, NIL);
+    ui.apply_txn(&t).unwrap();
+    ui.render(VIEW);
+    assert!(
+        !published(&ui)
+            .iter()
+            .any(|&(k, _)| k == craie_ui::a11y::aid(NodeId(b)))
+    );
+}
+
+/// Reorders across the viewport, sent as one replacement splice (as the
+/// bridge's prefix/suffix diff does): the anchor item keeps its place,
+/// its row node, and its measurement; moved rows keep theirs.
+#[test]
+fn reorders_keep_the_anchor_item() {
+    let (mut ui, mut d) = mount(2_000, 100.0);
+    d.settle(&mut ui, VIEW, &text, 8);
+    scroll(&mut ui, &mut d, 20_000.0);
+    let mut order: Vec<u32> = (0..2_000).collect();
+    for (step, span) in [(0u64, 5u32), (1, 12)] {
+        let l = ui.host.lists.get(LIST).unwrap();
+        let anchor = l.item_at(scroll_y(&ui) - ui.layouts.data(NodeId(LIST)).content[1]) as u32;
+        let anchor_id = order[anchor as usize];
+        let before = row_y(&ui, &d, anchor);
+        let node = d.rows[&anchor];
+        // Swap (step 0) or reverse (step 1) items around the anchor.
+        let (lo, hi) = (anchor - span, anchor + span);
+        let mut moved: Vec<u32> = order[lo as usize..=hi as usize].to_vec();
+        if step == 0 {
+            let last = moved.len() - 1;
+            moved.swap(0, last);
+        } else {
+            moved.reverse();
+        }
+        // Measured items by identity, before the move.
+        let was_measured: Vec<(u32, bool)> = (lo..=hi)
+            .map(|i| (order[i as usize], l.extents.is_measured(i as usize)))
+            .collect();
+        let mut t = Transaction::new(500 + step);
+        t.list_splice(
+            LIST,
+            lo,
+            hi - lo + 1,
+            &moved.iter().map(|&id| desc(id)).collect::<Vec<_>>(),
+        );
+        let old = order.clone();
+        order.splice(lo as usize..=hi as usize, moved.iter().copied());
+        let new_pos = |id: u32| order.iter().position(|&x| x == id).unwrap() as u32;
+        d.remap(&mut t, &|i| Some(new_pos(old[i as usize])));
+        ui.apply_txn(&t).unwrap();
+        let texts = order.clone();
+        d.settle(&mut ui, VIEW, &move |i| text(texts[i as usize]), 8);
+        let now = new_pos(anchor_id);
+        let after = row_y(&ui, &d, now);
+        assert!(
+            (after - before).abs() < 0.01,
+            "step {step}: {before} -> {after}"
+        );
+        assert_eq!(d.rows[&now], node, "step {step}: the same row node");
+        let l = ui.host.lists.get(LIST).unwrap();
+        for (id, m) in was_measured {
+            if m {
+                let i = new_pos(id) as usize;
+                assert!(
+                    l.extents.is_measured(i),
+                    "step {step}: item {id} keeps its measurement"
+                );
+            }
+        }
+    }
+}
+
+/// A focused row survives items inserted above it: the row node, its
+/// generation, and focus stay; the next range event names its new index
+/// and its identity.
+#[test]
+fn focus_survives_splices_above() {
+    let (mut ui, mut d) = mount(500, 100.0);
+    d.settle(&mut ui, VIEW, &text, 8);
+    let id = d.rows[&4];
+    let generation = ui.host.node(NodeId(id)).unwrap().generation;
+    let mut t = Transaction::new(50);
+    t.interaction(id, 0, true);
+    ui.apply_txn(&t).unwrap();
+    ui.dispatch(&craie_ui::events::Event::KeyDown(
+        craie_ui::events::KeyInput {
+            key: craie_ui::events::Key::Tab,
+            text: None,
+            char: None,
+            mods: Default::default(),
+        },
+    ));
+    assert_eq!(ui.focused(), Some(NodeId(id)));
+    ui.render(VIEW);
+    ui.take_events();
+    let mut t = Transaction::new(51);
+    t.list_splice(
+        LIST,
+        0,
+        0,
+        &(0..3).map(|i| desc_as(i, 900_000 + i)).collect::<Vec<_>>(),
+    );
+    d.spliced(&mut t, 0, 0, 3);
+    ui.apply_txn(&t).unwrap();
+    ui.render(VIEW);
+    let range = ui
+        .take_events()
+        .into_iter()
+        .find(|e| e.kind == craie_ui::events::out_kind::LIST_RANGE)
+        .expect("a splice re-reports the range");
+    assert_eq!(range.x, 7.0, "focused item's new index");
+    assert_eq!(range.key, 4, "focused item's identity");
+    assert_eq!(range.y, ui.host.lists.get(LIST).unwrap().revision as f32);
+    assert_eq!(ui.focused(), Some(NodeId(id)));
+    assert_eq!(ui.host.node(NodeId(id)).unwrap().generation, generation);
 }

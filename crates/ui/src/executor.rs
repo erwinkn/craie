@@ -149,6 +149,9 @@ pub fn validate(host: &Host, txn: &Transaction<'_>) -> Result<(), WireError> {
                 }
                 o.kinds.insert(*id, Some(*kind));
                 o.parents.insert(*id, (NodeId::DETACHED.0, step));
+                // A node created here holds no items, whatever an earlier
+                // occupant of the id held.
+                counts.insert(*id, 0);
             }
             Mutation::Place {
                 parent,
@@ -189,6 +192,7 @@ pub fn validate(host: &Host, txn: &Transaction<'_>) -> Result<(), WireError> {
                 o.kinds.insert(*id, None);
                 o.parents.insert(*id, (NodeId::DETACHED.0, step));
                 o.removed.insert(*id, step);
+                counts.insert(*id, 0);
             }
             Mutation::Layout { id, style } => {
                 need_live(&o, *id, "layout on an absent node")?;

@@ -53,14 +53,15 @@ impl DirtyQueue {
         &self.items
     }
 
-    /// Empties the queue into `out` (cleared first), keeping both
-    /// allocations.
+    /// Empties the queue into `out` (cleared first). Copies: the queue
+    /// and `out` each keep their own buffer, so each grows once to its
+    /// own peak (swapping would trade buffers and grow them again).
     pub fn drain_into(&mut self, out: &mut Vec<u32>) {
         out.clear();
+        out.extend_from_slice(&self.items);
         for &id in &self.items {
             self.marks[(id / 64) as usize] &= !(1u64 << (id % 64));
         }
-        std::mem::swap(out, &mut self.items);
         self.items.clear();
     }
 

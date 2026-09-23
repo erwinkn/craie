@@ -133,56 +133,69 @@ const WGPU_PASS: usize = 23;
 const WGPU_WRITE: usize = 8;
 const WGPU_WRITE_SUBMIT: usize = 5;
 
-/// The whole frame on a real device: UI render, renderer prepare
-/// (collect + upload), and draw (plan + encode). Separate budgets per
-/// phase: Craie phases (render, collect, plan) allocate nothing once
-/// warm, changed or not; wgpu phases (upload, encode) cost a fixed
-/// amount per write and per pass, the same every frame.
-#[test]
-fn whole_frame_budgets() {
-    let Some(gpu) = craie_render::Gpu::try_headless() else {
-        eprintln!("no GPU adapter: skipped");
-        return;
-    };
-    let format = wgpu::TextureFormat::Rgba8UnormSrgb;
-    let (w, h) = (800u32, 600u32);
-    let target = gpu.device.create_texture(&wgpu::TextureDescriptor {
-        label: None,
-        size: wgpu::Extent3d {
-            width: w,
-            height: h,
-            depth_or_array_layers: 1,
-        },
-        mip_level_count: 1,
-        sample_count: 1,
-        dimension: wgpu::TextureDimension::D2,
-        format,
-        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-        view_formats: &[],
-    });
-    let view = target.create_view(&Default::default());
-    let mut renderer = craie_render::Renderer::new(&gpu, format);
-    let mut ui = ui();
-    #[derive(Debug, PartialEq)]
-    struct Frame {
-        render: usize,
-        collect: usize,
-        upload: usize,
-        plan: usize,
-        encode: usize,
-        passes: u32,
+/// Allocations per phase of one frame.
+#[derive(Debug, PartialEq)]
+struct Frame {
+    render: usize,
+    collect: usize,
+    upload: usize,
+    plan: usize,
+    encode: usize,
+    passes: u32,
+}
+
+/// A real device, an offscreen target, and a renderer: runs whole frames
+/// and counts allocations per phase.
+struct GpuFrames {
+    gpu: craie_render::Gpu,
+    view: wgpu::TextureView,
+    renderer: craie_render::Renderer,
+    size: (u32, u32),
+}
+
+impl GpuFrames {
+    fn new() -> Option<GpuFrames> {
+        let gpu = craie_render::Gpu::try_headless()?;
+        let format = wgpu::TextureFormat::Rgba8UnormSrgb;
+        let (w, h) = (800u32, 600u32);
+        let target = gpu.device.create_texture(&wgpu::TextureDescriptor {
+            label: None,
+            size: wgpu::Extent3d {
+                width: w,
+                height: h,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        });
+        let view = target.create_view(&Default::default());
+        let renderer = craie_render::Renderer::new(&gpu, format);
+        Some(GpuFrames {
+            gpu,
+            view,
+            renderer,
+            size: (w, h),
+        })
     }
-    let mut frame = |ui: &mut Ui, t: Option<&Transaction>| {
+
+    /// One frame: `change` (a transaction, a scroll) and UI render, then
+    /// renderer collect, upload, plan, and encode.
+    fn frame(&mut self, ui: &mut Ui, change: impl FnOnce(&mut Ui)) -> Frame {
+        let (w, h) = self.size;
         let render = allocs(|| {
-            if let Some(t) = t {
-                ui.apply_txn(t).unwrap();
-            }
+            change(ui);
             ui.render(VIEW);
         });
-        let collect = allocs(|| renderer.collect(ui.scene_mut()));
-        let upload = allocs(|| renderer.upload(&gpu, ui.scene_mut()));
-        let plan = allocs(|| renderer.plan_frame(&gpu, w, h, ui.scene_mut()));
-        let encode = allocs(|| renderer.encode_frame(&gpu, &view, ui.scene()));
+        let r = &mut self.renderer;
+        let gpu = &self.gpu;
+        let collect = allocs(|| r.collect(ui.scene_mut()));
+        let upload = allocs(|| r.upload(gpu, ui.scene_mut()));
+        let plan = allocs(|| r.plan_frame(gpu, w, h, ui.scene_mut()));
+        let encode = allocs(|| r.encode_frame(gpu, &self.view, ui.scene()));
         // Retire the frame outside the measurement.
         gpu.device
             .poll(wgpu::PollType::Wait {
@@ -196,10 +209,34 @@ fn whole_frame_budgets() {
             upload,
             plan,
             encode,
-            passes: renderer.stats.passes,
+            passes: r.stats.passes,
         }
+    }
+}
+
+fn budget(passes: u32) -> usize {
+    WGPU_FRAME + WGPU_PASS * (passes as usize - 1)
+}
+
+/// The whole frame on a real device: UI render, renderer prepare
+/// (collect + upload), and draw (plan + encode). Separate budgets per
+/// phase: Craie phases (render, collect, plan) allocate nothing once
+/// warm, changed or not; wgpu phases (upload, encode) cost a fixed
+/// amount per write and per pass, the same every frame.
+#[test]
+fn whole_frame_budgets() {
+    let Some(mut g) = GpuFrames::new() else {
+        eprintln!("no GPU adapter: skipped");
+        return;
     };
-    let budget = |passes: u32| WGPU_FRAME + WGPU_PASS * (passes as usize - 1);
+    let mut ui = ui();
+    let mut frame = |ui: &mut Ui, t: Option<&Transaction>| {
+        g.frame(ui, |ui| {
+            if let Some(t) = t {
+                ui.apply_txn(t).unwrap();
+            }
+        })
+    };
 
     // Plain and with an opacity group (a layer: 4 passes).
     for opacity in [1.0, 0.5] {
@@ -244,9 +281,12 @@ fn whole_frame_budgets() {
     }
 }
 
-/// A virtualized list: unchanged frames and scrolls inside the rendered
-/// range allocate nothing (list sync, anchors, and range checks run on
-/// kept buffers).
+/// A virtualized list over the whole frame on a real device: warm
+/// scrolls inside the rendered range, idle frames, and the settle frame
+/// that snaps the content at rest. Craie phases allocate nothing; wgpu's
+/// upload and encode stay within their budgets. Frames that change the
+/// range (rows mount) and the mount itself are excluded: they create
+/// nodes. Without a GPU the UI phase is still measured.
 #[test]
 fn list_frames_do_not_allocate() {
     use craie_harness::ListDriver;
@@ -267,6 +307,7 @@ fn list_frames_do_not_allocate() {
         .map(|i| ItemDesc {
             template: 0,
             text_len: text(i).len() as u32,
+            id: i,
         })
         .collect();
     t.create(1, NodeKind::List)
@@ -275,20 +316,68 @@ fn list_frames_do_not_allocate() {
         .append(0, 1);
     ui.apply_txn(&t).unwrap();
     d.settle(&mut ui, VIEW, &text, 8);
-    ui.render(VIEW);
-    let n = allocs(|| {
+    let Some(mut g) = GpuFrames::new() else {
+        eprintln!("no GPU adapter: UI phase only");
         ui.render(VIEW);
-    });
-    assert_eq!(n, 0, "unchanged frame with a list");
-    // Warm the scroll path once, then scroll inside the overscan.
-    ui.scroll_to(NodeId(0), 0.0, 10.0);
-    ui.render(VIEW);
-    for k in 2..6 {
-        let n = allocs(|| {
+        assert_eq!(allocs(|| drop(ui.render(VIEW))), 0, "unchanged frame");
+        for k in 2..6 {
+            let n = allocs(|| {
+                ui.scroll_to(NodeId(0), 0.0, 10.0 * k as f32);
+                ui.render(VIEW);
+            });
+            assert_eq!(n, 0, "scroll {k}");
+        }
+        return;
+    };
+    // Warm: the first frames upload everything and grow buffers; one pass
+    // over the scroll positions builds the row chunks that come near the
+    // viewport (a first build uploads glyphs: content, not scroll cost).
+    g.frame(&mut ui, |_| {});
+    for k in 1..8 {
+        g.frame(&mut ui, |ui| {
             ui.scroll_to(NodeId(0), 0.0, 10.0 * k as f32);
-            ui.render(VIEW);
         });
-        assert_eq!(n, 0, "scroll {k} inside the rendered range");
+        g.frame(&mut ui, |_| {});
     }
-    assert!(ui.take_events().is_empty(), "no range change");
+    g.frame(&mut ui, |ui| {
+        ui.scroll_to(NodeId(0), 0.0, 0.0);
+    });
+    for k in 2..8 {
+        let f = g.frame(&mut ui, |ui| {
+            ui.scroll_to(NodeId(0), 0.0, 10.0 * k as f32);
+        });
+        assert_eq!(
+            (f.render, f.collect, f.plan),
+            (0, 0, 0),
+            "scroll {k}: {f:?}"
+        );
+        assert!(f.upload <= WGPU_WRITE, "scroll {k}: {f:?}");
+        assert!(
+            f.encode <= budget(f.passes) + WGPU_WRITE_SUBMIT,
+            "scroll {k}: {f:?}"
+        );
+        let idle = g.frame(&mut ui, |_| {});
+        assert_eq!(
+            (idle.render, idle.collect, idle.upload, idle.plan),
+            (0, 0, 0, 0),
+            "idle after scroll {k}: {idle:?}"
+        );
+        assert!(idle.encode <= budget(idle.passes), "{idle:?}");
+    }
+    assert!(
+        !ui.take_events()
+            .iter()
+            .any(|e| e.kind == craie_ui::events::out_kind::LIST_RANGE),
+        "the measured frames stayed inside the rendered range"
+    );
+    // The settle frame: the content snaps at rest (one world row).
+    ui.set_time(1.0);
+    assert!(ui.settle());
+    let f = g.frame(&mut ui, |_| {});
+    assert_eq!((f.render, f.collect, f.plan), (0, 0, 0), "settle: {f:?}");
+    assert!(f.upload <= WGPU_WRITE, "settle: {f:?}");
+    assert!(
+        f.encode <= budget(f.passes) + WGPU_WRITE_SUBMIT,
+        "settle: {f:?}"
+    );
 }
