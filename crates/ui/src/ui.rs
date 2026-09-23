@@ -24,11 +24,10 @@ use crate::host::{Host, NodeId, Revs};
 use crate::input::Inputs;
 use crate::layout::{self, Layouts, MeasuredText};
 use crate::mutation::{Command, NodeKind, Transaction};
-use crate::scene::{PaintSlot, Scene};
+use crate::scene::Scene;
 use crate::scene_sync::SceneSync;
 use crate::surface::{self, Quad, SurfacePainter};
 use crate::text::TextEngine;
-use crate::text::parley::Layout as ParleyLayout;
 use crate::wire::{self, WireError};
 
 pub struct Ui {
@@ -508,8 +507,8 @@ impl Ui {
         &mut self.scene
     }
 
-    /// Retained text layout for a node (valid after `render`).
-    pub fn text_layout(&self, id: NodeId) -> Option<&ParleyLayout<PaintSlot>> {
+    /// Retained paragraph of a text node (valid after `render`).
+    pub fn text_layout(&self, id: NodeId) -> Option<&crate::text::paragraph::Paragraph> {
         self.texts
             .get(id.index())
             .and_then(|m| m.as_ref())

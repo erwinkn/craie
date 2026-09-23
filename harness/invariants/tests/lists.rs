@@ -87,13 +87,17 @@ fn mount_renders_the_visible_range_only() {
     let (mut ui, mut d) = mount(10_000, 200.0);
     let commits = d.settle(&mut ui, VIEW, &text, 8);
     assert!(commits <= 3, "range converges ({commits} commits)");
-    // Visible 400 pt plus 200 pt overscan below: a few dozen rows.
-    let rendered = d.rows.len();
-    assert!(
-        (10..80).contains(&rendered),
-        "rendered {rendered} of 10000 rows"
+    // The rendered rows are the first items, and they cover the view plus
+    // the overscan below it (400 + 200 pt); far fewer than all.
+    let rendered = d.rows.len() as u32;
+    assert!(rendered < 80, "rendered {rendered} of 10000 rows");
+    assert_eq!(
+        d.rows.keys().copied().collect::<Vec<_>>(),
+        (0..rendered).collect::<Vec<_>>()
     );
     let l = ui.host.lists.get(LIST).unwrap();
+    let covered = l.offset(rendered as usize);
+    assert!(covered >= VIEW.height + 200.0, "rows cover {covered} pt");
     // The list is as tall as all its items; rows sit at their offsets.
     let list_h = ui.layouts.data(NodeId(LIST)).rect.size.height;
     assert!((list_h - l.total()).abs() < 1e-2, "{list_h}");
@@ -143,15 +147,16 @@ fn gamma(k: usize) -> f64 {
 ///
 /// Visual limit: the list's bound stays under 1/8 device pixel at 2x
 /// (it does for offsets up to about 2^18 pt; past that f32 layout itself
-/// cannot place rows more finely). With `exact` inputs (every partial sum
-/// representable) the two paths must also agree within 0.01 pt
-/// directly; with fractional inputs only the bounds hold, and the plain
-/// column is the less accurate path.
+/// cannot place rows more finely). When the inputs make every partial
+/// sum representable (derived below, not assumed) the two paths must
+/// also agree within 0.01 pt directly; otherwise only the bounds hold,
+/// and the plain column is the less accurate path.
 fn oracle(list_style: taffy::Style, what: &str) {
     oracle_with(list_style, what, true)
 }
 
-fn oracle_with(list_style: taffy::Style, what: &str, exact: bool) {
+/// `expect_exact` false: the case must exercise inexact sums.
+fn oracle_with(list_style: taffy::Style, what: &str, expect_exact: bool) {
     let n = 200;
     let sibling = 2;
     let tail = |t: &mut Transaction| {
@@ -212,9 +217,55 @@ fn oracle_with(list_style: taffy::Style, what: &str, exact: bool) {
     plain.apply_txn(&t).unwrap();
     plain.render(VIEW);
     let content_top = ui.layouts.data(NodeId(LIST)).content[1];
-    let gap = l.gap as f64;
     let within =
         |got: f32, reference: f64, bound: f64| (got as f64 - reference).abs() <= bound + 1e-9;
+    // The reference gap, from the style and exact sums: a length; a
+    // percentage of the definite content height; or, with none, of the
+    // rows' sum (flex sizes without the gap, then places with it). Each
+    // path's gap carries its own error: the list's comes from an f64 sum
+    // rounded once (2u), the plain column's from its f32 row sum
+    // (gamma(n + 1)) when the basis is that sum.
+    use taffy::util::MaybeResolve;
+    let rows_sum: f64 = (0..n)
+        .map(|i| plain.layouts.data(NodeId(100 + i)).rect.size.height as f64)
+        .sum();
+    let g0 = list_style
+        .gap
+        .height
+        .maybe_resolve(Some(0.0), |_, _| 0.0)
+        .unwrap_or(0.0) as f64;
+    let pct = list_style
+        .gap
+        .height
+        .maybe_resolve(Some(1.0), |_, _| 0.0)
+        .unwrap_or(0.0) as f64
+        - g0;
+    let inner = list_style
+        .size
+        .height
+        .maybe_resolve(Some(VIEW.height), |_, _| 0.0)
+        .map(|h| {
+            use taffy::util::ResolveOrZero;
+            let pb = list_style
+                .padding
+                .resolve_or_zero(Some(VIEW.width), |_, _| 0.0)
+                + list_style
+                    .border
+                    .resolve_or_zero(Some(VIEW.width), |_, _| 0.0);
+            (h - pb.top - pb.bottom) as f64
+        });
+    let deferred = pct != 0.0 && inner.is_none();
+    let gap = if pct != 0.0 {
+        pct * inner.unwrap_or(rows_sum)
+    } else {
+        g0
+    };
+    let gap_err_ours = 2.0 * U * gap;
+    let gap_err_plain = if deferred {
+        gamma(n as usize + 1) * gap
+    } else {
+        2.0 * U * gap
+    };
     // The reference offset of every item, from the plain rows' heights.
     let mut reference = Vec::with_capacity(n as usize);
     let mut acc = content_top as f64;
@@ -224,21 +275,32 @@ fn oracle_with(list_style: taffy::Style, what: &str, exact: bool) {
         reference.push(acc);
         acc += h as f64 + gap;
     }
+    // Exact inputs: every term a multiple of 1/64 and every sum below
+    // 2^17, so every f32 partial sum is exact in both paths.
+    let on_grid = |v: f64| (v * 64.0).fract() == 0.0;
+    let exact = on_grid(content_top as f64)
+        && on_grid(gap)
+        && (0..n).all(|i| on_grid(plain.layouts.data(NodeId(100 + i)).rect.size.height as f64))
+        && acc < (1 << 17) as f64;
+    if !expect_exact {
+        assert!(!exact, "{what}: meant to exercise inexact sums");
+    }
     for i in 0..n as usize {
         let (r, ours) = (reference[i], content_top + l.offset(i));
         let plain_y = plain.layouts.data(NodeId(100 + i as u32)).rect.origin.y;
+        let (b_ours, b_plain) = (
+            gamma(4) * r + i as f64 * gap_err_ours,
+            gamma(3 * i + 3) * r + i as f64 * gap_err_plain,
+        );
         assert!(
-            within(ours, r, gamma(4) * r),
+            within(ours, r, b_ours),
             "{what}: item {i}: {ours} vs reference {r}"
         );
         assert!(
-            within(plain_y, r, gamma(3 * i + 3) * r),
+            within(plain_y, r, b_plain),
             "{what}: plain item {i}: {plain_y} vs reference {r}"
         );
-        assert!(
-            gamma(4) * r * 2.0 < 0.125,
-            "{what}: visual limit at item {i}"
-        );
+        assert!(b_ours * 2.0 < 0.125, "{what}: visual limit at item {i}");
         if exact {
             assert!(
                 (ours - plain_y).abs() < 1e-2,
@@ -252,7 +314,7 @@ fn oracle_with(list_style: taffy::Style, what: &str, exact: bool) {
     // the box (a percentage gap without a definite height sizes nothing,
     // as flex does). Every term is nonnegative, so each path's sum is
     // within gamma(additions) of the sum of the terms' magnitudes.
-    use taffy::util::{MaybeResolve, ResolveOrZero};
+    use taffy::util::ResolveOrZero;
     let pw = Some(VIEW.width);
     let pad = list_style.padding.resolve_or_zero(pw, |_, _| 0.0);
     let border = list_style.border.resolve_or_zero(pw, |_, _| 0.0);
@@ -260,9 +322,7 @@ fn oracle_with(list_style: taffy::Style, what: &str, exact: bool) {
         (pad.top + border.top) as f64,
         (pad.bottom + border.bottom) as f64,
     );
-    let rows: f64 = (0..n)
-        .map(|i| plain.layouts.data(NodeId(100 + i)).rect.size.height as f64)
-        .sum();
+    let rows = rows_sum;
     let sizing_gap = list_style
         .gap
         .height
@@ -1398,7 +1458,7 @@ fn appends_equal_rebuild_across_powers_of_two() {
         craie_harness::compare(ui, &clean, VIEW, 0.01)
             .unwrap_or_else(|m| panic!("{what}: {}", m.0));
     };
-    let mut append_to = |ui: &mut Ui, d: &mut ListDriver, n: &mut u32, to: u32, seq: &mut u64| {
+    let append_to = |ui: &mut Ui, d: &mut ListDriver, n: &mut u32, to: u32, seq: &mut u64| {
         *seq += 1;
         let mut t = Transaction::new(*seq);
         // Fresh identities: after the middle splice, positions and ids

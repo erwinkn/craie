@@ -52,11 +52,11 @@ fn resize_reflows_text() {
     let mut ui = Ui::new(1.0);
     ui.apply(&txn()).unwrap();
     ui.render(Size::new(1600.0, 800.0));
-    let wide = ui.text_layout(NodeId(1)).unwrap().len();
+    let wide = ui.text_layout(NodeId(1)).unwrap().lines.len();
 
     ui.invalidate_layout();
     ui.render(Size::new(300.0, 800.0));
-    let narrow = ui.text_layout(NodeId(1)).unwrap().len();
+    let narrow = ui.text_layout(NodeId(1)).unwrap().lines.len();
 
     assert!(
         narrow > wide,

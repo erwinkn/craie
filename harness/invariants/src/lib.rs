@@ -142,9 +142,9 @@ pub const SETTLED: f64 = craie_ui::ui::SETTLE_SECS * 2.0;
 
 /// The drawn scene with glyphs keyed by a stable raster identity.
 pub fn drawn(ui: &Ui) -> Vec<Resolved> {
-    let cache = &ui.text.cache;
+    let text = &ui.text;
     ui.scene()
-        .resolve_drawn(&|r: RasterId| cache.stable_key(r).unwrap_or(u64::MAX))
+        .resolve_drawn(&|r: RasterId| text.stable_key(r).unwrap_or(u64::MAX))
 }
 
 /// One difference between two `Ui`s.

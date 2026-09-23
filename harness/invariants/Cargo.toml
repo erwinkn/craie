@@ -12,7 +12,8 @@ publish = false
 [dependencies]
 craie-core.workspace = true
 craie-scene.workspace = true
-craie-text.workspace = true
+# Pinned fonts: every harness Ui lays text out on assets/fonts.
+craie-text = { workspace = true, features = ["pinned-fonts"] }
 craie-render.workspace = true
 wgpu.workspace = true
 craie-ui.workspace = true

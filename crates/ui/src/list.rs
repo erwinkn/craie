@@ -25,9 +25,8 @@ use crate::events::out_kind;
 use crate::geom::{Point, Rect, Size};
 use crate::host::NodeId;
 use crate::mutation::{Anchor, ItemDesc, ItemTemplate, NIL};
-use crate::scene::PaintSlot;
-use crate::text::parley::style::StyleProperty;
-use crate::text::{ParagraphSpec, TextEngine};
+use crate::text::TextEngine;
+use crate::text::paragraph::{SpanStyle, TextSpec, TextStyle};
 use craie_core::Affine;
 
 /// Upper bound on a list's item count: bounds the per-item stores
@@ -372,19 +371,23 @@ impl Lists {
     /// shaping a sample.
     fn metrics(&mut self, text: &mut TextEngine, font_size: f32) -> (f32, f32) {
         *self.metrics.entry(font_size.to_bits()).or_insert_with(|| {
-            let layout = text.layout_paragraph(
-                &ParagraphSpec {
+            let spans = [SpanStyle {
+                start: 0,
+                style: TextStyle {
+                    size: font_size,
+                    ..TextStyle::default()
+                },
+            }];
+            let p = text.layout_text(
+                &TextSpec {
                     text: SAMPLE,
-                    defaults: &[
-                        StyleProperty::FontSize(font_size),
-                        StyleProperty::Brush(PaintSlot(0)),
-                    ],
-                    spans: &[],
+                    family: "system-ui",
+                    spans: &spans,
                 },
                 None,
             );
-            let advance = layout.width() / SAMPLE.chars().count() as f32;
-            (advance.max(0.01), layout.height())
+            let advance = p.width / SAMPLE.chars().count() as f32;
+            (advance.max(0.01), p.height)
         })
     }
 

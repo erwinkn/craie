@@ -566,6 +566,8 @@ fn bench_transcript() {
 }
 
 fn main() {
+    // Text lays out on the system's fonts.
+    craie_platform_winit::fonts::install();
     bench_rows();
     bench_transcript();
 }

@@ -45,6 +45,8 @@ struct Inner {
 
 impl HostApp {
     pub fn new(session: Arc<Session>) -> HostApp {
+        // Text engines created from here on use the system's fonts.
+        crate::fonts::install();
         HostApp {
             session,
             surfaces: Vec::new(),

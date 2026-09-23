@@ -13,29 +13,28 @@
 use std::collections::HashMap;
 
 use craie_scene::RasterId;
-use parley::FontData;
+
+use crate::fonts::{FontInstanceId, FontStore};
 
 /// Quarter-pixel subpixel quantization. Each axis uses 2 bits.
 pub const SUBPIXEL_BITS: u32 = 2;
 pub const SUBPIXEL_STEPS: u32 = 1 << SUBPIXEL_BITS;
 
-/// Compact key into the glyph cache. 12 bytes.
+/// Compact key into the glyph cache. 12 bytes. The font instance covers
+/// the face, variation coordinates, and synthesis.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct GlyphKey {
-    /// Interned (font blob id, face index).
-    pub font: u16,
-    /// Interned (normalized coords, synthesis) pair.
-    pub coords: u16,
+    pub font: FontInstanceId,
     pub glyph: u16,
     /// Exact f32 bits of the effective physical-pixel size.
     pub size_bits: u32,
     /// Quantized subpixel offset: x in bits 0..2, y in bits 2..4.
     pub subpixel: u8,
-    pub _pad: u8,
 }
 
 /// A cached glyph: its raster (none for zero-area glyphs such as
-/// spaces) and its bearing in physical pixels.
+/// spaces) and its bitmap geometry in physical pixels, relative to the
+/// glyph origin. No position: placements live in the paragraph.
 #[derive(Clone, Copy, Debug)]
 pub struct CachedGlyph {
     pub raster: Option<RasterId>,
@@ -56,20 +55,7 @@ pub struct CacheStats {
     pub rerasters: u64,
 }
 
-pub(crate) struct CoordsRow {
-    pub coords: Box<[i16]>,
-    pub embolden: bool,
-    pub skew: i16,
-}
-
 pub struct GlyphCache {
-    /// (blob id, face index) -> compact font slot.
-    fonts: HashMap<(u64, u32), u16>,
-    /// Font data per slot, kept to re-rasterize evicted glyphs.
-    pub(crate) font_data: Vec<FontData>,
-    /// Interned (normalized coords, embolden, skew) rows. The table is
-    /// tiny — a linear scan beats a per-lookup `Box<[i16]>` key alloc.
-    pub(crate) coords: Vec<CoordsRow>,
     map: HashMap<GlyphKey, CachedGlyph>,
     /// Key per raster id, for re-rasterization.
     pub(crate) keys: Vec<Option<GlyphKey>>,
@@ -81,46 +67,11 @@ pub struct GlyphCache {
 impl GlyphCache {
     pub fn new() -> GlyphCache {
         GlyphCache {
-            fonts: HashMap::new(),
-            font_data: Vec::new(),
-            coords: Vec::new(),
             map: HashMap::new(),
             keys: Vec::new(),
             raster_sizes: Vec::new(),
             stats: CacheStats::default(),
         }
-    }
-
-    /// Interns a font identity to a u16 slot. One map lookup per run.
-    pub fn font_slot(&mut self, font: &FontData) -> u16 {
-        let next = self.fonts.len() as u16;
-        let slot = *self
-            .fonts
-            .entry((font.data.id(), font.index))
-            .or_insert(next);
-        if slot as usize == self.font_data.len() {
-            self.font_data.push(font.clone());
-        }
-        slot
-    }
-
-    /// Interns variation coords + synthesis to a u16 slot.
-    /// `skew` is degrees quantized to i16 * 64.
-    pub fn coords_slot(&mut self, coords: &[i16], embolden: bool, skew: i16) -> u16 {
-        if let Some(i) = self
-            .coords
-            .iter()
-            .position(|r| r.embolden == embolden && r.skew == skew && r.coords.as_ref() == coords)
-        {
-            return i as u16;
-        }
-        let slot = self.coords.len() as u16;
-        self.coords.push(CoordsRow {
-            coords: coords.into(),
-            embolden,
-            skew,
-        });
-        slot
     }
 
     pub fn get(&mut self, key: &GlyphKey) -> Option<CachedGlyph> {
@@ -169,22 +120,28 @@ impl GlyphCache {
         self.keys.get(id.0 as usize).copied().flatten()
     }
 
-    /// A raster's identity independent of interning order: font blob and
-    /// face, coordinates, glyph, size, subpixel. Two engines that
-    /// rasterized the same glyph agree on it (test oracle).
-    pub fn stable_key(&self, id: RasterId) -> Option<u64> {
+    /// A raster's identity independent of interning order: font file
+    /// content and face, coordinates, synthesis, glyph, size, subpixel.
+    /// Two engines that rasterized the same glyph agree on it (test
+    /// oracle).
+    pub fn stable_key(&self, id: RasterId, store: &FontStore) -> Option<u64> {
         use std::hash::{Hash, Hasher};
         let k = self.key_of(id)?;
-        let font = &self.font_data[k.font as usize];
-        let row = &self.coords[k.coords as usize];
+        let inst = store.instance_data(k.font);
+        let face = store.face_data(inst.face);
         let mut h = std::collections::hash_map::DefaultHasher::new();
-        // Blob ids are per font context; identify the font by content.
-        let bytes = font.data.as_ref();
+        // Blob ids are per source; identify the font by content.
+        let bytes = face.bytes.as_ref().as_ref();
         let edge = bytes.len().min(4096);
-        (bytes.len(), font.index).hash(&mut h);
+        (bytes.len(), face.index).hash(&mut h);
         bytes[..edge].hash(&mut h);
         bytes[bytes.len() - edge..].hash(&mut h);
-        (&*row.coords, row.embolden, row.skew).hash(&mut h);
+        (
+            &*inst.coords,
+            inst.synthesis.embolden,
+            inst.synthesis.skew.to_bits(),
+        )
+            .hash(&mut h);
         (k.glyph, k.size_bits, k.subpixel).hash(&mut h);
         Some(h.finish())
     }

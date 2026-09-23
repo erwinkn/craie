@@ -95,7 +95,8 @@ impl InputState {
         if self.editor.try_layout().is_none() {
             text.shapes += 1;
         }
-        self.editor.layout(&mut text.font_cx, &mut text.layout_cx)
+        let (font_cx, layout_cx) = text.parley();
+        self.editor.layout(font_cx, layout_cx)
     }
 
     /// Marks the editor layout dirty (`set_width` is the public
@@ -125,7 +126,8 @@ impl InputState {
         // Reshape through the counted path; selecting then finds the
         // layout clean.
         self.layout(text);
-        let mut drv = self.editor.driver(&mut text.font_cx, &mut text.layout_cx);
+        let (font_cx, layout_cx) = text.parley();
+        let mut drv = self.editor.driver(font_cx, layout_cx);
         drv.select_byte_range(snap.anchor.min(len), snap.focus.min(len));
     }
 }
@@ -370,7 +372,8 @@ impl Inputs {
             multiline,
             ..
         } = state;
-        let mut drv = editor.driver(&mut text.font_cx, &mut text.layout_cx);
+        let (font_cx, layout_cx) = text.parley();
+        let mut drv = editor.driver(font_cx, layout_cx);
         let mut coalescing = false;
         // Edits that ran `update_layout`.
         let mut shaped = false;
@@ -518,7 +521,8 @@ impl Inputs {
             return;
         };
         let composing = state.editor.is_composing();
-        let mut drv = state.editor.driver(&mut text.font_cx, &mut text.layout_cx);
+        let (font_cx, layout_cx) = text.parley();
+        let mut drv = state.editor.driver(font_cx, layout_cx);
         if preedit.is_empty() {
             if composing {
                 drv.clear_compose();
@@ -537,7 +541,8 @@ impl Inputs {
             return;
         };
         state.record_undo(false);
-        let mut drv = state.editor.driver(&mut text.font_cx, &mut text.layout_cx);
+        let (font_cx, layout_cx) = text.parley();
+        let mut drv = state.editor.driver(font_cx, layout_cx);
         drv.insert_or_replace_selection(s);
         text.shapes += 1;
     }
@@ -552,7 +557,8 @@ impl Inputs {
         if !state.editor.is_composing() {
             return;
         }
-        let mut drv = state.editor.driver(&mut text.font_cx, &mut text.layout_cx);
+        let (font_cx, layout_cx) = text.parley();
+        let mut drv = state.editor.driver(font_cx, layout_cx);
         drv.finish_compose();
         text.shapes += 1;
     }

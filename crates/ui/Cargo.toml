@@ -17,3 +17,5 @@ tracing.workspace = true
 
 [dev-dependencies]
 taffy.workspace = true
+# Tests lay text out on the pinned fonts (assets/fonts).
+craie-text = { workspace = true, features = ["pinned-fonts"] }

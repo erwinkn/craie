@@ -23,6 +23,8 @@ fn row(name: &str, bytes: usize, align: usize, note: &str) {
 }
 
 fn main() {
+    // Text lays out on the system's fonts.
+    craie_platform_winit::fonts::install();
     println!("craie structural sizes\n");
 
     println!("host (per-node fixed cost):");

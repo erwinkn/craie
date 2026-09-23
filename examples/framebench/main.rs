@@ -207,6 +207,8 @@ fn draw(ui: &mut Ui, gpu: &mut Option<GpuSide>) -> (f64, f64, f64) {
 // -------------------------------------------------------------------- main
 
 fn main() {
+    // Text lays out on the system's fonts.
+    craie_platform_winit::fonts::install();
     let args: Vec<String> = std::env::args().collect();
     let dir = args
         .get(1)

@@ -9,7 +9,23 @@ repository.workspace = true
 [dependencies]
 craie-core.workspace = true
 craie-scene.workspace = true
+# Parley serves text inputs until owned editing lands (step 3b); text
+# nodes use the owned paragraph below.
 parley.workspace = true
 swash.workspace = true
 etagere.workspace = true
+harfrust.workspace = true
+skrifa.workspace = true
+unicode-bidi.workspace = true
+unicode-linebreak.workspace = true
+unicode-segmentation.workspace = true
+unicode-script.workspace = true
+
+[features]
+# Pinned test fonts (assets/fonts) as the default font source: for tests
+# and the E01 comparison. Never enabled by a release crate.
+pinned-fonts = []
+
+[dev-dependencies]
+craie-text = { path = ".", features = ["pinned-fonts"] }
 

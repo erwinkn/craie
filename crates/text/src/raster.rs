@@ -1,15 +1,13 @@
-//! Swash rasterization wrapper.
+//! Swash rasterization wrapper: the raster kernel behind `RasterId`.
 //!
-//! Parley owns font resolution, shaping, bidi and line breaking. Swash owns
-//! rasterization only. This module is the single funnel from Parley's
-//! `Run` data (font, size, variation coords) to a glyph bitmap.
+//! Shaping and layout are craie-text's own; Swash owns rasterization
+//! only. This module is the single funnel from a font instance (face
+//! bytes, size, variation coords) to a glyph bitmap.
 
 use swash::FontRef;
 use swash::scale::image::{Content, Image};
 use swash::scale::{Render, ScaleContext, Scaler, Source, StrikeWith};
 use swash::zeno::{Angle, Format, Transform, Vector};
-
-use parley::FontData;
 
 pub struct Rasterizer {
     cx: ScaleContext,
@@ -31,11 +29,12 @@ impl Rasterizer {
     /// the run, so callers build one scaler and rasterize many glyphs.
     pub fn scaler<'a>(
         &'a mut self,
-        font: &'a FontData,
+        bytes: &'a [u8],
+        index: u32,
         size: f32,
         coords: &[i16],
     ) -> Option<Scaler<'a>> {
-        let font_ref = FontRef::from_index(font.data.as_ref(), font.index as usize)?;
+        let font_ref = FontRef::from_index(bytes, index as usize)?;
         let builder = self.cx.builder(font_ref).size(size).hint(true);
         Some(if coords.is_empty() {
             builder.build()

@@ -735,12 +735,16 @@ impl Ui {
             .host
             .node(id)
             .is_some_and(|n| n.flags.contains(crate::host::NodeFlags::TEXT));
-        let stale = text_dirty
-            || match self.texts.get(slot).and_then(Option::as_ref) {
-                Some(m) => m.wrap_bits != content_w.to_bits(),
-                None => true,
-            };
-        if stale {
+        let retained = self.texts.get(slot).and_then(Option::as_ref);
+        if !text_dirty
+            && let Some(m) = retained
+            && m.wrap_bits != content_w.to_bits()
+        {
+            // Another width: rewrap, no shaping.
+            let m = self.texts[slot].as_mut().unwrap();
+            self.text.rewrap(&mut m.layout, Some(content_w));
+            m.wrap_bits = content_w.to_bits();
+        } else if text_dirty || retained.is_none() {
             let layout = crate::layout::shape_paragraph(&mut self.text, p, Some(content_w));
             if slot >= self.texts.len() {
                 self.texts.resize_with(slot + 1, || None);
@@ -754,7 +758,7 @@ impl Ui {
             }
         }
         let m = self.texts[slot].as_ref().unwrap();
-        self.text.emit(
+        self.text.emit_paragraph(
             &m.layout,
             Point::new(data.content[0], data.content[1]),
             self.scale,

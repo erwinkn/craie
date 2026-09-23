@@ -11,6 +11,7 @@ pub mod a11y;
 pub mod app;
 pub mod capture;
 pub mod clipboard;
+pub mod fonts;
 mod winit;
 
 use std::sync::{Arc, Mutex};

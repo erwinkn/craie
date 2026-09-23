@@ -17,6 +17,8 @@ wgpu.workspace = true
 accesskit.workspace = true
 accesskit_winit.workspace = true
 arboard.workspace = true
+# System font discovery and fallback (the platform side of FontSource).
+fontique.workspace = true
 
 
 [dev-dependencies]

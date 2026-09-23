@@ -26,10 +26,8 @@ use crate::geom::{Rect, Size};
 use crate::host::{Host, NodeFlags, NodeId, Paragraph};
 use crate::input::Inputs;
 use crate::mutation::NodeKind;
-use crate::scene::PaintSlot;
-use crate::text::parley::Layout as TextLayout;
-use crate::text::parley::style::{FontStyle, FontWeight, StyleProperty};
-use crate::text::{ParagraphSpec, TextEngine, TextSpan as SpecSpan};
+use crate::text::TextEngine;
+use crate::text::paragraph::{Paragraph as TextParagraph, SpanStyle, TextSpec, TextStyle};
 
 /// Computed border box for a node, relative to its parent's content box,
 /// in logical units. Written by `round_layout`, read by paint and
@@ -54,12 +52,12 @@ pub struct LayoutData {
     pub scroll_extent: [f32; 2],
 }
 
-/// A text leaf's retained Parley layout, plus the wrap width it was
-/// produced for (`u32::MAX` bits = unwrapped). Rebuilt only when the
-/// paragraph's metrics change or the wrap width changes; emitting a
-/// retained layout costs no reshaping and no re-rasterization.
+/// A text leaf's retained paragraph, plus the wrap width its lines were
+/// made for (`u32::MAX` bits = unwrapped). Shaped again only when the
+/// paragraph's text or metrics change; a new wrap width only rewraps
+/// (no shaping). Emitting it costs no re-rasterization.
 pub struct MeasuredText {
-    pub layout: TextLayout<PaintSlot>,
+    pub layout: TextParagraph,
     pub wrap_bits: u32,
 }
 
@@ -294,13 +292,17 @@ impl TreeView<'_> {
         if slot >= self.texts.len() {
             self.texts.resize_with(slot + 1, || None);
         }
-        if !text_dirty
-            && let Some(m) = &self.texts[slot]
-            && m.wrap_bits == wrap_bits
-        {
+        if !text_dirty && let Some(m) = &mut self.texts[slot] {
+            if m.wrap_bits != wrap_bits {
+                // Another width: rewrap the shaped paragraph.
+                self.text.rewrap(&mut m.layout, wrap);
+                m.wrap_bits = wrap_bits;
+                self.host.dirty.content.push(id.0);
+            }
+            let m = self.texts[slot].as_ref().unwrap();
             return TSize {
-                width: m.layout.width(),
-                height: m.layout.height(),
+                width: m.layout.width,
+                height: m.layout.height,
             };
         }
 
@@ -309,8 +311,8 @@ impl TreeView<'_> {
         };
         let layout = shape_paragraph(self.text, p, wrap);
         let size = TSize {
-            width: layout.width(),
-            height: layout.height(),
+            width: layout.width,
+            height: layout.height,
         };
         self.texts[slot] = Some(MeasuredText { layout, wrap_bits });
         // The shaped paragraph changed: its chunk must be re-emitted.
@@ -739,59 +741,26 @@ impl RoundTree for TreeView<'_> {
     }
 }
 
-/// Shapes a paragraph: span zero is the base style, later spans override
-/// over their byte ranges. The brush is the span index, which is also the
-/// span's paint slot in the text chunk, so a color change patches a
-/// paint record and never reshapes.
-pub fn shape_paragraph(
-    text: &mut TextEngine,
-    p: &Paragraph,
-    wrap: Option<f32>,
-) -> TextLayout<PaintSlot> {
-    let base = p.spans.first().copied().unwrap_or_default();
-    let defaults = [
-        StyleProperty::FontSize(base.font_size),
-        StyleProperty::FontWeight(FontWeight::new(base.weight as f32)),
-        StyleProperty::FontStyle(if base.italic {
-            FontStyle::Italic
-        } else {
-            FontStyle::Normal
-        }),
-        StyleProperty::Brush(PaintSlot(0)),
-    ];
-    let mut spans: Vec<SpecSpan> = Vec::new();
-    for (i, s) in p.spans.iter().enumerate().skip(1) {
-        let slot = PaintSlot(i as u32);
-        let end = p
-            .spans
-            .get(i + 1)
-            .map_or(p.text.len(), |n| n.start as usize);
-        let range = s.start as usize..end;
-        spans.push(SpecSpan {
-            range: range.clone(),
-            style: StyleProperty::FontSize(s.font_size),
-        });
-        spans.push(SpecSpan {
-            range: range.clone(),
-            style: StyleProperty::FontWeight(FontWeight::new(s.weight as f32)),
-        });
-        spans.push(SpecSpan {
-            range: range.clone(),
-            style: StyleProperty::FontStyle(if s.italic {
-                FontStyle::Italic
-            } else {
-                FontStyle::Normal
-            }),
-        });
-        spans.push(SpecSpan {
-            range,
-            style: StyleProperty::Brush(slot),
-        });
-    }
-    text.layout_paragraph(
-        &ParagraphSpec {
+/// Shapes a text node's paragraph at wrap width `wrap`: its spans become
+/// span styles (font size, weight, italic); a span's index is its paint
+/// slot, so a color change patches a paint record and never reshapes.
+pub fn shape_paragraph(text: &mut TextEngine, p: &Paragraph, wrap: Option<f32>) -> TextParagraph {
+    let spans: Vec<SpanStyle> = p
+        .spans
+        .iter()
+        .map(|s| SpanStyle {
+            start: s.start,
+            style: TextStyle {
+                size: s.font_size,
+                weight: s.weight,
+                italic: s.italic,
+            },
+        })
+        .collect();
+    text.layout_text(
+        &TextSpec {
             text: &p.text,
-            defaults: &defaults,
+            family: "system-ui",
             spans: &spans,
         },
         wrap,

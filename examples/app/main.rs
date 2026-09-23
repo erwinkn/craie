@@ -376,6 +376,8 @@ fn run_screenshot(path: &str, w: u32, h: u32, scale: f32) {
 }
 
 fn main() {
+    // Text lays out on the system's fonts.
+    craie_platform_winit::fonts::install();
     let args: Vec<String> = std::env::args().collect();
     if let Some(i) = args.iter().position(|a| a == "--screenshot") {
         let path = args.get(i + 1).map(String::as_str).unwrap_or("app.png");
