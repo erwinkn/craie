@@ -1,16 +1,35 @@
 // Commit-side host bookkeeping: JS owns node ids, maps element props to
-// wire ops, and seals one transaction per commit via queueMicrotask.
+// CRW2 ops, and seals one transaction per commit via queueMicrotask.
+//
+// Ids recycle immediately on removal. Native bumps a slot's generation
+// when it frees it; JS mirrors the counter, and events carry the
+// generation, so an event for a previous occupant of an id is dropped.
 
-import { Encoder, EVENT_KIND, EVENT_MASK, NIL, type StyleProps } from "./wire.js"
+import {
+  Encoder,
+  EVENT_KIND,
+  EVENT_MASK,
+  NIL,
+  ROLE,
+  layoutPart,
+  styleKey,
+  transformMatrix,
+  type AccessibilityRole,
+  type Affine,
+  type StyleProps,
+  type TextSpanIn,
+} from "./wire.js"
 
-export type Kind = 0 | 1 | 2 | 3 // 0 view, 1 text, 2 input, 3 custom — mirror NodeKind
-export const KIND: Record<string, Kind> = { view: 0, text: 1, input: 2, custom: 3 }
+export type Kind = 0 | 1 | 2 | 3 // 0 view, 1 text, 2 input, 3 surface — mirror NodeKind
+export const KIND: Record<string, Kind> = { view: 0, text: 1, input: 2, surface: 3 }
 
 /** One decoded UI -> JS event record (see events.rs `UiEvent`). */
 export interface UiEvent {
   kind: number
   /** Native node id. */
   node: number
+  /** The node's generation when the event fired. */
+  generation: number
   /** Pointer position in logical points, when applicable. */
   x: number
   y: number
@@ -26,11 +45,15 @@ export interface UiEvent {
 
 export interface HostNode {
   id: number
+  /** Generation of `id` this node occupies (mirrors native). */
+  gen: number
   type: string
   kind: Kind
   props: Record<string, any>
   mounted: boolean
   root: CraieHost
+  /** Hidden by React (Suspense): sent as `display: none`. */
+  suspended: boolean
   /** Children appended before this node got an id; replayed on materialize. */
   initial: HostNode[]
   /** Last buffer the native input reported; `value` commands that match
@@ -46,8 +69,7 @@ export interface HostNode {
 export interface Transport {
   send(frame: Uint8Array): void
   close(reason?: string): void
-  /** Native acks an applied transaction by seq. Optional: transports that
-   * don't ack leave ids unrecycled (safe, leaks the free list). */
+  /** Native acks an applied transaction by seq; resolves `flush()`. */
   onAck?(cb: (seq: number) => void): void
   /** Native pushes UI events (pointer/key/focus/input/scroll). */
   onEvent?(cb: (ev: UiEvent) => void): void
@@ -75,7 +97,25 @@ function textOf(props: Record<string, any>): string {
   return ""
 }
 
-// Listener prop name -> mask bit; emit PROPS when the mask changes.
+/** Span zero of a text node: the base style. */
+function baseSpan(props: Record<string, any>): TextSpanIn {
+  return {
+    start: 0,
+    fontSize: props.fontSize ?? 14,
+    color: color(props.color, 0xffff_ffff),
+    weight: typeof props.fontWeight === "number"
+      ? props.fontWeight
+      : props.fontWeight === "bold" ? 700 : 400,
+    italic: props.fontStyle === "italic",
+  }
+}
+
+function sameSpan(a: TextSpanIn, b: TextSpanIn): boolean {
+  return a.fontSize === b.fontSize && a.color === b.color &&
+    a.weight === b.weight && !!a.italic === !!b.italic
+}
+
+// Listener prop name -> mask bit; emit INTERACTION when the mask changes.
 const LISTENERS: Record<string, number> = {
   onPointerMove: EVENT_MASK.pointerMove,
   onPointerDown: EVENT_MASK.pointerDown,
@@ -100,16 +140,54 @@ function listenerMask(props: Record<string, any>): number {
   return mask
 }
 
+/** The layout style a node sends: its style minus spatial keys, with
+ * `display: none` when the node is hidden (prop or Suspense). */
+function layoutOf(props: Record<string, any>, suspended: boolean): StyleProps | undefined {
+  const base = layoutPart(props.style)
+  if (!(props.hidden || suspended)) return base
+  return { ...base, display: "none" }
+}
+
+function sameMatrix(a: Affine, b: Affine): boolean {
+  for (let i = 0; i < 6; i++) if (a[i] !== b[i]) return false
+  return true
+}
+
+function roleOf(props: Record<string, any>): number {
+  const r = props.accessibilityRole as AccessibilityRole | undefined
+  if (r === undefined) return ROLE.none
+  const v = ROLE[r]
+  if (v === undefined) throw Error(`unknown accessibilityRole "${r}"`)
+  return v
+}
+
+function f32bits(v: number): number {
+  const b = new DataView(new ArrayBuffer(4))
+  b.setFloat32(0, v, true)
+  return b.getUint32(0, true)
+}
+
+/** Surface parameters: colors as strings or numbers, floats as f32 bits
+ * when tagged `{ f32 }`. */
+export type SurfaceParam = number | string | { f32: number }
+function surfaceParams(params: readonly SurfaceParam[] | undefined): number[] {
+  const out = [0, 0, 0, 0]
+  for (let i = 0; i < 4; i++) {
+    const p = params?.[i]
+    if (p === undefined) continue
+    out[i] = typeof p === "object" ? f32bits(p.f32) : color(p)
+  }
+  return out
+}
+
 export class CraieHost {
   private nextId = 0
   private freeIds: number[] = []
+  /** Generation per id; bumped when native frees the slot. */
+  private gens: number[] = []
   private seq = 0
   private encoder = new Encoder()
   private scheduled = false
-  /** Ids removed in the currently-open transaction. */
-  private removing: number[] = []
-  /** seq -> ids that may be recycled once native acks the txn. */
-  private awaitingAck = new Map<number, number[]>()
   private flushWaiters = new Map<number, () => void>()
   /** Live nodes by native id — the event-dispatch target table. */
   private nodes = new Map<number, HostNode>()
@@ -119,14 +197,8 @@ export class CraieHost {
     transport.onEvent?.((ev) => this.dispatchEvent(ev))
   }
 
-  /** Native applied transaction `seq`: recycle its removed ids and
-   * resolve its flush waiters. */
+  /** Native applied transaction `seq`: resolve its flush waiters. */
   private ack(seq: number) {
-    const ids = this.awaitingAck.get(seq)
-    if (ids !== undefined) {
-      this.awaitingAck.delete(seq)
-      for (const id of ids) this.freeIds.push(id)
-    }
     this.flushWaiters.get(seq)?.()
     this.flushWaiters.delete(seq)
   }
@@ -135,6 +207,7 @@ export class CraieHost {
     const free = this.freeIds.pop()
     if (free !== undefined) return free
     if (this.nextId === MAX_ID) throw Error("node ids exhausted")
+    this.gens.push(0)
     return this.nextId++
   }
 
@@ -152,14 +225,7 @@ export class CraieHost {
 
   private seal() {
     const seq = ++this.seq
-    const buf = this.encoder.finish(seq)
-    // Style ids persist across txns; reset() keeps the table.
-    this.encoder.reset()
-    if (this.removing.length) {
-      this.awaitingAck.set(seq, this.removing)
-      this.removing = []
-    }
-    this.transport.send(buf)
+    this.transport.send(this.encoder.finish(seq))
   }
 
   /** Sends pending ops and resolves once native acks the transaction. */
@@ -174,30 +240,32 @@ export class CraieHost {
     const kind = KIND[type]
     if (kind === undefined) throw Error(`unknown element "${type}"`)
     const n: HostNode = {
-      id: 0, type, kind, props, mounted: false, root: this, initial: [],
-      focus() { this.root.cmd(this.id, (e, id) => e.cmdFocus(id)) },
-      blur() { this.root.cmd(this.id, (e, id) => e.cmdBlur(id)) },
+      id: 0, gen: 0, type, kind, props, mounted: false, root: this,
+      suspended: false, initial: [],
+      focus() { this.root.cmd(this, (e, id) => e.cmdFocus(id)) },
+      blur() { this.root.cmd(this, (e, id) => e.cmdBlur(id)) },
       scrollTo(x: number, y: number) {
-        this.root.cmd(this.id, (e, id) => e.cmdScrollTo(id, x, y))
+        this.root.cmd(this, (e, id) => e.cmdScrollTo(id, x, y))
       },
       setText(text: string) {
         this.nativeText = text
-        this.root.cmd(this.id, (e, id) => e.cmdSetInputText(id, text))
+        this.root.cmd(this, (e, id) => e.cmdSetText(id, text))
       },
     }
     return n
   }
 
   /** Emits an imperative command op in the current transaction. */
-  cmd(id: number, write: (enc: Encoder, id: number) => void) {
-    if (!id) return
-    if (this.ready()) write(this.encoder, id)
+  cmd(n: HostNode, write: (enc: Encoder, id: number) => void) {
+    if (!n.mounted) return
+    if (this.ready()) write(this.encoder, n.id)
   }
 
-  /** Routes a native event record to the target node's listener props. */
+  /** Routes a native event record to the target node's listener props.
+   * Events for a previous occupant of the id are dropped. */
   private dispatchEvent(ev: UiEvent) {
     const n = this.nodes.get(ev.node)
-    if (!n) return
+    if (!n || n.gen !== ev.generation) return
     const p = n.props
     const e = { target: n, x: ev.x, y: ev.y }
     // Pointer events pack mods into the low 4 key bits and the button
@@ -237,12 +305,13 @@ export class CraieHost {
   materialize(n: HostNode, parent: HostNode | null, before: HostNode | null) {
     if (n.mounted) return
     n.id = this.alloc()
+    n.gen = this.gens[n.id]!
     n.mounted = true
     this.nodes.set(n.id, n)
     if (!this.ready()) return
     const enc = this.encoder
     enc.create(n.id, n.kind)
-    this.emitProps(n, {}, n.props)
+    this.emitProps(n, {}, n.props, false)
     enc.place(parent ? parent.id : NIL, n.id, before ? before.id : NIL)
     for (const child of n.initial) this.place(n, child, null)
     n.initial = []
@@ -265,76 +334,101 @@ export class CraieHost {
     if (this.ready()) this.encoder.detach(n.id)
   }
 
-  /** React deleted `n` for good: free the native slot. The id is held
-   * until the removing transaction is acknowledged, then recycled. */
+  /** React deleted `n` for good: free the native slot and recycle the
+   * id at once. The generation bump keeps stale events out. */
   release(n: HostNode) {
     if (!n.mounted) return
     this.nodes.delete(n.id)
     if (this.ready()) this.encoder.remove(n.id)
-    this.removing.push(n.id)
+    this.gens[n.id] = (this.gens[n.id]! + 1) & 0xffff
+    this.freeIds.push(n.id)
     n.mounted = false
   }
 
-  setHidden(n: HostNode, hidden: boolean) {
-    if (this.ready()) this.encoder.hidden(n.id, hidden)
+  /** React (Suspense) hides or reveals a node: `display: none`. */
+  setSuspended(n: HostNode, hidden: boolean) {
+    if (n.suspended === hidden) return
+    const before = styleKey(layoutOf(n.props, n.suspended))
+    n.suspended = hidden
+    const layout = layoutOf(n.props, n.suspended)
+    if (styleKey(layout) !== before && this.ready()) this.encoder.layout(n.id, layout)
   }
 
   /** Prop diff -> ops for the fields that changed. */
   update(n: HostNode, oldProps: Record<string, any>, props: Record<string, any>) {
     n.props = props
-    if (this.ready()) this.emitProps(n, oldProps, props)
+    if (this.ready()) this.emitProps(n, oldProps, props, true)
   }
 
   setTextContent(n: HostNode, text: string) {
-    n.props = { ...n.props, children: text }
-    if (this.ready()) this.encoder.setText(n.id, text)
+    const old = n.props
+    n.props = { ...n.props, text, children: undefined }
+    if (this.ready()) this.emitProps(n, old, n.props, true)
   }
 
-  /** Writes the ops for props that differ between old and next. */
-  private emitProps(n: HostNode, oldProps: Record<string, any>, props: Record<string, any>) {
+  /** Writes the ops for props that differ between old and next. `mounted`
+   * is false on first emission, when native holds only defaults. */
+  private emitProps(
+    n: HostNode,
+    oldProps: Record<string, any>,
+    props: Record<string, any>,
+    mounted: boolean,
+  ) {
     const enc = this.encoder
+    const id = n.id
 
-    // style (interned; identical objects share one wire definition)
-    const oldKey = oldProps.style ? canon(oldProps.style) : ""
-    const newKey = props.style ? canon(props.style) : ""
-    if (oldKey !== newKey) enc.setStyle(n.id, enc.styleIdFor(props.style))
+    // Layout inputs (spatial keys split off; hiding is display: none).
+    const oldLayout = mounted ? layoutOf(oldProps, n.suspended) : undefined
+    const newLayout = layoutOf(props, n.suspended)
+    if (styleKey(oldLayout) !== styleKey(newLayout)) enc.layout(id, newLayout)
+
+    // Spatial: transform and opacity never touch layout.
+    const oldT = transformMatrix(oldProps.style?.transform)
+    const newT = transformMatrix(props.style?.transform)
+    const oldO = oldProps.style?.opacity ?? 1
+    const newO = props.style?.opacity ?? 1
+    const tChanged = !sameMatrix(oldT, newT)
+    if (tChanged || oldO !== newO) {
+      enc.spatial(id, tChanged ? newT : undefined, oldO !== newO ? newO : undefined)
+    }
 
     if (n.kind === 1) {
       const oldText = textOf(oldProps), newText = textOf(props)
-      if (oldText !== newText) enc.setText(n.id, newText)
-      const fs = props.fontSize ?? 14, color32 = color(props.color, 0xffff_ffff)
-      if (oldProps.fontSize !== props.fontSize || color(oldProps.color, 0xffff_ffff) !== color32) {
-        enc.textProps(n.id, fs, color32)
+      const oldSpan = baseSpan(oldProps), newSpan = baseSpan(props)
+      if (!mounted || oldText !== newText || !sameSpan(oldSpan, newSpan)) {
+        enc.paragraph(id, newText, [newSpan])
       }
     } else {
-      // Paint record: fill, corner radius, border — each an optional
-      // masked field; emit only what changed.
+      // Box paint: fill, corner radius, border — each an optional masked
+      // field; emit only what changed.
       const oldBg = color(oldProps.backgroundColor), newBg = color(props.backgroundColor)
       const oldR = oldProps.borderRadius ?? 0, newR = props.borderRadius ?? 0
       const oldBc = color(oldProps.borderColor), newBc = color(props.borderColor)
       const oldBw = oldProps.borderWidth ?? 0, newBw = props.borderWidth ?? 0
       if (oldBg !== newBg || oldR !== newR || oldBc !== newBc || oldBw !== newBw) {
         enc.paint(
-          n.id,
+          id,
           oldBg !== newBg ? newBg : undefined,
           oldR !== newR ? newR : undefined,
-          oldBc !== newBc || oldBw !== newBw
-            ? { color: newBc, width: newBw }
-            : undefined,
+          oldBc !== newBc || oldBw !== newBw ? { color: newBc, width: newBw } : undefined,
         )
       }
     }
 
     if (n.kind === 3) {
-      // Custom-element payload; `data` compares by content.
-      const tag = props.tag ?? 0
-      const text = props.text ?? ""
-      const data: readonly number[] = props.data ?? []
-      const oldData: readonly number[] = oldProps.data ?? []
-      const sameData =
-        data.length === oldData.length && data.every((v, i) => v === oldData[i])
-      if (tag !== (oldProps.tag ?? 0) || text !== (oldProps.text ?? "") || !sameData) {
-        enc.custom(n.id, tag, data, text)
+      // Surface kind + params; the payload is a typed array copied once
+      // per change (identity compare: a new array means new data).
+      const oldParams = surfaceParams(oldProps.params)
+      const newParams = surfaceParams(props.params)
+      const kind = props.kind ?? 0
+      if (
+        !mounted || kind !== (oldProps.kind ?? 0) ||
+        newParams.some((v, i) => v !== oldParams[i])
+      ) {
+        enc.surface(id, kind, newParams)
+      }
+      if (props.payload !== undefined && props.payload !== oldProps.payload) {
+        enc.payload(id, props.payload)
       }
     }
 
@@ -346,12 +440,13 @@ export class CraieHost {
       const ph = props.placeholder ?? ""
       const multiline = !!props.multiline
       if (
+        !mounted ||
         oldProps.fontSize !== props.fontSize ||
         color(oldProps.color, 0xffff_ffff) !== color32 ||
         (oldProps.placeholder ?? "") !== ph ||
         !!oldProps.multiline !== multiline
       ) {
-        enc.inputProps(n.id, fs, color32, ph, multiline)
+        enc.inputConfig(id, fs, color32, ph, multiline)
       }
       if (
         typeof props.value === "string" &&
@@ -359,27 +454,23 @@ export class CraieHost {
         props.value !== n.nativeText
       ) {
         n.nativeText = props.value
-        enc.cmdSetInputText(n.id, props.value)
+        enc.cmdSetText(id, props.value)
       }
     }
 
     // Listener mask + focusable flag.
     const oldMask = listenerMask(oldProps), newMask = listenerMask(props)
     if (oldMask !== newMask || !!oldProps.focusable !== !!props.focusable) {
-      enc.props(n.id, newMask, !!props.focusable)
+      enc.interaction(id, newMask, !!props.focusable)
     }
 
-    if (!!oldProps.hidden !== !!props.hidden) enc.hidden(n.id, !!props.hidden)
+    const oldRole = mounted ? roleOf(oldProps) : ROLE.none
+    const newRole = roleOf(props)
+    if (oldRole !== newRole) enc.role(id, newRole)
 
     const oldLabel = oldProps.accessibilityLabel ?? ""
     const newLabel = props.accessibilityLabel ?? ""
-    if (oldLabel !== newLabel) enc.label(n.id, newLabel)
+    if (oldLabel !== newLabel) enc.label(id, newLabel)
   }
 }
 
-function canon(v: unknown): string {
-  if (v === null || typeof v !== "object") return JSON.stringify(v)!
-  if (Array.isArray(v)) return `[${v.map(canon).join(",")}]`
-  const o = v as Record<string, unknown>
-  return `{${Object.keys(o).sort().map(k => `${JSON.stringify(k)}:${canon(o[k])}`).join(",")}}`
-}

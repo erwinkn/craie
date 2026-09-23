@@ -8,12 +8,15 @@
 
 use std::mem::{align_of, size_of};
 
-use craie_ui::host::{Host, NodeFlags, NodeHeader, NodeId, StyleId, TextRow, ViewRow};
-use craie_ui::layout::{EmittedText, LayoutData, MeasuredText};
+use craie_core::span::Span;
 use craie_scene::{Color, Instance};
 use craie_text::GlyphKey;
 use craie_text::parley::Layout as ParleyLayout;
-use craie_ui::wire;
+use craie_ui::host::{
+    BoxPaint, Host, Interaction, NodeFlags, NodeHeader, NodeId, Paragraph, Spatial,
+};
+use craie_ui::layout::{EmittedText, LayoutData, MeasuredText};
+use craie_ui::mutation::Mutation;
 
 fn row(name: &str, bytes: usize, align: usize, note: &str) {
     println!("{name:<24} {bytes:>3} B  align {align:<2} {note}");
@@ -24,12 +27,11 @@ fn main() {
 
     println!("host (per-node fixed cost):");
     row("NodeId", size_of::<NodeId>(), align_of::<NodeId>(), "index");
-    row("StyleId", size_of::<StyleId>(), align_of::<StyleId>(), "wire id");
     row(
         "NodeHeader",
         size_of::<NodeHeader>(),
         align_of::<NodeHeader>(),
-        "flat record: parent + aux + style + kind/gen + flags",
+        "flat record: parent + child span + kind + flags + generation",
     );
     row(
         "NodeFlags",
@@ -38,22 +40,40 @@ fn main() {
         "dirty bits",
     );
     row(
-        "children slot",
-        size_of::<Vec<NodeId>>(),
-        align_of::<Vec<NodeId>>(),
-        "Vec<NodeId> per node (empty = no alloc)",
+        "Span",
+        size_of::<Span>(),
+        align_of::<Span>(),
+        "child list in the span pool (in the header)",
     );
     row(
-        "TextRow",
-        size_of::<TextRow>(),
-        align_of::<TextRow>(),
-        "TEXT side-table row",
+        "taffy::Style",
+        size_of::<taffy::Style>(),
+        align_of::<taffy::Style>(),
+        "layout inputs row, one per node",
     );
     row(
-        "ViewRow",
-        size_of::<ViewRow>(),
-        align_of::<ViewRow>(),
-        "VIEW side-table row",
+        "Spatial",
+        size_of::<Spatial>(),
+        align_of::<Spatial>(),
+        "transform, opacity, scroll",
+    );
+    row(
+        "BoxPaint",
+        size_of::<BoxPaint>(),
+        align_of::<BoxPaint>(),
+        "fill, border, radius",
+    );
+    row(
+        "Paragraph",
+        size_of::<Paragraph>(),
+        align_of::<Paragraph>(),
+        "UTF-8 + span list (empty = no alloc)",
+    );
+    row(
+        "Interaction",
+        size_of::<Interaction>(),
+        align_of::<Interaction>(),
+        "listeners, focusable, role",
     );
     row("Host", size_of::<Host>(), align_of::<Host>(), "arena owner");
 
@@ -77,12 +97,6 @@ fn main() {
         "final border box per node",
     );
     row(
-        "taffy::Style",
-        size_of::<taffy::Style>(),
-        align_of::<taffy::Style>(),
-        "per wire style id",
-    );
-    row(
         "MeasuredText",
         size_of::<MeasuredText>(),
         align_of::<MeasuredText>(),
@@ -102,7 +116,12 @@ fn main() {
     );
 
     println!("\npaint / GPU data:");
-    row("Color", size_of::<Color>(), align_of::<Color>(), "0xRRGGBBAA");
+    row(
+        "Color",
+        size_of::<Color>(),
+        align_of::<Color>(),
+        "0xRRGGBBAA",
+    );
     row(
         "Instance",
         size_of::<Instance>(),
@@ -120,10 +139,10 @@ fn main() {
 
     println!("\nwire:");
     row(
-        "Op (max variant)",
-        size_of::<wire::Op>(),
-        align_of::<wire::Op>(),
-        "decoded op, borrows txn buffer",
+        "Mutation (max variant)",
+        size_of::<Mutation>(),
+        align_of::<Mutation>(),
+        "decoded mutation, borrows txn buffer",
     );
 
     println!("\nrepresentation check (anything above holding Vec/Box/Arc/HashMap is suspect):");

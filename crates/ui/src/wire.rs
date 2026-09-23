@@ -1,21 +1,23 @@
-//! Schema-driven binary transaction wire, modeled on gpui-react 46cb47d.
+//! CRW2: the binary transaction wire.
 //!
-//! One transaction = one React commit. Layout:
+//! One transaction = one React commit. Layout (little endian):
 //!
 //! ```text
-//! magic u32 = "CRW1" | version u16 | flags u16 | seq u64 | string_count u32
+//! magic u32 = "CRW2" | version u16 | flags u16 | seq u64
+//! string_count u32 | style_count u32 | span_count u32
 //! strings: string_count × (u32 byte_len + utf8 bytes)
-//! ops:     to end of buffer
+//! styles:  style_count × (u64 presence mask + fields in schema order)
+//! spans:   span_count × 16 bytes (start u32, font_size f32, color u32,
+//!          weight u16, flags u8, reserved u8)
+//! ops:     u8-tagged records to the end of the buffer
 //! ```
 //!
-//! Strings come first so ops can reference them by index. Ops are a flat
-//! stream of u8-tagged records with positional fields — no names, no
-//! nesting. Decoding borrows string bytes from the buffer; the only
-//! owned copies are the `taffy::Style`s stored under their wire ids.
-//!
-//! A `style` op carries a u64 presence mask followed by fields in schema
-//! order (see `fields` below). Today the encoders write full records; the
-//! mask exists so sparse updates don't change the format.
+//! Strings, styles, and spans are per-transaction tables: ops refer to
+//! them by index and they die with the transaction. The style table is
+//! transport compression only; natively each node owns its layout row.
+//! Decoding borrows strings and payload bytes from the buffer and yields
+//! the same `Transaction` the Rust direct API builds, so one executor
+//! serves both. Op tags group by family (high nibble).
 
 use taffy::{
     AlignContent, AlignItems, Dimension, Display, ExpandedDimension, ExpandedLengthPercentage,
@@ -23,54 +25,69 @@ use taffy::{
     Overflow, Position, Rect, Size as TSize, Style,
 };
 
-use crate::host::{Host, NodeId, NodeKind};
-use crate::layout::Layouts;
+use craie_core::geom::Affine;
 
-const MAGIC: u32 = 0x3157_5243; // "CRW1"
-const VERSION: u16 = 1;
-const NIL: u32 = u32::MAX;
+use crate::mutation::{Command, Mutation, NIL, NodeKind, Role, TextSpan, Transaction};
 
-mod op {
+pub const MAGIC: u32 = 0x3257_5243; // "CRW2"
+pub const VERSION: u16 = 2;
+
+pub mod op {
+    // structure
     pub const CREATE: u8 = 0x01;
-    pub const SET_TEXT: u8 = 0x02;
-    pub const TEXT_PROPS: u8 = 0x03;
-    pub const SET_STYLE: u8 = 0x04;
-    pub const PLACE: u8 = 0x05;
-    pub const DETACH: u8 = 0x06;
-    pub const REMOVE: u8 = 0x07;
-    pub const HIDDEN: u8 = 0x08;
-    pub const STYLE: u8 = 0x09;
-    pub const VIEW_PAINT: u8 = 0x0A;
-    /// Masked paint record: fill/radius/border for views and inputs.
-    pub const PAINT: u8 = 0x0B;
-    /// Event listener mask + flags (focusable).
-    pub const PROPS: u8 = 0x0C;
-    /// Text-input configuration for INPUT-kind nodes.
-    pub const INPUT_PROPS: u8 = 0x0D;
-    /// UI command: focus, blur, set input text, scroll to.
-    pub const COMMAND: u8 = 0x0E;
-    /// Custom-element payload: painter tag + data for CUSTOM-kind nodes.
-    pub const CUSTOM: u8 = 0x0F;
-    /// Accessibility name for a node (string ref; empty clears).
-    pub const LABEL: u8 = 0x10;
+    pub const PLACE: u8 = 0x02;
+    pub const DETACH: u8 = 0x03;
+    pub const REMOVE: u8 = 0x04;
+    // layout
+    pub const LAYOUT: u8 = 0x10;
+    // spatial
+    pub const SPATIAL: u8 = 0x20;
+    // paint
+    pub const PAINT: u8 = 0x30;
+    // text
+    pub const PARAGRAPH: u8 = 0x40;
+    pub const INPUT_CONFIG: u8 = 0x41;
+    // semantics
+    pub const ROLE: u8 = 0x50;
+    pub const LABEL: u8 = 0x51;
+    // interaction
+    pub const INTERACTION: u8 = 0x60;
+    // payload
+    pub const SURFACE: u8 = 0x70;
+    pub const PAYLOAD: u8 = 0x71;
+    // command
+    pub const COMMAND: u8 = 0x80;
+}
+
+/// SPATIAL op field mask bits.
+pub mod spatial_field {
+    /// Six f32: CSS matrix(a, b, c, d, e, f), applied about the center.
+    pub const TRANSFORM: u8 = 1 << 0;
+    /// One f32 in [0, 1].
+    pub const OPACITY: u8 = 1 << 1;
 }
 
 /// PAINT op field mask bits.
-mod paint_field {
-    pub const COLOR: u8 = 1 << 0;
+pub mod paint_field {
+    pub const FILL: u8 = 1 << 0;
     pub const RADIUS: u8 = 1 << 1;
-    /// border_color u32 + border_w f32, written together.
+    /// border_color u32 + border_width f32, written together.
     pub const BORDER: u8 = 1 << 2;
 }
 
 /// COMMAND op sub-tags.
-mod cmd {
+pub mod cmd {
     pub const FOCUS: u8 = 0;
     pub const BLUR: u8 = 1;
     /// Followed by a string ref: replace the input's text.
     pub const SET_TEXT: u8 = 2;
     /// Followed by two f32s: set the scroll offset (logical).
     pub const SCROLL_TO: u8 = 3;
+}
+
+/// Text span flag bits.
+pub mod span_flag {
+    pub const ITALIC: u8 = 1 << 0;
 }
 
 // Style schema, in mask order. Every field is written as a fixed tag byte
@@ -256,224 +273,228 @@ fn overflow_of(tag: u8) -> Overflow {
     }
 }
 
-/// Transaction encoder. Strings are interned per transaction; ops append
-/// to a flat op buffer; `finish` splices header + strings + ops.
-#[derive(Default)]
-pub struct Encoder {
-    strings: Vec<String>,
-    ops: Vec<u8>,
+/// Serializes a style's full record (mask = ALL) — the canonical form
+/// used both on the wire and as the builder's intern key.
+pub fn put_style(out: &mut Vec<u8>, s: &Style) {
+    out.extend_from_slice(&field::ALL.to_le_bytes());
+    put_style_fields(out, s, field::ALL);
 }
 
-impl Encoder {
-    pub fn new() -> Encoder {
-        Encoder::default()
-    }
+/// Per-transaction string table for the encoder.
+struct Strings<'t> {
+    list: Vec<&'t str>,
+    ix: std::collections::HashMap<&'t str, u32>,
+}
 
-    fn str_ref(&mut self, s: &str) -> u32 {
-        // Linear scan is fine: transactions carry few unique strings.
-        if let Some(i) = self.strings.iter().position(|x| x == s) {
-            return i as u32;
+impl<'t> Strings<'t> {
+    fn get(&mut self, s: &'t str) -> u32 {
+        if let Some(&i) = self.ix.get(s) {
+            return i;
         }
-        self.strings.push(s.to_string());
-        (self.strings.len() - 1) as u32
+        self.list.push(s);
+        let i = self.list.len() as u32 - 1;
+        self.ix.insert(s, i);
+        i
     }
+}
 
-    pub fn create(&mut self, id: u32, kind: u8) {
-        self.ops.extend_from_slice(&[op::CREATE]);
-        self.ops.extend_from_slice(&id.to_le_bytes());
-        self.ops.push(kind);
-    }
-
-    pub fn set_text(&mut self, id: u32, text: &str) {
-        let s = self.str_ref(text);
-        self.ops.push(op::SET_TEXT);
-        self.ops.extend_from_slice(&id.to_le_bytes());
-        self.ops.extend_from_slice(&s.to_le_bytes());
-    }
-
-    pub fn text_props(&mut self, id: u32, font_size: f32, color: u32) {
-        self.ops.push(op::TEXT_PROPS);
-        self.ops.extend_from_slice(&id.to_le_bytes());
-        self.ops.extend_from_slice(&font_size.to_le_bytes());
-        self.ops.extend_from_slice(&color.to_le_bytes());
-    }
-
-    pub fn set_style(&mut self, id: u32, wire_style: u32) {
-        self.ops.push(op::SET_STYLE);
-        self.ops.extend_from_slice(&id.to_le_bytes());
-        self.ops.extend_from_slice(&wire_style.to_le_bytes());
-    }
-
-    pub fn clear_style(&mut self, id: u32) {
-        self.set_style(id, NIL);
-    }
-
-    /// `before` of `u32::MAX` appends.
-    pub fn place(&mut self, parent: u32, child: u32, before: u32) {
-        self.ops.push(op::PLACE);
-        for v in [parent, child, before] {
-            self.ops.extend_from_slice(&v.to_le_bytes());
+/// Encodes a transaction as CRW2 bytes. Strings are interned per
+/// transaction.
+pub fn encode(txn: &Transaction<'_>) -> Vec<u8> {
+    let mut strings = Strings {
+        list: Vec::new(),
+        ix: std::collections::HashMap::new(),
+    };
+    let mut ops: Vec<u8> = Vec::with_capacity(txn.mutations.len() * 12);
+    let u32le = |ops: &mut Vec<u8>, v: u32| ops.extend_from_slice(&v.to_le_bytes());
+    let f32le = |ops: &mut Vec<u8>, v: f32| ops.extend_from_slice(&v.to_le_bytes());
+    for m in &txn.mutations {
+        match m {
+            Mutation::Create { id, kind } => {
+                ops.push(op::CREATE);
+                u32le(&mut ops, *id);
+                ops.push(*kind as u8);
+            }
+            Mutation::Place {
+                parent,
+                child,
+                before,
+            } => {
+                ops.push(op::PLACE);
+                for v in [*parent, *child, *before] {
+                    u32le(&mut ops, v);
+                }
+            }
+            Mutation::Detach { id } => {
+                ops.push(op::DETACH);
+                u32le(&mut ops, *id);
+            }
+            Mutation::Remove { id } => {
+                ops.push(op::REMOVE);
+                u32le(&mut ops, *id);
+            }
+            Mutation::Layout { id, style } => {
+                ops.push(op::LAYOUT);
+                u32le(&mut ops, *id);
+                u32le(&mut ops, *style);
+            }
+            Mutation::Spatial {
+                id,
+                transform,
+                opacity,
+            } => {
+                ops.push(op::SPATIAL);
+                u32le(&mut ops, *id);
+                let mut mask = 0;
+                if transform.is_some() {
+                    mask |= spatial_field::TRANSFORM;
+                }
+                if opacity.is_some() {
+                    mask |= spatial_field::OPACITY;
+                }
+                ops.push(mask);
+                if let Some(t) = transform {
+                    for v in t.0 {
+                        f32le(&mut ops, v);
+                    }
+                }
+                if let Some(o) = opacity {
+                    f32le(&mut ops, *o);
+                }
+            }
+            Mutation::Paint {
+                id,
+                fill,
+                radius,
+                border,
+            } => {
+                ops.push(op::PAINT);
+                u32le(&mut ops, *id);
+                let mut mask = 0;
+                if fill.is_some() {
+                    mask |= paint_field::FILL;
+                }
+                if radius.is_some() {
+                    mask |= paint_field::RADIUS;
+                }
+                if border.is_some() {
+                    mask |= paint_field::BORDER;
+                }
+                ops.push(mask);
+                if let Some(c) = fill {
+                    u32le(&mut ops, *c);
+                }
+                if let Some(r) = radius {
+                    f32le(&mut ops, *r);
+                }
+                if let Some((c, w)) = border {
+                    u32le(&mut ops, *c);
+                    f32le(&mut ops, *w);
+                }
+            }
+            Mutation::Paragraph { id, text, spans } => {
+                let s = strings.get(text);
+                ops.push(op::PARAGRAPH);
+                u32le(&mut ops, *id);
+                u32le(&mut ops, s);
+                u32le(&mut ops, spans.start);
+                u32le(&mut ops, spans.end - spans.start);
+            }
+            Mutation::InputConfig {
+                id,
+                font_size,
+                color,
+                placeholder,
+                multiline,
+            } => {
+                let s = strings.get(placeholder);
+                ops.push(op::INPUT_CONFIG);
+                u32le(&mut ops, *id);
+                f32le(&mut ops, *font_size);
+                u32le(&mut ops, *color);
+                u32le(&mut ops, s);
+                ops.push(*multiline as u8);
+            }
+            Mutation::Role { id, role } => {
+                ops.push(op::ROLE);
+                u32le(&mut ops, *id);
+                ops.push(*role as u8);
+            }
+            Mutation::Label { id, text } => {
+                let s = strings.get(text);
+                ops.push(op::LABEL);
+                u32le(&mut ops, *id);
+                u32le(&mut ops, s);
+            }
+            Mutation::Interaction {
+                id,
+                listeners,
+                focusable,
+            } => {
+                ops.push(op::INTERACTION);
+                u32le(&mut ops, *id);
+                u32le(&mut ops, *listeners);
+                ops.push(*focusable as u8);
+            }
+            Mutation::Surface { id, kind, params } => {
+                ops.push(op::SURFACE);
+                u32le(&mut ops, *id);
+                u32le(&mut ops, *kind);
+                for p in params {
+                    u32le(&mut ops, *p);
+                }
+            }
+            Mutation::Payload { id, bytes } => {
+                ops.push(op::PAYLOAD);
+                u32le(&mut ops, *id);
+                u32le(&mut ops, bytes.len() as u32);
+                ops.extend_from_slice(bytes);
+            }
+            Mutation::Command { id, cmd } => {
+                ops.push(op::COMMAND);
+                u32le(&mut ops, *id);
+                match cmd {
+                    Command::Focus => ops.push(cmd::FOCUS),
+                    Command::Blur => ops.push(cmd::BLUR),
+                    Command::SetText(t) => {
+                        let s = strings.get(t);
+                        ops.push(cmd::SET_TEXT);
+                        u32le(&mut ops, s);
+                    }
+                    Command::ScrollTo(x, y) => {
+                        ops.push(cmd::SCROLL_TO);
+                        f32le(&mut ops, *x);
+                        f32le(&mut ops, *y);
+                    }
+                }
+            }
         }
     }
-
-    pub fn detach(&mut self, id: u32) {
-        self.ops.push(op::DETACH);
-        self.ops.extend_from_slice(&id.to_le_bytes());
+    let mut out = Vec::with_capacity(28 + ops.len());
+    out.extend_from_slice(&MAGIC.to_le_bytes());
+    out.extend_from_slice(&VERSION.to_le_bytes());
+    out.extend_from_slice(&0u16.to_le_bytes());
+    out.extend_from_slice(&txn.seq.to_le_bytes());
+    out.extend_from_slice(&(strings.list.len() as u32).to_le_bytes());
+    out.extend_from_slice(&(txn.styles.len() as u32).to_le_bytes());
+    out.extend_from_slice(&(txn.spans.len() as u32).to_le_bytes());
+    for s in &strings.list {
+        out.extend_from_slice(&(s.len() as u32).to_le_bytes());
+        out.extend_from_slice(s.as_bytes());
     }
-
-    pub fn remove(&mut self, id: u32) {
-        self.ops.push(op::REMOVE);
-        self.ops.extend_from_slice(&id.to_le_bytes());
+    for s in &txn.styles {
+        put_style(&mut out, s);
     }
-
-    pub fn hidden(&mut self, id: u32, hidden: bool) {
-        self.ops.push(op::HIDDEN);
-        self.ops.extend_from_slice(&id.to_le_bytes());
-        self.ops.push(hidden as u8);
+    for sp in &txn.spans {
+        out.extend_from_slice(&sp.start.to_le_bytes());
+        out.extend_from_slice(&sp.font_size.to_le_bytes());
+        out.extend_from_slice(&sp.color.to_le_bytes());
+        out.extend_from_slice(&sp.weight.to_le_bytes());
+        out.push(if sp.italic { span_flag::ITALIC } else { 0 });
+        out.push(0);
     }
-
-    /// Sets a view's background color (0xRRGGBBAA).
-    pub fn view_paint(&mut self, id: u32, color: u32) {
-        self.ops.push(op::VIEW_PAINT);
-        self.ops.extend_from_slice(&id.to_le_bytes());
-        self.ops.extend_from_slice(&color.to_le_bytes());
-    }
-
-    /// Masked paint update: color (0xRRGGBBAA), corner radius, border.
-    pub fn paint(
-        &mut self,
-        id: u32,
-        color: Option<u32>,
-        radius: Option<f32>,
-        border: Option<(u32, f32)>,
-    ) {
-        self.ops.push(op::PAINT);
-        self.ops.extend_from_slice(&id.to_le_bytes());
-        let mut mask = 0u8;
-        if color.is_some() {
-            mask |= paint_field::COLOR;
-        }
-        if radius.is_some() {
-            mask |= paint_field::RADIUS;
-        }
-        if border.is_some() {
-            mask |= paint_field::BORDER;
-        }
-        self.ops.push(mask);
-        if let Some(c) = color {
-            self.ops.extend_from_slice(&c.to_le_bytes());
-        }
-        if let Some(r) = radius {
-            self.ops.extend_from_slice(&r.to_le_bytes());
-        }
-        if let Some((bc, bw)) = border {
-            self.ops.extend_from_slice(&bc.to_le_bytes());
-            self.ops.extend_from_slice(&bw.to_le_bytes());
-        }
-    }
-
-    /// Event listener mask + focusable flag for a node.
-    pub fn props(&mut self, id: u32, listeners: u32, focusable: bool) {
-        self.ops.push(op::PROPS);
-        self.ops.extend_from_slice(&id.to_le_bytes());
-        self.ops.extend_from_slice(&listeners.to_le_bytes());
-        self.ops.push(focusable as u8);
-    }
-
-    /// Text-input configuration.
-    pub fn input_props(
-        &mut self,
-        id: u32,
-        font_size: f32,
-        color: u32,
-        placeholder: &str,
-        multiline: bool,
-    ) {
-        let s = self.str_ref(placeholder);
-        self.ops.push(op::INPUT_PROPS);
-        self.ops.extend_from_slice(&id.to_le_bytes());
-        self.ops.extend_from_slice(&font_size.to_le_bytes());
-        self.ops.extend_from_slice(&color.to_le_bytes());
-        self.ops.extend_from_slice(&s.to_le_bytes());
-        self.ops.push(multiline as u8);
-    }
-
-    /// Accessibility name for a node (empty string clears it).
-    pub fn label(&mut self, id: u32, text: &str) {
-        let s = self.str_ref(text);
-        self.ops.push(op::LABEL);
-        self.ops.extend_from_slice(&id.to_le_bytes());
-        self.ops.extend_from_slice(&s.to_le_bytes());
-    }
-
-    /// Focus a node.
-    pub fn cmd_focus(&mut self, id: u32) {
-        self.ops.push(op::COMMAND);
-        self.ops.extend_from_slice(&id.to_le_bytes());
-        self.ops.push(cmd::FOCUS);
-    }
-
-    /// Blur a node.
-    pub fn cmd_blur(&mut self, id: u32) {
-        self.ops.push(op::COMMAND);
-        self.ops.extend_from_slice(&id.to_le_bytes());
-        self.ops.push(cmd::BLUR);
-    }
-
-    /// Replace an input node's text.
-    pub fn cmd_set_input_text(&mut self, id: u32, text: &str) {
-        let s = self.str_ref(text);
-        self.ops.push(op::COMMAND);
-        self.ops.extend_from_slice(&id.to_le_bytes());
-        self.ops.push(cmd::SET_TEXT);
-        self.ops.extend_from_slice(&s.to_le_bytes());
-    }
-
-    /// Set a node's scroll offset (logical points).
-    pub fn cmd_scroll_to(&mut self, id: u32, x: f32, y: f32) {
-        self.ops.push(op::COMMAND);
-        self.ops.extend_from_slice(&id.to_le_bytes());
-        self.ops.push(cmd::SCROLL_TO);
-        self.ops.extend_from_slice(&x.to_le_bytes());
-        self.ops.extend_from_slice(&y.to_le_bytes());
-    }
-
-    /// Custom-element payload for a CUSTOM-kind node: painter tag, four
-    /// floats, and a string.
-    pub fn custom(&mut self, id: u32, tag: u32, data: [f32; 4], text: &str) {
-        let s = self.str_ref(text);
-        self.ops.push(op::CUSTOM);
-        self.ops.extend_from_slice(&id.to_le_bytes());
-        self.ops.extend_from_slice(&tag.to_le_bytes());
-        for v in data {
-            self.ops.extend_from_slice(&v.to_le_bytes());
-        }
-        self.ops.extend_from_slice(&s.to_le_bytes());
-    }
-
-    /// Defines wire style `wire_id`. Writes a full record (mask = ALL);
-    /// sparse updates are a format-compatible extension.
-    pub fn style(&mut self, wire_id: u32, s: &Style) {
-        self.ops.push(op::STYLE);
-        self.ops.extend_from_slice(&wire_id.to_le_bytes());
-        self.ops.extend_from_slice(&field::ALL.to_le_bytes());
-        put_style_fields(&mut self.ops, s, field::ALL);
-    }
-
-    pub fn finish(&self, seq: u64) -> Vec<u8> {
-        let mut out = Vec::with_capacity(20 + self.ops.len());
-        out.extend_from_slice(&MAGIC.to_le_bytes());
-        out.extend_from_slice(&VERSION.to_le_bytes());
-        out.extend_from_slice(&0u16.to_le_bytes()); // flags
-        out.extend_from_slice(&seq.to_le_bytes());
-        out.extend_from_slice(&(self.strings.len() as u32).to_le_bytes());
-        for s in &self.strings {
-            out.extend_from_slice(&(s.len() as u32).to_le_bytes());
-            out.extend_from_slice(s.as_bytes());
-        }
-        out.extend_from_slice(&self.ops);
-        out
-    }
+    out.extend_from_slice(&ops);
+    out
 }
 
 /// Serializes the fields selected by `mask` in schema order.
@@ -577,102 +598,207 @@ pub enum WireError {
     BadOp(u8),
     BadString(usize),
     BadUtf8,
+    /// A table index, kind, or role out of range.
+    BadRef(&'static str),
     /// The transaction decoded but references something invalid: an
-    /// unknown/absent node, wrong kind, a placement cycle, or a reserved
-    /// sentinel id. Nothing was applied.
+    /// absent node, a wrong kind, a placement cycle, a reserved id, or a
+    /// malformed paragraph. Nothing was applied.
     Invalid(&'static str),
 }
 
-/// A decoded transaction. Strings borrow from the input buffer.
-pub struct Txn<'a> {
-    pub seq: u64,
-    pub ops: Vec<Op<'a>>,
+impl std::fmt::Display for WireError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{self:?}")
+    }
 }
 
-#[derive(Debug)]
-pub enum Op<'a> {
-    Create {
-        id: u32,
-        kind: u8,
-    },
-    SetText {
-        id: u32,
-        text: &'a str,
-    },
-    TextProps {
-        id: u32,
-        font_size: f32,
-        color: u32,
-    },
-    SetStyle {
-        id: u32,
-        wire_style: u32,
-    },
-    Place {
-        parent: u32,
-        child: u32,
-        before: u32,
-    },
-    Detach {
-        id: u32,
-    },
-    Remove {
-        id: u32,
-    },
-    Hidden {
-        id: u32,
-        hidden: bool,
-    },
-    ViewPaint {
-        id: u32,
-        color: u32,
-    },
-    Style {
-        wire_id: u32,
-        style: Box<Style>,
-    },
-    Paint {
-        id: u32,
-        color: Option<u32>,
-        radius: Option<f32>,
-        border: Option<(u32, f32)>,
-    },
-    Props {
-        id: u32,
-        listeners: u32,
-        focusable: bool,
-    },
-    InputProps {
-        id: u32,
-        font_size: f32,
-        color: u32,
-        placeholder: &'a str,
-        multiline: bool,
-    },
-    Command {
-        id: u32,
-        cmd: Command<'a>,
-    },
-    Custom {
-        id: u32,
-        tag: u32,
-        data: [f32; 4],
-        text: &'a str,
-    },
-    /// Accessibility name for a node (empty string clears it).
-    Label {
-        id: u32,
-        text: &'a str,
-    },
-}
+/// Decodes a CRW2 buffer. O(n); strings and payloads borrow the buffer.
+pub fn decode(buf: &[u8]) -> Result<Transaction<'_>, WireError> {
+    let mut r = Reader { buf, pos: 0 };
+    if r.u32()? != MAGIC {
+        return Err(WireError::BadMagic);
+    }
+    let version = r.u16()?;
+    if version != VERSION {
+        return Err(WireError::BadVersion(version));
+    }
+    let _flags = r.u16()?;
+    let seq = r.u64()?;
+    let string_count = r.u32()? as usize;
+    let style_count = r.u32()? as usize;
+    let span_count = r.u32()? as usize;
 
-/// UI command payloads (COMMAND op).
-#[derive(Debug)]
-pub enum Command<'a> {
-    Focus,
-    Blur,
-    SetInputText(&'a str),
-    ScrollTo(f32, f32),
+    let mut strings: Vec<&str> = Vec::with_capacity(string_count.min(buf.len()));
+    for i in 0..string_count {
+        let len = r.u32()? as usize;
+        let bytes = r.take(len).map_err(|_| WireError::BadString(i))?;
+        strings.push(std::str::from_utf8(bytes).map_err(|_| WireError::BadUtf8)?);
+    }
+    let mut txn = Transaction::new(seq);
+    txn.styles.reserve(style_count.min(buf.len()));
+    for _ in 0..style_count {
+        let mask = r.u64()?;
+        txn.styles.push(r.style(mask)?);
+    }
+    txn.spans.reserve(span_count.min(buf.len() / 16));
+    for _ in 0..span_count {
+        let start = r.u32()?;
+        let font_size = r.f32()?;
+        let color = r.u32()?;
+        let weight = r.u16()?;
+        let flags = r.u8()?;
+        let _reserved = r.u8()?;
+        txn.spans.push(TextSpan {
+            start,
+            font_size,
+            color,
+            weight,
+            italic: flags & span_flag::ITALIC != 0,
+        });
+    }
+    let string = |i: u32| -> Result<&str, WireError> {
+        strings
+            .get(i as usize)
+            .copied()
+            .ok_or(WireError::BadRef("string"))
+    };
+
+    while r.pos < buf.len() {
+        let tag = r.u8()?;
+        let m = match tag {
+            op::CREATE => {
+                let id = r.u32()?;
+                let kind = NodeKind::from_u8(r.u8()?).ok_or(WireError::BadRef("kind"))?;
+                Mutation::Create { id, kind }
+            }
+            op::PLACE => Mutation::Place {
+                parent: r.u32()?,
+                child: r.u32()?,
+                before: r.u32()?,
+            },
+            op::DETACH => Mutation::Detach { id: r.u32()? },
+            op::REMOVE => Mutation::Remove { id: r.u32()? },
+            op::LAYOUT => {
+                let id = r.u32()?;
+                let style = r.u32()?;
+                if style != NIL && style as usize >= txn.styles.len() {
+                    return Err(WireError::BadRef("style"));
+                }
+                Mutation::Layout { id, style }
+            }
+            op::SPATIAL => {
+                let id = r.u32()?;
+                let mask = r.u8()?;
+                let transform = if mask & spatial_field::TRANSFORM != 0 {
+                    let mut m = [0.0f32; 6];
+                    for v in &mut m {
+                        *v = r.f32()?;
+                    }
+                    Some(Affine(m))
+                } else {
+                    None
+                };
+                let opacity = if mask & spatial_field::OPACITY != 0 {
+                    Some(r.f32()?)
+                } else {
+                    None
+                };
+                Mutation::Spatial {
+                    id,
+                    transform,
+                    opacity,
+                }
+            }
+            op::PAINT => {
+                let id = r.u32()?;
+                let mask = r.u8()?;
+                let fill = if mask & paint_field::FILL != 0 {
+                    Some(r.u32()?)
+                } else {
+                    None
+                };
+                let radius = if mask & paint_field::RADIUS != 0 {
+                    Some(r.f32()?)
+                } else {
+                    None
+                };
+                let border = if mask & paint_field::BORDER != 0 {
+                    Some((r.u32()?, r.f32()?))
+                } else {
+                    None
+                };
+                Mutation::Paint {
+                    id,
+                    fill,
+                    radius,
+                    border,
+                }
+            }
+            op::PARAGRAPH => {
+                let id = r.u32()?;
+                let text = string(r.u32()?)?;
+                let start = r.u32()?;
+                let count = r.u32()?;
+                let end = start.checked_add(count).ok_or(WireError::BadRef("span"))?;
+                if end as usize > txn.spans.len() {
+                    return Err(WireError::BadRef("span"));
+                }
+                Mutation::Paragraph {
+                    id,
+                    text: text.into(),
+                    spans: start..end,
+                }
+            }
+            op::INPUT_CONFIG => Mutation::InputConfig {
+                id: r.u32()?,
+                font_size: r.f32()?,
+                color: r.u32()?,
+                placeholder: string(r.u32()?)?.into(),
+                multiline: r.u8()? != 0,
+            },
+            op::ROLE => {
+                let id = r.u32()?;
+                let role = Role::from_u8(r.u8()?).ok_or(WireError::BadRef("role"))?;
+                Mutation::Role { id, role }
+            }
+            op::LABEL => Mutation::Label {
+                id: r.u32()?,
+                text: string(r.u32()?)?.into(),
+            },
+            op::INTERACTION => Mutation::Interaction {
+                id: r.u32()?,
+                listeners: r.u32()?,
+                focusable: r.u8()? != 0,
+            },
+            op::SURFACE => Mutation::Surface {
+                id: r.u32()?,
+                kind: r.u32()?,
+                params: [r.u32()?, r.u32()?, r.u32()?, r.u32()?],
+            },
+            op::PAYLOAD => {
+                let id = r.u32()?;
+                let len = r.u32()? as usize;
+                Mutation::Payload {
+                    id,
+                    bytes: r.take(len)?.into(),
+                }
+            }
+            op::COMMAND => {
+                let id = r.u32()?;
+                let cmd = match r.u8()? {
+                    cmd::FOCUS => Command::Focus,
+                    cmd::BLUR => Command::Blur,
+                    cmd::SET_TEXT => Command::SetText(string(r.u32()?)?.into()),
+                    cmd::SCROLL_TO => Command::ScrollTo(r.f32()?, r.f32()?),
+                    other => return Err(WireError::BadOp(other)),
+                };
+                Mutation::Command { id, cmd }
+            }
+            _ => return Err(WireError::BadOp(tag)),
+        };
+        txn.mutations.push(m);
+    }
+    Ok(txn)
 }
 
 struct Reader<'a> {
@@ -851,544 +977,5 @@ impl<'a> Reader<'a> {
             };
         }
         Ok(s)
-    }
-}
-
-/// Decodes a transaction buffer into ops. O(n), zero-copy for strings.
-pub fn decode(buf: &[u8]) -> Result<Txn<'_>, WireError> {
-    let mut r = Reader { buf, pos: 0 };
-    if r.u32()? != MAGIC {
-        return Err(WireError::BadMagic);
-    }
-    let version = r.u16()?;
-    if version != VERSION {
-        return Err(WireError::BadVersion(version));
-    }
-    let _flags = r.u16()?;
-    let seq = r.u64()?;
-    let string_count = r.u32()? as usize;
-
-    let mut strings: Vec<&str> = Vec::with_capacity(string_count);
-    for i in 0..string_count {
-        let len = r.u32()? as usize;
-        let bytes = r.take(len).map_err(|_| WireError::BadString(i))?;
-        strings.push(std::str::from_utf8(bytes).map_err(|_| WireError::BadUtf8)?);
-    }
-
-    let mut ops = Vec::new();
-    while r.pos < buf.len() {
-        let tag = r.u8()?;
-        let op = match tag {
-            op::CREATE => Op::Create {
-                id: r.u32()?,
-                kind: r.u8()?,
-            },
-            op::SET_TEXT => Op::SetText {
-                id: r.u32()?,
-                text: strings
-                    .get(r.u32()? as usize)
-                    .copied()
-                    .ok_or(WireError::Truncated)?,
-            },
-            op::TEXT_PROPS => Op::TextProps {
-                id: r.u32()?,
-                font_size: r.f32()?,
-                color: r.u32()?,
-            },
-            op::SET_STYLE => Op::SetStyle {
-                id: r.u32()?,
-                wire_style: r.u32()?,
-            },
-            op::PLACE => Op::Place {
-                parent: r.u32()?,
-                child: r.u32()?,
-                before: r.u32()?,
-            },
-            op::DETACH => Op::Detach { id: r.u32()? },
-            op::REMOVE => Op::Remove { id: r.u32()? },
-            op::HIDDEN => Op::Hidden {
-                id: r.u32()?,
-                hidden: r.u8()? != 0,
-            },
-            op::VIEW_PAINT => Op::ViewPaint {
-                id: r.u32()?,
-                color: r.u32()?,
-            },
-            op::STYLE => {
-                let wire_id = r.u32()?;
-                let mask = r.u64()?;
-                Op::Style {
-                    wire_id,
-                    style: Box::new(r.style(mask)?),
-                }
-            }
-            op::PAINT => {
-                let id = r.u32()?;
-                let mask = r.u8()?;
-                let color = if mask & paint_field::COLOR != 0 {
-                    Some(r.u32()?)
-                } else {
-                    None
-                };
-                let radius = if mask & paint_field::RADIUS != 0 {
-                    Some(r.f32()?)
-                } else {
-                    None
-                };
-                let border = if mask & paint_field::BORDER != 0 {
-                    Some((r.u32()?, r.f32()?))
-                } else {
-                    None
-                };
-                Op::Paint {
-                    id,
-                    color,
-                    radius,
-                    border,
-                }
-            }
-            op::PROPS => Op::Props {
-                id: r.u32()?,
-                listeners: r.u32()?,
-                focusable: r.u8()? != 0,
-            },
-            op::INPUT_PROPS => Op::InputProps {
-                id: r.u32()?,
-                font_size: r.f32()?,
-                color: r.u32()?,
-                placeholder: strings
-                    .get(r.u32()? as usize)
-                    .copied()
-                    .ok_or(WireError::Truncated)?,
-                multiline: r.u8()? != 0,
-            },
-            op::COMMAND => {
-                let id = r.u32()?;
-                let cmd = match r.u8()? {
-                    cmd::FOCUS => Command::Focus,
-                    cmd::BLUR => Command::Blur,
-                    cmd::SET_TEXT => Command::SetInputText(
-                        strings
-                            .get(r.u32()? as usize)
-                            .copied()
-                            .ok_or(WireError::Truncated)?,
-                    ),
-                    cmd::SCROLL_TO => Command::ScrollTo(r.f32()?, r.f32()?),
-                    other => return Err(WireError::BadOp(other)),
-                };
-                Op::Command { id, cmd }
-            }
-            op::CUSTOM => Op::Custom {
-                id: r.u32()?,
-                tag: r.u32()?,
-                data: [r.f32()?, r.f32()?, r.f32()?, r.f32()?],
-                text: strings
-                    .get(r.u32()? as usize)
-                    .copied()
-                    .ok_or(WireError::Truncated)?,
-            },
-            op::LABEL => Op::Label {
-                id: r.u32()?,
-                text: strings
-                    .get(r.u32()? as usize)
-                    .copied()
-                    .ok_or(WireError::Truncated)?,
-            },
-            _ => return Err(WireError::BadOp(tag)),
-        };
-        ops.push(op);
-    }
-    Ok(Txn { seq, ops })
-}
-
-// ---------------------------------------------------------------- apply
-
-impl Txn<'_> {
-    /// Validates the whole transaction against current host state, then
-    /// applies it. Validation simulates create/remove/place effects so
-    /// references to ids created earlier in the same transaction resolve
-    /// correctly; on failure nothing is applied.
-    pub fn apply(&self, host: &mut Host, layouts: &mut Layouts) -> Result<(), WireError> {
-        self.validate(host)?;
-        self.apply_unchecked(host, layouts);
-        Ok(())
-    }
-
-    /// Applies without validation — benches and tests with trusted input.
-    pub fn apply_unchecked(&self, host: &mut Host, layouts: &mut Layouts) {
-        for op in &self.ops {
-            match op {
-                Op::Create { id, kind } => {
-                    host.create(
-                        NodeId(*id),
-                        match kind {
-                            1 => NodeKind::TEXT,
-                            2 => NodeKind::INPUT,
-                            3 => NodeKind::CUSTOM,
-                            _ => NodeKind::VIEW,
-                        },
-                    );
-                }
-                Op::SetText { id, text } => host.set_text(NodeId(*id), text),
-                Op::TextProps {
-                    id,
-                    font_size,
-                    color,
-                } => host.set_text_props(NodeId(*id), *font_size, *color),
-                Op::SetStyle { id, wire_style } => {
-                    // The header stores the wire id verbatim; NIL means
-                    // "no style".
-                    host.set_style(NodeId(*id), *wire_style);
-                }
-                Op::Place {
-                    parent,
-                    child,
-                    before,
-                } => {
-                    host.insert_before(
-                        NodeId(*parent),
-                        NodeId(*child),
-                        if *before == NIL {
-                            NodeId::NIL
-                        } else {
-                            NodeId(*before)
-                        },
-                    );
-                }
-                Op::Detach { id } => host.detach(NodeId(*id)),
-                Op::Remove { id } => host.remove(NodeId(*id)),
-                Op::Hidden { id, hidden } => host.set_hidden(NodeId(*id), *hidden),
-                Op::ViewPaint { id, color } => host.set_view_paint(NodeId(*id), *color),
-                Op::Style { wire_id, style } => {
-                    let existed = layouts.wire_style_defined(*wire_id);
-                    layouts.define_style(*wire_id, (**style).clone());
-                    if existed {
-                        // A redefined style reaches nodes we don't track a
-                        // reverse map for; drop every layout cache.
-                        layouts.clear_all_caches(host.slot_count());
-                    }
-                }
-                Op::Paint {
-                    id,
-                    color,
-                    radius,
-                    border,
-                } => host.set_paint(NodeId(*id), *color, *radius, *border),
-                Op::Props {
-                    id,
-                    listeners,
-                    focusable,
-                } => host.set_props(NodeId(*id), *listeners, *focusable),
-                // Input state, custom payloads, labels, and commands are
-                // UI-level: `Ui::apply_txn` handles them after the host
-                // pass.
-                Op::InputProps { .. }
-                | Op::Command { .. }
-                | Op::Custom { .. }
-                | Op::Label { .. } => {}
-            }
-        }
-    }
-
-    /// Checks every op against host state plus the effects of earlier ops
-    /// in the same transaction. O(ops), no host mutation.
-    fn validate(&self, host: &Host) -> Result<(), WireError> {
-        use std::collections::HashMap;
-        // Overlay of liveness changes made by earlier ops: node id ->
-        // (live?, kind). Absent entries consult the host.
-        let mut diff: HashMap<u32, (bool, NodeKind)> = HashMap::new();
-        // Overlay of parent links after earlier places/detaches.
-        let mut parents: HashMap<u32, u32> = HashMap::new();
-
-        fn kind_of(host: &Host, diff: &HashMap<u32, (bool, NodeKind)>, id: u32) -> Option<NodeKind> {
-            if let Some(&(live, kind)) = diff.get(&id) {
-                return live.then_some(kind);
-            }
-            host.node(NodeId(id)).map(|n| n.kind())
-        }
-        fn parent_of(host: &Host, parents: &HashMap<u32, u32>, id: u32) -> u32 {
-            if let Some(&p) = parents.get(&id) {
-                return p;
-            }
-            host.node(NodeId(id))
-                .map(|n| n.parent)
-                .unwrap_or(NodeId::DETACHED.0)
-        }
-        macro_rules! kind_of {
-            ($id:expr) => {
-                kind_of(host, &diff, $id)
-            };
-        }
-        macro_rules! live {
-            ($id:expr) => {
-                kind_of!($id).is_some()
-            };
-        }
-        macro_rules! parent_of {
-            ($id:expr) => {
-                parent_of(host, &parents, $id)
-            };
-        }
-
-        for op in &self.ops {
-            match op {
-                Op::Create { id, kind } => {
-                    if *id >= NodeId::DETACHED.0 || *kind > 3 {
-                        return Err(WireError::Invalid("bad id or kind in create"));
-                    }
-                    if live!(*id) {
-                        return Err(WireError::Invalid("create over live node"));
-                    }
-                    let kind = match kind {
-                        1 => NodeKind::TEXT,
-                        2 => NodeKind::INPUT,
-                        3 => NodeKind::CUSTOM,
-                        _ => NodeKind::VIEW,
-                    };
-                    diff.insert(*id, (true, kind));
-                }
-                Op::SetText { id, .. } | Op::TextProps { id, .. } => {
-                    if kind_of!(*id) != Some(NodeKind::TEXT) {
-                        return Err(WireError::Invalid("text op on non-text node"));
-                    }
-                }
-                Op::SetStyle { id, wire_style } => {
-                    if !live!(*id) {
-                        return Err(WireError::Invalid("style on absent node"));
-                    }
-                    // NIL clears the style; a defined id is checked lazily
-                    // at layout (undefined ids resolve to the default).
-                    let _ = wire_style;
-                }
-                Op::Place {
-                    parent,
-                    child,
-                    before,
-                } => {
-                    if *child >= NodeId::DETACHED.0 {
-                        return Err(WireError::Invalid("place of sentinel"));
-                    }
-                    if !live!(*child) {
-                        return Err(WireError::Invalid("place of absent child"));
-                    }
-                    if *parent != NIL && !live!(*parent) {
-                        return Err(WireError::Invalid("place under absent parent"));
-                    }
-                    if *before != NIL && !live!(*before) {
-                        return Err(WireError::Invalid("place before absent sibling"));
-                    }
-                    // Cycle check: walking ancestors of `parent` (through
-                    // the pending overlay) must never reach `child`.
-                    let mut cur = *parent;
-                    let mut hops = 0u32;
-                    while cur != NIL && cur != NodeId::DETACHED.0 {
-                        if cur == *child {
-                            return Err(WireError::Invalid("place would create a cycle"));
-                        }
-                        cur = parent_of!(cur);
-                        hops += 1;
-                        // `diff` accounts for nodes created earlier in
-                        // this transaction that don't exist in the arena
-                        // yet.
-                        if hops > host.slot_count() as u32 + diff.len() as u32 + 1 {
-                            return Err(WireError::Invalid("corrupt parent chain"));
-                        }
-                    }
-                    parents.insert(*child, *parent);
-                }
-                Op::Detach { id } | Op::Remove { id } => {
-                    if *id >= NodeId::DETACHED.0 {
-                        return Err(WireError::Invalid("sentinel id"));
-                    }
-                    if !live!(*id) {
-                        return Err(WireError::Invalid("op on absent node"));
-                    }
-                    if matches!(op, Op::Remove { .. }) {
-                        diff.insert(*id, (false, NodeKind::EMPTY));
-                    } else {
-                        parents.insert(*id, NodeId::DETACHED.0);
-                    }
-                }
-                Op::Hidden { id, .. } => {
-                    if !live!(*id) {
-                        return Err(WireError::Invalid("hidden on absent node"));
-                    }
-                }
-                Op::ViewPaint { id, .. } | Op::Paint { id, .. } => {
-                    if !matches!(
-                        kind_of!(*id),
-                        Some(NodeKind::VIEW | NodeKind::INPUT | NodeKind::CUSTOM)
-                    ) {
-                        return Err(WireError::Invalid("paint on non-view node"));
-                    }
-                }
-                Op::Props { id, .. } | Op::Command { id, .. } => {
-                    if !live!(*id) {
-                        return Err(WireError::Invalid("props/command on absent node"));
-                    }
-                }
-                Op::InputProps { id, .. } => {
-                    if kind_of!(*id) != Some(NodeKind::INPUT) {
-                        return Err(WireError::Invalid("input props on non-input node"));
-                    }
-                }
-                Op::Custom { id, .. } => {
-                    if kind_of!(*id) != Some(NodeKind::CUSTOM) {
-                        return Err(WireError::Invalid("custom props on non-custom node"));
-                    }
-                }
-                Op::Label { id, .. } => {
-                    if !live!(*id) {
-                        return Err(WireError::Invalid("label on absent node"));
-                    }
-                }
-                Op::Style { wire_id, .. } => {
-                    if *wire_id == NIL {
-                        return Err(WireError::Invalid("style definition at NIL id"));
-                    }
-                }
-            }
-        }
-        Ok(())
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use taffy::{AlignContent, AlignItems};
-
-    fn sample_style() -> Style {
-        Style {
-            display: Display::Flex,
-            position: Position::Absolute,
-            flex_direction: FlexDirection::Column,
-            flex_wrap: FlexWrap::Wrap,
-            justify_content: Some(AlignContent::SPACE_BETWEEN),
-            align_items: Some(AlignItems::CENTER),
-            align_content: Some(AlignContent::STRETCH),
-            align_self: Some(AlignItems::FLEX_END),
-            gap: TSize {
-                width: LengthPercentage::length(8.0),
-                height: LengthPercentage::percent(0.5),
-            },
-            size: TSize {
-                width: Dimension::percent(1.0),
-                height: Dimension::auto(),
-            },
-            min_size: TSize {
-                width: LengthPercentageAuto::length(10.0),
-                height: LengthPercentageAuto::auto(),
-            },
-            padding: Rect {
-                left: LengthPercentage::length(1.0),
-                right: LengthPercentage::length(2.0),
-                top: LengthPercentage::percent(0.25),
-                bottom: LengthPercentage::length(4.0),
-            },
-            margin: Rect {
-                left: LengthPercentageAuto::auto(),
-                right: LengthPercentageAuto::length(6.0),
-                top: LengthPercentageAuto::percent(0.1),
-                bottom: LengthPercentageAuto::auto(),
-            },
-            flex_basis: Dimension::length(64.0),
-            flex_grow: 2.0,
-            flex_shrink: 0.5,
-            aspect_ratio: Some(1.5),
-            ..Style::default()
-        }
-    }
-
-    #[test]
-    fn roundtrip_ops() {
-        let mut enc = Encoder::new();
-        enc.create(0, 0);
-        enc.create(1, 1);
-        enc.set_text(1, "héllo — مرحبا");
-        enc.text_props(1, 16.0, 0xFF00FFEE);
-        enc.place(0, 1, u32::MAX);
-        enc.hidden(1, true);
-        enc.hidden(1, false);
-        enc.style(7, &sample_style());
-        enc.set_style(0, 7);
-        enc.detach(1);
-        enc.remove(1);
-        let buf = enc.finish(42);
-
-        let txn = decode(&buf).expect("decode");
-        assert_eq!(txn.seq, 42);
-        assert_eq!(txn.ops.len(), 11);
-        match &txn.ops[2] {
-            Op::SetText { id, text } => {
-                assert_eq!(*id, 1);
-                assert_eq!(*text, "héllo — مرحبا");
-            }
-            _ => panic!("op 2 not SetText"),
-        }
-        match &txn.ops[7] {
-            Op::Style { wire_id, style } => {
-                assert_eq!(*wire_id, 7);
-                assert_eq!(**style, sample_style());
-            }
-            _ => panic!("op 7 not Style"),
-        }
-    }
-
-    #[test]
-    fn apply_builds_tree() {
-        let mut enc = Encoder::new();
-        enc.create(0, 0);
-        enc.create(1, 1);
-        enc.create(2, 1);
-        enc.set_text(1, "first");
-        enc.set_text(2, "second");
-        enc.place(0, 1, u32::MAX);
-        enc.place(0, 2, u32::MAX);
-        enc.place(u32::MAX, 0, u32::MAX); // root
-        let buf = enc.finish(1);
-        let txn = decode(&buf).unwrap();
-
-        let mut host = Host::new();
-        let mut layouts = Layouts::new();
-        txn.apply(&mut host, &mut layouts).unwrap();
-
-        assert_eq!(host.len(), 3);
-        assert_eq!(
-            host.children(NodeId(0)).to_vec(),
-            vec![NodeId(1), NodeId(2)]
-        );
-        assert_eq!(host.text(NodeId(1)).unwrap().text, "first");
-        assert!(host.paint_dirty());
-    }
-
-    #[test]
-    fn apply_style_and_hidden() {
-        let mut enc = Encoder::new();
-        enc.style(3, &sample_style());
-        enc.create(0, 0);
-        enc.set_style(0, 3);
-        enc.hidden(0, true);
-        let buf = enc.finish(1);
-        let txn = decode(&buf).unwrap();
-
-        let mut host = Host::new();
-        let mut layouts = Layouts::new();
-        txn.apply(&mut host, &mut layouts).unwrap();
-
-        let node = host.node(NodeId(0)).unwrap();
-        assert!(node.hidden());
-        let style = layouts.style(crate::host::StyleId(node.style));
-        assert_eq!(style.flex_direction, FlexDirection::Column);
-        assert_eq!(style.padding.left, LengthPercentage::length(1.0));
-    }
-
-    #[test]
-    fn rejects_garbage() {
-        assert!(matches!(decode(&[]), Err(WireError::Truncated)));
-        assert!(matches!(
-            decode(&[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]),
-            Err(WireError::BadMagic)
-        ));
     }
 }

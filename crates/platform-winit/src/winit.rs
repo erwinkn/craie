@@ -87,9 +87,11 @@ impl<A: App> Driver<A> {
         let text = if self.mods.meta || self.mods.ctrl {
             None
         } else {
-            event.text.as_ref().map(|t| t.to_string()).or_else(|| {
-                (key == Key::Unknown).then(|| char.clone()).flatten()
-            })
+            event
+                .text
+                .as_ref()
+                .map(|t| t.to_string())
+                .or_else(|| (key == Key::Unknown).then(|| char.clone()).flatten())
         };
         KeyInput {
             key,
@@ -204,15 +206,13 @@ impl<A: App> ApplicationHandler for Driver<A> {
                 // The pointer left the surface; report a move outside so
                 // hover/leave synthesis runs.
                 self.pointer = (-1.0, -1.0);
-                self.app.event(window, &Event::PointerMove { x: -1.0, y: -1.0 });
+                self.app
+                    .event(window, &Event::PointerMove { x: -1.0, y: -1.0 });
             }
             WindowEvent::MouseWheel { delta, .. } => {
                 let (dx, dy) = match delta {
                     // Pixel deltas are physical px -> logical points.
-                    MouseScrollDelta::PixelDelta(p) => (
-                        (p.x as f32) / scale,
-                        (p.y as f32) / scale,
-                    ),
+                    MouseScrollDelta::PixelDelta(p) => ((p.x as f32) / scale, (p.y as f32) / scale),
                     // Line deltas: ~32pt per line, a common convention.
                     MouseScrollDelta::LineDelta(x, y) => (x * 32.0, y * 32.0),
                 };

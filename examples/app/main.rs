@@ -9,18 +9,22 @@
 //! The ticker submits the demo transaction, then one update per second —
 //! exercising submit → wake → apply → ack → repaint without a JS runtime.
 
-use craie_platform_winit::app::HostApp;
-use craie_ui::bridge;
 use craie_core::geom::Size;
-use craie_render::{Gpu, Renderer};
 use craie_platform_winit as platform;
+use craie_platform_winit::app::HostApp;
+use craie_render::{Gpu, Renderer};
+use craie_ui::bridge;
+use craie_ui::mutation::{Mutation, NodeKind, Transaction};
 use craie_ui::ui::Ui;
-use craie_ui::wire::Encoder;
 use taffy::{AlignContent, AlignItems, Dimension, FlexDirection, LengthPercentage, Rect, Style};
 
-const KIND_VIEW: u8 = 0;
-const KIND_TEXT: u8 = 1;
 const NIL: u32 = u32::MAX;
+
+/// Seals a transaction as CRW2 bytes.
+fn finish(mut t: Transaction<'_>, seq: u64) -> Vec<u8> {
+    t.seq = seq;
+    craie_ui::wire::encode(&t)
+}
 
 fn style(f: impl FnOnce(&mut Style)) -> Style {
     let mut s = Style::default();
@@ -31,98 +35,93 @@ fn style(f: impl FnOnce(&mut Style)) -> Style {
 /// The built-in demo, expressed as one transaction. The JS bridge produces
 /// exactly this byte shape from a React tree.
 fn demo_txn() -> Vec<u8> {
-    let mut enc = Encoder::new();
+    let mut enc = Transaction::new(0);
 
-    enc.style(
-        1,
-        &style(|s| {
-            s.display = taffy::Display::Flex;
-            s.flex_direction = FlexDirection::Column;
-            s.size = taffy::Size {
-                width: Dimension::percent(1.0),
-                height: Dimension::percent(1.0),
-            };
-            s.padding = Rect {
-                left: LengthPercentage::length(32.0),
-                right: LengthPercentage::length(32.0),
-                top: LengthPercentage::length(32.0),
-                bottom: LengthPercentage::length(32.0),
-            };
-            s.gap = taffy::Size {
-                width: LengthPercentage::length(16.0),
-                height: LengthPercentage::length(16.0),
-            };
-        }),
-    );
-    enc.style(
-        2,
-        &style(|s| {
-            s.align_items = Some(AlignItems::CENTER);
-            s.justify_content = Some(AlignContent::CENTER);
-            s.size = taffy::Size {
-                width: Dimension::length(220.0),
-                height: Dimension::length(80.0),
-            };
-        }),
-    );
+    enc.style(&style(|s| {
+        s.display = taffy::Display::Flex;
+        s.flex_direction = FlexDirection::Column;
+        s.size = taffy::Size {
+            width: Dimension::percent(1.0),
+            height: Dimension::percent(1.0),
+        };
+        s.padding = Rect {
+            left: LengthPercentage::length(32.0),
+            right: LengthPercentage::length(32.0),
+            top: LengthPercentage::length(32.0),
+            bottom: LengthPercentage::length(32.0),
+        };
+        s.gap = taffy::Size {
+            width: LengthPercentage::length(16.0),
+            height: LengthPercentage::length(16.0),
+        };
+    }));
+    enc.style(&style(|s| {
+        s.align_items = Some(AlignItems::CENTER);
+        s.justify_content = Some(AlignContent::CENTER);
+        s.size = taffy::Size {
+            width: Dimension::length(220.0),
+            height: Dimension::length(80.0),
+        };
+    }));
 
     // Root column
-    enc.create(0, KIND_VIEW);
-    enc.set_style(0, 1);
-    enc.view_paint(0, 0x1B1D_24FF);
+    enc.create(0, NodeKind::View);
+    enc.push(Mutation::Layout { id: 0, style: 0 });
+    enc.fill(0, 0x1B1D_24FF);
     enc.place(NIL, 0, NIL);
 
     // Title + body text
-    enc.create(1, KIND_TEXT);
-    enc.set_text(1, "Craie — driven entirely over the wire");
-    enc.text_props(1, 28.0, 0xECEC_F0FF);
+    enc.create(1, NodeKind::Text);
+    enc.text(
+        1,
+        "Craie — driven entirely over the wire",
+        28.0,
+        0xECEC_F0FF,
+    );
     enc.place(0, 1, NIL);
 
-    enc.create(2, KIND_TEXT);
-    enc.set_text(
+    enc.create(2, NodeKind::Text);
+    enc.text(
         2,
         "This frame was decoded from a flat binary transaction: no per-node \
          objects, no diffing, just ops applied to a retained host.",
+        15.0,
+        0x9AA0_AEFF,
     );
-    enc.text_props(2, 15.0, 0x9AA0_AEFF);
     enc.place(0, 2, NIL);
 
     // A row of colored boxes
-    enc.style(
-        3,
-        &style(|s| {
-            s.display = taffy::Display::Flex;
-            s.gap = taffy::Size {
-                width: LengthPercentage::length(12.0),
-                height: LengthPercentage::length(12.0),
-            };
-            s.padding = Rect {
-                left: LengthPercentage::length(0.0),
-                right: LengthPercentage::length(0.0),
-                top: LengthPercentage::length(8.0),
-                bottom: LengthPercentage::length(8.0),
-            };
-        }),
-    );
-    enc.create(3, KIND_VIEW);
-    enc.set_style(3, 3);
+    enc.style(&style(|s| {
+        s.display = taffy::Display::Flex;
+        s.gap = taffy::Size {
+            width: LengthPercentage::length(12.0),
+            height: LengthPercentage::length(12.0),
+        };
+        s.padding = Rect {
+            left: LengthPercentage::length(0.0),
+            right: LengthPercentage::length(0.0),
+            top: LengthPercentage::length(8.0),
+            bottom: LengthPercentage::length(8.0),
+        };
+    }));
+    enc.create(3, NodeKind::View);
+    enc.push(Mutation::Layout { id: 3, style: 2 });
     enc.place(0, 3, NIL);
 
     let colors = [0x6DC7_FFFF, 0xB1E1_8AFF, 0xFFB4_6DFF];
     for (i, c) in colors.iter().enumerate() {
         let id = 10 + i as u32;
-        enc.create(id, KIND_VIEW);
-        enc.set_style(id, 2);
-        enc.view_paint(id, *c);
+        enc.create(id, NodeKind::View);
+        enc.push(Mutation::Layout { id: id, style: 1 });
+        enc.fill(id, *c);
         enc.place(3, id, NIL);
         let tid = 20 + i as u32;
-        enc.create(tid, KIND_TEXT);
-        enc.set_text(tid, &format!("box {i}"));
-        enc.text_props(tid, 14.0, 0x1415_18FF);
+        enc.create(tid, NodeKind::Text);
+        enc.text(tid, format!("box {i}"), 14.0, 0x1415_18FF);
         enc.place(id, tid, NIL);
     }
 
-    enc.finish(1)
+    finish(enc, 1)
 }
 
 // -------------------------------------------------------------- headless
@@ -229,7 +228,10 @@ fn run_screenshot(path: &str, w: u32, h: u32, scale: f32) {
     let nodes = ui.host.len();
     eprintln!("[craie] wire render — {items} instances, {nodes} nodes");
     renderer.sync_atlas(&gpu, &mut ui.text.atlas);
-    eprintln!("[craie] atlas upload: {} bytes", renderer.atlas_upload_bytes);
+    eprintln!(
+        "[craie] atlas upload: {} bytes",
+        renderer.atlas_upload_bytes
+    );
     let scene = ui.scene();
     dump_scene(&gpu, &mut renderer, scene, w, h, format, path);
 }
@@ -258,15 +260,17 @@ fn main() {
             }
             for tick in 1u64.. {
                 std::thread::sleep(std::time::Duration::from_secs(1));
-                let mut enc = Encoder::new();
-                enc.set_text(
+                let mut enc = Transaction::new(0);
+                enc.text(
                     2,
-                    &format!(
+                    format!(
                         "In-process bridge: this line was submitted by a ticker \
                          thread {tick}s ago — one transaction per tick."
                     ),
+                    15.0,
+                    0x9AA0_AEFF,
                 );
-                if ticker.submit(enc.finish(1 + tick)).is_err() {
+                if ticker.submit(finish(enc, 1 + tick)).is_err() {
                     return;
                 }
             }

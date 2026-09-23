@@ -1,10 +1,13 @@
 //! Cross-language wire verification: `packages/bridge/test/fixture.bin`
 //! is produced by the TypeScript encoder (scripts/gen-fixture.ts) and must
-//! decode + apply cleanly here.
+//! decode and execute cleanly here.
 
-use craie_ui::host::{Host, NodeId, NodeKind};
-use craie_ui::layout::Layouts;
-use craie_ui::wire::{self, Op};
+use craie_core::Affine;
+use craie_ui::host::NodeId;
+use craie_ui::mutation::{Mutation, NodeKind, Role};
+use craie_ui::surface;
+use craie_ui::ui::Ui;
+use craie_ui::wire;
 use taffy::{AlignContent, AlignItems, Dimension, FlexDirection, LengthPercentage, Position};
 
 const FIXTURE: &str = concat!(
@@ -13,36 +16,42 @@ const FIXTURE: &str = concat!(
 );
 
 #[test]
-fn js_fixture_decodes() {
+fn js_fixture_decodes_and_executes() {
     let buf = std::fs::read(FIXTURE).expect("run `bun packages/bridge/scripts/gen-fixture.ts`");
     let txn = wire::decode(&buf).expect("fixture must decode");
     assert_eq!(txn.seq, 99);
+    // Identical styles intern to one table row; the span table holds
+    // the paragraph's two spans.
+    assert_eq!(txn.styles.len(), 1);
+    assert_eq!(txn.spans.len(), 2);
 
-    let mut host = Host::new();
-    let mut layouts = Layouts::new();
-    txn.apply(&mut host, &mut layouts).unwrap();
+    let mut ui = Ui::new(1.0);
+    assert_eq!(ui.apply(&buf).unwrap(), 99);
+    let host = &ui.host;
 
-    // The fixture ends with remove(1): view + input + custom remain live.
+    // The fixture ends with remove(1): view + input + surface remain.
     assert_eq!(host.len(), 3);
-    let root = host.node(NodeId(0)).expect("root view");
-    assert_eq!(root.kind(), NodeKind::VIEW);
-    // The masked PAINT op overwrote viewPaint's fill and added
-    // radius + border.
-    let paint = host.view(NodeId(0)).unwrap();
-    assert_eq!(paint.color, 0x1122_33ff);
+    assert_eq!(host.kind(NodeId(0)), Some(NodeKind::View));
+    let paint = host.paint[0];
+    assert_eq!(paint.fill, 0x1122_33ff);
     assert_eq!(paint.radius, 6.5);
-    assert_eq!((paint.border_color, paint.border_w), (0xff00_00ff, 2.0));
+    assert_eq!((paint.border_color, paint.border_width), (0xff00_00ff, 2.0));
 
-    // The input node: props + listeners + focusable decoded.
-    let input = host.node(NodeId(2)).expect("input node");
-    assert_eq!(input.kind(), NodeKind::INPUT);
-    let props = host.props(NodeId(2));
-    assert_eq!(props.listeners, 0x1ff);
-    assert!(props.focusable);
+    // Spatial: translateX(3) · scale(2), opacity 0.75.
+    let s = host.spatial[0];
+    assert_eq!(s.transform, Affine([2.0, 0.0, 0.0, 2.0, 3.0, 0.0]));
+    assert_eq!(s.opacity, 0.75);
 
-    // Style id 0 was defined by the txn and applied to the root.
-    let style = layouts.style(craie_ui::host::StyleId(root.style));
-    assert_eq!(style.display, taffy::Display::Flex);
+    // Input: listeners, focusable, explicit role, config.
+    assert_eq!(host.kind(NodeId(2)), Some(NodeKind::Input));
+    let i = host.interaction(NodeId(2));
+    assert_eq!(i.listeners, 0x1ff);
+    assert!(i.focusable);
+    assert_eq!(i.role, Role::MultilineTextInput);
+    assert_eq!(ui.inputs.text(2), "seed");
+
+    // The root owns its layout row.
+    let style = host.style(NodeId(0));
     assert_eq!(style.flex_direction, FlexDirection::Column);
     assert_eq!(style.gap.width, LengthPercentage::length(12.0));
     assert_eq!(style.padding.left, LengthPercentage::length(16.0));
@@ -59,28 +68,31 @@ fn js_fixture_decodes() {
     assert_eq!(style.aspect_ratio, Some(1.25));
     assert_eq!(style.overflow.x, taffy::Overflow::Hidden);
 
-    // Text was created, styled, hidden/unhidden, detached, re-placed, removed.
+    // Text: created, styled with two spans, moved, removed.
     assert!(host.node(NodeId(1)).is_none());
-    assert!(txn.ops.iter().any(|op| matches!(
-        op,
-        Op::SetText { text, .. } if *text == "héllo — مرحبا 日本語"
-    )));
-
-    // The custom node decoded its payload op.
-    assert_eq!(host.node(NodeId(3)).unwrap().kind(), NodeKind::CUSTOM);
-    assert!(txn.ops.iter().any(|op| matches!(
-        op,
-        Op::Custom { id: 3, tag: 7, data, text }
-            if *data == [0.25, 0.5, 0.75, 1.0] && *text == "0.1,0.4,0.9"
-    )));
-
-    // Accessibility labels decoded (set, then cleared).
-    assert!(txn.ops.iter().any(|op| matches!(
-        op,
-        Op::Label { id: 0, text } if *text == "root container"
-    )));
-    assert!(txn
-        .ops
+    let para = txn
+        .mutations
         .iter()
-        .any(|op| matches!(op, Op::Label { id: 3, text } if text.is_empty())));
+        .find_map(|m| match m {
+            Mutation::Paragraph { text, spans, .. } => Some((text.clone(), spans.clone())),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(para.0, "héllo — مرحبا 日本語");
+    let spans = &txn.spans[para.1.start as usize..para.1.end as usize];
+    assert_eq!(spans[1].start as usize, "héllo ".len());
+    assert!(spans[1].italic);
+    assert_eq!(spans[1].weight, 700);
+
+    // Surface: kind, params, payload bytes.
+    let sd = &host.surfaces[&3];
+    assert_eq!(sd.kind, surface::kind::BARS);
+    assert_eq!(sd.params[0], 0x6dc7_c8ff);
+    let values: Vec<f32> = surface::payload_f32(&sd.payload).collect();
+    assert_eq!(values, [0.25, 0.5, 0.75, 1.0]);
+
+    // Labels: set, then cleared.
+    assert_eq!(host.label(NodeId(0)), Some("root container"));
+    assert_eq!(host.label(NodeId(3)), None);
+    assert_eq!(host.children(NodeId(0)), [NodeId(3), NodeId(2)]);
 }

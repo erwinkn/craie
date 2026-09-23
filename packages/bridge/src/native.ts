@@ -13,41 +13,10 @@ import { format } from "node:util"
 import { createRoot, type Root } from "./index.js"
 import type { Transport } from "./host.js"
 
-/** What a JS painter gets for each custom node at paint time: the wire
- * payload plus the node's content rect, in logical points. */
-export interface PaintSpec {
-  tag: number
-  data: number[]
-  text: string
-  x: number
-  y: number
-  w: number
-  h: number
-}
-
-/** One filled rect a painter returns — logical points, 0xRRGGBBAA
- * colors. `radius`/`borderW`/`borderColor` are optional. */
-export interface PaintQuad {
-  x: number
-  y: number
-  w: number
-  h: number
-  color: number
-  radius?: number
-  borderW?: number
-  borderColor?: number
-}
-
-export type PainterFn = (spec: PaintSpec) => PaintQuad[]
-
 export interface NativeHostHandle {
   readonly id: number
   run(): string
   close(reason: string): void
-  /** Registers the painter for `<Custom>` payloads with `tag`. Must be
-   * called before `run`; the callback fires on the UI thread during
-   * paint. */
-  registerPainter(tag: number, callback: PainterFn): void
 }
 
 export interface NativeClientHandle {
@@ -69,6 +38,7 @@ export function decodeEvents(buf: Uint8Array, at = 0): import("./host.js").UiEve
   const text = new TextDecoder()
   for (let i = 0; i < count; i++) {
     const kind = view.getUint8(pos)
+    const generation = view.getUint16(pos + 2, true)
     const node = view.getUint32(pos + 4, true)
     const x = view.getFloat32(pos + 8, true)
     const y = view.getFloat32(pos + 12, true)
@@ -79,7 +49,7 @@ export function decodeEvents(buf: Uint8Array, at = 0): import("./host.js").UiEve
     pos += 32
     const s = len ? text.decode(buf.subarray(at + pos, at + pos + len)) : ""
     pos += len
-    out.push({ kind, node, x, y, a, b, key, text: s })
+    out.push({ kind, node, generation, x, y, a, b, key, text: s })
   }
   return out
 }
@@ -97,7 +67,7 @@ export function loadBindings(path?: string): Bindings {
     process.env.CRAIE_NODE ??
     fileURLToPath(new URL("../../../craie-node.node", import.meta.url))
   const bindings = require(resolved) as Bindings
-  if (bindings.craieRuntimeVersion() !== 1) throw Error("Craie native bridge protocol mismatch")
+  if (bindings.craieRuntimeVersion() !== 2) throw Error("Craie native bridge protocol mismatch")
   return bindings
 }
 
@@ -199,18 +169,10 @@ export async function runApp(
     title?: string
     width?: number
     height?: number
-    /** Painter tag -> function, registered before the loop starts. */
-    painters?: Record<number, PainterFn>
   } = {},
 ): Promise<void> {
   if (!isMainThread) throw Error("runApp requires the main thread")
-  const { painters, ...hostOptions } = options
-  const host = new bindings.NativeHost(hostOptions)
-  if (painters) {
-    for (const [tag, fn] of Object.entries(painters)) {
-      host.registerPainter(Number(tag), fn)
-    }
-  }
+  const host = new bindings.NativeHost(options)
   let worker: Worker | undefined
   try {
     worker = new Worker(entry, { workerData: { craieSession: host.id } })

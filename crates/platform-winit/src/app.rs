@@ -12,6 +12,7 @@ use craie_render::{Gpu, Renderer, WindowSurface};
 use craie_ui::a11y::A11yShared;
 use craie_ui::bridge::Session;
 use craie_ui::events::{self, Event};
+use craie_ui::surface::SurfacePainter;
 use craie_ui::ui::Ui;
 
 use crate::clipboard::SystemClipboard;
@@ -20,9 +21,9 @@ use crate::{App, Wake, Window};
 /// A `platform::App` that renders a `Session`-fed `Ui` into one window.
 pub struct HostApp {
     session: Arc<Session>,
-    /// Custom painters registered before `ready` — moved into the `Ui`
+    /// Surface painters registered before `ready`, moved into the `Ui`
     /// when it exists.
-    painters: Vec<(u32, craie_ui::custom::Painter)>,
+    surfaces: Vec<(u32, SurfacePainter)>,
     /// Accessibility handoff shared with the platform adapter.
     a11y: Arc<A11yShared>,
     inner: Option<Inner>,
@@ -39,7 +40,7 @@ impl HostApp {
     pub fn new(session: Arc<Session>) -> HostApp {
         HostApp {
             session,
-            painters: Vec::new(),
+            surfaces: Vec::new(),
             a11y: A11yShared::new(),
             inner: None,
         }
@@ -54,11 +55,12 @@ impl HostApp {
         &self.session
     }
 
-    /// Registers a custom-element painter. Safe before or after `ready`.
-    pub fn register_painter(&mut self, tag: u32, painter: craie_ui::custom::Painter) {
+    /// Registers a native surface painter for `kind`. Safe before or
+    /// after `ready`.
+    pub fn register_surface(&mut self, kind: u32, painter: SurfacePainter) {
         match &mut self.inner {
-            Some(inner) => inner.ui.register_painter(tag, painter),
-            None => self.painters.push((tag, painter)),
+            Some(inner) => inner.ui.register_surface(kind, painter),
+            None => self.surfaces.push((kind, painter)),
         }
     }
 
@@ -129,8 +131,8 @@ impl App for HostApp {
         let surface = WindowSurface::new(&gpu, surface, w, h);
         let renderer = Renderer::new(&gpu, surface.config.format);
         let mut ui = Ui::new(window.scale_factor() as f32);
-        for (tag, painter) in self.painters.drain(..) {
-            ui.register_painter(tag, painter);
+        for (kind, painter) in self.surfaces.drain(..) {
+            ui.register_surface(kind, painter);
         }
         ui.inputs.clipboard = Box::new(SystemClipboard);
         let poke = wake.clone();

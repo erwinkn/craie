@@ -1,14 +1,18 @@
-// Generates test/fixture.bin: one transaction covering every op the Rust
-// decoder must accept. Regenerate after wire format changes:
+// Generates test/fixture.bin: one CRW2 transaction covering every op the
+// Rust decoder must accept. Regenerate after wire format changes:
 //   bun packages/bridge/scripts/gen-fixture.ts
-import { Encoder, NIL } from "../src/wire.js"
+import { Encoder, NIL, ROLE, SURFACE, transformMatrix } from "../src/wire.js"
 
 const enc = new Encoder()
 enc.create(0, 0)                                    // view
 enc.create(1, 1)                                    // text
-enc.setText(1, "héllo — مرحبا 日本語")
-enc.textProps(1, 18.5, 0x6dc7_ff80)
-const sid = enc.styleIdFor({
+const text = "héllo — مرحبا 日本語"
+const bold = new TextEncoder().encode("héllo ").length // byte offset of span 1
+enc.paragraph(1, text, [
+  { start: 0, fontSize: 18.5, color: 0x6dc7_ff80 },
+  { start: bold, fontSize: 18.5, color: 0xffff_ffff, weight: 700, italic: true },
+])
+enc.layout(0, {
   display: "flex",
   flexDirection: "column",
   gap: 12,
@@ -26,28 +30,27 @@ const sid = enc.styleIdFor({
   inset: { left: 4 },
   margin: { top: "auto" as const },
 })
-enc.setStyle(0, sid)
-enc.viewPaint(0, 0x1b1d_24ff)
-enc.paint(0, 0x1122_33ff, 6.5, { color: 0xff00_00ff, width: 2 }) // masked paint
+enc.spatial(0, transformMatrix([{ translateX: 3 }, { scale: 2 }]), 0.75)
+enc.paint(0, 0x1122_33ff, 6.5, { color: 0xff00_00ff, width: 2 })
 enc.create(2, 2)                                    // input
-enc.inputProps(2, 15, 0xffff_ffff, "type here", true)
-enc.props(2, 0x1ff, true)                           // all listeners, focusable
-enc.create(3, 3)                                    // custom
-enc.custom(3, 7, [0.25, 0.5, 0.75, 1.0], "0.1,0.4,0.9")
+enc.inputConfig(2, 15, 0xffff_ffff, "type here", true)
+enc.interaction(2, 0x1ff, true)                     // all listeners, focusable
+enc.role(2, ROLE.multilineTextInput)
+enc.create(3, 3)                                    // surface
+enc.surface(3, SURFACE.bars, [0x6dc7_c8ff, 0x6dc7_ffff, 0, 0])
+enc.payload(3, new Float32Array([0.25, 0.5, 0.75, 1.0]))
 enc.paint(3, 0x1b1d_24ff, 4, undefined)
-enc.label(0, "root container")                     // a11y name
+enc.label(0, "root container")                      // a11y name
 enc.label(3, "throughput chart")
 enc.label(3, "")                                    // empty clears
+enc.place(NIL, 0, NIL)
 enc.place(0, 3, NIL)
-enc.cmdSetInputText(2, "seed")
+enc.place(0, 1, 3)                                  // before the surface
+enc.place(0, 2, NIL)
+enc.cmdSetText(2, "seed")
 enc.cmdScrollTo(0, 4, 8)
 enc.cmdFocus(2)
 enc.cmdBlur(2)
-enc.place(NIL, 0, NIL)
-enc.place(0, 1, NIL)
-enc.place(0, 2, NIL)
-enc.hidden(1, true)
-enc.hidden(1, false)
 enc.detach(1)
 enc.place(0, 1, NIL)
 enc.remove(1)

@@ -1,10 +1,11 @@
 // Widgets app: an external behavior (Slider — pure React over pointer
-// events) and a custom element (sparkline — painted by the host's
-// registered painter). Neither needed a second UI framework: the slider
-// composes Views; the sparkline is one retained node with a JS painter.
+// events) and a native surface (sparkline — a Bars surface fed by a
+// Float32Array payload). Neither needed a second UI framework: the
+// slider composes Views; the sparkline is one retained node whose data
+// crosses the bridge as typed-array bytes, with no JS at paint time.
 
 import React, { useEffect, useRef, useState } from "react"
-import { attachApp, Custom, Text, View, type PointerEvt } from "@craie/react"
+import { attachApp, Bars, Text, View, type PointerEvt } from "@craie/react"
 
 const BG = "#141518"
 const PANEL = "#1b1d24"
@@ -75,10 +76,19 @@ function Labeled({ label, children }: { label: string; children: React.ReactNode
 function App() {
   const [volume, setVolume] = useState(0.4)
   const [brightness, setBrightness] = useState(0.7)
-  const [series, setSeries] = useState<number[]>([0.2, 0.5, 0.3, 0.8, 0.6, 0.9, 0.45, 0.7])
+  const [series, setSeries] = useState(
+    () => new Float32Array([0.2, 0.5, 0.3, 0.8, 0.6, 0.9, 0.45, 0.7]),
+  )
   useEffect(() => {
     const t = setInterval(
-      () => setSeries((s) => [...s.slice(1), Math.random() * 0.8 + 0.2]),
+      () =>
+        setSeries((s) => {
+          // A new array per update: the payload compares by identity.
+          const next = new Float32Array(s.length)
+          next.set(s.subarray(1))
+          next[s.length - 1] = Math.random() * 0.8 + 0.2
+          return next
+        }),
       900,
     )
     return () => clearInterval(t)
@@ -112,16 +122,17 @@ function App() {
         style={{ flexDirection: "column", padding: 16, gap: 8, width: "100%" }}
       >
         <Text fontSize={12} color={DIM}>throughput — custom element</Text>
-        <Custom
-          tag={1}
-          text={series.join(",")}
-          data={[0x6dc7c8ff, 1]}
+        <Bars
+          values={series}
+          color="#6dc7c8"
+          maxColor="#6dc7ff"
+          accessibilityLabel="throughput"
           style={{ width: "100%", height: 80 }}
         />
       </View>
       <Text fontSize={12} color={DIM}>
-        sliders are plain Views; the chart is one Custom node painted by
-        the host's registered painter.
+        sliders are plain Views; the chart is one native Bars surface fed
+        by a Float32Array.
       </Text>
     </View>
   )

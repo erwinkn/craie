@@ -1,45 +1,82 @@
-// Binary transaction encoder — the exact mirror of crates/craie/src/wire.rs.
+// CRW2 transaction encoder — the mirror of crates/ui/src/wire.rs.
 //
-//   header: magic "CRW1" u32 | version u16 | flags u16 | seq u64 | strings u32
+//   header:  magic "CRW2" u32 | version u16 | flags u16 | seq u64
+//            string_count u32 | style_count u32 | span_count u32
 //   strings: count x (u32 byte_len + utf8)
-//   ops:     flat u8-tagged records to end of buffer
+//   styles:  count x (u64 presence mask + fields in schema order)
+//   spans:   count x 16 bytes (start u32, font_size f32, color u32,
+//            weight u16, flags u8, reserved u8)
+//   ops:     u8-tagged records to the end of the buffer
 //
-// Style ops carry a u64 presence mask + positional fields (see FIELD).
-// Strings are interned per transaction and referenced by index.
+// Strings, styles, and spans are per-transaction tables: ops refer to
+// them by index and everything resets after `finish`. Nothing persists
+// across transactions.
 
-const MAGIC = 0x3157_5243 // "CRW1" little-endian
-const VERSION = 1
-export const NIL = 0xffff_ffff // no node / append / clear
+const MAGIC = 0x3257_5243 // "CRW2" little-endian
+const VERSION = 2
+export const NIL = 0xffff_ffff // no node / append / default style
 
 const enum Op {
+  // structure
   Create = 0x01,
-  SetText = 0x02,
-  TextProps = 0x03,
-  SetStyle = 0x04,
-  Place = 0x05,
-  Detach = 0x06,
-  Remove = 0x07,
-  Hidden = 0x08,
-  Style = 0x09,
-  ViewPaint = 0x0a,
-  Paint = 0x0b,
-  Props = 0x0c,
-  InputProps = 0x0d,
-  Command = 0x0e,
-  Custom = 0x0f,
-  Label = 0x10,
+  Place = 0x02,
+  Detach = 0x03,
+  Remove = 0x04,
+  // layout
+  Layout = 0x10,
+  // spatial
+  Spatial = 0x20,
+  // paint
+  Paint = 0x30,
+  // text
+  Paragraph = 0x40,
+  InputConfig = 0x41,
+  // semantics
+  Role = 0x50,
+  Label = 0x51,
+  // interaction
+  Interaction = 0x60,
+  // payload
+  Surface = 0x70,
+  Payload = 0x71,
+  // command
+  Command = 0x80,
 }
 
-// PAINT op field mask bits — mirror wire.rs `mod paint_field`.
-const PAINT_FIELD = { COLOR: 1 << 0, RADIUS: 1 << 1, BORDER: 1 << 2 } as const
+// Field mask bits — mirror wire.rs `spatial_field` / `paint_field`.
+const SPATIAL_FIELD = { TRANSFORM: 1 << 0, OPACITY: 1 << 1 } as const
+const PAINT_FIELD = { FILL: 1 << 0, RADIUS: 1 << 1, BORDER: 1 << 2 } as const
+const SPAN_ITALIC = 1 << 0
 
 // COMMAND op sub-tags — mirror wire.rs `mod cmd`.
 const enum Cmd {
   Focus = 0,
   Blur = 1,
-  SetInputText = 2,
+  SetText = 2,
   ScrollTo = 3,
 }
+
+/** Accessibility roles — mirror mutation.rs `Role`. */
+export const ROLE = {
+  none: 0,
+  button: 1,
+  text: 2,
+  textInput: 3,
+  multilineTextInput: 4,
+  scrollView: 5,
+  image: 6,
+  header: 7,
+  link: 8,
+  checkbox: 9,
+  adjustable: 10,
+  list: 11,
+  listItem: 12,
+  group: 13,
+} as const
+export type AccessibilityRole = keyof typeof ROLE
+
+/** Built-in surface kinds — mirror surface.rs `kind`. */
+export const SURFACE = { bars: 1 } as const
 
 // Outbound event kinds + listener mask bits — mirror events.rs.
 export const EVENT_KIND = {
@@ -142,7 +179,25 @@ export interface StyleProps {
   flexShrink?: number
   aspectRatio?: number
   overflow?: "visible" | "clip" | "hidden" | "scroll" | { x?: string; y?: string }
+  /** Spatial, not layout: travels in its own op and never relayouts.
+   * RN-style list, applied about the border-box center. */
+  transform?: Transform
+  /** Spatial: group opacity in [0, 1]. */
+  opacity?: number
 }
+
+/** One RN-style transform step. Angles: "45deg", "0.5rad", or radians. */
+export type TransformStep =
+  | { translateX: number }
+  | { translateY: number }
+  | { scale: number }
+  | { scaleX: number }
+  | { scaleY: number }
+  | { rotate: string | number }
+  | { skewX: string | number }
+  | { skewY: string | number }
+  | { matrix: readonly [number, number, number, number, number, number] }
+export type Transform = readonly TransformStep[]
 
 const textEncoder = new TextEncoder()
 
@@ -305,15 +360,94 @@ function putStyle(w: Writer, s: StyleProps) {
   }
 }
 
-/** One transaction being encoded. Call `finish` to get the wire bytes. */
+/** One style span of a paragraph (span zero starts at 0). */
+export interface TextSpanIn {
+  start: number
+  fontSize: number
+  color: number
+  weight?: number
+  italic?: boolean
+}
+
+export type Affine = [number, number, number, number, number, number]
+export const IDENTITY: Affine = [1, 0, 0, 1, 0, 0]
+
+function angle(v: string | number): number {
+  if (typeof v === "number") return v
+  if (v.endsWith("deg")) return (parseFloat(v) * Math.PI) / 180
+  if (v.endsWith("rad")) return parseFloat(v)
+  throw Error(`bad angle "${v}"`)
+}
+
+/** p · c: apply `c` first, then `p` (CSS matrix order, like Affine::mul). */
+function mul(p: Affine, c: Affine): Affine {
+  const [a, b, cc, d, e, f] = p
+  const [a2, b2, c2, d2, e2, f2] = c
+  return [
+    a * a2 + cc * b2,
+    b * a2 + d * b2,
+    a * c2 + cc * d2,
+    b * c2 + d * d2,
+    a * e2 + cc * f2 + e,
+    b * e2 + d * f2 + f,
+  ]
+}
+
+/** Folds an RN-style transform list into one matrix. Like CSS, the list
+ * composes left to right, so the last step applies to points first. */
+export function transformMatrix(t: Transform | undefined): Affine {
+  let m: Affine = IDENTITY
+  for (const step of t ?? []) {
+    const [k, v] = Object.entries(step)[0] as [string, any]
+    let s: Affine
+    switch (k) {
+      case "translateX": s = [1, 0, 0, 1, v, 0]; break
+      case "translateY": s = [1, 0, 0, 1, 0, v]; break
+      case "scale": s = [v, 0, 0, v, 0, 0]; break
+      case "scaleX": s = [v, 0, 0, 1, 0, 0]; break
+      case "scaleY": s = [1, 0, 0, v, 0, 0]; break
+      case "rotate": {
+        const r = angle(v)
+        s = [Math.cos(r), Math.sin(r), -Math.sin(r), Math.cos(r), 0, 0]
+        break
+      }
+      case "skewX": s = [1, 0, Math.tan(angle(v)), 1, 0, 0]; break
+      case "skewY": s = [1, Math.tan(angle(v)), 0, 1, 0, 0]; break
+      case "matrix": s = [...v] as Affine; break
+      default: throw Error(`unknown transform "${k}"`)
+    }
+    m = mul(m, s)
+  }
+  return m
+}
+
+/** The layout part of a style: everything but the spatial keys. */
+export function layoutPart(s: StyleProps | undefined): StyleProps | undefined {
+  if (!s) return undefined
+  if (s.transform === undefined && s.opacity === undefined) return s
+  const { transform: _t, opacity: _o, ...rest } = s
+  return rest
+}
+
+/** Key-order-independent stringify for style interning. */
+export function styleKey(s: StyleProps | undefined): string {
+  return s ? canon(s) : ""
+}
+
+/** One transaction being encoded. Call `finish` to get the wire bytes;
+ * every table resets afterwards. */
 export class Encoder {
-  private w = new Writer()
+  private out = new Writer()
+  private ops = new Writer()
+  private styleBytes = new Writer()
+  private spanBytes = new Writer()
   private strings: string[] = []
   private stringIx = new Map<string, number>()
-  private opBytes = new Writer()
-  /** wire style id -> already defined; new styles are interned here. */
-  private styleIds = new Map<string, number>()
-  private nextStyleId = 0
+  private styleIx = new Map<string, number>()
+  private styleCount = 0
+  private spanCount = 0
+  /** Span lists interned by content: most paragraphs share one style. */
+  private spanIx = new Map<string, number>()
 
   private strRef(s: string): number {
     const hit = this.stringIx.get(s)
@@ -324,167 +458,206 @@ export class Encoder {
     return ix
   }
 
+  /** Interns a layout style into this transaction's table. */
+  private styleRef(s: StyleProps | undefined): number {
+    if (!s) return NIL
+    const key = canon(s)
+    const hit = this.styleIx.get(key)
+    if (hit !== undefined) return hit
+    const ix = this.styleCount++
+    this.styleIx.set(key, ix)
+    putStyle(this.styleBytes, s)
+    return ix
+  }
+
+  /** Whether any op has been recorded since the last `finish`. */
+  get empty(): boolean {
+    return this.ops.at === 0
+  }
+
   create(id: number, kind: number) {
-    this.opBytes.u8(Op.Create)
-    this.opBytes.u32(id)
-    this.opBytes.u8(kind)
-  }
-  setText(id: number, text: string) {
-    this.opBytes.u8(Op.SetText)
-    this.opBytes.u32(id)
-    this.opBytes.u32(this.strRef(text))
-  }
-  textProps(id: number, fontSize: number, color: number) {
-    this.opBytes.u8(Op.TextProps)
-    this.opBytes.u32(id)
-    this.opBytes.f32(fontSize)
-    this.opBytes.u32(color >>> 0)
-  }
-  setStyle(id: number, wireStyle: number) {
-    this.opBytes.u8(Op.SetStyle)
-    this.opBytes.u32(id)
-    this.opBytes.u32(wireStyle >>> 0)
+    this.ops.u8(Op.Create)
+    this.ops.u32(id)
+    this.ops.u8(kind)
   }
   place(parent: number, child: number, before: number) {
-    this.opBytes.u8(Op.Place)
-    this.opBytes.u32(parent)
-    this.opBytes.u32(child)
-    this.opBytes.u32(before)
+    this.ops.u8(Op.Place)
+    this.ops.u32(parent)
+    this.ops.u32(child)
+    this.ops.u32(before)
   }
   detach(id: number) {
-    this.opBytes.u8(Op.Detach)
-    this.opBytes.u32(id)
+    this.ops.u8(Op.Detach)
+    this.ops.u32(id)
   }
   remove(id: number) {
-    this.opBytes.u8(Op.Remove)
-    this.opBytes.u32(id)
+    this.ops.u8(Op.Remove)
+    this.ops.u32(id)
   }
-  hidden(id: number, hidden: boolean) {
-    this.opBytes.u8(Op.Hidden)
-    this.opBytes.u32(id)
-    this.opBytes.u8(hidden ? 1 : 0)
+  /** Sets a node's layout inputs; `undefined` restores the defaults.
+   * Spatial keys must already be split off (see `layoutPart`). */
+  layout(id: number, style: StyleProps | undefined) {
+    const ref = this.styleRef(style)
+    this.ops.u8(Op.Layout)
+    this.ops.u32(id)
+    this.ops.u32(ref)
   }
-  viewPaint(id: number, color: number) {
-    this.opBytes.u8(Op.ViewPaint)
-    this.opBytes.u32(id)
-    this.opBytes.u32(color >>> 0)
+  /** Transform (CSS matrix about the center) and/or opacity. */
+  spatial(id: number, transform?: Affine, opacity?: number) {
+    const b = this.ops
+    b.u8(Op.Spatial)
+    b.u32(id)
+    b.u8(
+      (transform !== undefined ? SPATIAL_FIELD.TRANSFORM : 0) |
+        (opacity !== undefined ? SPATIAL_FIELD.OPACITY : 0),
+    )
+    if (transform !== undefined) for (const v of transform) b.f32(v)
+    if (opacity !== undefined) b.f32(opacity)
   }
   /** Masked paint update: fill, corner radius, border (color, width). */
   paint(
     id: number,
-    color?: number,
+    fill?: number,
     radius?: number,
     border?: { color: number; width: number },
   ) {
-    const b = this.opBytes
+    const b = this.ops
     b.u8(Op.Paint)
     b.u32(id)
     b.u8(
-      (color !== undefined ? PAINT_FIELD.COLOR : 0) |
+      (fill !== undefined ? PAINT_FIELD.FILL : 0) |
         (radius !== undefined ? PAINT_FIELD.RADIUS : 0) |
         (border !== undefined ? PAINT_FIELD.BORDER : 0),
     )
-    if (color !== undefined) b.u32(color >>> 0)
+    if (fill !== undefined) b.u32(fill >>> 0)
     if (radius !== undefined) b.f32(radius)
     if (border !== undefined) { b.u32(border.color >>> 0); b.f32(border.width) }
   }
-  props(id: number, listeners: number, focusable: boolean) {
-    this.opBytes.u8(Op.Props)
-    this.opBytes.u32(id)
-    this.opBytes.u32(listeners >>> 0)
-    this.opBytes.u8(focusable ? 1 : 0)
+  /** A paragraph: UTF-8 text plus its style span list. Span starts are
+   * UTF-8 byte offsets; span zero starts at 0. */
+  paragraph(id: number, text: string, spans: readonly TextSpanIn[]) {
+    const s = this.strRef(text)
+    let key = ""
+    for (const sp of spans) {
+      key += `${sp.start},${sp.fontSize},${sp.color >>> 0},${sp.weight ?? 400},${sp.italic ? 1 : 0};`
+    }
+    let start = this.spanIx.get(key)
+    if (start === undefined) {
+      start = this.spanCount
+      this.spanIx.set(key, start)
+      for (const sp of spans) {
+        const w = this.spanBytes
+        w.u32(sp.start)
+        w.f32(sp.fontSize)
+        w.u32(sp.color >>> 0)
+        w.u16(sp.weight ?? 400)
+        w.u8(sp.italic ? SPAN_ITALIC : 0)
+        w.u8(0)
+        this.spanCount++
+      }
+    }
+    this.ops.u8(Op.Paragraph)
+    this.ops.u32(id)
+    this.ops.u32(s)
+    this.ops.u32(start)
+    this.ops.u32(spans.length)
   }
-  inputProps(
-    id: number,
-    fontSize: number,
-    color: number,
-    placeholder: string,
-    multiline: boolean,
-  ) {
-    this.opBytes.u8(Op.InputProps)
-    this.opBytes.u32(id)
-    this.opBytes.f32(fontSize)
-    this.opBytes.u32(color >>> 0)
-    this.opBytes.u32(this.strRef(placeholder))
-    this.opBytes.u8(multiline ? 1 : 0)
+  inputConfig(id: number, fontSize: number, color: number, placeholder: string, multiline: boolean) {
+    const s = this.strRef(placeholder)
+    this.ops.u8(Op.InputConfig)
+    this.ops.u32(id)
+    this.ops.f32(fontSize)
+    this.ops.u32(color >>> 0)
+    this.ops.u32(s)
+    this.ops.u8(multiline ? 1 : 0)
   }
-  cmdFocus(id: number) {
-    this.opBytes.u8(Op.Command)
-    this.opBytes.u32(id)
-    this.opBytes.u8(Cmd.Focus)
+  role(id: number, role: number) {
+    this.ops.u8(Op.Role)
+    this.ops.u32(id)
+    this.ops.u8(role)
   }
-  cmdBlur(id: number) {
-    this.opBytes.u8(Op.Command)
-    this.opBytes.u32(id)
-    this.opBytes.u8(Cmd.Blur)
-  }
-  cmdSetInputText(id: number, text: string) {
-    this.opBytes.u8(Op.Command)
-    this.opBytes.u32(id)
-    this.opBytes.u8(Cmd.SetInputText)
-    this.opBytes.u32(this.strRef(text))
-  }
-  cmdScrollTo(id: number, x: number, y: number) {
-    this.opBytes.u8(Op.Command)
-    this.opBytes.u32(id)
-    this.opBytes.u8(Cmd.ScrollTo)
-    this.opBytes.f32(x)
-    this.opBytes.f32(y)
-  }
-  /** Custom-element payload: painter tag + 4 floats + text. */
-  custom(id: number, tag: number, data: readonly number[], text: string) {
-    const b = this.opBytes
-    b.u8(Op.Custom)
-    b.u32(id)
-    b.u32(tag >>> 0)
-    for (let i = 0; i < 4; i++) b.f32(data[i] ?? 0)
-    b.u32(this.strRef(text))
-  }
-
   /** Accessibility name (empty string clears it). */
   label(id: number, text: string) {
-    const b = this.opBytes
-    b.u8(Op.Label)
+    const s = this.strRef(text)
+    this.ops.u8(Op.Label)
+    this.ops.u32(id)
+    this.ops.u32(s)
+  }
+  interaction(id: number, listeners: number, focusable: boolean) {
+    this.ops.u8(Op.Interaction)
+    this.ops.u32(id)
+    this.ops.u32(listeners >>> 0)
+    this.ops.u8(focusable ? 1 : 0)
+  }
+  surface(id: number, kind: number, params: readonly number[]) {
+    this.ops.u8(Op.Surface)
+    this.ops.u32(id)
+    this.ops.u32(kind >>> 0)
+    for (let i = 0; i < 4; i++) this.ops.u32((params[i] ?? 0) >>> 0)
+  }
+  /** Surface payload: the typed array's bytes, copied once. */
+  payload(id: number, bytes: ArrayBufferView) {
+    const view = new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.byteLength)
+    const b = this.ops
+    b.u8(Op.Payload)
     b.u32(id)
-    b.u32(this.strRef(text))
+    b.u32(view.byteLength)
+    b.reserve(view.byteLength)
+    b.bytes.set(view, b.at)
+    b.at += view.byteLength
+  }
+  cmdFocus(id: number) {
+    this.ops.u8(Op.Command)
+    this.ops.u32(id)
+    this.ops.u8(Cmd.Focus)
+  }
+  cmdBlur(id: number) {
+    this.ops.u8(Op.Command)
+    this.ops.u32(id)
+    this.ops.u8(Cmd.Blur)
+  }
+  cmdSetText(id: number, text: string) {
+    const s = this.strRef(text)
+    this.ops.u8(Op.Command)
+    this.ops.u32(id)
+    this.ops.u8(Cmd.SetText)
+    this.ops.u32(s)
+  }
+  cmdScrollTo(id: number, x: number, y: number) {
+    this.ops.u8(Op.Command)
+    this.ops.u32(id)
+    this.ops.u8(Cmd.ScrollTo)
+    this.ops.f32(x)
+    this.ops.f32(y)
   }
 
-  /** Interns a style; emits a `style` op on first sight and returns its
-   * wire id. Identical style objects share one definition. */
-  styleIdFor(s: StyleProps | undefined): number {
-    if (!s) return NIL
-    const key = canon(s)
-    const hit = this.styleIds.get(key)
-    if (hit !== undefined) return hit
-    const id = this.nextStyleId++
-    this.styleIds.set(key, id)
-    this.opBytes.u8(Op.Style)
-    this.opBytes.u32(id)
-    putStyle(this.opBytes, s)
-    return id
-  }
-
+  /** Seals the transaction and resets every table for the next one. */
   finish(seq: number | bigint): Uint8Array {
-    const w = this.w
+    const w = this.out
+    w.at = 0
     w.u32(MAGIC)
     w.u16(VERSION)
     w.u16(0)
     w.u64(seq)
     w.u32(this.strings.length)
+    w.u32(this.styleCount)
+    w.u32(this.spanCount)
     for (const s of this.strings) w.str(s)
-    w.reserve(this.opBytes.at)
-    w.bytes.set(this.opBytes.bytes.subarray(0, this.opBytes.at), w.at)
-    w.at += this.opBytes.at
-    return w.bytes.slice(0, w.at)
-  }
-
-  /** Clears per-transaction state (strings + ops) while keeping the
-   * buffers and the style table — style definitions persist on the
-   * native side for the life of the session. */
-  reset() {
-    this.w.at = 0
-    this.opBytes.at = 0
+    for (const part of [this.styleBytes, this.spanBytes, this.ops]) {
+      w.reserve(part.at)
+      w.bytes.set(part.bytes.subarray(0, part.at), w.at)
+      w.at += part.at
+    }
+    const buf = w.bytes.slice(0, w.at)
+    this.ops.at = 0
+    this.styleBytes.at = 0
+    this.spanBytes.at = 0
     this.strings.length = 0
     this.stringIx.clear()
+    this.styleIx.clear()
+    this.spanIx.clear()
+    this.styleCount = 0
+    this.spanCount = 0
+    return buf
   }
 }

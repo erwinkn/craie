@@ -10,14 +10,22 @@
 pub mod a11y;
 pub mod bridge;
 pub mod clipboard;
-pub mod custom;
+mod dispatch;
 pub mod events;
+mod executor;
 pub mod host;
 pub mod input;
 pub mod layout;
+pub mod mutation;
+mod paint;
 pub mod platform;
+pub mod surface;
+#[cfg(test)]
+mod tests;
 pub mod ui;
 pub mod wire;
+
+pub use executor::validate;
 
 pub use craie_core::geom;
 pub use craie_core::{Point, Rect, Size};

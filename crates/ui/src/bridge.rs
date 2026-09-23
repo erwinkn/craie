@@ -15,7 +15,6 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Condvar, Mutex, Weak};
 
-
 /// Pokes the UI thread's event loop from any thread. The platform
 /// adapter installs it once its loop exists.
 pub type WakeFn = Arc<dyn Fn() + Send + Sync>;
@@ -80,8 +79,7 @@ impl Session {
             if let Some(reason) = &inner.closed {
                 return Err(reason.clone());
             }
-            if inner.commits.len() >= MAX_TRANSACTIONS
-                || inner.commit_bytes + txn.len() > MAX_BYTES
+            if inner.commits.len() >= MAX_TRANSACTIONS || inner.commit_bytes + txn.len() > MAX_BYTES
             {
                 return Err("commit queue is full".to_string());
             }
@@ -230,10 +228,7 @@ impl Sessions {
 
     pub fn insert(&self, session: &Arc<Session>) -> u32 {
         let id = self.next.fetch_add(1, Ordering::Relaxed) + 1;
-        self.map
-            .lock()
-            .unwrap()
-            .insert(id, Arc::downgrade(session));
+        self.map.lock().unwrap().insert(id, Arc::downgrade(session));
         id
     }
 

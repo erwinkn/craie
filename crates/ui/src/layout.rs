@@ -22,12 +22,13 @@ use taffy::{
 };
 
 use crate::geom::{Rect, Size};
-use crate::host::{Host, NodeFlags, NodeId, NodeKind, StyleId};
+use crate::host::{Host, NodeFlags, NodeId, Paragraph};
 use crate::input::Inputs;
+use crate::mutation::NodeKind;
 use crate::scene::{Color, Instance};
 use crate::text::parley::Layout as TextLayout;
-use crate::text::parley::style::StyleProperty;
-use crate::text::{ParagraphSpec, TextEngine};
+use crate::text::parley::style::{FontStyle, FontWeight, StyleProperty};
+use crate::text::{ParagraphSpec, TextEngine, TextSpan as SpecSpan};
 
 /// Computed border box for a node, relative to its parent's content box,
 /// in logical units. Written by `round_layout`, read by paint and
@@ -76,14 +77,11 @@ pub struct MeasuredText {
     pub emitted: Option<EmittedText>,
 }
 
-/// Per-node layout state plus the style table.
-///
-/// `cache`, `unrounded` and `rects` are indexed by node id and grow with
-/// the host arena. `styles` holds wire styles verbatim: the JS side already
-/// deduplicates styles and assigns dense ids, so `StyleId` on a node header
-/// IS the wire id — no second interning pass here.
+/// Per-node layout results. `cache`, `unrounded` and `rects` are indexed
+/// by node id and grow with the host arena. Layout inputs are not here:
+/// each node owns its row in `Host::layout`.
 pub struct Layouts {
-    styles: Vec<Option<Style>>,
+    /// Style for ids outside the host arena.
     default: Style,
     cache: Vec<Cache>,
     unrounded: Vec<Layout>,
@@ -103,7 +101,6 @@ fn row_mut<T: Default + Clone>(rows: &mut Vec<T>, i: usize) -> &mut T {
 impl Layouts {
     pub fn new() -> Layouts {
         Layouts {
-            styles: Vec::new(),
             default: Style::default(),
             cache: Vec::new(),
             unrounded: Vec::new(),
@@ -126,28 +123,8 @@ impl Layouts {
         self.rects.get(id.0 as usize).copied().unwrap_or_default()
     }
 
-    /// The style behind a `StyleId` (a wire id); undefined ids get the
-    /// default style.
-    pub fn style(&self, id: StyleId) -> &Style {
-        self.styles
-            .get(id.0 as usize)
-            .and_then(Option::as_ref)
-            .unwrap_or(&self.default)
-    }
-
-    /// Defines or redefines a wire style id.
-    pub fn define_style(&mut self, wire_id: u32, style: Style) {
-        *row_mut(&mut self.styles, wire_id as usize) = Some(style);
-    }
-
-    pub fn wire_style_defined(&self, wire_id: u32) -> bool {
-        self.styles
-            .get(wire_id as usize)
-            .is_some_and(Option::is_some)
-    }
-
-    /// Drops every per-node layout cache (used when a redefined style
-    /// can't be traced to its dependents).
+    /// Drops every per-node layout cache (resize: every wrap width may
+    /// change).
     pub fn clear_all_caches(&mut self, slots: usize) {
         if self.cache.len() < slots {
             self.cache.resize(slots, Cache::default());
@@ -172,37 +149,11 @@ fn from_taffy(id: TaffyId) -> NodeId {
     NodeId(u64::from(id) as u32)
 }
 
-/// Recomputes layout for the tree rooted at `root` (a real node — wrap
-/// multiple roots in a View). Drains the dirty queue first, runs Taffy,
-/// then rounds to the pixel grid. TEXT leaves are measured through `text`
-/// and retained in `texts` (indexed by node id) for paint.
-pub fn compute(
-    host: &mut Host,
-    store: &mut Layouts,
-    text: &mut TextEngine,
-    texts: &mut Vec<Option<MeasuredText>>,
-    inputs: &mut Inputs,
-    root: NodeId,
-    available: Size,
-) {
-    invalidate(host, store);
-    let mut view = TreeView {
-        host,
-        store,
-        text,
-        texts,
-        inputs,
-    };
-    let space = TSize {
-        width: AvailableSpace::Definite(available.width),
-        height: AvailableSpace::Definite(available.height),
-    };
-    compute_root_layout(&mut view, to_taffy(root), space);
-    view.finalize(to_taffy(root));
-}
-
-/// `compute` instrumented: returns (root-layout ms, finalize ms) so
-/// experiments can price the result-copy pass separately.
+/// Recomputes layout for the tree rooted at `root` (a real node; wrap
+/// multiple roots in a View), then copies results into `Layouts`. Call
+/// `invalidate` first. TEXT leaves are measured through `text` and
+/// retained in `texts` (indexed by node id) for paint. Returns
+/// (root-layout ms, finalize ms).
 pub fn compute_timed(
     host: &mut Host,
     store: &mut Layouts,
@@ -212,7 +163,6 @@ pub fn compute_timed(
     root: NodeId,
     available: Size,
 ) -> (f64, f64) {
-    invalidate(host, store);
     let mut view = TreeView {
         host,
         store,
@@ -237,8 +187,8 @@ pub fn compute_timed(
 /// of its ancestors, then clears the flags. Child changes invalidate the
 /// path to the root because a node's cache key does not include its
 /// children.
-fn invalidate(host: &mut Host, store: &mut Layouts) {
-    for id in host.take_layout_dirty() {
+pub fn invalidate(host: &mut Host, store: &mut Layouts) {
+    for id in host.dirty.layout.take().into_iter().map(NodeId) {
         let mut cur = id;
         loop {
             // Detached/subtree-orphaned nodes carry DETACHED as their
@@ -273,12 +223,10 @@ struct TreeView<'a> {
 
 impl TreeView<'_> {
     fn style_of(&self, id: NodeId) -> &Style {
-        let sid = self
-            .host
-            .node(id)
-            .map(|n| StyleId(n.style))
-            .unwrap_or(StyleId::NIL);
-        self.store.style(sid)
+        self.host
+            .layout
+            .get(id.index())
+            .unwrap_or(&self.store.default)
     }
 
     /// Copies the computed (unrounded) layout into `rects` recursively.
@@ -316,7 +264,7 @@ impl TreeView<'_> {
         let Some(node) = self.host.node(id) else {
             return TSize::ZERO;
         };
-        if node.kind() == NodeKind::INPUT {
+        if node.kind == NodeKind::Input {
             // Inputs measure like text: the editor wraps at the definite
             // content width; otherwise it takes its natural width.
             let w = match available.width {
@@ -329,7 +277,7 @@ impl TreeView<'_> {
                 height: size.height,
             };
         }
-        if node.kind() != NodeKind::TEXT {
+        if node.kind != NodeKind::Text {
             return TSize::ZERO;
         }
         let text_dirty = node.flags.contains(NodeFlags::TEXT);
@@ -356,20 +304,10 @@ impl TreeView<'_> {
             };
         }
 
-        let Some(row) = self.host.text(id) else {
+        let Some(p) = self.host.paragraph(id) else {
             return TSize::ZERO;
         };
-        // No brush default: the row color is applied at emit time, so a
-        // color-only change never reshapes or re-lays-out.
-        let defaults = [StyleProperty::FontSize(row.font_size)];
-        let layout = self.text.layout_paragraph(
-            &ParagraphSpec {
-                text: &row.text,
-                defaults: &defaults,
-                spans: &[],
-            },
-            wrap,
-        );
+        let layout = shape_paragraph(self.text, p, wrap);
         let size = TSize {
             width: layout.width(),
             height: layout.height(),
@@ -437,7 +375,7 @@ impl LayoutPartialTree for TreeView<'_> {
         }
         compute_cached_layout(self, node_id, inputs, |tree, node_id, inputs| {
             let id = from_taffy(node_id);
-            let hidden = tree.host.node(id).map(|n| n.hidden()).unwrap_or(true);
+            let hidden = tree.host.node(id).is_none();
             // Clone the style: the leaf arm borrows `tree` mutably for the
             // measure callback while Taffy still holds the style ref.
             let style = tree.style_of(id).clone();
@@ -545,4 +483,62 @@ impl RoundTree for TreeView<'_> {
             n.flags.clear(NodeFlags::LAYOUT);
         }
     }
+}
+
+/// Shapes a paragraph: span zero is the base style, later spans override
+/// over their byte ranges. The brush is the span's color index into the
+/// paragraph's spans, so colors resolve at emit and a color change never
+/// reshapes.
+pub fn shape_paragraph(
+    text: &mut TextEngine,
+    p: &Paragraph,
+    wrap: Option<f32>,
+) -> TextLayout<Color> {
+    let base = p.spans.first().copied().unwrap_or_default();
+    let defaults = [
+        StyleProperty::FontSize(base.font_size),
+        StyleProperty::FontWeight(FontWeight::new(base.weight as f32)),
+        StyleProperty::FontStyle(if base.italic {
+            FontStyle::Italic
+        } else {
+            FontStyle::Normal
+        }),
+        StyleProperty::Brush(Color(base.color)),
+    ];
+    let mut spans: Vec<SpecSpan> = Vec::new();
+    for (i, s) in p.spans.iter().enumerate().skip(1) {
+        let end = p
+            .spans
+            .get(i + 1)
+            .map_or(p.text.len(), |n| n.start as usize);
+        let range = s.start as usize..end;
+        spans.push(SpecSpan {
+            range: range.clone(),
+            style: StyleProperty::FontSize(s.font_size),
+        });
+        spans.push(SpecSpan {
+            range: range.clone(),
+            style: StyleProperty::FontWeight(FontWeight::new(s.weight as f32)),
+        });
+        spans.push(SpecSpan {
+            range: range.clone(),
+            style: StyleProperty::FontStyle(if s.italic {
+                FontStyle::Italic
+            } else {
+                FontStyle::Normal
+            }),
+        });
+        spans.push(SpecSpan {
+            range,
+            style: StyleProperty::Brush(Color(s.color)),
+        });
+    }
+    text.layout_paragraph(
+        &ParagraphSpec {
+            text: &p.text,
+            defaults: &defaults,
+            spans: &spans,
+        },
+        wrap,
+    )
 }

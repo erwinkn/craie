@@ -1,6 +1,6 @@
 //! Input events, normalized at the platform boundary.
 //!
-//! `platform/` produces `Event`s in logical points with winit types
+//! The platform adapter produces `Event`s in logical points with winit types
 //! resolved to Craie's small enums; `Ui::dispatch` consumes them. Events
 //! the JS side subscribes to are encoded by `encode_events` into outbox
 //! frames (`crate::bridge`).
@@ -81,15 +81,35 @@ pub enum Button {
 /// A platform input event, positions in logical points.
 #[derive(Clone, Debug)]
 pub enum Event {
-    PointerMove { x: f32, y: f32 },
-    PointerDown { x: f32, y: f32, button: Button, mods: Mods },
-    PointerUp { x: f32, y: f32, button: Button },
+    PointerMove {
+        x: f32,
+        y: f32,
+    },
+    PointerDown {
+        x: f32,
+        y: f32,
+        button: Button,
+        mods: Mods,
+    },
+    PointerUp {
+        x: f32,
+        y: f32,
+        button: Button,
+    },
     /// dx/dy in logical points, sign = content scroll direction.
-    Wheel { x: f32, y: f32, dx: f32, dy: f32 },
+    Wheel {
+        x: f32,
+        y: f32,
+        dx: f32,
+        dy: f32,
+    },
     KeyDown(KeyInput),
     KeyUp(KeyInput),
     /// IME composing region update; `None` cursor hides the caret.
-    ImePreedit { text: String, cursor: Option<(usize, usize)> },
+    ImePreedit {
+        text: String,
+        cursor: Option<(usize, usize)>,
+    },
     ImeCommit(String),
     /// The platform reports composing is done.
     ImeDone,
@@ -126,6 +146,9 @@ pub mod out_kind {
 pub struct UiEvent {
     pub kind: u8,
     pub node: u32,
+    /// The node's generation when the event fired. JS drops events whose
+    /// generation no longer matches the id's current occupant.
+    pub generation: u16,
     pub x: f32,
     pub y: f32,
     pub a: f32,
@@ -139,6 +162,7 @@ impl UiEvent {
         UiEvent {
             kind,
             node,
+            generation: 0,
             x: 0.0,
             y: 0.0,
             a: 0.0,
@@ -180,14 +204,15 @@ pub fn mask_for(kind: u8) -> u32 {
 }
 
 /// Serializes events into one outbox frame. Record layout (LE):
-/// `kind u8 | pad u8 | pad u16 | node u32 | x f32 | y f32 | a f32 | b f32
-/// | key u32 | text_len u32 | text utf8`. The frame starts with a u32
-/// record count.
+/// `kind u8 | pad u8 | generation u16 | node u32 | x f32 | y f32 | a f32
+/// | b f32 | key u32 | text_len u32 | text utf8`. The frame starts with
+/// a u32 record count.
 pub fn encode_events(events: &[UiEvent]) -> Vec<u8> {
     let mut out = Vec::with_capacity(events.len() * 28);
     out.extend_from_slice(&(events.len() as u32).to_le_bytes());
     for e in events {
-        out.extend_from_slice(&[e.kind, 0, 0, 0]);
+        out.extend_from_slice(&[e.kind, 0]);
+        out.extend_from_slice(&e.generation.to_le_bytes());
         out.extend_from_slice(&e.node.to_le_bytes());
         for f in [e.x, e.y, e.a, e.b] {
             out.extend_from_slice(&f.to_le_bytes());

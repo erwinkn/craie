@@ -6,20 +6,23 @@
 import React, { createContext, createElement, type ReactNode } from "react"
 import ReactReconciler from "react-reconciler"
 import { ConcurrentRoot, DefaultEventPriority } from "react-reconciler/constants.js"
-import { CraieHost, type HostNode, type Transport } from "./host.js"
-import type { StyleProps } from "./wire.js"
+import { CraieHost, type HostNode, type SurfaceParam, type Transport } from "./host.js"
+import { SURFACE, type AccessibilityRole, type StyleProps } from "./wire.js"
 
 export { attachApp, decodeEvents, loadBindings, runApp, NativeTransport } from "./native.js"
-export type {
-  Bindings,
-  NativeClientHandle,
-  NativeHostHandle,
-  PaintQuad,
-  PaintSpec,
-  PainterFn,
-} from "./native.js"
-export { Encoder, NIL, type StyleProps } from "./wire.js"
-export type { HostNode, Transport, UiEvent } from "./host.js"
+export type { Bindings, NativeClientHandle, NativeHostHandle } from "./native.js"
+export {
+  Encoder,
+  NIL,
+  ROLE,
+  SURFACE,
+  transformMatrix,
+  type AccessibilityRole,
+  type StyleProps,
+  type Transform,
+  type TransformStep,
+} from "./wire.js"
+export type { HostNode, SurfaceParam, Transport, UiEvent } from "./host.js"
 
 /** Pointer position + target passed to pointer/wheel listeners. `x`/`y`
  * are window-absolute logical points; `rx`/`ry` are relative to the
@@ -77,37 +80,56 @@ export interface ViewProps extends ListenerProps {
   focusable?: boolean
   /** Accessibility name announced by assistive technology. */
   accessibilityLabel?: string
+  /** Accessibility role; a plain View has none. */
+  accessibilityRole?: AccessibilityRole
+  /** Sends `display: none`. */
   hidden?: boolean
   children?: ReactNode
+}
+export interface PressableProps extends ViewProps {
+  /** Primary pointer released over the node. */
+  onPress?: (e: PointerEvt) => void
 }
 export interface TextProps {
   style?: StyleProps
   fontSize?: number
   color?: string | number
+  fontWeight?: number | "normal" | "bold"
+  fontStyle?: "normal" | "italic"
   /** Accessibility name; defaults to the text content. */
   accessibilityLabel?: string
+  accessibilityRole?: AccessibilityRole
   hidden?: boolean
   children?: ReactNode // strings land on the wire as text
   text?: string
 }
-export interface CustomProps extends ListenerProps {
+export interface SurfaceProps extends ListenerProps {
   style?: StyleProps
   backgroundColor?: string | number
   borderRadius?: number
   borderColor?: string | number
   borderWidth?: number
-  /** Which registered painter renders this node (see
-   *  `NativeHost.registerPainter` / `runApp` `painters`). */
-  tag: number
-  /** Up to 4 floats of author data for the painter. */
-  data?: number[]
-  /** String payload for the painter. */
-  text?: string
-  /** Accessibility name announced by assistive technology. */
+  /** Native surface kind (see `SURFACE`); Rust hosts may register more. */
+  kind: number
+  /** Up to four kind-specific parameters: colors or `{ f32 }` values. */
+  params?: SurfaceParam[]
+  /** Kind-specific data, copied once per change (identity compare). */
+  payload?: ArrayBufferView
   accessibilityLabel?: string
+  accessibilityRole?: AccessibilityRole
   hidden?: boolean
 }
+export interface BarsProps extends Omit<SurfaceProps, "kind" | "params" | "payload"> {
+  /** Bar heights in [0, 1]. A new array means new data. */
+  values: Float32Array
+  color: string | number
+  /** Color of the tallest bar; defaults to `color`. */
+  maxColor?: string | number
+  /** Gap between bars, logical points (default 2). */
+  gap?: number
+}
 export interface TextInputProps extends ListenerProps {
+  accessibilityRole?: AccessibilityRole
   style?: StyleProps
   backgroundColor?: string | number
   borderRadius?: number
@@ -131,6 +153,20 @@ export interface TextInputProps extends ListenerProps {
 export function View(props: ViewProps) {
   return createElement("view", props)
 }
+
+/** A View that is a button for assistive technology and fires `onPress`
+ * on primary pointer release. */
+export function Pressable({ onPress, ...props }: PressableProps) {
+  return createElement("view", {
+    accessibilityRole: "button",
+    focusable: true,
+    ...props,
+    onPointerUp: (e: PointerEvt) => {
+      props.onPointerUp?.(e)
+      if ((e.button ?? 1) === 1) onPress?.(e)
+    },
+  })
+}
 export function Text(props: TextProps) {
   // Flatten primitive children ("a" {b} "c") into a single `text` prop so
   // mixed string/expression JSX still forms one paragraph. Nested
@@ -141,17 +177,34 @@ export function Text(props: TextProps) {
     children !== undefined &&
     flattenText(children) !== undefined
   ) {
-    return createElement("text", { ...props, text: flattenText(children), children: undefined })
+    return createElement("text", {
+      accessibilityRole: "text",
+      ...props,
+      text: flattenText(children),
+      children: undefined,
+    })
   }
-  return createElement("text", props)
+  return createElement("text", { accessibilityRole: "text", ...props })
 }
 
-export function Custom(props: CustomProps) {
-  return createElement("custom", props)
+/** A native drawing surface fed by payload bytes. */
+export function Surface(props: SurfaceProps) {
+  return createElement("surface", props)
+}
+
+/** Bar chart surface (`SURFACE.bars`). */
+export function Bars({ values, color, maxColor, gap, ...props }: BarsProps) {
+  return createElement("surface", {
+    ...props,
+    kind: SURFACE.bars,
+    params: [color, maxColor ?? 0, { f32: gap ?? 2 }],
+    payload: values,
+  })
 }
 
 export function ScrollView(props: ViewProps) {
   return createElement("view", {
+    accessibilityRole: "scrollView",
     ...props,
     style: { overflow: "scroll", ...props.style },
   })
@@ -160,7 +213,11 @@ export function ScrollView(props: ViewProps) {
 export function TextInput(props: TextInputProps) {
   // focusable by default; a Tab ring that skips the only editable field
   // would surprise.
-  return createElement("input", { focusable: true, ...props })
+  return createElement("input", {
+    focusable: true,
+    accessibilityRole: props.multiline ? "multilineTextInput" : "textInput",
+    ...props,
+  })
 }
 
 function flattenText(children: ReactNode): string | undefined {
@@ -199,7 +256,7 @@ const config = {
   // String children are absorbed into the `text` prop via
   // shouldSetTextContent; createTextInstance covers mixed content.
   createTextInstance: (text: string, root: CraieHost) =>
-    root.node("text", { text }),
+    root.node("text", { text, accessibilityRole: "text" }),
 
   appendInitialChild: (parent: HostNode, child: HostNode) => {
     // Parent has no id yet; replayed by materialize.
@@ -223,10 +280,11 @@ const config = {
   commitTextUpdate: (n: HostNode, _old: string, text: string) =>
     n.root.setTextContent(n, text),
 
-  hideInstance: (n: HostNode) => n.root.setHidden(n, true),
-  hideTextInstance: (n: HostNode) => n.root.setHidden(n, true),
-  unhideInstance: (n: HostNode) => n.root.setHidden(n, false),
-  unhideTextInstance: (n: HostNode) => n.root.setHidden(n, false),
+  // Suspense hiding is `display: none`: the one way to hide.
+  hideInstance: (n: HostNode) => n.root.setSuspended(n, true),
+  hideTextInstance: (n: HostNode) => n.root.setSuspended(n, true),
+  unhideInstance: (n: HostNode) => n.root.setSuspended(n, false),
+  unhideTextInstance: (n: HostNode) => n.root.setSuspended(n, false),
 
   getPublicInstance: (n: HostNode) => n,
   getRootHostContext: () => context,

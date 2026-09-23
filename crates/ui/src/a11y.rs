@@ -13,14 +13,34 @@
 use std::sync::{Arc, Mutex};
 
 use accesskit::{
-    Action, ActionRequest, ActivationHandler, DeactivationHandler, Node,
-    NodeId as A11yId, Rect as A11yRect, Role, TreeId, TreeInfo, TreeUpdate,
+    Action, ActionRequest, ActivationHandler, DeactivationHandler, Node, NodeId as A11yId,
+    Rect as A11yRect, Role, TreeId, TreeInfo, TreeUpdate,
 };
 
-use crate::events::mask;
 use crate::geom::Size;
-use crate::host::{NodeId, NodeKind, ROOT, StyleId};
+use crate::host::{NodeId, ROOT};
+use crate::mutation::{NodeKind, Role as UiRole};
 use crate::ui::Ui;
+
+/// The AccessKit role for a Craie role.
+fn ak_role(role: UiRole) -> Role {
+    match role {
+        UiRole::None => Role::GenericContainer,
+        UiRole::Button => Role::Button,
+        UiRole::Label => Role::Label,
+        UiRole::TextInput => Role::TextInput,
+        UiRole::MultilineTextInput => Role::MultilineTextInput,
+        UiRole::ScrollView => Role::ScrollView,
+        UiRole::Image => Role::Image,
+        UiRole::Heading => Role::Heading,
+        UiRole::Link => Role::Link,
+        UiRole::CheckBox => Role::CheckBox,
+        UiRole::Slider => Role::Slider,
+        UiRole::List => Role::List,
+        UiRole::ListItem => Role::ListItem,
+        UiRole::Group => Role::Group,
+    }
+}
 
 /// The window root's accessibility id.
 pub const ROOT_AID: A11yId = A11yId(0);
@@ -112,77 +132,55 @@ impl Ui {
 
     /// One retained node -> one semantic node (plus recursed children).
     /// Returns the node's a11y id, or `None` when the subtree is hidden.
+    ///
+    /// The role comes from the node's role field only; the facade sets
+    /// defaults (Pressable, TextInput, ScrollView, Text). Content (text,
+    /// input value) and behavior (scroll actions) come from the node.
     fn a11y_node(&self, id: NodeId, out: &mut Vec<(A11yId, Node)>) -> Option<A11yId> {
         let node = self.host.node(id)?;
-        if node.hidden() {
-            return None;
-        }
-        let style = self.layouts.style(StyleId(node.style));
+        let style = self.host.style(id);
         if style.display == taffy::Display::None {
             return None;
         }
-        let props = self.host.props(id);
-        let kind = node.kind();
+        let props = self.host.interaction(id);
+        let kind = node.kind;
 
         let scroll_x = style.overflow.x == taffy::Overflow::Scroll;
         let scroll_y = style.overflow.y == taffy::Overflow::Scroll;
-        let clickable = props.listeners & (mask::POINTER_DOWN | mask::POINTER_UP) != 0;
 
-        let mut an = match kind {
-            NodeKind::TEXT => {
-                let mut n = Node::new(Role::Label);
-                if let Some(t) = self.host.text(id) {
-                    n.set_value(t.text.clone());
-                }
-                n
+        let mut an = Node::new(ak_role(props.role));
+        match props.role {
+            UiRole::Button | UiRole::Link | UiRole::CheckBox => an.add_action(Action::Click),
+            _ => {}
+        }
+        if let Some(p) = self.host.paragraph(id) {
+            an.set_value(p.text.clone());
+        }
+        if kind == NodeKind::Input {
+            let state = self.inputs.get(id.0);
+            an.set_value(self.inputs.text(id.0));
+            if let Some(s) = state
+                && !s.placeholder.is_empty()
+            {
+                an.set_placeholder(s.placeholder.clone());
             }
-            NodeKind::INPUT => {
-                let state = self.inputs.get(id.0);
-                let multiline = state.map(|s| s.multiline).unwrap_or(false);
-                let mut n = Node::new(if multiline {
-                    Role::MultilineTextInput
-                } else {
-                    Role::TextInput
-                });
-                n.set_value(self.inputs.text(id.0));
-                if let Some(s) = state
-                    && !s.placeholder.is_empty()
-                {
-                    n.set_placeholder(s.placeholder.clone());
-                }
-                n.add_action(Action::Focus);
-                n.add_action(Action::Blur);
-                n.add_action(Action::ReplaceSelectedText);
-                n
-            }
-            _ => {
-                let role = if scroll_x || scroll_y {
-                    Role::ScrollView
-                } else if clickable {
-                    Role::Button
-                } else {
-                    Role::GenericContainer
-                };
-                let mut n = Node::new(role);
-                if clickable {
-                    n.add_action(Action::Click);
-                }
-                if scroll_x {
-                    n.add_action(Action::ScrollLeft);
-                    n.add_action(Action::ScrollRight);
-                }
-                if scroll_y {
-                    n.add_action(Action::ScrollUp);
-                    n.add_action(Action::ScrollDown);
-                }
-                n
-            }
-        };
+            an.add_action(Action::Focus);
+            an.add_action(Action::Blur);
+            an.add_action(Action::ReplaceSelectedText);
+        }
+        if scroll_x {
+            an.add_action(Action::ScrollLeft);
+            an.add_action(Action::ScrollRight);
+        }
+        if scroll_y {
+            an.add_action(Action::ScrollUp);
+            an.add_action(Action::ScrollDown);
+        }
 
-        if props.focusable && kind != NodeKind::INPUT {
+        if props.focusable && kind != NodeKind::Input {
             an.add_action(Action::Focus);
         }
-        if let Some(label) = self.a11y_label(id) {
+        if let Some(label) = self.host.label(id) {
             an.set_label(label.to_string());
         }
         let r = self.abs_rect(id);
