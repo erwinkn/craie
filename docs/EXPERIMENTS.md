@@ -267,6 +267,67 @@ need 110 rasterizations in SF and 71 in Helvetica, on both engines.
 Shaping and emission times for 1,000 rows moved up to 3x between runs
 under this load, so no time split is claimed for them.
 
+### E01 editable cases: owned editing versus Parley's editor (step 3b)
+
+Correctness: `cargo test -p craie-harness --test e01_editing`. The
+owned `Editor` and Parley's `PlainEditor` (the pinned fonts, Parley
+unquantized) run the same scripted steps: typing, Backspace and Delete
+by cluster and by word, visual left and right, word moves, line
+start and end, up and down across soft and hard breaks, text start and
+end, selection versions of each, select all, click, drag, double-click
+word selection and word-wise drag, byte-range selection, and IME
+preedit, commit, and cancel. Six scripts: Latin, a wrapped paragraph
+at 120 pt, hard breaks with an empty line, bidi in an LTR paragraph and
+in an RTL one, and IME composition (127 steps). After every step the
+buffer (preedit included), the selection's anchor and focus bytes, and
+the preedit range are equal, and the caret draws at the same x (within
+the f32 bound of the line's additions) and at the same line box top.
+
+Known difference, asserted exactly
+(`caret_stops_at_graphemes_where_parley_splits`): Parley puts a caret
+between e and a combining acute, and inside the ligature of a ZWJ
+family; Backspace there leaves an orphan mark. Craie's caret stops only
+at grapheme boundaries (UAX #29); Backspace after a combining mark
+removes the mark (one code point, as Parley), and after an emoji the
+whole grapheme.
+
+Cost (`e01_text` example, `editing` rows; interleaved medians of 1,001
+calls; load average 14 to 19):
+
+| text (bytes)       | retained B ours / Parley | keystroke pair µs | pair allocs | caret move µs | move allocs | width change µs | width allocs |
+|--------------------|--------------------------|-------------------|-------------|---------------|-------------|-----------------|--------------|
+| latin (180)        | 7,996 / 8,848            | 80.5 / 79.2       | 30 / 41     | 0.08 / 0.04   | 0 / 0       | 2.04 / 30.29    | 2 / 22       |
+| bidi (55)          | 3,658 / 6,547            | 33.2 / 37.4       | 60 / 43     | 0.04 / 0.04   | 0 / 0       | 0.42 / 12.92    | 0 / 21       |
+| multilingual (74)  | 2,440 / 6,566            | 30.1 / 52.8       | 24 / 53     | 0.08 / 0.04   | 0 / 0       | 0.54 / 27.50    | 0 / 26       |
+
+A keystroke pair is one character typed at the end and deleted: two
+edits, each shaping the paragraph once on both sides. A width change
+rewraps the owned paragraph; Parley's editor lays out again. The bidi
+pair allocates more (`BidiInfo`, LEDGER.md AR-3).
+
+Found while porting:
+- The first caret-move version built the line's visual clusters as a
+  `Vec` on each move (9 to 29 allocations, 20 to 40 times Parley's
+  time). An iterator over the placements (`Paragraph::clusters_of`)
+  made moves allocation-free; carets, hits, and selection rectangles
+  use it too.
+- The editor's cluster table was rebuilt by an in-place `collect` that
+  kept the 16-byte capacity of its source for 8-byte entries (14.7 KB
+  retained for the Latin editor); it is now refilled in place.
+- The text demo, ported off Parley, drew regular text bold after a
+  650-weight title in SF. swash keeps its variation coordinates in the
+  scale context across scaler builders, and the rasterizer skipped
+  setting them for a default instance, so the previous scaler's
+  coordinates applied. This dates from step 3a (captures there used
+  one weight per variable face). The rasterizer now always sets them;
+  `default_instance_raster_does_not_inherit_coords` (a 1.9 KB variable
+  Noto Emoji subset, `assets/fonts/NotoEmoji-Var-Test.ttf`) fails
+  without the fix.
+
+The text demo lost an inline monospace span: a paragraph has one family
+(its code line is all monospace). Parley's line-height override is
+gone with it.
+
 ### E14: layout-aware virtualization, list versus a plain column (step 2)
 
 `cargo run --release -p craie-harness --example e14_lists`: a scroller

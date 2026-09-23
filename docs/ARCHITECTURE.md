@@ -95,9 +95,9 @@ crates/render/          craie-render: wgpu
   shaders/              scene.wgsl (rects + glyphs), composite.wgsl
 crates/text/            craie-text: HarfRust, skrifa, unicode-*, Swash
   paragraph.rs          owned paragraph: analysis, shaping, lines, carets
+  editor.rs             owned editing: cursors, selection, IME preedit
   fonts.rs              FontStore, FontSource, RawFonts, pinned fonts
   lib.rs cache.rs       engine, emit into chunks, GlyphKey -> RasterId
-                        (Parley for inputs until step 3b)
 crates/ui/              craie-ui: core, scene, text, Taffy, accesskit
   mutation.rs           Mutation enum, Transaction + direct-API builder
   wire.rs               CRW2 decode/encode
@@ -338,13 +338,23 @@ graphemes, one break for CRLF and one after NEL, unbroken no-break
 spaces, no break inside a marked grapheme, and one font per
 grapheme. A retained paragraph holds 0.29 to
 0.75 times Parley's bytes. The Text default family is the engine's
-`default_family`, `system-ui` (Decisions). INPUT nodes still hold a Parley
-`PlainEditor` each until step 3b. Its contexts are made on first use,
-and its glyphs go through the same font store and glyph cache. `TextInput` is uncontrolled (`value`
-is sent once at mount; `setText` replaces the text). Editor reshapes
-count where Parley shapes: each edit, preedit, commit, and finished
-composition, and a dirty layout refreshed before navigation (Parley
-pinned to 0.11.1). Validation bounds font sizes to `MAX_FONT_SIZE`
+`default_family`, `system-ui` (Decisions). INPUT nodes hold an owned
+`Editor` each (`craie-text/src/editor.rs`, step 3b): one UTF-8 buffer
+with the IME preedit inside it (`raw_text`; `text` excludes it), a
+selection of two cursors (a byte index at a cluster boundary and an
+affinity, so a soft line break has a caret at each line), and the
+layout as an owned paragraph. Left and right move one cluster in
+visual order; up and down keep a horizontal goal; word moves and
+deletions use UAX #29 word boundaries; Backspace removes one code
+point after a combining mark and a whole newline or emoji cluster.
+Carets stop only at grapheme boundaries. Every operation of Parley's
+`PlainEditor` that the input used is kept, with its behavior (E01
+editable cases). An edit shapes once through the engine; a width
+change only rewraps; caret motions allocate nothing. Caret, selection,
+and IME-area geometry read the placements. `TextInput` is uncontrolled
+(`value` is sent once at mount; `setText` replaces the text). Parley is
+not a dependency of any release crate: the harness keeps it as the
+oracle. Validation bounds font sizes to `MAX_FONT_SIZE`
 (2048 logical points). A glyph larger than an atlas page renders: it
 is rasterized at a smaller size that fits, and its quad draws the
 bitmap scaled up (softer, never missing). The cache keeps the raster
@@ -442,8 +452,11 @@ installs it as the default source at startup. The engine caches the
 primary instance per (family, attrs) and the source's candidates per
 (script, attrs, emoji) and cluster; each cluster takes the first
 candidate that covers all of it, so the choice depends on the cluster
-alone. Until step 3b, Parley (for inputs) still brings fontique into
-craie-text's graph.
+alone. fontique is reachable only through the platform adapter: the
+layer map test asserts that craie-text and craie-ui reach neither
+fontique nor Parley. The rasterizer sets a face's variation
+coordinates on every scaler, empty included (swash keeps them across
+builders).
 
 **Target.** `FontFaceId` and `FontInstanceId` (face, variation coords,
 synthesis, features) owned by `craie-text`. Desktop discovery and
@@ -925,9 +938,13 @@ multi-glyph clusters and L1-reversed segments; line starts at UAX #14
 opportunities; fallback that depends on the cluster alone; byte
 identity across a replaced source); a width change does no shapes;
 release builds without test features (`pinned-fonts`), with the
-harness and a workspace build as negative controls; and the E01, E10,
-and E14 benches (`examples/fontcost` splits a fresh engine's font
-work). `prepare_frame` in
+harness and a workspace build as negative controls; E01 editable
+cases (the owned editor against Parley's `PlainEditor` over scripted
+steps: buffer, selection, preedit, and caret position equal after
+every step; carets at graphemes where Parley splits them, asserted
+exactly); Parley as a reference-only crate in every release graph; and
+the E01, E10, and E14 benches (`examples/fontcost` splits a fresh
+engine's font work). `prepare_frame` in
 platform-winit is the one frame path for commits and native input;
 accessibility bounds and the IME area publish only after it.
 The host sets the UI clock and wakes at `Ui::next_settle` to snap

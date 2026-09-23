@@ -49,13 +49,15 @@ target shape.
   algorithm.
 - Baseline vs now: bidi-ltr 24 (Craie) vs 21 (Parley), bidi-rtl 30 vs
   29, hebrew-lines 32 vs 24, styled-synth 20 vs 16. Every other E01 case
-  allocates fewer than Parley (6 to 15 vs 16 to 33).
+  allocates fewer than Parley (6 to 15 vs 16 to 33). Editing (step 3b):
+  a keystroke pair on the 55-byte bidi text allocates 60 vs Parley's 43;
+  Latin and multilingual allocate fewer (30 vs 41, 24 vs 53).
 - Why accepted: `unicode_bidi::BidiInfo` allocates its level and class
   tables per paragraph; LTR-only text skips it.
 - Resolves in: E02 (generated Unicode tables versus the unicode-*
   crates), or bidi scratch reused in the shaper.
 - Re-test: `cargo run --release -p craie-harness --example e01_text`
-  (cold allocs column).
+  (cold allocs column; `editing` rows, pair allocs).
 
 ### AR-4: SF raster count against Helvetica (a decision, not a regression)
 
@@ -72,8 +74,8 @@ target shape.
 - Resolves in: not a defect; re-measure when glyph raster work changes
   (E08).
 - Re-test: `scripts/measure-framebench.sh` with and without
-  `FAMILY=sans-serif`; `cargo run --release --example fontcost -- ours
-  system-ui` and `-- ours sans-serif` (raster counts).
+  `FAMILY=sans-serif`; `cargo run --release --example fontcost --
+  system-ui` and `-- sans-serif` (raster counts).
 
 ## Deferred findings
 
@@ -86,9 +88,10 @@ Reviewer minors and nitpicks not fixed yet.
 - Claim: the AccessKit projection has no per-cluster text runs
   (character positions, word boundaries), so assistive technology gets
   no caret or selection geometry inside a paragraph.
-- Why deferred: not a regression (step 2 had none either); caret and
-  selection geometry for assistive technology belong with owned
-  editing and selection (steps 3b, 3c), which own those positions.
+- Why deferred: not a regression (step 2 had none either). Step 3b
+  owns the input's caret and selection positions but projects only the
+  value; the per-cluster text runs belong with cross-node selection
+  (step 3c), which needs them for read-only text too.
 
 ## Closed
 
