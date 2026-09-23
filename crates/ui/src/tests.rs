@@ -1027,13 +1027,10 @@ fn clip_applies_per_axis() {
     // Past the right edge: visible and hittable. Past the bottom: not.
     assert_eq!(ui.hit_test(250.0, 50.0), Some(NodeId(1)));
     assert_eq!(ui.hit_test(50.0, 250.0), None);
-    let child = resolved(ui.scene())
-        .into_iter()
-        .find(|p| p.color == 0xFF00_00FF)
-        .unwrap();
-    let c = child.clip.unwrap();
-    assert!(c.size.width > 1.0e6, "x is unbounded: {c:?}");
-    assert_eq!(c.size.height, 100.0);
+    // The clip record bounds y only; x is open, not a large finite box.
+    let clip = ui.scene().clips.get(0);
+    assert_eq!(clip.open, [true, false]);
+    assert_eq!(clip.rect.size.height, 100.0);
 }
 
 /// A rounded clip: a point in the cut corner does not hit the child.
@@ -1116,4 +1113,48 @@ fn registering_a_painter_rebuilds_its_surfaces() {
     );
     ui.render(Size::new(200.0, 200.0));
     assert!(resolved(ui.scene()).iter().any(|p| p.color == 0x00FF_00FF));
+}
+
+/// Batch-local links count too: a child placed under a parent that the
+/// same batch then removes is an orphan.
+#[test]
+fn batch_links_orphan_on_parent_removal() {
+    let mut ui = Ui::new(1.0);
+    let mut t = Transaction::new(1);
+    t.create(0, NodeKind::View)
+        .append(NIL, 0)
+        .create(1, NodeKind::View)
+        .create(2, NodeKind::View);
+    ui.apply_txn(&t).unwrap();
+    let mut t = Transaction::new(2);
+    t.append(0, 1)
+        .remove(0)
+        .create(0, NodeKind::View)
+        .append(NIL, 0)
+        .place(0, 2, 1);
+    assert!(ui.apply_txn(&t).is_err());
+    // Re-linking after the recreation is valid.
+    let mut t = Transaction::new(3);
+    t.remove(0)
+        .create(0, NodeKind::View)
+        .append(NIL, 0)
+        .append(0, 1)
+        .place(0, 2, 1);
+    ui.apply_txn(&t).unwrap();
+    assert_eq!(ui.host.children(NodeId(0)), [NodeId(2), NodeId(1)]);
+}
+
+/// Ids stay dense: a create far past the slots in use is invalid.
+#[test]
+fn node_ids_stay_dense() {
+    let mut ui = Ui::new(1.0);
+    let mut t = Transaction::new(1);
+    t.create(1_000_000, NodeKind::View);
+    assert!(ui.apply_txn(&t).is_err());
+    assert_eq!(ui.host.slot_count(), 0);
+    let mut t = Transaction::new(2);
+    for id in 0..100 {
+        t.create(id, NodeKind::View);
+    }
+    ui.apply_txn(&t).unwrap();
 }

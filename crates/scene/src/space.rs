@@ -158,14 +158,16 @@ impl Transforms {
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ClipRecord {
-    /// Clip rect in the space of `transform`.
+    /// Clip rect in the space of `transform`. Ignored along open axes.
     pub rect: Rect,
     pub radius: f32,
     pub transform: u32,
     pub parent: u32,
+    /// Axes the clip leaves unbounded (x, y): overflow visible there.
+    pub open: [bool; 2],
 }
 
-/// Clip row as the GPU reads it: 48 bytes.
+/// Clip row as the GPU reads it: 52 bytes.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Pod, Zeroable)]
 pub struct ClipGpu {
@@ -175,6 +177,8 @@ pub struct ClipGpu {
     pub rect: [f32; 4],
     pub radius: f32,
     pub parent: u32,
+    /// Bit 0: x unbounded. Bit 1: y unbounded.
+    pub flags: u32,
 }
 
 #[derive(Default)]
@@ -196,13 +200,14 @@ impl Clips {
         self.stale = true;
     }
 
-    /// Patches one record's rect/radius (layout change without a
-    /// structure change).
-    pub fn set_rect(&mut self, id: u32, rect: Rect, radius: f32) {
+    /// Patches one record's shape (layout change without a structure
+    /// change).
+    pub fn set_rect(&mut self, id: u32, rect: Rect, radius: f32, open: [bool; 2]) {
         let r = &mut self.records[id as usize];
-        if r.rect != rect || r.radius != radius {
+        if r.rect != rect || r.radius != radius || r.open != open {
             r.rect = rect;
             r.radius = radius;
+            r.open = open;
             self.stale = true;
         }
     }
@@ -245,6 +250,7 @@ impl Clips {
                 ],
                 radius: r.radius,
                 parent: r.parent,
+                flags: r.open[0] as u32 | (r.open[1] as u32) << 1,
             };
             if self.gpu[i] != row {
                 self.gpu[i] = row;
@@ -254,11 +260,16 @@ impl Clips {
         }
     }
 
-    /// World-space bounding box of a clip chain (for culling).
+    /// World-space bounding box of a clip chain (for culling). Records
+    /// with an open axis bound nothing here (conservative).
     pub fn world_bounds(&self, transforms: &Transforms, mut id: u32) -> Option<Rect> {
         let mut out: Option<Rect> = None;
         while id != NONE {
             let r = &self.records[id as usize];
+            if r.open[0] || r.open[1] {
+                id = r.parent;
+                continue;
+            }
             let b = transforms.world(r.transform).map_rect(&r.rect);
             out = Some(match out {
                 Some(o) => o.intersect(&b),
@@ -316,12 +327,14 @@ mod tests {
                 radius: 0.0,
                 transform: root,
                 parent: NONE,
+                open: [false; 2],
             },
             ClipRecord {
                 rect: Rect::new(50.0, 50.0, 100.0, 100.0),
                 radius: 4.0,
                 transform: root,
                 parent: 0,
+                open: [false; 2],
             },
         ]);
         c.derive(&t);

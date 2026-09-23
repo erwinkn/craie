@@ -14,6 +14,9 @@ use crate::mutation::{Command, Mutation, NIL, NodeKind, TextSpan, Transaction};
 use crate::ui::Ui;
 use crate::wire::WireError;
 
+/// How far past the slots in use a create may reach.
+const ID_SLACK: u32 = 4096;
+
 fn invalid(why: &'static str) -> WireError {
     WireError::Invalid(why)
 }
@@ -50,10 +53,14 @@ fn valid_spans(text: &str, spans: &[TextSpan]) -> Result<(), WireError> {
 struct Overlay<'h> {
     host: &'h Host,
     kinds: HashMap<u32, Option<NodeKind>>,
-    parents: HashMap<u32, u32>,
-    /// Nodes removed earlier in the transaction: children still linked
-    /// to them in the host are detached.
-    removed: std::collections::HashSet<u32>,
+    /// Parent links set by the batch, with the step that set them.
+    parents: HashMap<u32, (u32, usize)>,
+    /// Nodes removed by the batch, with the step of the last removal. A
+    /// link made before its parent's removal is an orphan (the host
+    /// detaches the children of a removed node).
+    removed: HashMap<u32, usize>,
+    /// Ids the batch created beyond the host's slots so far.
+    grown: u32,
 }
 
 impl Overlay<'_> {
@@ -69,13 +76,18 @@ impl Overlay<'_> {
     }
 
     fn parent(&self, id: u32) -> u32 {
-        match self.parents.get(&id) {
-            Some(p) => *p,
+        let (p, set_at) = match self.parents.get(&id) {
+            Some(&(p, step)) => (p, Some(step)),
             None => match self.host.node(NodeId(id)) {
-                Some(n) if self.removed.contains(&n.parent) => NodeId::DETACHED.0,
-                Some(n) => n.parent,
-                None => NodeId::DETACHED.0,
+                Some(n) => (n.parent, None),
+                None => return NodeId::DETACHED.0,
             },
+        };
+        match (self.removed.get(&p), set_at) {
+            // Host links predate every removal in the batch.
+            (Some(_), None) => NodeId::DETACHED.0,
+            (Some(&removed_at), Some(step)) if removed_at > step => NodeId::DETACHED.0,
+            _ => p,
         }
     }
 }
@@ -86,7 +98,8 @@ pub fn validate(host: &Host, txn: &Transaction<'_>) -> Result<(), WireError> {
         host,
         kinds: HashMap::new(),
         parents: HashMap::new(),
-        removed: std::collections::HashSet::new(),
+        removed: HashMap::new(),
+        grown: 0,
     };
     let need_live = |o: &Overlay, id: u32, why: &'static str| {
         if o.live(id) {
@@ -95,7 +108,7 @@ pub fn validate(host: &Host, txn: &Transaction<'_>) -> Result<(), WireError> {
             Err(invalid(why))
         }
     };
-    for m in &txn.mutations {
+    for (step, m) in txn.mutations.iter().enumerate() {
         match m {
             Mutation::Create { id, kind } => {
                 // Ids index dense stores: a bound keeps one op from
@@ -103,11 +116,22 @@ pub fn validate(host: &Host, txn: &Transaction<'_>) -> Result<(), WireError> {
                 if *id >= MAX_NODES {
                     return Err(invalid("create beyond the node id limit"));
                 }
+                // Ids stay dense: the bridge allocates them in order and
+                // recycles freed ones, so a create never jumps far past
+                // the slots in use. Memory grows with nodes sent, not
+                // with the largest id named.
+                let slots = host.slot_count() as u32 + o.grown;
+                if *id >= slots + ID_SLACK {
+                    return Err(invalid("create leaves a gap in node ids"));
+                }
+                if *id >= slots {
+                    o.grown += *id + 1 - slots;
+                }
                 if o.live(*id) {
                     return Err(invalid("create over a live node"));
                 }
                 o.kinds.insert(*id, Some(*kind));
-                o.parents.insert(*id, NodeId::DETACHED.0);
+                o.parents.insert(*id, (NodeId::DETACHED.0, step));
             }
             Mutation::Place {
                 parent,
@@ -137,17 +161,17 @@ pub fn validate(host: &Host, txn: &Transaction<'_>) -> Result<(), WireError> {
                         return Err(invalid("corrupt parent chain"));
                     }
                 }
-                o.parents.insert(*child, *parent);
+                o.parents.insert(*child, (*parent, step));
             }
             Mutation::Detach { id } => {
                 need_live(&o, *id, "detach of an absent node")?;
-                o.parents.insert(*id, NodeId::DETACHED.0);
+                o.parents.insert(*id, (NodeId::DETACHED.0, step));
             }
             Mutation::Remove { id } => {
                 need_live(&o, *id, "remove of an absent node")?;
                 o.kinds.insert(*id, None);
-                o.parents.insert(*id, NodeId::DETACHED.0);
-                o.removed.insert(*id);
+                o.parents.insert(*id, (NodeId::DETACHED.0, step));
+                o.removed.insert(*id, step);
             }
             Mutation::Layout { id, style } => {
                 need_live(&o, *id, "layout on an absent node")?;

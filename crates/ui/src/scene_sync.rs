@@ -117,9 +117,6 @@ impl SceneSync {
     }
 }
 
-/// Extent of a clip along an axis whose overflow is visible.
-const UNBOUNDED: f32 = 1.0e7;
-
 /// Walk context: the space children draw in.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Ctx {
@@ -445,7 +442,7 @@ impl Ui {
         // record.
         let mut child_clip = ctx.clip;
         if clips {
-            let (rect, radius) = self.clip_shape(id, offset, &data);
+            let (rect, radius, open) = self.clip_shape(id, offset, &data);
             if topo {
                 s.clip_rec = out.clips.len() as u32;
                 out.clips.push(ClipRecord {
@@ -453,9 +450,10 @@ impl Ui {
                     radius,
                     transform: space,
                     parent: ctx.clip,
+                    open,
                 });
             } else if s.clip_rec != NONE {
-                self.scene.clips.set_rect(s.clip_rec, rect, radius);
+                self.scene.clips.set_rect(s.clip_rec, rect, radius, open);
             }
             child_clip = s.clip_rec;
         } else if topo {
@@ -539,32 +537,30 @@ impl Ui {
     }
 
     /// The clip a node imposes on its children, in its own space at
-    /// `offset`: its padding box, unbounded along an axis whose overflow
-    /// is visible, rounded by its corner radius.
+    /// `offset`: its padding box rounded by its corner radius, open along
+    /// an axis whose overflow is visible.
     pub(crate) fn clip_shape(
         &self,
         id: NodeId,
         offset: [f32; 2],
         data: &LayoutData,
-    ) -> (Rect, f32) {
+    ) -> (Rect, f32, [bool; 2]) {
         let style = self.host.style(id);
-        let (x0, x1) = if style.overflow.x == taffy::Overflow::Visible {
-            (-UNBOUNDED, UNBOUNDED)
-        } else {
-            let x = offset[0] + data.clip_box.origin.x;
-            (x, x + data.clip_box.size.width)
-        };
-        let (y0, y1) = if style.overflow.y == taffy::Overflow::Visible {
-            (-UNBOUNDED, UNBOUNDED)
-        } else {
-            let y = offset[1] + data.clip_box.origin.y;
-            (y, y + data.clip_box.size.height)
-        };
+        let open = [
+            style.overflow.x == taffy::Overflow::Visible,
+            style.overflow.y == taffy::Overflow::Visible,
+        ];
+        let rect = Rect::new(
+            offset[0] + data.clip_box.origin.x,
+            offset[1] + data.clip_box.origin.y,
+            data.clip_box.size.width,
+            data.clip_box.size.height,
+        );
         let radius = match self.host.kind(id) {
             Some(k) if k.has_box() => self.host.paint[id.index()].radius,
             _ => 0.0,
         };
-        (Rect::new(x0, y0, x1 - x0, y1 - y0), radius)
+        (rect, radius, open)
     }
 
     /// Patches the paint records of a chunk whose colors changed.
@@ -597,8 +593,8 @@ impl Ui {
         let clip_rec = self.sync.spaces[id.index()].clip_rec;
         if clip_rec != NONE && clip_rec < self.scene.clips.len() as u32 {
             let offset = self.scene.placement(id.0).offset;
-            let (rect, radius) = self.clip_shape(id, offset, &data);
-            self.scene.clips.set_rect(clip_rec, rect, radius);
+            let (rect, radius, open) = self.clip_shape(id, offset, &data);
+            self.scene.clips.set_rect(clip_rec, rect, radius, open);
         }
         let mut w = std::mem::take(&mut self.sync.writer);
         w.clear();

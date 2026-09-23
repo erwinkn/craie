@@ -12,6 +12,17 @@ use crate::input::KeyAction;
 use crate::mutation::NodeKind;
 use crate::ui::Ui;
 
+/// Whether `p` passes a clip: each bounded axis must contain it, and the
+/// corners round only when both axes are bounded (as the shader does).
+fn in_clip(p: Point, r: &Rect, radius: f32, open: [bool; 2]) -> bool {
+    match open {
+        [false, false] => in_rounded(p, r, radius),
+        [true, false] => p.y >= r.origin.y && p.y < r.max_y(),
+        [false, true] => p.x >= r.origin.x && p.x < r.max_x(),
+        [true, true] => true,
+    }
+}
+
 /// Whether `p` lies inside `r` with corners rounded by `radius` (the
 /// same rounded-rect shape the renderer draws and clips with).
 fn in_rounded(p: Point, r: &Rect, radius: f32) -> bool {
@@ -102,8 +113,8 @@ impl Ui {
         }
         let clips = style.overflow.x != taffy::Overflow::Visible
             || style.overflow.y != taffy::Overflow::Visible;
-        let (clip, radius) = self.clip_shape(id, [0.0, 0.0], &data);
-        if !clips || in_rounded(q, &clip, radius) {
+        let (clip, radius, open) = self.clip_shape(id, [0.0, 0.0], &data);
+        if !clips || in_clip(q, &clip, radius, open) {
             let [sx, sy] = self.scroll_offset_if_scrolls(id);
             let cp = Point::new(q.x + sx, q.y + sy);
             // Children paint above their parent and later siblings above

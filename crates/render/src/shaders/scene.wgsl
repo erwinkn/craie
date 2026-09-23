@@ -11,7 +11,7 @@ struct RectI { x: f32, y: f32, w: f32, h: f32, radius: f32, border_width: f32, f
 struct GlyphI { x: f32, y: f32, raster: u32, paint: u32, chunk: u32 };
 struct PlacementI { ox: f32, oy: f32, transform: u32, clip: u32 };
 struct WorldI { a: f32, b: f32, c: f32, d: f32, e: f32, f: f32, flags: u32, _pad: u32 };
-struct ClipI { ia: f32, ib: f32, ic: f32, id: f32, ie: f32, if_: f32, x0: f32, y0: f32, x1: f32, y1: f32, radius: f32, parent: u32 };
+struct ClipI { ia: f32, ib: f32, ic: f32, id: f32, ie: f32, if_: f32, x0: f32, y0: f32, x1: f32, y1: f32, radius: f32, parent: u32, flags: u32 };
 struct RasterI { xy: u32, wh: u32, page: u32 };
 
 @group(0) @binding(0) var<uniform> vp: Viewport;
@@ -156,7 +156,16 @@ fn clip_coverage(dev: vec2<f32>, first: u32) -> f32 {
         let lp = vec2<f32>(c.ia * dev.x + c.ic * dev.y + c.ie, c.ib * dev.x + c.id * dev.y + c.if_);
         let lo = vec2<f32>(c.x0, c.y0);
         let hi = vec2<f32>(c.x1, c.y1);
-        let d = sd_rect(lp - (lo + hi) * 0.5, (hi - lo) * 0.5, c.radius);
+        let center = (lo + hi) * 0.5;
+        let half = (hi - lo) * 0.5;
+        // An open axis (overflow visible) bounds nothing.
+        var d: f32;
+        switch (c.flags & 3u) {
+            case 1u: { d = abs(lp.y - center.y) - half.y; }
+            case 2u: { d = abs(lp.x - center.x) - half.x; }
+            case 3u: { d = -1.0e9; }
+            default: { d = sd_rect(lp - center, half, c.radius); }
+        }
         // Distance in local units -> device px.
         let px = 1.0 / sqrt(max(abs(c.ia * c.id - c.ib * c.ic), 1e-12));
         cov = cov * clamp(0.5 - d * px, 0.0, 1.0);
