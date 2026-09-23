@@ -366,10 +366,10 @@ export class CraieHost {
       r.sentParagraph = key
       this.encoder.paragraph(r.id, text, spans)
     }
-    const interaction = `${mask},${!!r.props.focusable}`
+    const interaction = `${mask},${!!r.props.focusable},${!!r.props.selectable}`
     if (interaction !== r.sentInteraction) {
       r.sentInteraction = interaction
-      this.encoder.interaction(r.id, mask, !!r.props.focusable)
+      this.encoder.interaction(r.id, mask, !!r.props.focusable, !!r.props.selectable)
     }
   }
 
@@ -751,8 +751,12 @@ export class CraieHost {
 
     // Listener mask + focusable flag (a text root's: at the seal).
     const oldMask = listenerMask(oldProps), newMask = listenerMask(props)
-    if (n.kind !== 1 && (oldMask !== newMask || !!oldProps.focusable !== !!props.focusable)) {
-      enc.interaction(id, newMask, !!props.focusable)
+    if (
+      n.kind !== 1 &&
+      (oldMask !== newMask || !!oldProps.focusable !== !!props.focusable ||
+        !!oldProps.selectable !== !!props.selectable)
+    ) {
+      enc.interaction(id, newMask, !!props.focusable, !!props.selectable)
     }
 
     const oldRole = mounted ? roleOf(oldProps) : ROLE.none

@@ -83,6 +83,9 @@ export interface ListenerProps {
 
 export interface ViewProps extends ListenerProps {
   style?: StyleProps
+  /** The View's text descendants form one selection domain: drag to
+   * select across them, Cmd/Ctrl+C copies in tree order. */
+  selectable?: boolean
   backgroundColor?: string | number
   borderRadius?: number
   borderColor?: string | number
@@ -108,6 +111,8 @@ export interface TextProps extends ListenerProps {
   style?: StyleProps
   /** Primary pointer released over this text (or this nested span). */
   onPress?: (e: PointerEvt) => void
+  /** This Text alone is a selection domain (on the outermost Text). */
+  selectable?: boolean
   fontSize?: number
   color?: string | number
   fontWeight?: number | "normal" | "bold"

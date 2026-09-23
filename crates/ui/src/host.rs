@@ -204,6 +204,8 @@ pub struct Interaction {
     pub listeners: u32,
     /// Participates in Tab traversal and accepts click focus.
     pub focusable: bool,
+    /// Its text descendants (itself included) form one selection domain.
+    pub selectable: bool,
     pub role: Role,
 }
 

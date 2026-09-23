@@ -41,7 +41,7 @@ fn in_rounded(p: Point, r: &Rect, radius: f32) -> bool {
 
 impl Ui {
     /// Ancestor chain of `id`, deepest first (inclusive).
-    fn path_to(&self, id: NodeId) -> Vec<NodeId> {
+    pub(crate) fn path_to(&self, id: NodeId) -> Vec<NodeId> {
         let mut path = Vec::new();
         let mut cur = id;
         loop {
@@ -223,6 +223,7 @@ impl Ui {
             Event::PointerMove { x, y } => self.pointer_move(*x, *y),
             Event::PointerDown { x, y, button, mods } => self.pointer_down(*x, *y, *button, *mods),
             Event::PointerUp { x, y, button } => {
+                self.selecting = false;
                 // Pointer capture: while a button was held the press
                 // target owns the release, wherever the pointer is.
                 let target = self.pressed.take().or_else(|| self.hit_test(*x, *y));
@@ -296,6 +297,9 @@ impl Ui {
     }
 
     fn pointer_move(&mut self, x: f32, y: f32) {
+        if self.selecting {
+            self.selection_drag(x, y);
+        }
         // Drag capture: a press inside an input extends its selection.
         if let Some(pid) = self.pressed
             && self.host.kind(pid) == Some(NodeKind::Input)
@@ -388,6 +392,12 @@ impl Ui {
             self.inputs.act(&mut self.text, id.0, &action);
             self.input_changed(id);
         }
+        // Text selection: a primary press outside inputs starts one in its
+        // selectable domain, or clears one.
+        let in_input = hit.is_some_and(|h| self.host.kind(h) == Some(NodeKind::Input));
+        if button == crate::events::Button::Primary && !in_input {
+            self.selecting = self.selection_press(hit, x, y, mods.shift);
+        }
         if let Some(hit) = hit {
             self.emit_pointer(hit, out_kind::POINTER_DOWN, x, y, button, mods);
         }
@@ -463,6 +473,22 @@ impl Ui {
         let focused_input = self
             .focus
             .filter(|&f| self.host.kind(f) == Some(NodeKind::Input));
+
+        // Text selection keys, outside inputs: copy, select all, clear.
+        if focused_input.is_none() && self.text_selection.is_some() {
+            let command = k.mods.meta || k.mods.ctrl;
+            match (command, k.char.as_deref(), k.key) {
+                (true, Some("c"), _) => {
+                    let text = self.selected_text();
+                    if !text.is_empty() {
+                        self.inputs.clipboard.set(&text);
+                    }
+                }
+                (true, Some("a"), _) => self.select_domain(),
+                (false, _, Key::Escape) => self.set_text_selection(None),
+                _ => {}
+            }
+        }
 
         if let Some(id) = focused_input {
             if k.key == Key::Escape {

@@ -1,0 +1,248 @@
+//! Cross-node read-only text selection (ARCHITECTURE.md §5, step 3c).
+//!
+//! A `selectable` node makes its text descendants (itself included) one
+//! selection domain. A selection has an anchor and a focus, each a byte
+//! offset in one of the domain's text nodes; between them, in tree
+//! order, every text node is selected whole. Copy yields the selected
+//! text in tree order, one line per paragraph. The highlight is drawn in
+//! each text node's chunk from its paragraph's placements.
+
+use std::ops::Range;
+
+use craie_core::geom::Rect;
+
+use crate::host::NodeId;
+use crate::mutation::NodeKind;
+use crate::ui::Ui;
+
+/// A byte offset in a text node.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TextPoint {
+    pub node: NodeId,
+    pub offset: u32,
+}
+
+/// A selection in one domain.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TextSelection {
+    pub domain: NodeId,
+    pub anchor: TextPoint,
+    pub focus: TextPoint,
+}
+
+/// The highlight fill (as inputs'): rgba(53,132,228,0.48).
+pub const SELECTION_COLOR: u32 = 0x3584_E47A;
+
+impl Ui {
+    /// The nearest selectable node on `id`'s path (itself included).
+    pub(crate) fn selection_domain(&self, id: NodeId) -> Option<NodeId> {
+        self.path_to(id)
+            .into_iter()
+            .find(|&n| self.host.interaction(n).selectable)
+    }
+
+    /// The domain's text nodes in tree order (displayed ones only).
+    pub(crate) fn domain_texts(&self, domain: NodeId) -> Vec<NodeId> {
+        let mut out = Vec::new();
+        let mut stack = vec![domain];
+        while let Some(id) = stack.pop() {
+            if self.host.node(id).is_none() || self.host.style(id).display == taffy::Display::None {
+                continue;
+            }
+            if self.host.kind(id) == Some(NodeKind::Text) {
+                out.push(id);
+            }
+            stack.extend(self.host.children(id).iter().rev().copied());
+        }
+        out
+    }
+
+    /// The text position nearest window point (x, y) in `domain`: the
+    /// first text (tree order) whose box the point is above goes from its
+    /// start; the first whose box spans the point's y takes the paragraph
+    /// hit there; past every box, the last text's end.
+    pub(crate) fn text_position(&self, domain: NodeId, x: f32, y: f32) -> Option<TextPoint> {
+        let texts = self.domain_texts(domain);
+        for &t in &texts {
+            let data = self.layouts.data(t);
+            let content = Rect::new(
+                data.content[0],
+                data.content[1],
+                (data.rect.size.width - data.insets[0]).max(0.0),
+                (data.rect.size.height - data.insets[1]).max(0.0),
+            );
+            let b = self.node_to_window(t).map_rect(&content);
+            if y < b.origin.y {
+                return Some(TextPoint { node: t, offset: 0 });
+            }
+            if y < b.origin.y + b.size.height {
+                let (lx, ly) = self.to_content(t, x, y);
+                let offset = self.text_layout(t).map_or(0, |p| p.hit(lx, ly).offset);
+                return Some(TextPoint { node: t, offset });
+            }
+        }
+        let last = *texts.last()?;
+        let len = self.host.paragraph(last).map_or(0, |p| p.text.len() as u32);
+        Some(TextPoint {
+            node: last,
+            offset: len,
+        })
+    }
+
+    /// The highlighted range of text node `id`, clamped onto its text.
+    pub(crate) fn highlight_of(&self, id: NodeId) -> Option<Range<u32>> {
+        let r = self
+            .selection_highlight
+            .iter()
+            .find(|(n, _)| *n == id)?
+            .1
+            .clone();
+        let text = &self.host.paragraph(id)?.text;
+        let clamp = |i: u32| {
+            let mut i = (i as usize).min(text.len());
+            while !text.is_char_boundary(i) {
+                i -= 1;
+            }
+            i as u32
+        };
+        let r = clamp(r.start)..clamp(r.end);
+        (!r.is_empty()).then_some(r)
+    }
+
+    /// The selected range of each text node (non-empty ones), in tree
+    /// order. Offsets past a paragraph's text (it changed) are clamped
+    /// onto character boundaries.
+    pub fn selection_ranges(&self) -> Vec<(NodeId, Range<u32>)> {
+        let Some(sel) = self.text_selection else {
+            return Vec::new();
+        };
+        let texts = self.domain_texts(sel.domain);
+        let index = |p: &TextPoint| texts.iter().position(|&t| t == p.node);
+        let (Some(ia), Some(ifo)) = (index(&sel.anchor), index(&sel.focus)) else {
+            return Vec::new();
+        };
+        let clamp = |p: &TextPoint| {
+            let text = self.host.paragraph(p.node).map_or("", |q| q.text.as_str());
+            let mut i = (p.offset as usize).min(text.len());
+            while !text.is_char_boundary(i) {
+                i -= 1;
+            }
+            i as u32
+        };
+        let (a, f) = ((ia, clamp(&sel.anchor)), (ifo, clamp(&sel.focus)));
+        let (start, end) = if a <= f { (a, f) } else { (f, a) };
+        let mut out = Vec::new();
+        for (k, &t) in texts.iter().enumerate().take(end.0 + 1).skip(start.0) {
+            let len = self.host.paragraph(t).map_or(0, |p| p.text.len() as u32);
+            let from = if k == start.0 { start.1 } else { 0 };
+            let to = if k == end.0 { end.1 } else { len };
+            if from < to {
+                out.push((t, from..to));
+            }
+        }
+        out
+    }
+
+    /// The selected text in tree order, one line per paragraph.
+    pub fn selected_text(&self) -> String {
+        let mut out = String::new();
+        for (k, (t, r)) in self.selection_ranges().into_iter().enumerate() {
+            if k > 0 {
+                out.push('\n');
+            }
+            if let Some(p) = self.host.paragraph(t) {
+                out.push_str(&p.text[r.start as usize..r.end as usize]);
+            }
+        }
+        out
+    }
+
+    /// Replaces the selection; text nodes whose highlight changed rebuild
+    /// their chunk.
+    pub fn set_text_selection(&mut self, next: Option<TextSelection>) {
+        if self.text_selection == next {
+            return;
+        }
+        self.text_selection = next;
+        let after = self.selection_ranges();
+        let before = std::mem::replace(&mut self.selection_highlight, after);
+        let after = &self.selection_highlight;
+        let range_of = |list: &[(NodeId, Range<u32>)], id: NodeId| {
+            list.iter().find(|(n, _)| *n == id).map(|(_, r)| r.clone())
+        };
+        let mut changed: Vec<NodeId> = Vec::new();
+        for (id, _) in before.iter().chain(after.iter()) {
+            if !changed.contains(id) && range_of(&before, *id) != range_of(after, *id) {
+                changed.push(*id);
+            }
+        }
+        for id in changed {
+            self.host.dirty.content.push(id.0);
+        }
+        self.force_paint = true;
+    }
+
+    /// A primary press at (x, y) on `hit`: starts (or with shift,
+    /// extends) a selection in its domain, or clears one outside any.
+    /// Returns whether a selection drag began.
+    pub(crate) fn selection_press(
+        &mut self,
+        hit: Option<NodeId>,
+        x: f32,
+        y: f32,
+        shift: bool,
+    ) -> bool {
+        let domain = hit.and_then(|h| self.selection_domain(h));
+        let Some(domain) = domain else {
+            self.set_text_selection(None);
+            return false;
+        };
+        let Some(at) = self.text_position(domain, x, y) else {
+            self.set_text_selection(None);
+            return false;
+        };
+        let anchor = match self.text_selection {
+            Some(s) if shift && s.domain == domain => s.anchor,
+            _ => at,
+        };
+        self.set_text_selection(Some(TextSelection {
+            domain,
+            anchor,
+            focus: at,
+        }));
+        true
+    }
+
+    /// A drag to (x, y) moves the focus.
+    pub(crate) fn selection_drag(&mut self, x: f32, y: f32) {
+        let Some(sel) = self.text_selection else {
+            return;
+        };
+        if let Some(focus) = self.text_position(sel.domain, x, y) {
+            self.set_text_selection(Some(TextSelection { focus, ..sel }));
+        }
+    }
+
+    /// Selects every text of the current selection's domain.
+    pub(crate) fn select_domain(&mut self) {
+        let Some(sel) = self.text_selection else {
+            return;
+        };
+        let texts = self.domain_texts(sel.domain);
+        let (Some(&first), Some(&last)) = (texts.first(), texts.last()) else {
+            return;
+        };
+        let len = self.host.paragraph(last).map_or(0, |p| p.text.len() as u32);
+        self.set_text_selection(Some(TextSelection {
+            domain: sel.domain,
+            anchor: TextPoint {
+                node: first,
+                offset: 0,
+            },
+            focus: TextPoint {
+                node: last,
+                offset: len,
+            },
+        }));
+    }
+}

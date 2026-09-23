@@ -688,11 +688,16 @@ impl Ui {
                 id,
                 listeners,
                 focusable,
+                selectable,
             } => {
                 let i = &mut self.host.interaction[*id as usize];
-                if i.listeners != *listeners || i.focusable != *focusable {
+                if i.listeners != *listeners
+                    || i.focusable != *focusable
+                    || i.selectable != *selectable
+                {
                     i.listeners = *listeners;
                     i.focusable = *focusable;
+                    i.selectable = *selectable;
                     self.host.revs.semantic.bump();
                     self.host.dirty.semantic.push(*id);
                 }

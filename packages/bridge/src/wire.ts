@@ -636,11 +636,13 @@ export class Encoder {
     this.ops.u32(id)
     this.ops.u32(s)
   }
-  interaction(id: number, listeners: number, focusable: boolean) {
+  /** Listener mask and flags: `selectable` makes the node's text
+   * descendants one selection domain. */
+  interaction(id: number, listeners: number, focusable: boolean, selectable = false) {
     this.ops.u8(Op.Interaction)
     this.ops.u32(id)
     this.ops.u32(listeners >>> 0)
-    this.ops.u8(focusable ? 1 : 0)
+    this.ops.u8((focusable ? 1 : 0) | (selectable ? 2 : 0))
   }
   surface(id: number, kind: number, params: readonly number[]) {
     this.ops.u8(Op.Surface)

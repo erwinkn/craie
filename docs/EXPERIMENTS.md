@@ -353,6 +353,26 @@ The text demo lost an inline monospace span: a paragraph has one family
 (its code line is all monospace). Parley's line-height override is
 gone with it.
 
+### Step 3c: span record, nested Text, per-span events, selection
+
+- The span record (wire v3, 28 bytes) carries the style React Native
+  allows on nested Text. E01 case `spacing` (letter spacing on a span,
+  an absolute line height) equals Parley: advances bit-equal, worst
+  ratio to the f32 bound 0.061. Families resolve once at apply
+  (`span_family_resolves_when_applied`: a color change neither
+  re-resolves nor reshapes; a family change does both).
+- Decorations draw one rect per decorated span stretch
+  (`decorations_draw_over_their_spans`). The text demo shows the inline
+  monospace span again, and an underline.
+- Nested Text: one native text node per outermost Text; nested edits
+  and removals send one paragraph op (bun tests); a pointer event names
+  its span (`text_pointer_events_carry_the_span`) and reaches the
+  nested Text that owns it.
+- Selection: drags across paragraphs in tree order, copy, select all,
+  clearing, clamping after a text change, and highlight rects in exactly
+  the selected paragraphs' chunks (`selection_spans_paragraphs_in_tree_order`,
+  `selection_survives_a_shrinking_paragraph`).
+
 ### E14: layout-aware virtualization, list versus a plain column (step 2)
 
 `cargo run --release -p craie-harness --example e14_lists`: a scroller

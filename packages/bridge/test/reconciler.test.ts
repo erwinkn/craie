@@ -440,3 +440,17 @@ test("pointer events on a span reach its nested Text", async () => {
   t.eventCb!(up(2)) // " bold": no handler of its own, so the root
   expect(hits).toEqual(["link", "outer", "outer"])
 })
+
+test("selectable sets the interaction flag bit", async () => {
+  const t = new FakeTransport()
+  const root = createRoot(t)
+  root.renderSync(
+    createElement(View, { selectable: true },
+      createElement(Text, null, "one"),
+      createElement(Text, { selectable: true }, "two"))
+  )
+  await tick()
+  const flags = t.ops(0).filter(o => o.tag === 0x60).map(o => o.f[1])
+  // The View and the selectable Text send flag bit 1 (selectable).
+  expect(flags.filter(f => f === 2).length).toBe(2)
+})

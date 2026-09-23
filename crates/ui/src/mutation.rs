@@ -325,6 +325,8 @@ pub enum Mutation<'a> {
         id: u32,
         listeners: u32,
         focusable: bool,
+        /// Its text descendants form one selection domain.
+        selectable: bool,
     },
     // payload
     Surface {
@@ -606,10 +608,23 @@ impl<'a> Transaction<'a> {
     }
 
     pub fn interaction(&mut self, id: u32, listeners: u32, focusable: bool) -> &mut Self {
+        self.interaction_flags(id, listeners, focusable, false)
+    }
+
+    /// Interaction with every flag: `selectable` makes the node's text
+    /// descendants one selection domain.
+    pub fn interaction_flags(
+        &mut self,
+        id: u32,
+        listeners: u32,
+        focusable: bool,
+        selectable: bool,
+    ) -> &mut Self {
         self.push(Mutation::Interaction {
             id,
             listeners,
             focusable,
+            selectable,
         })
     }
 

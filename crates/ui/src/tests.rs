@@ -2331,3 +2331,145 @@ fn text_pointer_events_carry_the_span() {
     }
     assert_eq!(down(line.x + line.advance + 5.0), 0, "past the text");
 }
+
+/// Under a plain column (10): a selectable View (0) with "Hello world"
+/// (1) and, inside a plain View (2), "Second line" (3); below it, outside
+/// the domain, "Outside" (5).
+fn selection_ui() -> Ui {
+    let mut ui = Ui::new(1.0);
+    let mut t = Transaction::new(1);
+    let column = taffy::Style {
+        flex_direction: taffy::FlexDirection::Column,
+        size: taffy::Size {
+            width: taffy::Dimension::length(300.0),
+            height: taffy::Dimension::auto(),
+        },
+        ..taffy::Style::default()
+    };
+    // A plain column root holding the selectable View and, below it,
+    // text outside any domain.
+    t.create(10, NodeKind::View)
+        .layout(10, &column)
+        .place(NIL, 10, NIL);
+    t.create(0, NodeKind::View)
+        .layout(0, &column)
+        .interaction_flags(0, 0, false, true)
+        .place(10, 0, NIL);
+    t.create(1, NodeKind::Text)
+        .text(1, "Hello world", 16.0, 0xFFFF_FFFF)
+        .place(0, 1, NIL);
+    t.create(2, NodeKind::View).place(0, 2, NIL);
+    t.create(3, NodeKind::Text)
+        .text(3, "Second line", 16.0, 0xFFFF_FFFF)
+        .place(2, 3, NIL);
+    t.create(5, NodeKind::Text)
+        .text(5, "Outside", 16.0, 0xFFFF_FFFF)
+        .place(10, 5, NIL);
+    ui.apply_txn(&t).unwrap();
+    ui.render(Size::new(400.0, 300.0));
+    ui
+}
+
+/// The window point of byte `offset` of text node `id` (mid-line).
+fn text_point(ui: &Ui, id: u32, offset: u32) -> (f32, f32) {
+    let p = ui.text_layout(NodeId(id)).unwrap();
+    let c = p.caret(offset);
+    let data = ui.layouts.data(NodeId(id));
+    let q = ui
+        .node_to_window(NodeId(id))
+        .apply(craie_core::geom::Point::new(
+            data.content[0] + c.x,
+            data.content[1] + c.top + c.height * 0.5,
+        ));
+    (q.x, q.y)
+}
+
+fn drag(ui: &mut Ui, from: (f32, f32), to: (f32, f32)) {
+    ui.dispatch(&Event::PointerDown {
+        x: from.0,
+        y: from.1,
+        button: Button::Primary,
+        mods: Mods::default(),
+    });
+    ui.dispatch(&Event::PointerMove { x: to.0, y: to.1 });
+    ui.dispatch(&Event::PointerUp {
+        x: to.0,
+        y: to.1,
+        button: Button::Primary,
+    });
+}
+
+/// Dragging selects across paragraphs in tree order (either direction);
+/// copy yields one line per paragraph; Cmd+A selects the domain; a press
+/// outside the domain clears; only the paragraphs whose highlight
+/// changed rebuild their chunk.
+#[test]
+fn selection_spans_paragraphs_in_tree_order() {
+    let mut ui = selection_ui();
+    let (a, b) = (text_point(&ui, 1, 6), text_point(&ui, 3, 6));
+    drag(&mut ui, a, b);
+    assert_eq!(
+        ui.selection_ranges(),
+        [(NodeId(1), 6..11), (NodeId(3), 0..6)]
+    );
+    assert_eq!(ui.selected_text(), "world\nSecond");
+    drag(&mut ui, b, a);
+    assert_eq!(ui.selected_text(), "world\nSecond", "backwards");
+
+    let before = ui.counters();
+    ui.render(Size::new(400.0, 300.0));
+    let built = ui.counters().since(&before).chunks_built;
+    assert!(built <= 2, "only highlighted paragraphs rebuild: {built}");
+    // The highlight is drawn in the selected paragraphs' chunks (text
+    // chunks have no other rects here).
+    let rects = |ui: &Ui, id: u32| ui.scene().chunk(id).map_or(0, |c| c.rects.len());
+    assert!(rects(&ui, 1) > 0 && rects(&ui, 3) > 0);
+    assert_eq!(rects(&ui, 5), 0);
+
+    let meta = Mods {
+        meta: true,
+        ..Mods::default()
+    };
+    for ch in ["a", "c"] {
+        ui.dispatch(&Event::KeyDown(KeyInput {
+            key: Key::Unknown,
+            text: None,
+            char: Some(ch.into()),
+            mods: meta,
+        }));
+    }
+    assert_eq!(
+        ui.inputs.clipboard.get().as_deref(),
+        Some("Hello world\nSecond line")
+    );
+
+    let outside = text_point(&ui, 5, 2);
+    ui.dispatch(&Event::PointerDown {
+        x: outside.0,
+        y: outside.1,
+        button: Button::Primary,
+        mods: Mods::default(),
+    });
+    assert!(ui.selection_ranges().is_empty());
+    assert_eq!(ui.selected_text(), "");
+    ui.render(Size::new(400.0, 300.0));
+    assert_eq!((rects(&ui, 1), rects(&ui, 3)), (0, 0), "highlight gone");
+}
+
+/// A selected paragraph that shrinks keeps a valid selection (clamped
+/// onto its new text).
+#[test]
+fn selection_survives_a_shrinking_paragraph() {
+    let mut ui = selection_ui();
+    let (a, b) = (text_point(&ui, 1, 6), text_point(&ui, 1, 11));
+    drag(&mut ui, a, b);
+    assert_eq!(ui.selected_text(), "world");
+    let mut t = Transaction::new(2);
+    t.text(1, "Hé", 16.0, 0xFFFF_FFFF);
+    ui.apply_txn(&t).unwrap();
+    ui.render(Size::new(400.0, 300.0));
+    assert_eq!(ui.selected_text(), "");
+    let (a, b) = (text_point(&ui, 1, 0), text_point(&ui, 1, 3));
+    drag(&mut ui, a, b);
+    assert_eq!(ui.selected_text(), "Hé");
+}

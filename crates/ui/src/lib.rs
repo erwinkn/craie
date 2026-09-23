@@ -20,6 +20,7 @@ pub mod list;
 pub mod mutation;
 pub mod platform;
 mod scene_sync;
+pub mod selection;
 pub mod surface;
 #[cfg(test)]
 mod tests;

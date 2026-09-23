@@ -52,6 +52,12 @@ pub struct Ui {
     pub(crate) pressed: Option<NodeId>,
     /// Last primary press (time, node, x, y) for double-click detection.
     pub(crate) last_click: Option<(Instant, NodeId, f32, f32)>,
+    /// The text selection (`selection.rs`), whether a press is dragging
+    /// it, and each text node's highlighted range (what chunk builds
+    /// draw).
+    pub(crate) text_selection: Option<crate::selection::TextSelection>,
+    pub(crate) selecting: bool,
+    pub(crate) selection_highlight: Vec<(NodeId, std::ops::Range<u32>)>,
     /// Events accumulated for the JS side since the last `take_events`.
     pub(crate) pending_events: Vec<UiEvent>,
     /// Set when anything observable to assistive tech changed.
@@ -105,6 +111,9 @@ impl Ui {
             hover: None,
             pressed: None,
             last_click: None,
+            text_selection: None,
+            selecting: false,
+            selection_highlight: Vec::new(),
             pending_events: Vec::new(),
             a11y_stale: true,
             force_paint: true,

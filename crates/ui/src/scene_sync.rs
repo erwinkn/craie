@@ -763,6 +763,18 @@ impl Ui {
             .map(|p| p.spans.iter().map(|s| s.decoration).collect())
             .unwrap_or_default();
         let m = self.texts[slot].as_ref().unwrap();
+        // A text selection's highlight, under the glyphs, from the
+        // placements (paint slot after the span colors).
+        if let Some(range) = self.highlight_of(id) {
+            let fill = w.paint(crate::selection::SELECTION_COLOR);
+            for (x, y, rw, rh) in m.layout.selection_rects(range) {
+                w.rect(
+                    Rect::new(data.content[0] + x, data.content[1] + y, rw, rh),
+                    0.0,
+                    fill,
+                );
+            }
+        }
         self.text.emit_paragraph(
             &m.layout,
             Point::new(data.content[0], data.content[1]),

@@ -93,6 +93,12 @@ pub mod cmd {
     pub const SCROLL_TO: u8 = 3;
 }
 
+/// Interaction flag bits.
+pub mod interaction_flag {
+    pub const FOCUSABLE: u8 = 1 << 0;
+    pub const SELECTABLE: u8 = 1 << 1;
+}
+
 /// Text span flag bits.
 pub mod span_flag {
     pub const ITALIC: u8 = 1 << 0;
@@ -452,11 +458,22 @@ pub fn encode(txn: &Transaction<'_>) -> Vec<u8> {
                 id,
                 listeners,
                 focusable,
+                selectable,
             } => {
                 ops.push(op::INTERACTION);
                 u32le(&mut ops, *id);
                 u32le(&mut ops, *listeners);
-                ops.push(*focusable as u8);
+                ops.push(
+                    if *focusable {
+                        interaction_flag::FOCUSABLE
+                    } else {
+                        0
+                    } | if *selectable {
+                        interaction_flag::SELECTABLE
+                    } else {
+                        0
+                    },
+                );
             }
             Mutation::Surface { id, kind, params } => {
                 ops.push(op::SURFACE);
@@ -875,11 +892,18 @@ pub fn decode(buf: &[u8]) -> Result<Transaction<'_>, WireError> {
                 id: r.u32()?,
                 text: string(r.u32()?)?.into(),
             },
-            op::INTERACTION => Mutation::Interaction {
-                id: r.u32()?,
-                listeners: r.u32()?,
-                focusable: r.u8()? != 0,
-            },
+            op::INTERACTION => {
+                let (id, listeners, flags) = (r.u32()?, r.u32()?, r.u8()?);
+                if flags & !(interaction_flag::FOCUSABLE | interaction_flag::SELECTABLE) != 0 {
+                    return Err(WireError::BadRef("interaction flags"));
+                }
+                Mutation::Interaction {
+                    id,
+                    listeners,
+                    focusable: flags & interaction_flag::FOCUSABLE != 0,
+                    selectable: flags & interaction_flag::SELECTABLE != 0,
+                }
+            }
             op::SURFACE => Mutation::Surface {
                 id: r.u32()?,
                 kind: r.u32()?,

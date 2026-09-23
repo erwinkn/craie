@@ -88,10 +88,14 @@ Reviewer minors and nitpicks not fixed yet.
 - Claim: the AccessKit projection has no per-cluster text runs
   (character positions, word boundaries), so assistive technology gets
   no caret or selection geometry inside a paragraph.
-- Why deferred: not a regression (step 2 had none either). Step 3b
-  owns the input's caret and selection positions but projects only the
-  value; the per-cluster text runs belong with cross-node selection
-  (step 3c), which needs them for read-only text too.
+- Why deferred: not a regression (step 2 had none either). Steps 3b
+  and 3c own the positions (the input caret and selection, the
+  read-only selection) but project only values. AccessKit text runs
+  (per-cluster character lengths, positions, widths, word lengths, and
+  the text selection) are an accessibility projection change of their
+  own; step 3c's scope was selection, nested Text, and per-span events.
+- Resolves in: the accessibility pass over owned text (reads
+  `Paragraph::line_clusters` and `Ui::selection_ranges`).
 
 ## Closed
 

@@ -162,7 +162,12 @@ both) and rejects unknown item flag bits and partial descriptions.
 Identities are adversarial input: validation and the index sort and
 binary-search them and never hash them. Header: magic, version, flags, seq, then counts and
 per-transaction tables for strings, layout styles (u64 presence mask +
-positional fields), and text spans (16 bytes each). Ops are u8-tagged,
+positional fields), and text spans (28 bytes each since wire version 3,
+step 3c: start, size, color, weight, flags for italic, underline, and
+line-through, a family string reference or NIL, letter spacing, and
+line height; span zero is the base, and a paragraph has no family of
+its own). The interaction op's flag byte carries focusable and
+selectable; unknown bits fail decoding. Ops are u8-tagged,
 grouped by family in the high nibble. `wire::decode` yields a
 `Transaction` of `Mutation`s; the Rust builder produces the same type;
 `Ui::execute` validates the whole transaction, then applies it with no
@@ -338,7 +343,14 @@ graphemes, one break for CRLF and one after NEL, unbroken no-break
 spaces, no break inside a marked grapheme, and one font per
 grapheme. A retained paragraph holds 0.29 to
 0.75 times Parley's bytes. The Text default family is the engine's
-`default_family`, `system-ui` (Decisions). INPUT nodes hold an owned
+default family, `system-ui` (Decisions). A span carries the style
+subset React Native allows on nested Text (family, size, weight,
+style, color, underline and line-through, letter spacing, and line
+height, which is span zero's for the paragraph); the executor resolves
+each span's family to a `FontInstanceId` once, when the paragraph is
+applied, and per-cluster fallback stays the one fallback path.
+Decorations draw as rects from the placements in the span's paint slot.
+INPUT nodes hold an owned
 `Editor` each (`craie-text/src/editor.rs`, step 3b): one UTF-8 buffer
 with the IME preedit inside it (`raw_text`; `text` excludes it), a
 selection of two cursors (a byte index at a cluster boundary and an
@@ -397,6 +409,9 @@ UTF-8 + spans -> Unicode analysis -> font resolution + fallback
 - Raster: Swash stays as the raster kernel behind `RasterId`.
 - Nested `<Text>` flattens to spans of one paragraph node in the
   reconciler. Per-span events map through cluster ranges.
+  (Current since step 3c: a Text inside a Text is virtual in the bridge
+  host; the outermost Text composes its paragraph and listener mask at
+  each commit's seal, each span inheriting its parent's unset style.)
 
 **Experiments.**
 - E01: owned paragraph runtime versus Parley on pinned multilingual,
@@ -779,6 +794,16 @@ hit tests through border boxes, ancestor clips, and scroll offsets, then
 walks the propagation path with listener-relative coordinates. Pointer
 capture holds a drag on the pressed node. Tab traverses focusable nodes
 in tree order. Clipboard via arboard. IME with cursor-area tracking.
+A pointer event on a text node carries the span under the pointer (key
+bits 16 and up), found from the placements, so JS routes it to the
+nested Text that owns the span (step 3c). Read-only text selection
+(`selection.rs`): a `selectable` node makes its text descendants one
+domain; a primary press starts a selection at the nearest text
+position, a drag moves its focus, shift extends; Cmd/Ctrl+A selects the
+domain, Cmd/Ctrl+C copies the selected text in tree order (one line per
+paragraph), Escape or a press outside clears. Each selected paragraph
+draws its highlight from its placements in its own chunk; only the
+chunks whose range changed rebuild.
 
 **Target.** The same model over the new stores. Pointer ids and types
 rather than mouse-only concepts. Hit testing stays bounds plus clip
