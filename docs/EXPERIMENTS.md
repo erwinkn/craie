@@ -1,7 +1,10 @@
 # Experiments
 
 Findings per milestone. Each entry is a decision or measurement with the
-reason it landed.
+reason it landed. Proposals live in `ARCHITECTURE.md`, in the
+`Experiments` section of each subsystem; a proposal becomes an entry here
+only when it has a measured result. Decisions in `ARCHITECTURE.md`
+override older entries below.
 
 ## Pass 3 — interaction, extension, accessibility
 
@@ -189,7 +192,9 @@ because the ICU4X line-segmentation data is not bundled. CJK glyphs still
 shape and render; what degrades is line breaking inside CJK text (breaks
 fall back to space-separator rules). Options: enable the `icu` feature on
 Parley (pulls compiled segmentation data), or accept degraded CJK
-wrapping until the demo needs it. Deferred.
+wrapping until the demo needs it. Superseded 2026-09-23: the owned text
+stack uses `unicode-linebreak`, which carries the UAX #14 CJK rules, and
+Parley leaves production (see `ARCHITECTURE.md` §5).
 
 ### Subpixel positioning
 
