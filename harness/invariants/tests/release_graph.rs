@@ -1,8 +1,9 @@
 //! Reference libraries and harness crates enter only as dev-dependencies:
 //! the release dependency graphs of the shipped crates must not contain
-//! them. Parley and Taffy are production engines in this milestone; they
-//! join `REFERENCE_ONLY` when the owned text and layout engines replace
-//! them (ARCHITECTURE.md §4, §5).
+//! them. Parley left production with owned editing (step 3b) and is the
+//! harness's E01 oracle only. Taffy is a production engine in this
+//! milestone; it joins `REFERENCE_ONLY` when the owned layout engine
+//! replaces it (ARCHITECTURE.md §4, §5).
 
 use std::process::Command;
 
@@ -12,6 +13,7 @@ const RELEASE: &[&str] = &["craie-node", "craie-platform-winit"];
 /// Crates that must never appear in a release graph.
 const REFERENCE_ONLY: &[&str] = &[
     "craie-harness",
+    "parley",
     "png",
     "resvg",
     "usvg",
@@ -115,6 +117,18 @@ fn layer_map_holds() {
     assert!(
         !deps("craie-text").iter().any(|n| n == "taffy"),
         "craie-text depends on taffy"
+    );
+    // Font discovery is the platform's (fontique behind `FontSource`);
+    // text and ui never reach it, nor Parley.
+    for krate in ["craie-text", "craie-ui"] {
+        let d = deps(krate);
+        for bad in ["parley", "fontique"] {
+            assert!(!d.iter().any(|n| n == bad), "{krate} depends on {bad}");
+        }
+    }
+    assert!(
+        deps("craie-platform-winit").iter().any(|n| n == "fontique"),
+        "negative control: the platform adapter reaches fontique"
     );
 }
 

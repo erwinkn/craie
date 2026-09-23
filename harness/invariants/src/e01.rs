@@ -836,3 +836,159 @@ pub fn layout(
     };
     engine.layout_text(&spec, width)
 }
+
+// --- MARK: editing (E01 editable cases) ---
+
+use craie_text::editor::{Editor, Motion};
+use parley::PlainEditor;
+
+/// One editing step, applied the same way to both editors.
+#[derive(Clone, Debug)]
+pub enum Op {
+    Insert(&'static str),
+    Backspace,
+    Delete,
+    BackspaceWord,
+    DeleteWord,
+    Move(Motion),
+    Select(Motion),
+    SelectAll,
+    Point(f32, f32),
+    Extend(f32, f32),
+    WordAt(f32, f32),
+    Range(u32, u32),
+    Compose(&'static str, Option<(u32, u32)>),
+    ClearCompose,
+    FinishCompose,
+}
+
+/// What both editors must agree on after a step: the buffer (preedit
+/// included), the selection's anchor and focus bytes, and the preedit
+/// range.
+#[derive(Clone, Debug, PartialEq)]
+pub struct EditState {
+    pub text: String,
+    pub anchor: usize,
+    pub focus: usize,
+    pub compose: Option<Range<usize>>,
+}
+
+/// The owned editor on the pinned fonts.
+pub fn editor(text: &str, size: f32, width: Option<f32>, engine: &mut TextEngine) -> Editor {
+    let mut ed = Editor::new(size);
+    ed.set_text(text);
+    ed.set_width(width);
+    ed.refresh(engine);
+    ed
+}
+
+pub fn apply_ours(ed: &mut Editor, engine: &mut TextEngine, op: &Op) {
+    ed.refresh(engine);
+    match *op {
+        Op::Insert(s) => ed.insert_or_replace_selection(engine, s),
+        Op::Backspace => ed.backdelete(engine),
+        Op::Delete => ed.delete(engine),
+        Op::BackspaceWord => ed.backdelete_word(engine),
+        Op::DeleteWord => ed.delete_word(engine),
+        Op::Move(m) => ed.motion(m, false),
+        Op::Select(m) => ed.motion(m, true),
+        Op::SelectAll => ed.select_all(),
+        Op::Point(x, y) => ed.move_to_point(x, y),
+        Op::Extend(x, y) => ed.extend_to_point(x, y),
+        Op::WordAt(x, y) => ed.select_word_at_point(x, y),
+        Op::Range(a, b) => ed.select_byte_range(a, b),
+        Op::Compose(s, c) => ed.set_compose(engine, s, c),
+        Op::ClearCompose => ed.clear_compose(engine),
+        Op::FinishCompose => ed.finish_compose(engine),
+    }
+    ed.refresh(engine);
+}
+
+pub fn state_ours(ed: &Editor) -> EditState {
+    let s = ed.selection();
+    EditState {
+        text: ed.raw_text().to_string(),
+        anchor: s.anchor.index as usize,
+        focus: s.focus.index as usize,
+        compose: ed.raw_compose().map(|r| r.start as usize..r.end as usize),
+    }
+}
+
+impl Oracle {
+    /// Parley's editor over the pinned fonts, unquantized as E01 lays
+    /// out.
+    pub fn editor(&mut self, text: &str, size: f32, width: Option<f32>) -> PlainEditor<u16> {
+        let mut ed = PlainEditor::new(size);
+        ed.edit_styles()
+            .insert(StyleProperty::FontFamily(FontFamily::Source(
+                Cow::Borrowed(STACK),
+            )));
+        ed.set_quantize(false);
+        ed.set_text(text);
+        ed.set_width(width);
+        ed.refresh_layout(&mut self.font_cx, &mut self.layout_cx);
+        ed
+    }
+
+    /// Brings Parley's editor layout up to date (a width change relays
+    /// it out).
+    pub fn refresh(&mut self, ed: &mut PlainEditor<u16>) {
+        ed.refresh_layout(&mut self.font_cx, &mut self.layout_cx);
+    }
+
+    pub fn apply(&mut self, ed: &mut PlainEditor<u16>, op: &Op) {
+        let mut d = ed.driver(&mut self.font_cx, &mut self.layout_cx);
+        let motion =
+            |d: &mut parley::PlainEditorDriver<'_, u16>, m: Motion, extend: bool| match (m, extend)
+            {
+                (Motion::Left, false) => d.move_left(),
+                (Motion::Right, false) => d.move_right(),
+                (Motion::WordLeft, false) => d.move_word_left(),
+                (Motion::WordRight, false) => d.move_word_right(),
+                (Motion::LineStart, false) => d.move_to_line_start(),
+                (Motion::LineEnd, false) => d.move_to_line_end(),
+                (Motion::Up, false) => d.move_up(),
+                (Motion::Down, false) => d.move_down(),
+                (Motion::TextStart, false) => d.move_to_text_start(),
+                (Motion::TextEnd, false) => d.move_to_text_end(),
+                (Motion::Left, true) => d.select_left(),
+                (Motion::Right, true) => d.select_right(),
+                (Motion::WordLeft, true) => d.select_word_left(),
+                (Motion::WordRight, true) => d.select_word_right(),
+                (Motion::LineStart, true) => d.select_to_line_start(),
+                (Motion::LineEnd, true) => d.select_to_line_end(),
+                (Motion::Up, true) => d.select_up(),
+                (Motion::Down, true) => d.select_down(),
+                (Motion::TextStart, true) => d.select_to_text_start(),
+                (Motion::TextEnd, true) => d.select_to_text_end(),
+            };
+        match *op {
+            Op::Insert(s) => d.insert_or_replace_selection(s),
+            Op::Backspace => d.backdelete(),
+            Op::Delete => d.delete(),
+            Op::BackspaceWord => d.backdelete_word(),
+            Op::DeleteWord => d.delete_word(),
+            Op::Move(m) => motion(&mut d, m, false),
+            Op::Select(m) => motion(&mut d, m, true),
+            Op::SelectAll => d.select_all(),
+            Op::Point(x, y) => d.move_to_point(x, y),
+            Op::Extend(x, y) => d.extend_selection_to_point(x, y),
+            Op::WordAt(x, y) => d.select_word_at_point(x, y),
+            Op::Range(a, b) => d.select_byte_range(a as usize, b as usize),
+            Op::Compose(s, c) => d.set_compose(s, c.map(|(a, b)| (a as usize, b as usize))),
+            Op::ClearCompose => d.clear_compose(),
+            Op::FinishCompose => d.finish_compose(),
+        }
+        d.refresh_layout();
+    }
+}
+
+pub fn state_parley(ed: &PlainEditor<u16>) -> EditState {
+    let s = ed.raw_selection();
+    EditState {
+        text: ed.raw_text().to_string(),
+        anchor: s.anchor().index(),
+        focus: s.focus().index(),
+        compose: ed.raw_compose().clone(),
+    }
+}

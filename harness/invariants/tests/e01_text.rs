@@ -332,7 +332,7 @@ fn grapheme_and_ligature_clusters_are_exact() {
             let p = e01::layout(&mut engine, text, &spans, w);
             let map: Vec<std::ops::Range<u32>> =
                 p.cluster_map().into_iter().map(|(t, _)| t).collect();
-            assert_eq!(map, [range.clone()], "{text:?} at {w:?}");
+            assert_eq!(map, std::slice::from_ref(&range), "{text:?} at {w:?}");
             assert_eq!(
                 p.lines.len(),
                 1,

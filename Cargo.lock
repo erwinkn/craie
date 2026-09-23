@@ -728,7 +728,6 @@ dependencies = [
  "craie-text",
  "etagere",
  "harfrust",
- "parley",
  "skrifa",
  "swash",
  "unicode-bidi",

@@ -1,5 +1,5 @@
-//! Native text input: a `PlainEditor` per INPUT-kind node plus undo and
-//! clipboard glue. Key/pointer events reach here through `Ui::dispatch`;
+//! Native text input: an owned `Editor` (craie-text) per INPUT-kind node
+//! plus undo and clipboard glue. Key/pointer events reach here through `Ui::dispatch`;
 //! text changes emit `onChangeText` events to the bridge.
 //!
 //! The editor owns the buffer — the JS `value` prop is a command
@@ -9,61 +9,51 @@
 
 use std::collections::HashMap;
 
-use crate::text::parley::style::StyleProperty;
-use crate::text::parley::{self, Generation, PlainEditor};
+use crate::text::editor::{Editor, Motion};
+use crate::text::paragraph::Paragraph;
 
 use crate::clipboard::{Clipboard, MemoryClipboard};
 use crate::geom::Size;
-use crate::scene::PaintSlot;
 use crate::text::TextEngine;
 
 /// A snapshot of buffer + selection for undo.
 #[derive(Clone)]
 struct Snapshot {
     text: String,
-    anchor: usize,
-    focus: usize,
+    anchor: u32,
+    focus: u32,
 }
 
 pub struct InputState {
-    pub editor: PlainEditor<PaintSlot>,
+    pub editor: Editor,
     pub placeholder: String,
     pub font_size: f32,
-    /// Text color, 0xRRGGBBAA — also the editor's default brush.
+    /// Text color, 0xRRGGBBAA: the input chunk's paint slot 2.
     pub color: u32,
     /// Selection fill, 0xRRGGBBAA.
     pub selection_color: u32,
     pub multiline: bool,
-    /// Wrap width last handed to the editor; re-setting it is also how a
-    /// style change marks the layout dirty (`PlainEditor` has no public
-    /// invalidate).
-    width: Option<f32>,
     /// Undo/redo snapshot stacks.
     undo: Vec<Snapshot>,
     redo: Vec<Snapshot>,
     /// Whether the last undo entry was produced by character insertion —
     /// consecutive inserts coalesce; anything else splits the entry.
     coalescing_insert: bool,
-    /// Shaped placeholder and the wrap width it was shaped at. Dropped
-    /// when the placeholder or the font size changes.
-    pub placeholder_layout: Option<(u32, parley::Layout<PaintSlot>)>,
+    /// Shaped placeholder and the wrap width it is laid out at. Dropped
+    /// when the placeholder or the font size changes; a width change
+    /// rewraps it.
+    pub placeholder_layout: Option<(u32, Paragraph)>,
 }
 
 impl InputState {
     fn new(font_size: f32, color: u32, placeholder: String, multiline: bool) -> InputState {
-        let mut editor = PlainEditor::new(font_size);
-        // Slot 0 of the input chunk carries the text color.
-        editor
-            .edit_styles()
-            .insert(StyleProperty::Brush(PaintSlot(0)));
         InputState {
-            editor,
+            editor: Editor::new(font_size),
             placeholder,
             font_size,
             color,
             selection_color: 0x3584_E47A, // rgba(53,132,228,0.48)
             multiline,
-            width: None,
             undo: Vec::new(),
             redo: Vec::new(),
             coalescing_insert: false,
@@ -72,37 +62,24 @@ impl InputState {
     }
 
     fn snapshot(&self) -> Snapshot {
-        let sel = self.editor.raw_selection();
+        let sel = self.editor.selection();
         Snapshot {
             text: self.editor.raw_text().to_string(),
-            anchor: sel.anchor().index(),
-            focus: sel.focus().index(),
+            anchor: sel.anchor.index,
+            focus: sel.focus.index,
         }
     }
 
-    /// Sets the wrap width; unchanged widths leave the shaped buffer
-    /// alone (`PlainEditor::set_width` always dirties it).
+    /// Sets the wrap width: the editor rewraps, it does not reshape.
     pub fn set_width(&mut self, width: f32) {
-        if self.width != Some(width) {
-            self.width = Some(width);
-            self.editor.set_width(Some(width));
-        }
+        self.editor.set_width(Some(width));
     }
 
-    /// The editor's layout, reshaping only when dirty. Reshapes count in
-    /// `TextEngine::shapes`.
-    pub fn layout(&mut self, text: &mut TextEngine) -> &crate::text::parley::Layout<PaintSlot> {
-        if self.editor.try_layout().is_none() {
-            text.shapes += 1;
-        }
-        let (font_cx, layout_cx) = text.parley();
-        self.editor.layout(font_cx, layout_cx)
-    }
-
-    /// Marks the editor layout dirty (`set_width` is the public
-    /// invalidation path; re-setting the same width still dirties).
-    fn invalidate(&mut self) {
-        self.editor.set_width(self.width);
+    /// The editor's layout, brought up to date (shaping only after an
+    /// edit; `TextEngine::shapes` counts it).
+    pub fn layout(&mut self, text: &mut TextEngine) -> &Paragraph {
+        self.editor.refresh(text);
+        self.editor.layout()
     }
 
     /// Records an undo step before a mutating edit. `coalesce` merges
@@ -119,43 +96,14 @@ impl InputState {
         self.coalescing_insert = coalesce;
     }
 
-    /// Restores a snapshot; returns true when something changed.
+    /// Restores a snapshot (one reshape).
     fn restore(&mut self, text: &mut TextEngine, snap: Snapshot) {
         self.editor.set_text(&snap.text);
-        let len = snap.text.len();
-        // Reshape through the counted path; selecting then finds the
-        // layout clean.
-        self.layout(text);
-        let (font_cx, layout_cx) = text.parley();
-        let mut drv = self.editor.driver(font_cx, layout_cx);
-        drv.select_byte_range(snap.anchor.min(len), snap.focus.min(len));
+        let len = snap.text.len() as u32;
+        self.editor.refresh(text);
+        self.editor
+            .select_byte_range(snap.anchor.min(len), snap.focus.min(len));
     }
-}
-
-/// `InputState::record_undo` for use while a `PlainEditorDriver` holds
-/// the editor borrow.
-#[allow(clippy::too_many_arguments)]
-fn record_undo(
-    undo: &mut Vec<Snapshot>,
-    redo: &mut Vec<Snapshot>,
-    coalescing_insert: &mut bool,
-    editor: &PlainEditor<PaintSlot>,
-    coalesce: bool,
-) {
-    if coalesce && *coalescing_insert && !undo.is_empty() {
-        return;
-    }
-    let sel = editor.raw_selection();
-    undo.push(Snapshot {
-        text: editor.raw_text().to_string(),
-        anchor: sel.anchor().index(),
-        focus: sel.focus().index(),
-    });
-    if undo.len() > 128 {
-        undo.remove(0);
-    }
-    redo.clear();
-    *coalescing_insert = coalesce;
 }
 
 /// All live text inputs, keyed by node id.
@@ -163,7 +111,7 @@ pub struct Inputs {
     map: HashMap<u32, InputState>,
     /// Buffer generation last reported to JS — `onChangeText` fires only
     /// when this differs.
-    notified: HashMap<u32, Generation>,
+    notified: HashMap<u32, u64>,
     /// Copy/cut/paste target. The platform installs the system clipboard.
     pub clipboard: Box<dyn Clipboard>,
 }
@@ -257,17 +205,13 @@ impl Inputs {
                 }
                 if state.font_size != font_size {
                     state.font_size = font_size;
-                    state
-                        .editor
-                        .edit_styles()
-                        .insert(StyleProperty::FontSize(font_size));
+                    state.editor.set_font_size(font_size);
                 }
                 if state.placeholder != placeholder {
                     placeholder.clone_into(&mut state.placeholder);
                 }
                 state.multiline = multiline;
                 state.placeholder_layout = None;
-                state.invalidate();
                 true
             }
             None => {
@@ -296,14 +240,14 @@ impl Inputs {
         state.set_width(width);
         let line = state.font_size * 1.25;
         let layout = state.layout(text);
-        Size::new(layout.width(), layout.height().max(line))
+        Size::new(layout.width, layout.height.max(line))
     }
 
     /// The committed text (preedit excluded) — the `value` seen by JS.
     pub fn text(&self, id: u32) -> String {
         self.map
             .get(&id)
-            .map(|s| s.editor.text().to_string())
+            .map(|s| s.editor.text())
             .unwrap_or_default()
     }
 
@@ -324,23 +268,18 @@ impl Inputs {
             return None;
         }
         self.notified.insert(id, generation);
-        Some(state.editor.text().to_string())
+        Some(state.editor.text())
     }
 
     /// Applies an editing/pointer action to an input. Returns true when
     /// the buffer or selection changed enough to repaint; the caller
     /// separately asks `take_change` whether JS needs `onChangeText`.
     ///
-    /// Reshapes count in `TextEngine::shapes` where they happen. Parley
-    /// (pinned to 0.11.1) shapes in two places: `refresh_layout`, which
-    /// navigation and deletion run when the layout is dirty, and
-    /// `update_layout`, which every edit runs once when it changes the
-    /// buffer (an insertion always does). Operations that read the
-    /// layout get it clean through `InputState::layout` first (counted),
-    /// so their own refresh does nothing; each edit then counts one.
+    /// The editor shapes where it must and `TextEngine::shapes` counts
+    /// it: each edit that changes the buffer shapes once; actions that
+    /// read the layout bring it up to date first (a reshape only when an
+    /// earlier change left it dirty; a width change only rewraps).
     pub fn act(&mut self, text: &mut TextEngine, id: u32, action: &KeyAction) -> bool {
-        // Undo/redo replace the buffer wholesale; they need the driver
-        // after `set_text`, so handle them outside the driver scope.
         if matches!(action, KeyAction::Undo | KeyAction::Redo) {
             return self.undo_redo(text, id, matches!(action, KeyAction::Undo));
         }
@@ -359,128 +298,97 @@ impl Inputs {
                 | KeyAction::Submit
         );
         if reads_layout {
-            state.layout(text);
+            state.editor.refresh(text);
         }
-        let len_before = state.editor.raw_text().len();
-        // Destructure so `record_undo` can touch the undo fields while
-        // the driver holds `editor`.
-        let InputState {
-            editor,
-            undo,
-            redo,
-            coalescing_insert,
-            multiline,
-            ..
-        } = state;
-        let (font_cx, layout_cx) = text.parley();
-        let mut drv = editor.driver(font_cx, layout_cx);
         let mut coalescing = false;
-        // Edits that ran `update_layout`.
-        let mut shaped = false;
+        let ed = &mut state.editor;
         match action {
             KeyAction::Insert(s) => {
-                record_undo(undo, redo, coalescing_insert, drv.editor, true);
+                state.record_undo(true);
                 coalescing = true;
-                shaped = true;
-                if *multiline {
-                    drv.insert_or_replace_selection(s);
+                let s = if state.multiline {
+                    s.clone()
                 } else {
-                    drv.insert_or_replace_selection(&s.replace(['\n', '\r'], ""));
-                }
+                    s.replace(['\n', '\r'], "")
+                };
+                state.editor.insert_or_replace_selection(text, &s);
             }
             KeyAction::Newline => {
-                if *multiline {
-                    record_undo(undo, redo, coalescing_insert, drv.editor, false);
-                    drv.insert_or_replace_selection("\n");
-                    shaped = true;
+                if state.multiline {
+                    state.record_undo(false);
+                    state.editor.insert_or_replace_selection(text, "\n");
                 }
             }
             KeyAction::Backspace => {
-                record_undo(undo, redo, coalescing_insert, drv.editor, false);
-                drv.backdelete();
+                state.record_undo(false);
+                state.editor.backdelete(text);
             }
             KeyAction::Delete => {
-                record_undo(undo, redo, coalescing_insert, drv.editor, false);
-                drv.delete();
+                state.record_undo(false);
+                state.editor.delete(text);
             }
             KeyAction::BackspaceWord => {
-                record_undo(undo, redo, coalescing_insert, drv.editor, false);
-                drv.backdelete_word();
+                state.record_undo(false);
+                state.editor.backdelete_word(text);
             }
             KeyAction::DeleteWord => {
-                record_undo(undo, redo, coalescing_insert, drv.editor, false);
-                drv.delete_word();
+                state.record_undo(false);
+                state.editor.delete_word(text);
             }
-            KeyAction::MoveLeft => drv.move_left(),
-            KeyAction::MoveRight => drv.move_right(),
-            KeyAction::MoveUp => drv.move_up(),
-            KeyAction::MoveDown => drv.move_down(),
-            KeyAction::MoveWordLeft => drv.move_word_left(),
-            KeyAction::MoveWordRight => drv.move_word_right(),
-            KeyAction::MoveLineStart => drv.move_to_line_start(),
-            KeyAction::MoveLineEnd => drv.move_to_line_end(),
-            KeyAction::MoveTextStart => drv.move_to_text_start(),
-            KeyAction::MoveTextEnd => drv.move_to_text_end(),
-            KeyAction::SelectLeft => drv.select_left(),
-            KeyAction::SelectRight => drv.select_right(),
-            KeyAction::SelectUp => drv.select_up(),
-            KeyAction::SelectDown => drv.select_down(),
-            KeyAction::SelectWordLeft => drv.select_word_left(),
-            KeyAction::SelectWordRight => drv.select_word_right(),
-            KeyAction::SelectLineStart => drv.select_to_line_start(),
-            KeyAction::SelectLineEnd => drv.select_to_line_end(),
-            KeyAction::SelectTextStart => drv.select_to_text_start(),
-            KeyAction::SelectTextEnd => drv.select_to_text_end(),
-            KeyAction::SelectAll => drv.select_all(),
-            KeyAction::MoveTo(x, y) => drv.move_to_point(*x, *y),
-            KeyAction::ExtendTo(x, y) => drv.extend_selection_to_point(*x, *y),
-            KeyAction::SelectWordAt(x, y) => drv.select_word_at_point(*x, *y),
+            KeyAction::MoveLeft => ed.motion(Motion::Left, false),
+            KeyAction::MoveRight => ed.motion(Motion::Right, false),
+            KeyAction::MoveUp => ed.motion(Motion::Up, false),
+            KeyAction::MoveDown => ed.motion(Motion::Down, false),
+            KeyAction::MoveWordLeft => ed.motion(Motion::WordLeft, false),
+            KeyAction::MoveWordRight => ed.motion(Motion::WordRight, false),
+            KeyAction::MoveLineStart => ed.motion(Motion::LineStart, false),
+            KeyAction::MoveLineEnd => ed.motion(Motion::LineEnd, false),
+            KeyAction::MoveTextStart => ed.motion(Motion::TextStart, false),
+            KeyAction::MoveTextEnd => ed.motion(Motion::TextEnd, false),
+            KeyAction::SelectLeft => ed.motion(Motion::Left, true),
+            KeyAction::SelectRight => ed.motion(Motion::Right, true),
+            KeyAction::SelectUp => ed.motion(Motion::Up, true),
+            KeyAction::SelectDown => ed.motion(Motion::Down, true),
+            KeyAction::SelectWordLeft => ed.motion(Motion::WordLeft, true),
+            KeyAction::SelectWordRight => ed.motion(Motion::WordRight, true),
+            KeyAction::SelectLineStart => ed.motion(Motion::LineStart, true),
+            KeyAction::SelectLineEnd => ed.motion(Motion::LineEnd, true),
+            KeyAction::SelectTextStart => ed.motion(Motion::TextStart, true),
+            KeyAction::SelectTextEnd => ed.motion(Motion::TextEnd, true),
+            KeyAction::SelectAll => ed.select_all(),
+            KeyAction::MoveTo(x, y) => ed.move_to_point(*x, *y),
+            KeyAction::ExtendTo(x, y) => ed.extend_to_point(*x, *y),
+            KeyAction::SelectWordAt(x, y) => ed.select_word_at_point(*x, *y),
             KeyAction::Copy => {
-                if let Some(sel) = drv.editor.selected_text() {
+                if let Some(sel) = ed.selected_text() {
                     self.clipboard.set(sel);
                 }
             }
             KeyAction::Cut => {
-                if let Some(sel) = drv.editor.selected_text() {
+                if let Some(sel) = ed.selected_text() {
                     self.clipboard.set(sel);
-                    record_undo(undo, redo, coalescing_insert, drv.editor, false);
-                    drv.delete_selection();
-                    shaped = true;
+                    state.record_undo(false);
+                    state.editor.delete_selection(text);
                 }
             }
             KeyAction::Paste => {
                 if let Some(s) = self.clipboard.get()
                     && !s.is_empty()
                 {
-                    record_undo(undo, redo, coalescing_insert, drv.editor, false);
-                    if *multiline {
-                        drv.insert_or_replace_selection(&s);
+                    state.record_undo(false);
+                    let s = if state.multiline {
+                        s
                     } else {
-                        drv.insert_or_replace_selection(&s.replace(['\n', '\r'], " "));
-                    }
-                    shaped = true;
+                        s.replace(['\n', '\r'], " ")
+                    };
+                    state.editor.insert_or_replace_selection(text, &s);
                 }
             }
             KeyAction::Submit => {}
             KeyAction::Undo | KeyAction::Redo => unreachable!(),
         }
         if !coalescing {
-            *coalescing_insert = false;
-        }
-        drop(drv);
-        // Deletions only remove bytes, and reshape exactly when they do.
-        let deleted = state.editor.raw_text().len() < len_before;
-        if matches!(
-            action,
-            KeyAction::Backspace
-                | KeyAction::Delete
-                | KeyAction::BackspaceWord
-                | KeyAction::DeleteWord
-        ) {
-            shaped = deleted;
-        }
-        if shaped {
-            text.shapes += 1;
+            state.coalescing_insert = false;
         }
         true
     }
@@ -520,19 +428,13 @@ impl Inputs {
         let Some(state) = self.map.get_mut(&id) else {
             return;
         };
-        let composing = state.editor.is_composing();
-        let (font_cx, layout_cx) = text.parley();
-        let mut drv = state.editor.driver(font_cx, layout_cx);
         if preedit.is_empty() {
-            if composing {
-                drv.clear_compose();
-                text.shapes += 1;
-            }
+            state.editor.clear_compose(text);
             return;
         }
-        let cursor = cursor.map(|(a, b)| (a.min(preedit.len()), b.min(preedit.len())));
-        drv.set_compose(preedit, cursor);
-        text.shapes += 1;
+        let n = preedit.len();
+        let cursor = cursor.map(|(a, b)| (a.min(n) as u32, b.min(n) as u32));
+        state.editor.set_compose(text, preedit, cursor);
     }
 
     /// IME commit: inserts `text` as committed input (one reshape).
@@ -541,25 +443,15 @@ impl Inputs {
             return;
         };
         state.record_undo(false);
-        let (font_cx, layout_cx) = text.parley();
-        let mut drv = state.editor.driver(font_cx, layout_cx);
-        drv.insert_or_replace_selection(s);
-        text.shapes += 1;
+        state.editor.insert_or_replace_selection(text, s);
     }
 
     /// IME disabled / focus lost: keeps the composing text as committed
     /// text. Reshapes once when there was a composing region (its
     /// underline goes away).
     pub fn finish_compose(&mut self, text: &mut TextEngine, id: u32) {
-        let Some(state) = self.map.get_mut(&id) else {
-            return;
-        };
-        if !state.editor.is_composing() {
-            return;
+        if let Some(state) = self.map.get_mut(&id) {
+            state.editor.finish_compose(text);
         }
-        let (font_cx, layout_cx) = text.parley();
-        let mut drv = state.editor.driver(font_cx, layout_cx);
-        drv.finish_compose();
-        text.shapes += 1;
     }
 }

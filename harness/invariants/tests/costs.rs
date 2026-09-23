@@ -284,8 +284,8 @@ fn nonempty_input_color_change_does_no_shapes() {
 }
 
 /// Positive control for the zero-shape color test: typing into an input
-/// reshapes its buffer, and the counter sees it (Parley's driver shapes
-/// inside the edit, outside `InputState::layout`).
+/// reshapes its buffer, and the counter sees it (the editor shapes inside
+/// the edit, through `TextEngine::layout_text`).
 #[test]
 fn typing_counts_shapes() {
     use craie_ui::events::{Button, Event, Key, KeyInput, Mods};
@@ -357,18 +357,14 @@ fn typing_counts_shapes() {
         ("navigation to start", key(Key::Home), 0),
         ("backspace at start", key(Key::Backspace), 0),
     ];
-    // Oracle, independent of the counter: a reshape builds a new layout
-    // (shaped data, including its font table) while the old one lives,
-    // so that data moves exactly when the editor reshaped (0 versus at
-    // least 1). The buffer is never empty here.
+    // Oracle, independent of the counter: a reshape builds a new
+    // paragraph (its glyph store) while the old one lives, so the store
+    // moves exactly when the editor reshaped (0 versus at least 1); a
+    // rewrap keeps it. The buffer is never empty here.
     let line_ptr = |ui: &Ui| {
-        use craie_ui::text::parley::PositionedLayoutItem;
-        let layout = ui.inputs.get(0).unwrap().editor.try_layout().unwrap();
-        let line = layout.lines().next().unwrap();
-        let Some(PositionedLayoutItem::GlyphRun(run)) = line.items().next() else {
-            panic!("no glyph run");
-        };
-        run.run().font() as *const _ as usize
+        let editor = &ui.inputs.get(0).unwrap().editor;
+        assert!(editor.is_clean());
+        editor.layout().glyphs.as_ptr() as usize
     };
     for (what, event, want) in cases {
         let before = ui.counters();

@@ -213,6 +213,89 @@ pub struct WrapScratch {
     clusters: Vec<Cluster>,
 }
 
+/// The clusters of a run of segments in visual order
+/// (`Paragraph::clusters_of`).
+pub struct LineClusters<'a> {
+    p: &'a Paragraph,
+    /// Segments not started yet.
+    segs: Range<u32>,
+    /// The current segment: its glyphs, whether it places its clusters
+    /// reversed, its direction, its text end, and the group cursor.
+    seg: Option<(Range<u32>, bool, bool, u32, u32)>,
+    /// The next group of the current segment (one of lookahead).
+    pending: Option<Range<u32>>,
+    /// The cluster byte of the group before it.
+    prev: Option<u32>,
+}
+
+impl Iterator for LineClusters<'_> {
+    type Item = VisualCluster;
+
+    fn next(&mut self) -> Option<VisualCluster> {
+        let p = self.p;
+        loop {
+            if let Some((glyphs, reversed, ltr, text_end, cursor)) = &mut self.seg
+                && let Some(g) = self.pending.take()
+            {
+                let next = next_group(&p.glyphs, glyphs, *reversed, cursor);
+                let first = |g: &Range<u32>| &p.glyphs[g.start as usize];
+                let left = first(&g).x;
+                let right = match &next {
+                    Some(n) => first(n).x,
+                    None => {
+                        let last = &p.glyphs[g.end as usize - 1];
+                        last.x + last.advance
+                    }
+                };
+                // Left to right, cluster starts rise at an even level and
+                // fall at an odd one: a cluster ends where the next in
+                // logical order starts.
+                let end = if *ltr {
+                    next.as_ref().map(|n| first(n).cluster)
+                } else {
+                    self.prev
+                };
+                let start = first(&g).cluster;
+                self.prev = Some(start);
+                self.pending = next;
+                return Some(VisualCluster {
+                    text: start..end.unwrap_or(*text_end),
+                    rtl: !*ltr,
+                    left,
+                    right,
+                });
+            }
+            // The next segment.
+            if self.segs.start >= self.segs.end {
+                return None;
+            }
+            let seg = &p.segs[self.segs.start as usize];
+            self.segs.start += 1;
+            let reversed = p.reversed(seg);
+            let mut cursor = group_cursor(&seg.glyphs, reversed);
+            self.pending = next_group(&p.glyphs, &seg.glyphs, reversed, &mut cursor);
+            self.prev = None;
+            self.seg = Some((
+                seg.glyphs.clone(),
+                reversed,
+                seg.level & 1 == 0,
+                seg.text.end,
+                cursor,
+            ));
+        }
+    }
+}
+
+/// One cluster of a line in visual order (`Paragraph::visual_clusters`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct VisualCluster {
+    pub text: Range<u32>,
+    /// Laid out right to left (odd level after L1).
+    pub rtl: bool,
+    pub left: f32,
+    pub right: f32,
+}
+
 /// A caret: a vertical bar at `x` from `top` for `height`.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Caret {
@@ -668,50 +751,39 @@ impl Paragraph {
         (seg.level ^ self.runs[seg.run as usize].level) & 1 == 1
     }
 
-    /// Clusters of a segment, left to right, as (text range, left, right),
-    /// read from the placements: a cluster's left edge is the x of its
-    /// first placed glyph, its right edge the next cluster's left edge or,
-    /// for the last, the pen after the last glyph.
-    fn seg_clusters(&self, seg: &Seg) -> Vec<(Range<u32>, f32, f32)> {
-        let reversed = self.reversed(seg);
-        let mut cursor = group_cursor(&seg.glyphs, reversed);
-        let mut groups: Vec<Range<u32>> = Vec::new();
-        while let Some(g) = next_group(&self.glyphs, &seg.glyphs, reversed, &mut cursor) {
-            groups.push(g);
+    /// Clusters of segments `segs` (a line's, or one), left to right, read
+    /// from the placements: a cluster's left edge is the x of its first
+    /// placed glyph, its right edge the next cluster's left edge or, for a
+    /// segment's last, the pen after its last glyph. No allocation.
+    pub fn clusters_of(&self, segs: Range<u32>) -> LineClusters<'_> {
+        LineClusters {
+            p: self,
+            segs,
+            seg: None,
+            pending: None,
+            prev: None,
         }
-        let first = |g: &Range<u32>| &self.glyphs[g.start as usize];
-        // Left to right, cluster starts rise at an even level and fall at
-        // an odd one: a cluster ends where the next one in logical order
-        // starts.
-        let ltr = seg.level & 1 == 0;
-        (0..groups.len())
-            .map(|k| {
-                let g = &groups[k];
-                let left = first(g).x;
-                let right = match groups.get(k + 1) {
-                    Some(n) => first(n).x,
-                    None => {
-                        let last = &self.glyphs[g.end as usize - 1];
-                        last.x + last.advance
-                    }
-                };
-                let next = if ltr {
-                    groups.get(k + 1)
-                } else {
-                    k.checked_sub(1).map(|p| &groups[p])
-                };
-                let end = next.map_or(seg.text.end, |n| first(n).cluster);
-                (first(g).cluster..end, left, right)
-            })
-            .collect()
+    }
+
+    /// A line's clusters left to right (`clusters_of` its segments).
+    pub fn line_clusters(&self, line: usize) -> LineClusters<'_> {
+        let segs = self.lines.get(line).map_or(0..0, |l| l.segs.clone());
+        self.clusters_of(segs)
+    }
+
+    /// A line's clusters left to right, with their direction (the
+    /// segment's L1 level) and edges from the placements. Newlines are
+    /// included (zero width).
+    pub fn visual_clusters(&self, line: usize) -> Vec<VisualCluster> {
+        self.line_clusters(line).collect()
     }
 
     /// The left and right edges of a line's content (placements).
     fn line_edges(&self, line: &Line) -> Option<(f32, f32)> {
-        let segs = &self.segs[line.segs.start as usize..line.segs.end as usize];
-        let left = self.seg_clusters(segs.first()?).first()?.1;
-        let right = self.seg_clusters(segs.last()?).last()?.2;
-        Some((left, right))
+        let mut it = self.clusters_of(line.segs.clone());
+        let first = it.next()?;
+        let last = it.last().unwrap_or_else(|| first.clone());
+        Some((first.left, last.right))
     }
 
     /// The caret at byte `offset`: the left edge of the cluster starting
@@ -733,13 +805,9 @@ impl Paragraph {
             height: line.height,
             line: li as u32,
         };
-        for s in line.segs.start..line.segs.end {
-            let seg = &self.segs[s as usize];
-            let rtl = seg.level & 1 == 1;
-            for (text, left, right) in self.seg_clusters(seg) {
-                if text.start == offset {
-                    return bar(if rtl { right } else { left });
-                }
+        for v in self.clusters_of(line.segs.clone()) {
+            if v.text.start == offset {
+                return bar(if v.rtl { v.right } else { v.left });
             }
         }
         // The end of the line (past its content, before any trailing
@@ -771,10 +839,14 @@ impl Paragraph {
         };
         let line = &self.lines[li];
         let mut best: Option<(f32, Hit)> = None;
-        for s in line.segs.start..line.segs.end {
-            let seg = &self.segs[s as usize];
-            let rtl = seg.level & 1 == 1;
-            for (text, left, right) in self.seg_clusters(seg) {
+        {
+            for VisualCluster {
+                text,
+                rtl,
+                left,
+                right,
+            } in self.clusters_of(line.segs.clone())
+            {
                 if text.is_empty() {
                     continue;
                 }
@@ -830,9 +902,11 @@ impl Paragraph {
                 continue;
             }
             let mut cur: Option<(f32, f32)> = None;
-            for s in line.segs.start..line.segs.end {
-                let seg = &self.segs[s as usize];
-                for (text, left, right) in self.seg_clusters(seg) {
+            {
+                for VisualCluster {
+                    text, left, right, ..
+                } in self.clusters_of(line.segs.clone())
+                {
                     let inside =
                         text.start >= range.start && text.end <= range.end && !text.is_empty();
                     match (inside, cur.as_mut()) {

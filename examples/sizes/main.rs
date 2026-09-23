@@ -11,7 +11,7 @@ use std::mem::{align_of, size_of};
 use craie_core::span::Span;
 use craie_scene::{Chunk, Color, GlyphInstance, Placement, RectInstance, WorldGpu};
 use craie_text::GlyphKey;
-use craie_text::parley::Layout as ParleyLayout;
+use craie_text::paragraph::{Glyph, Paragraph as TextParagraph};
 use craie_ui::host::{
     BoxPaint, Host, Interaction, NodeFlags, NodeHeader, NodeId, Paragraph, Spatial,
 };
@@ -102,13 +102,19 @@ fn main() {
         "MeasuredText",
         size_of::<MeasuredText>(),
         align_of::<MeasuredText>(),
-        "retained Parley layout",
+        "retained owned paragraph",
     );
     row(
-        "parley::Layout<PaintSlot>",
-        size_of::<ParleyLayout<craie_scene::PaintSlot>>(),
-        align_of::<ParleyLayout<craie_scene::PaintSlot>>(),
-        "shaped text per text node",
+        "text::Paragraph",
+        size_of::<TextParagraph>(),
+        align_of::<TextParagraph>(),
+        "shaped text per text node (plus its stores)",
+    );
+    row(
+        "Glyph",
+        size_of::<Glyph>(),
+        align_of::<Glyph>(),
+        "one placement store row",
     );
 
     println!("\npaint / GPU data:");

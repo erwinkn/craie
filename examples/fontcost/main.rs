@@ -1,16 +1,13 @@
 //! First-draw font cost breakdown: the one-time work a fresh text engine
-//! does for framebench's row text (14 pt, 800 pt wide, 2x), per engine
-//! and family, in a fresh process so every cache starts cold.
+//! does for framebench's row text (14 pt, 800 pt wide, 2x), per family,
+//! in a fresh process so every cache starts cold: source load
+//! (`SystemFonts::new`), family resolution, HarfRust shaping data, the
+//! first shape (plan compile + shaping) against a warm shape, raster
+//! (first emit against a warm emit), fallback probes (an ASCII row
+//! covered by its primary needs none), and 1,000 more rows. (Step 3a
+//! also ran Parley here; Parley left craie-text in step 3b.)
 //!
-//! Owned engine: source load (`SystemFonts::new`), family resolution,
-//! HarfRust shaping data, the first shape (plan compile + shaping)
-//! against a warm shape, raster (first emit against a warm emit), and
-//! fallback probes (an ASCII row covered by its primary needs none).
-//! Parley (the step-2 path): context creation, then the first layout
-//! against a warm one (resolution, shaping data, and plan inside), and
-//! raster the same way.
-//!
-//!   cargo run --release --example fontcost -- ours|parley <family>
+//!   cargo run --release --example fontcost -- <family>
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -19,11 +16,10 @@ use std::time::Instant;
 use craie_core::Point;
 use craie_platform_winit::fonts::SystemFonts;
 use craie_scene::{ChunkWriter, RasterAtlas};
-use craie_text::fonts::{FontAttrs, FontBlob, FontSource, RawFonts, ScriptTag};
+use craie_text::TextEngine;
+use craie_text::fonts::{FontAttrs, FontBlob, FontSource, ScriptTag};
 use craie_text::paragraph::{Resolve, SpanStyle, TextSpec, TextStyle};
-use craie_text::parley::{FontFamily, PositionedLayoutItem, StyleProperty};
 use craie_text::swash::{FontRef, StringId};
-use craie_text::{ParagraphSpec, TextEngine};
 
 const WIDTH: f32 = 800.0;
 const SCALE: f32 = 2.0;
@@ -168,101 +164,8 @@ fn ours(family: &str) {
     );
 }
 
-fn parley(family: &str) {
-    let mut e = TextEngine::with_source(Box::new(RawFonts::new()));
-    let t = Instant::now();
-    e.parley();
-    let load = ms(t);
-    let defaults = [
-        StyleProperty::FontSize(14.0),
-        StyleProperty::FontFamily(FontFamily::Source(family.to_string().into())),
-    ];
-    let (a, b) = (row(0), row(1));
-    let (sa, sb) = (
-        ParagraphSpec {
-            text: &a,
-            defaults: &defaults,
-            spans: &[],
-        },
-        ParagraphSpec {
-            text: &b,
-            defaults: &defaults,
-            spans: &[],
-        },
-    );
-    let t = Instant::now();
-    let p = e.layout_paragraph(&sa, Some(WIDTH));
-    let first = ms(t);
-    let t = Instant::now();
-    let q = e.layout_paragraph(&sb, Some(WIDTH));
-    let warm = ms(t);
-    let mut atlas = RasterAtlas::new();
-    let t = Instant::now();
-    e.emit(
-        &p,
-        Point::ZERO,
-        SCALE,
-        None,
-        &mut atlas,
-        &mut ChunkWriter::new(),
-    );
-    let raster = ms(t);
-    let t = Instant::now();
-    e.emit(
-        &q,
-        Point::ZERO,
-        SCALE,
-        None,
-        &mut atlas,
-        &mut ChunkWriter::new(),
-    );
-    let emit_warm = ms(t);
-    let texts: Vec<String> = (2..1002).map(row).collect();
-    let t = Instant::now();
-    let ps: Vec<_> = texts
-        .iter()
-        .map(|text| {
-            e.layout_paragraph(
-                &ParagraphSpec {
-                    text,
-                    defaults: &defaults,
-                    spans: &[],
-                },
-                Some(WIDTH),
-            )
-        })
-        .collect();
-    let shape_1k = ms(t);
-    let t = Instant::now();
-    for (i, l) in ps.iter().enumerate() {
-        let origin = Point::new(0.0, i as f32 * 20.0);
-        e.emit(l, origin, SCALE, None, &mut atlas, &mut ChunkWriter::new());
-    }
-    let emit_1k = ms(t);
-    let rasters = e.cache.stats.rasters;
-    println!(
-        "parley {family:10} 1k rows: shape {shape_1k:6.2} emit {emit_1k:6.2} rasters {rasters}"
-    );
-    let mut name = String::new();
-    if let Some(PositionedLayoutItem::GlyphRun(run)) =
-        p.lines().next().and_then(|l| l.items().next())
-    {
-        let font = run.run().font();
-        name = family_name(font.data.data(), font.index);
-    }
-    println!(
-        "parley {family:10} face {:22} load {load:6.2} first-layout {first:6.3} warm-layout {warm:6.3} \
-         first-emit {raster:6.3} warm-emit {emit_warm:6.3}",
-        format!("{name:?}")
-    );
-}
-
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    let engine = args.get(1).map_or("ours", String::as_str);
-    let family = args.get(2).map_or("system-ui", String::as_str);
-    match engine {
-        "parley" => parley(family),
-        _ => ours(family),
-    }
+    let family = args.get(1).map_or("system-ui", String::as_str);
+    ours(family);
 }

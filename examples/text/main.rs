@@ -1,6 +1,7 @@
-//! Milestone 0 demo: Parley -> Swash -> raster atlas -> scene chunks ->
-//! wgpu, in a real native window. One chunk per paragraph; colors are
-//! paint slots, so the palette lives in each chunk's paint records.
+//! Text demo: owned paragraphs (HarfRust + skrifa) -> Swash -> raster
+//! atlas -> scene chunks -> wgpu, in a real native window. One chunk per
+//! paragraph; a span's index is its paint slot, so each chunk's paint
+//! records hold its spans' colors in order.
 //!
 //!   cargo run --example text                 open the window
 //!   cargo run --example text -- --screenshot out.png [w h scale]
@@ -12,9 +13,9 @@
 use craie_core::geom::{Affine, Point, Rect, Size};
 use craie_platform_winit::{self as platform, Window};
 use craie_render::{Gpu, Renderer, WindowSurface};
-use craie_scene::{ChunkWriter, Color, NONE, OrderItem, PaintSlot, Placement, Scene};
-use craie_text::parley::style::{FontStyle, FontWeight, GenericFamily, LineHeight, StyleProperty};
-use craie_text::{ParagraphSpec, TextEngine, TextSpan};
+use craie_scene::{ChunkWriter, Color, NONE, OrderItem, Placement, Scene};
+use craie_text::TextEngine;
+use craie_text::paragraph::{SpanStyle, TextSpec, TextStyle};
 
 const MARGIN: f32 = 48.0;
 const GAP: f32 = 20.0;
@@ -25,135 +26,129 @@ const DIM: Color = Color::rgb(0x9a, 0xa0, 0xae);
 const ACCENT: Color = Color::rgb(0x6d, 0xc7, 0xff);
 const CODE_BG: Color = Color::rgb(0x22, 0x24, 0x2b);
 
-/// Every paragraph chunk carries this palette in its paint slots.
-const PALETTE: [Color; 4] = [FG, DIM, ACCENT, CODE_BG];
-const FG_SLOT: PaintSlot = PaintSlot(0);
-const DIM_SLOT: PaintSlot = PaintSlot(1);
-const ACCENT_SLOT: PaintSlot = PaintSlot(2);
-const CODE_BG_SLOT: PaintSlot = PaintSlot(3);
-
-/// One paragraph of demo content: text plus its default style and ranged
-/// overrides.
+/// One paragraph of demo content: text, family, and spans with their
+/// colors (span i paints with paint slot i).
 struct Para {
     text: String,
-    defaults: Vec<StyleProperty<'static, PaintSlot>>,
-    spans: Vec<TextSpan>,
+    family: &'static str,
+    spans: Vec<SpanStyle>,
+    colors: Vec<Color>,
     /// Give this paragraph a background quad (exercises the quad pipeline).
     backing: bool,
 }
 
-fn para(text: &str, size: f32, spans: Vec<TextSpan>) -> Para {
+/// A styled stretch of a paragraph: the first occurrence of `needle`.
+struct Mark {
+    needle: &'static str,
+    weight: u16,
+    italic: bool,
+    color: Color,
+}
+
+fn mark(needle: &'static str, weight: u16, italic: bool, color: Color) -> Mark {
+    Mark {
+        needle,
+        weight,
+        italic,
+        color,
+    }
+}
+
+/// A paragraph in `FG` at `size`, with `marks` (not overlapping) as
+/// spans; the text between them keeps the default style.
+fn para(text: &str, size: f32, family: &'static str, marks: &[Mark]) -> Para {
+    let base = TextStyle {
+        size,
+        weight: 400,
+        italic: false,
+    };
+    let mut ranges: Vec<(usize, &Mark)> = marks
+        .iter()
+        .map(|m| (text.find(m.needle).expect("mark needle not in text"), m))
+        .collect();
+    ranges.sort_by_key(|r| r.0);
+    let (mut spans, mut colors) = (Vec::new(), Vec::new());
+    let mut push = |start: usize, style: TextStyle, color: Color| {
+        spans.push(SpanStyle {
+            start: start as u32,
+            style,
+        });
+        colors.push(color);
+    };
+    push(0, base, FG);
+    for (start, m) in ranges {
+        let style = TextStyle {
+            size,
+            weight: m.weight,
+            italic: m.italic,
+        };
+        push(start, style, m.color);
+        let end = start + m.needle.len();
+        if end < text.len() {
+            push(end, base, FG);
+        }
+    }
+    // A mark at 0 replaces the default span.
+    if spans.len() > 1 && spans[1].start == 0 {
+        spans.remove(0);
+        colors.remove(0);
+    }
     Para {
         text: text.to_string(),
-        defaults: vec![
-            StyleProperty::Brush(FG_SLOT),
-            StyleProperty::FontFamily(GenericFamily::SansSerif.into()),
-            StyleProperty::FontSize(size),
-            StyleProperty::LineHeight(LineHeight::FontSizeRelative(1.25)),
-        ],
+        family,
         spans,
+        colors,
         backing: false,
     }
 }
 
-fn span(text: &str, needle: &str, style: StyleProperty<'static, PaintSlot>) -> TextSpan {
-    let start = text.find(needle).expect("span needle not in text");
-    TextSpan {
-        range: start..start + needle.len(),
-        style,
-    }
-}
-
 /// The demo content: the milestone-required strings, mixed styling in one
-/// paragraph, a monospace run, and an emoji probe.
+/// paragraph, a monospace paragraph, and an emoji probe.
 fn paragraphs() -> Vec<Para> {
-    let mut out = Vec::new();
-
-    out.push(para(
-        "Craie",
-        44.0,
-        vec![span(
-            "Craie",
-            "Craie",
-            StyleProperty::FontWeight(FontWeight::new(650.0)),
-        )],
-    ));
-
-    out.push(para(
-        "React → retained native state → native pixels",
-        17.0,
-        vec![span(
-            "React → retained native state → native pixels",
-            "retained native state",
-            StyleProperty::Brush(ACCENT_SLOT),
-        )],
-    ));
-
-    out.push(para(
-        "The quick brown fox jumps over the lazy dog.  ffi AV To",
-        17.0,
-        vec![],
-    ));
-
-    let mixed = "A normal run, a bold run, an italic run, and `code → atlas` inline.";
-    out.push(para(
-        mixed,
-        16.0,
-        vec![
-            span(
-                mixed,
-                "a bold run",
-                StyleProperty::FontWeight(FontWeight::new(700.0)),
-            ),
-            span(
-                mixed,
-                "an italic run",
-                StyleProperty::FontStyle(FontStyle::Italic),
-            ),
-            span(
-                mixed,
-                "`code → atlas`",
-                StyleProperty::FontFamily(GenericFamily::Monospace.into()),
-            ),
-            span(mixed, "code → atlas", StyleProperty::Brush(ACCENT_SLOT)),
-        ],
-    ));
-
-    out.push(para("English — 日本語 — مرحبا بالعالم", 20.0, vec![]));
-
-    out.push(para("Emoji probe: 🎨 🚀 👩‍💻 🦀 (color atlas)", 16.0, vec![]));
-
-    let wrap_text = "Wrapping probe: the retained host should do no work while idle. This \
-                     paragraph exists to exercise break_all_lines at the current width; \
-                     resizing the window must reflow it without re-rasterizing glyphs \
-                     that are already in the atlas.";
-    out.push(para(
-        wrap_text,
+    let mut code = para(
+        "let inst = Instance::quad(x, y, w, h, color); // monospace",
         14.0,
-        vec![span(
-            wrap_text,
-            "no work while idle",
-            StyleProperty::Brush(DIM_SLOT),
-        )],
-    ));
-
-    let code = "let inst = Instance::quad(x, y, w, h, color); // monospace";
-    let mut code_para = para(
-        code,
-        14.0,
-        vec![
-            span(
-                code,
-                code,
-                StyleProperty::FontFamily(GenericFamily::Monospace.into()),
-            ),
-            span(code, "// monospace", StyleProperty::Brush(DIM_SLOT)),
-        ],
+        "monospace",
+        &[mark("// monospace", 400, false, DIM)],
     );
-    code_para.backing = true;
-    out.push(code_para);
-
-    out
+    code.backing = true;
+    vec![
+        para("Craie", 44.0, "", &[mark("Craie", 650, false, FG)]),
+        para(
+            "React → retained native state → native pixels",
+            17.0,
+            "",
+            &[mark("retained native state", 400, false, ACCENT)],
+        ),
+        para(
+            "The quick brown fox jumps over the lazy dog.  ffi AV To",
+            17.0,
+            "",
+            &[],
+        ),
+        para(
+            "A normal run, a bold run, an italic run, and `code → atlas` inline.",
+            16.0,
+            "",
+            &[
+                mark("a bold run", 700, false, FG),
+                mark("an italic run", 400, true, FG),
+                mark("code → atlas", 400, false, ACCENT),
+            ],
+        ),
+        para("English — 日本語 — مرحبا بالعالم", 20.0, "", &[]),
+        para("Emoji probe: 🎨 🚀 👩‍💻 🦀 (color atlas)", 16.0, "", &[]),
+        para(
+            "Wrapping probe: the retained host should do no work while idle. This \
+             paragraph exists to exercise line breaking at the current width; \
+             resizing the window must reflow it without re-rasterizing glyphs \
+             that are already in the atlas.",
+            14.0,
+            "",
+            &[mark("no work while idle", 400, false, DIM)],
+        ),
+        code,
+    ]
 }
 
 /// Lays out every paragraph at the current logical size and rebuilds
@@ -181,26 +176,28 @@ fn build_scene(
     let mut order = Vec::new();
     let mut y = MARGIN;
     for (i, para) in paras.iter().enumerate() {
-        let layout = text.layout_paragraph(
-            &ParagraphSpec {
+        let layout = text.layout_text(
+            &TextSpec {
                 text: &para.text,
-                defaults: &para.defaults,
+                family: para.family,
                 spans: &para.spans,
             },
             Some(wrap),
         );
-        for c in PALETTE {
+        for c in &para.colors {
             w.paint(c.0);
         }
         // The backing rect paints under this paragraph's glyphs.
         if para.backing {
+            let slot = w.paint(CODE_BG.0);
             w.rect(
-                Rect::new(-8.0, -4.0, layout.width() + 16.0, layout.height() + 8.0),
+                Rect::new(-8.0, -4.0, layout.width + 16.0, layout.height + 8.0),
                 0.0,
-                CODE_BG_SLOT,
+                slot,
             );
         }
-        let emitted = text.emit(&layout, Point::ZERO, scale, None, &mut scene.atlas, &mut w);
+        let emitted =
+            text.emit_paragraph(&layout, Point::ZERO, scale, None, &mut scene.atlas, &mut w);
         runs += emitted.glyph_runs;
         glyphs += emitted.glyphs;
         let id = i as u32;
@@ -214,7 +211,7 @@ fn build_scene(
             },
         );
         order.push(OrderItem::Chunk(id));
-        y += layout.height() + GAP;
+        y += layout.height + GAP;
     }
     scene.set_order(order, Vec::new());
     let mut missing = Vec::new();

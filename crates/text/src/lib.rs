@@ -3,14 +3,16 @@
 //! `RasterId`s in the scene's raster atlas -> chunk-local glyph instances
 //! whose brush is a paint slot.
 //!
-//! Text nodes lay out through `paragraph` (owned). Text inputs still use
-//! Parley's editor until owned editing lands (step 3b); both paths share
-//! the `FontStore` and the glyph cache.
+//! Text nodes lay out through `paragraph`, text inputs through `editor`
+//! over the same paragraph; both share the `FontStore` and the glyph
+//! cache. Parley is not a dependency: it is the harness's oracle (E01).
 //!
-//! Coarse resources (font store, shaping buffers, `ScaleContext`, Parley
-//! contexts) are created once and reused; nothing here is per-paragraph.
+//! Coarse resources (font store, shaping buffers, plans, `ScaleContext`,
+//! wrap scratch) are created once and reused; nothing here is
+//! per-paragraph.
 
 mod cache;
+pub mod editor;
 pub mod fonts;
 pub mod paragraph;
 mod raster;
@@ -21,38 +23,15 @@ pub use cache::{CacheStats, CachedGlyph, GlyphCache, GlyphKey};
 pub use raster::Rasterizer;
 
 use std::collections::HashMap;
-use std::ops::Range;
-use std::sync::Arc;
 
 use craie_core::Point;
 use craie_scene::{ChunkWriter, PaintSlot, RasterAtlas, RasterId};
-use parley::layout::{GlyphRun, Layout, PositionedLayoutItem};
-use parley::style::StyleProperty;
-use parley::{Alignment, AlignmentOptions, FontContext, LayoutContext};
 use swash::zeno::Vector;
 
-use fonts::{FontAttrs, FontBlob, FontInstanceId, FontSource, FontStore, ScriptTag, Synthesis};
+use fonts::{FontAttrs, FontInstanceId, FontSource, FontStore, ScriptTag};
 use paragraph::{HIDDEN, Paragraph, Resolve, Shaper, TextSpec, WrapScratch};
 
-pub use parley;
 pub use swash;
-
-/// A styled range within one Parley paragraph's text (inputs).
-#[derive(Clone)]
-pub struct TextSpan {
-    pub range: Range<usize>,
-    pub style: StyleProperty<'static, PaintSlot>,
-}
-
-/// Inputs for laying out one Parley paragraph (inputs and their
-/// placeholders, until step 3b).
-pub struct ParagraphSpec<'a> {
-    pub text: &'a str,
-    /// Default styles for the whole paragraph.
-    pub defaults: &'a [StyleProperty<'static, PaintSlot>],
-    /// Ranged style overrides.
-    pub spans: &'a [TextSpan],
-}
 
 /// Font resolution over the platform's `FontSource`: the primary face per
 /// (family, style) and fallback faces per cluster, cached.
@@ -138,9 +117,6 @@ impl Resolve for Fonts {
 }
 
 pub struct TextEngine {
-    /// Parley contexts for inputs (until step 3b), made on first use:
-    /// `FontContext::new` scans the system fonts.
-    parley: Option<Box<(FontContext, LayoutContext<PaintSlot>)>>,
     pub fonts: Fonts,
     shaper: Shaper,
     wrap: WrapScratch,
@@ -149,8 +125,8 @@ pub struct TextEngine {
     /// The family of a `TextSpec` with an empty family: `system-ui`, React
     /// Native's default (ARCHITECTURE.md §5, Decisions).
     pub default_family: String,
-    /// Paragraphs shaped (cost counter): owned paragraphs and Parley
-    /// layouts alike. Rewrapping at another width is not shaping.
+    /// Paragraphs shaped (cost counter): text nodes, inputs, and
+    /// placeholders alike. Rewrapping at another width is not shaping.
     pub shapes: u64,
 }
 
@@ -169,7 +145,6 @@ impl TextEngine {
 
     pub fn with_source(source: Box<dyn FontSource>) -> TextEngine {
         TextEngine {
-            parley: None,
             default_family: "system-ui".to_string(),
             fonts: Fonts::new(source),
             shaper: Shaper::default(),
@@ -259,122 +234,6 @@ impl TextEngine {
             );
         }
         stats
-    }
-
-    /// The Parley contexts (inputs until step 3b), made on first use.
-    pub fn parley(&mut self) -> (&mut FontContext, &mut LayoutContext<PaintSlot>) {
-        let cx = self
-            .parley
-            .get_or_insert_with(|| Box::new((FontContext::new(), LayoutContext::new())));
-        (&mut cx.0, &mut cx.1)
-    }
-
-    /// Lays out one Parley paragraph in logical units (inputs until step
-    /// 3b). `max_width` is the wrap width in logical units.
-    pub fn layout_paragraph(
-        &mut self,
-        spec: &ParagraphSpec,
-        max_width: Option<f32>,
-    ) -> Layout<PaintSlot> {
-        self.shapes += 1;
-        let (font_cx, layout_cx) = self.parley();
-        let mut builder = layout_cx.ranged_builder(font_cx, spec.text, 1.0, false);
-        for default in spec.defaults {
-            builder.push_default(default.clone());
-        }
-        for span in spec.spans {
-            builder.push(span.style.clone(), span.range.clone());
-        }
-        let mut layout: Layout<PaintSlot> = builder.build(spec.text);
-        layout.break_all_lines(max_width);
-        layout.align(Alignment::Start, AlignmentOptions::default());
-        layout
-    }
-
-    /// Appends a Parley layout's glyphs to a chunk (inputs until step 3b),
-    /// through the same font store and glyph cache as owned paragraphs.
-    pub fn emit(
-        &mut self,
-        layout: &Layout<PaintSlot>,
-        origin: Point,
-        scale: f32,
-        brush: Option<PaintSlot>,
-        atlas: &mut RasterAtlas,
-        out: &mut ChunkWriter,
-    ) -> EmitStats {
-        let mut stats = EmitStats::default();
-        for line in layout.lines() {
-            for item in line.items() {
-                if let PositionedLayoutItem::GlyphRun(glyph_run) = item {
-                    stats.glyph_runs += 1;
-                    self.emit_parley_run(&glyph_run, origin, scale, brush, atlas, out, &mut stats);
-                }
-            }
-        }
-        stats
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn emit_parley_run(
-        &mut self,
-        glyph_run: &GlyphRun<'_, PaintSlot>,
-        origin: Point,
-        scale: f32,
-        brush: Option<PaintSlot>,
-        atlas: &mut RasterAtlas,
-        out: &mut ChunkWriter,
-        stats: &mut EmitStats,
-    ) {
-        let run = glyph_run.run();
-        let font = run.font();
-        let synthesis = run.synthesis();
-        debug_assert!(font.data.id() < fonts::RAW_ID_BASE);
-        let blob = FontBlob {
-            id: font.data.id(),
-            index: font.index,
-            bytes: Arc::new(font.data.clone()),
-            synthesis: Synthesis {
-                embolden: synthesis.embolden(),
-                skew: synthesis.skew().unwrap_or(0.0),
-            },
-            variations: Vec::new(),
-        };
-        let store = &mut self.fonts.store;
-        let Some(instance) = store
-            .face(&blob)
-            .and_then(|face| store.instance(face, run.normalized_coords(), blob.synthesis))
-        else {
-            return;
-        };
-        let slot = brush.unwrap_or(glyph_run.style().brush);
-        let baseline = (origin.y + glyph_run.baseline()) * scale;
-        let mut run_x = (origin.x + glyph_run.offset()) * scale;
-        let glyphs: Vec<(u16, f32, f32, PaintSlot)> = glyph_run
-            .glyphs()
-            .map(|g| {
-                let x = run_x + g.x * scale;
-                run_x += g.advance * scale;
-                (g.id as u16, x, baseline + g.y * scale, slot)
-            })
-            .collect();
-        let TextEngine {
-            raster,
-            cache,
-            fonts,
-            ..
-        } = self;
-        emit_glyphs(
-            raster,
-            cache,
-            &fonts.store,
-            instance,
-            run.font_size() * scale,
-            scale,
-            glyphs.into_iter(),
-            atlas,
-            out,
-            stats,
-        );
     }
 
     /// Rasterizes `ids` again after eviction. Needs neither the paragraph

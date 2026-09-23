@@ -528,12 +528,12 @@ impl Ui {
         }
         let state = self.inputs.get(id.0)?;
         let data = self.layouts.data(id);
-        let area = state.editor.ime_cursor_area();
+        let (x, y, w, h) = state.editor.ime_area();
         Some(self.node_to_window(id).map_rect(&Rect::new(
-            data.content[0] + area.x0 as f32,
-            data.content[1] + area.y0 as f32,
-            (area.x1 - area.x0).max(0.0) as f32,
-            (area.y1 - area.y0).max(0.0) as f32,
+            data.content[0] + x,
+            data.content[1] + y,
+            w.max(0.0),
+            h.max(0.0),
         )))
     }
 

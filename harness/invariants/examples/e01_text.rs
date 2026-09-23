@@ -6,7 +6,9 @@
 //! `Paragraph::heap_bytes`), allocations and
 //! median time of a cold layout (warm engine, new paragraph), a width
 //! change (rewrap), a one-character edit, and a span color change. A
-//! fresh engine's first layout (font loading) is reported once.
+//! fresh engine's first layout (font loading) is reported once. Then
+//! the editing costs of the owned `Editor` against Parley's
+//! `PlainEditor` (`editing`).
 //!
 //!   cargo run --release -p craie-harness --example e01_text
 
@@ -224,6 +226,144 @@ fn main() {
             parley_edit_allocs,
             "0",
             parley_color,
+        );
+    }
+    editing(&mut engine, &mut oracle);
+}
+
+/// Editing costs (E01 editable cases): the owned `Editor` against
+/// Parley's `PlainEditor`, per text: retained bytes of an editor holding
+/// the laid-out text, a keystroke (type one character at the end, then
+/// delete it: one pair), a caret move right, and a width change (ours
+/// rewraps; Parley relays out).
+fn editing(engine: &mut craie_text::TextEngine, oracle: &mut Oracle) {
+    use craie_harness::e01::Op;
+    use craie_text::editor::Motion;
+    println!(
+        "\nediting: {:14} {:>5} | {:>15} | {:>13} {:>9} | {:>13} {:>9} | {:>13} {:>9}",
+        "case",
+        "bytes",
+        "retained B o/P",
+        "keypair us",
+        "alloc o/P",
+        "move us",
+        "alloc o/P",
+        "width us",
+        "alloc o/P"
+    );
+    let texts = [
+        (
+            "latin",
+            "The quick brown fox jumps over the lazy dog. ".repeat(4),
+        ),
+        (
+            "bidi",
+            "Hello שלום world مرحبا بالعالم 123 end.".to_string(),
+        ),
+        (
+            "multilingual",
+            "Hello नमस्ते दुनिया こんにちは東京 ✕ done".to_string(),
+        ),
+    ];
+    for (name, text) in &texts {
+        let w = Some(240.0);
+        let ours_bytes = held(e01::editor(text, 16.0, w, engine));
+        let parley_bytes = held(oracle.editor(text, 16.0, w));
+        let mut ours = e01::editor(text, 16.0, w, engine);
+        let mut theirs = oracle.editor(text, 16.0, w);
+        e01::apply_ours(&mut ours, engine, &Op::Move(Motion::TextEnd));
+        oracle.apply(&mut theirs, &Op::Move(Motion::TextEnd));
+        let pair_ours = |ed: &mut craie_text::editor::Editor,
+                         engine: &mut craie_text::TextEngine| {
+            e01::apply_ours(ed, engine, &Op::Insert("x"));
+            e01::apply_ours(ed, engine, &Op::Backspace);
+        };
+        let (_, key_allocs_o) = allocs(|| pair_ours(&mut ours, engine));
+        let (_, key_allocs_p) = allocs(|| {
+            oracle.apply(&mut theirs, &Op::Insert("x"));
+            oracle.apply(&mut theirs, &Op::Backspace);
+        });
+        // Both closures need `engine`/`oracle`; time them in turn, many
+        // times, interleaved by hand.
+        let mut t_o = Vec::with_capacity(RUNS);
+        let mut t_p = Vec::with_capacity(RUNS);
+        for _ in 0..RUNS {
+            let s = Instant::now();
+            pair_ours(&mut ours, engine);
+            t_o.push(s.elapsed().as_secs_f64() * 1e6);
+            let s = Instant::now();
+            oracle.apply(&mut theirs, &Op::Insert("x"));
+            oracle.apply(&mut theirs, &Op::Backspace);
+            t_p.push(s.elapsed().as_secs_f64() * 1e6);
+        }
+        let med = |mut v: Vec<f64>| {
+            v.sort_by(f64::total_cmp);
+            v[v.len() / 2]
+        };
+        let (key_o, key_p) = (med(t_o), med(t_p));
+
+        // Caret moves: right then left (a pair keeps the caret in place).
+        e01::apply_ours(&mut ours, engine, &Op::Move(Motion::TextStart));
+        oracle.apply(&mut theirs, &Op::Move(Motion::TextStart));
+        let (_, mv_allocs_o) =
+            allocs(|| e01::apply_ours(&mut ours, engine, &Op::Move(Motion::Right)));
+        let (_, mv_allocs_p) = allocs(|| oracle.apply(&mut theirs, &Op::Move(Motion::Right)));
+        let (mut m_o, mut m_p) = (Vec::with_capacity(RUNS), Vec::with_capacity(RUNS));
+        for k in 0..RUNS {
+            let m = if k % 2 == 0 {
+                Motion::Left
+            } else {
+                Motion::Right
+            };
+            let s = Instant::now();
+            e01::apply_ours(&mut ours, engine, &Op::Move(m));
+            m_o.push(s.elapsed().as_secs_f64() * 1e6);
+            let s = Instant::now();
+            oracle.apply(&mut theirs, &Op::Move(m));
+            m_p.push(s.elapsed().as_secs_f64() * 1e6);
+        }
+        let (mv_o, mv_p) = (med(m_o), med(m_p));
+
+        // Width change: alternate 240 and 180.
+        let (_, w_allocs_o) = allocs(|| {
+            ours.set_width(Some(180.0));
+            ours.refresh(engine);
+        });
+        let (_, w_allocs_p) = allocs(|| {
+            theirs.set_width(Some(180.0));
+            oracle.refresh(&mut theirs);
+        });
+        let (mut w_o, mut w_p) = (Vec::with_capacity(RUNS), Vec::with_capacity(RUNS));
+        for k in 0..RUNS {
+            let width = Some(if k % 2 == 0 { 240.0 } else { 180.0 });
+            let s = Instant::now();
+            ours.set_width(width);
+            ours.refresh(engine);
+            w_o.push(s.elapsed().as_secs_f64() * 1e6);
+            let s = Instant::now();
+            theirs.set_width(width);
+            oracle.refresh(&mut theirs);
+            w_p.push(s.elapsed().as_secs_f64() * 1e6);
+        }
+        let (wd_o, wd_p) = (med(w_o), med(w_p));
+        println!(
+            "editing: {:14} {:>5} | {:>7}/{:<7} | {:>6.1}/{:<6.1} {:>4}/{:<4} | {:>6.2}/{:<6.2} {:>4}/{:<4} | {:>6.2}/{:<6.2} {:>4}/{:<4}",
+            name,
+            text.len(),
+            ours_bytes,
+            parley_bytes,
+            key_o,
+            key_p,
+            key_allocs_o,
+            key_allocs_p,
+            mv_o,
+            mv_p,
+            mv_allocs_o,
+            mv_allocs_p,
+            wd_o,
+            wd_p,
+            w_allocs_o,
+            w_allocs_p
         );
     }
 }

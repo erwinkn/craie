@@ -1,6 +1,6 @@
 [package]
 name = "craie-text"
-description = "Shaping, paragraph layout, glyph rasterization"
+description = "Shaping, paragraph layout, editing, glyph rasterization"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -9,9 +9,6 @@ repository.workspace = true
 [dependencies]
 craie-core.workspace = true
 craie-scene.workspace = true
-# Parley serves text inputs until owned editing lands (step 3b); text
-# nodes use the owned paragraph below.
-parley.workspace = true
 swash.workspace = true
 etagere.workspace = true
 harfrust.workspace = true

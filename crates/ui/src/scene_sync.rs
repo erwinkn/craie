@@ -27,8 +27,7 @@ use craie_scene::{ChunkWriter, ClipRecord, NONE, OrderItem, PaintSlot, Placement
 use crate::host::{NodeId, ROOT};
 use crate::layout::{LayoutData, MeasuredText};
 use crate::mutation::NodeKind;
-use crate::text::ParagraphSpec;
-use crate::text::parley::style::StyleProperty;
+use crate::text::paragraph::{SpanStyle, TextSpec, TextStyle};
 use crate::ui::Ui;
 
 /// Derived per-node scene bookkeeping, rebuilt by the tree walk.
@@ -786,68 +785,52 @@ impl Ui {
         let caret_slot = w.paint(state.color);
         debug_assert_eq!(text_slot, PaintSlot(2));
         let empty = state.editor.raw_text().is_empty();
+        state.editor.refresh(&mut self.text);
         if focused {
-            state.editor.selection_geometry_with(|bb, _| {
+            for (x, y, rw, rh) in state.editor.selection_rects() {
                 w.rect(
-                    Rect::new(
-                        cx + bb.x0 as f32,
-                        cy + bb.y0 as f32,
-                        (bb.x1 - bb.x0).max(0.0) as f32,
-                        (bb.y1 - bb.y0).max(0.0) as f32,
-                    ),
+                    Rect::new(cx + x, cy + y, rw.max(0.0), rh.max(0.0)),
                     0.0,
                     sel_slot,
                 );
-            });
+            }
         }
         let origin = Point::new(cx, cy);
         if empty && !state.placeholder.is_empty() {
             let bits = content_w.to_bits();
-            if state
-                .placeholder_layout
-                .as_ref()
-                .is_none_or(|(w, _)| *w != bits)
-            {
-                let defaults = [StyleProperty::FontSize(state.font_size)];
-                let spec = ParagraphSpec {
-                    text: &state.placeholder,
-                    defaults: &defaults,
-                    spans: &[],
-                };
-                let layout = self.text.layout_paragraph(&spec, Some(content_w));
-                state.placeholder_layout = Some((bits, layout));
+            match &mut state.placeholder_layout {
+                Some((b, p)) if *b != bits => {
+                    self.text.rewrap(p, Some(content_w));
+                    *b = bits;
+                }
+                Some(_) => {}
+                None => {
+                    let spans = [SpanStyle {
+                        start: 0,
+                        style: TextStyle {
+                            size: state.font_size,
+                            ..TextStyle::default()
+                        },
+                    }];
+                    let spec = TextSpec {
+                        text: &state.placeholder,
+                        family: "",
+                        spans: &spans,
+                    };
+                    let p = self.text.layout_text(&spec, Some(content_w));
+                    state.placeholder_layout = Some((bits, p));
+                }
             }
-            let layout = &state.placeholder_layout.as_ref().unwrap().1;
-            self.text.emit(
-                layout,
-                origin,
-                scale,
-                Some(ph_slot),
-                &mut self.scene.atlas,
-                w,
-            );
+            let p = &state.placeholder_layout.as_ref().unwrap().1;
+            self.text
+                .emit_paragraph(p, origin, scale, Some(ph_slot), &mut self.scene.atlas, w);
         } else {
-            let layout = state.layout(&mut self.text);
-            self.text.emit(
-                layout,
-                origin,
-                scale,
-                Some(text_slot),
-                &mut self.scene.atlas,
-                w,
-            );
+            let p = state.editor.layout();
+            self.text
+                .emit_paragraph(p, origin, scale, Some(text_slot), &mut self.scene.atlas, w);
         }
-        if focused && let Some(c) = state.editor.cursor_geometry(1.5) {
-            w.rect(
-                Rect::new(
-                    cx + c.x0 as f32,
-                    cy + c.y0 as f32,
-                    (c.x1 - c.x0).max(1.0) as f32,
-                    (c.y1 - c.y0).max(0.0) as f32,
-                ),
-                0.0,
-                caret_slot,
-            );
+        if focused && let Some((x, y, _, h)) = state.editor.caret_rect(1.5) {
+            w.rect(Rect::new(cx + x, cy + y, 1.5, h.max(0.0)), 0.0, caret_slot);
         }
     }
 
