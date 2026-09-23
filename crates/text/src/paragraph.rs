@@ -41,7 +41,7 @@ use skrifa::raw::types::F2Dot14;
 use unicode_bidi::{BidiClass, BidiInfo};
 use unicode_segmentation::UnicodeSegmentation;
 
-use crate::fonts::{FontAttrs, FontInstanceId, FontStore, ScriptTag};
+use crate::fonts::{FontAttrs, FontInstanceId, FontStore, ScriptTag, ignorable};
 
 /// Style of a span: what font resolution, shaping, and metrics read.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -307,13 +307,6 @@ pub(crate) fn covers_cluster(store: &mut FontStore, font: FontInstanceId, cluste
         .all(|c| store.covers(font, c))
 }
 
-/// Characters a font need not cover for a cluster to be covered.
-pub(crate) fn ignorable(c: char) -> bool {
-    c.is_control()
-        || matches!(c, '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2060}'..='\u{206F}'
-            | '\u{FE00}'..='\u{FE0F}' | '\u{FEFF}' | '\u{E0100}'..='\u{E01EF}')
-}
-
 impl Paragraph {
     fn span_at(spans: &[SpanStyle], byte: u32) -> usize {
         spans.partition_point(|s| s.start <= byte).saturating_sub(1)
@@ -457,14 +450,12 @@ impl Paragraph {
             let next = x + c.advance;
             if next <= limit {
                 x = next;
-            } else if c.space && clusters.get(i + 1).is_none_or(|n| n.boundary || n.newline) {
-                // Overflowing whitespace hangs, where UAX #14 allows a
-                // break after it; else it waits for an opportunity.
-                self.push_line(clusters, start..i + 1, &mut y, &mut width);
-                lines += 1;
-                start = i + 1;
-                x = 0.0;
-                opportunity = None;
+            } else if c.space {
+                // Overflowing whitespace hangs and never breaks by itself:
+                // the line breaks at the next opportunity after it (the
+                // next content cluster overflows there), or a hard break
+                // after it closes the same line (UAX #14 LB6, LB7).
+                x = next;
             } else if let Some(o) = opportunity.take() {
                 self.push_line(clusters, start..o, &mut y, &mut width);
                 lines += 1;

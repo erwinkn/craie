@@ -567,3 +567,47 @@ fn mapping_reads_the_placements() {
     assert!(multi > 10, "multi-glyph clusters checked: {multi}");
     assert!(reversed > 0, "no L1-reversed segment was checked");
 }
+
+/// Whitespace before a hard break hangs on the line the break closes: no
+/// empty line, at any width (UAX #14 LB6, LB7).
+#[test]
+fn whitespace_before_a_hard_break_stays_on_its_line() {
+    let mut e = engine();
+    for text in [
+        "a \nb",
+        "a \r\nb",
+        "a   \nb",
+        "a\u{2003} \u{2028}b",
+        "a b  \n\nc",
+    ] {
+        let want = text.matches(['\n', '\u{2028}']).count() + 1;
+        for w in [0.0, 3.0, 8.0, 20.0, 100.0] {
+            let p = layout(&mut e, text, Some(w));
+            check_lines(&p, text);
+            let hard: Vec<&str> = p
+                .lines
+                .iter()
+                .map(|l| &text[l.text.start as usize..l.text.end as usize])
+                .filter(|t| !t.is_empty() && t.trim_matches(|c: char| c.is_whitespace()).is_empty())
+                .collect();
+            // Only an empty paragraph between two breaks may be all
+            // whitespace (the "\n\n" case).
+            assert!(
+                hard.iter().all(|t| *t == "\n"),
+                "{text:?} at {w}: whitespace-only lines {hard:?}"
+            );
+            assert!(p.lines.len() >= want, "{text:?} at {w}");
+        }
+        let p = layout(&mut e, text, Some(0.0));
+        let words = text
+            .split(|c: char| c.is_whitespace())
+            .filter(|w| !w.is_empty())
+            .count();
+        let empty = text.matches("\n\n").count();
+        assert_eq!(
+            p.lines.len(),
+            words + empty,
+            "{text:?} at 0: one line per word"
+        );
+    }
+}

@@ -36,6 +36,12 @@ pub struct Case {
     pub widths: Vec<Option<f32>>,
     /// Some character has no pinned face: both sides draw `.notdef`.
     pub notdef: bool,
+    /// Oracle lines per width compared by their glyph sum (Parley's
+    /// emoji advance defect); empty: none at any width.
+    pub advance_fixups: Vec<usize>,
+    /// Oracle clusters merged per layout because Parley splits a
+    /// grapheme (GB9c conjuncts).
+    pub grapheme_merges: usize,
 }
 
 fn span(start: usize, size: f32, weight: u16, italic: bool) -> SpanStyle {
@@ -71,6 +77,8 @@ pub fn cases() -> Vec<Case> {
             text: long.clone(),
             spans: plain(14.0),
             notdef: false,
+            advance_fixups: vec![],
+            grapheme_merges: 0,
             widths: vec![None, Some(120.0), Some(240.0), Some(480.0)],
         },
         Case {
@@ -79,6 +87,8 @@ pub fn cases() -> Vec<Case> {
             text: long,
             spans: plain(17.0),
             notdef: false,
+            advance_fixups: vec![],
+            grapheme_merges: 0,
             widths: vec![Some(40.0), Some(90.0)],
         },
         Case {
@@ -93,6 +103,8 @@ pub fn cases() -> Vec<Case> {
                 span(a, 14.0, 400, false),
             ],
             notdef: false,
+            advance_fixups: vec![],
+            grapheme_merges: 0,
             widths: vec![None, Some(150.0), Some(300.0)],
         },
         Case {
@@ -105,6 +117,8 @@ pub fn cases() -> Vec<Case> {
                 span("Bold مرحبا ".len(), 16.0, 400, true),
             ],
             notdef: false,
+            advance_fixups: vec![],
+            grapheme_merges: 0,
             widths: vec![None, Some(80.0)],
         },
         Case {
@@ -113,6 +127,8 @@ pub fn cases() -> Vec<Case> {
             text: "Hello नमस्ते दुनिया こんにちは東京 ✕ done — क्षत्रिय 日本語のテキスト".to_string(),
             spans: plain(16.0),
             notdef: false,
+            advance_fixups: vec![],
+            grapheme_merges: 1,
             widths: vec![None, Some(100.0), Some(200.0)],
         },
         Case {
@@ -121,6 +137,8 @@ pub fn cases() -> Vec<Case> {
             text: "Hello שלום world مرحبا بالعالم 123 end.".to_string(),
             spans: plain(15.0),
             notdef: false,
+            advance_fixups: vec![],
+            grapheme_merges: 0,
             widths: vec![None, Some(90.0), Some(160.0)],
         },
         Case {
@@ -129,6 +147,8 @@ pub fn cases() -> Vec<Case> {
             text: "مرحبا بالعالم with English inside and ٣٤٥ numbers، ثم نهاية الجملة.".to_string(),
             spans: plain(15.0),
             notdef: false,
+            advance_fixups: vec![],
+            grapheme_merges: 0,
             widths: vec![None, Some(110.0), Some(220.0)],
         },
         Case {
@@ -140,6 +160,8 @@ pub fn cases() -> Vec<Case> {
             text: "one\ntwo\rthree\u{2028}four\u{2029}five and the end".to_string(),
             spans: plain(15.0),
             notdef: false,
+            advance_fixups: vec![],
+            grapheme_merges: 0,
             widths: vec![None, Some(0.0), Some(25.0), Some(60.0)],
         },
         Case {
@@ -150,6 +172,8 @@ pub fn cases() -> Vec<Case> {
                 .to_string(),
             spans: plain(16.0),
             notdef: false,
+            advance_fixups: vec![1, 2, 2],
+            grapheme_merges: 0,
             widths: vec![None, Some(60.0), Some(120.0)],
         },
         Case {
@@ -161,6 +185,8 @@ pub fn cases() -> Vec<Case> {
             text: "a\u{0301}\u{0323} 1\u{0651} \u{25CC} ✕ 1\u{20E3}".to_string(),
             spans: plain(16.0),
             notdef: false,
+            advance_fixups: vec![],
+            grapheme_merges: 0,
             widths: vec![None, Some(50.0)],
         },
         Case {
@@ -170,7 +196,24 @@ pub fn cases() -> Vec<Case> {
             text: "Thai สวัสดี and Geez ሰላም end".to_string(),
             spans: plain(15.0),
             notdef: true,
+            advance_fixups: vec![],
+            grapheme_merges: 0,
             widths: vec![None, Some(60.0)],
+        },
+        Case {
+            name: "ligatures",
+            class: "ligature",
+            // Latin ffi/fi ligatures across graphemes, one with a mark,
+            // and marked Arabic (Noto Sans Arabic draws lam-alef as two
+            // glyphs; Parley lists its marked clusters' glyph-less
+            // continuation before the start). Narrow widths: Parley breaks
+            // inside a marked grapheme, its own test.
+            text: "office fi\u{0301}ne لا لَا بِلَا end".to_string(),
+            spans: plain(16.0),
+            notdef: false,
+            advance_fixups: vec![],
+            grapheme_merges: 0,
+            widths: vec![None],
         },
         Case {
             name: "hebrew-lines",
@@ -178,6 +221,8 @@ pub fn cases() -> Vec<Case> {
             text: "שורה ראשונה\nשורה שנייה עם עוד מילים\n\nסוף".to_string(),
             spans: plain(15.0),
             notdef: false,
+            advance_fixups: vec![],
+            grapheme_merges: 0,
             widths: vec![None, Some(70.0)],
         },
     ]
@@ -198,11 +243,20 @@ pub struct LineSnap {
     pub top: f32,
     pub height: f32,
     pub baseline: f32,
+    /// The line's advance as its layout reports it (Parley's
+    /// `LineMetrics::advance`, raw).
     pub advance: f32,
     pub trailing: f32,
     pub x: f32,
     /// Drawn glyphs in visual order, paragraph space.
     pub glyphs: Vec<Drawn>,
+    /// Oracle only: the sum of the line's glyph advances, and whether the
+    /// line is a verified case of Parley's emoji advance defect (it holds
+    /// a multi-codepoint emoji sequence, and Parley's own run advances
+    /// sum to its glyph advances). Only such a line may be compared by
+    /// its glyph sum (`compare`).
+    pub glyph_advance: f32,
+    pub emoji_defect: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -223,10 +277,6 @@ pub struct Snapshot {
     /// Oracle clusters merged because they split one grapheme (UAX #29,
     /// GB9c conjuncts; Parley clusters finer). Always 0 for ours.
     pub grapheme_merges: usize,
-    /// Oracle lines whose `LineMetrics::advance` is not the sum of their
-    /// glyph advances (Parley with emoji ZWJ ligatures); the glyph sum is
-    /// used. Always 0 for ours.
-    pub advance_fixups: usize,
     pub rtl: bool,
     pub width: f32,
     pub height: f32,
@@ -320,12 +370,13 @@ pub fn ours(engine: &TextEngine, p: &Paragraph, text: &str) -> Snapshot {
                 trailing: l.trailing,
                 x: l.x,
                 glyphs,
+                glyph_advance: l.advance,
+                emoji_defect: false,
             }
         })
         .collect();
     Snapshot {
         grapheme_merges: 0,
-        advance_fixups: 0,
         rtl: p.base_rtl,
         width: p.width,
         height: p.height,
@@ -342,10 +393,9 @@ pub fn ours(engine: &TextEngine, p: &Paragraph, text: &str) -> Snapshot {
 pub fn parley(layout: &Layout<u16>, text: &str) -> Snapshot {
     let starts = grapheme_starts(text);
     let grapheme = |b: usize| starts[starts.partition_point(|&s| s <= b) - 1];
-    let mut clusters: Vec<ClusterSnap> = Vec::new();
+    // Parley's clusters with (ligature continuation, right-to-left run).
+    let mut clusters: Vec<(ClusterSnap, bool, bool)> = Vec::new();
     let mut lines = Vec::new();
-    let mut advance_fixups = 0;
-    let mut width = 0.0f32;
     for line in layout.lines() {
         let m = line.metrics();
         let mut glyphs = Vec::new();
@@ -381,27 +431,24 @@ pub fn parley(layout: &Layout<u16>, text: &str) -> Snapshot {
                 let t = c.text_range();
                 let ids: Vec<u16> = c.glyphs().map(|g| g.id as u16).collect();
                 let advance: f32 = c.glyphs().map(|g| g.advance).sum();
-                let merge = ids.is_empty()
-                    && clusters
-                        .last()
-                        .is_some_and(|l| l.text.end == t.start && !newline(text, &t));
-                if merge {
-                    let last = clusters.last_mut().unwrap();
-                    last.text.end = t.end;
-                    last.advance += advance;
-                } else {
-                    clusters.push(ClusterSnap {
+                clusters.push((
+                    ClusterSnap {
                         glyphs: if newline(text, &t) { Vec::new() } else { ids },
                         advance,
                         text: t,
-                    });
-                }
+                    },
+                    c.is_ligature_continuation(),
+                    run.is_rtl(),
+                ));
             }
         }
-        if (advance - m.advance).abs() > 1e-3 * advance.abs().max(1.0) {
-            advance_fixups += 1;
-        }
-        width = width.max(advance - m.trailing_whitespace);
+        let runs: f32 = line.runs().map(|r| r.advance()).sum();
+        let emoji_sequence = text[line.text_range()]
+            .graphemes(true)
+            .any(|g| g.chars().count() > 1 && fonts::emoji_presentation(g));
+        let n = glyphs.len();
+        let emoji_defect =
+            emoji_sequence && f64::from((runs - advance).abs()) <= bound(n + 2, advance.abs());
         lines.push(LineSnap {
             text: line.text_range(),
             // The line box top. (`block_min_coord` is the selection
@@ -410,39 +457,56 @@ pub fn parley(layout: &Layout<u16>, text: &str) -> Snapshot {
             top: m.baseline - m.ascent - m.leading * 0.5,
             height: m.line_height,
             baseline: m.baseline,
-            advance,
+            advance: m.advance,
             trailing: m.trailing_whitespace,
             x: m.offset,
             glyphs,
+            glyph_advance: advance,
+            emoji_defect,
         });
     }
     // Clusters of one run split over lines arrive in line order; within a
     // line, `runs()` is visual order. Logical order is by text start.
-    clusters.sort_by_key(|c| c.text.start);
-    let mut merged: Vec<ClusterSnap> = Vec::with_capacity(clusters.len());
+    clusters.sort_by_key(|c| c.0.text.start);
+    // Merges, in logical order: a ligature continuation joins its
+    // ligature start (before it in a left-to-right run; after it in a
+    // right-to-left one, where Parley lists the glyph-less continuation
+    // first), uncounted; a cluster starting inside a grapheme joins the
+    // one before (GB9c), counted.
+    let mut merged: Vec<(ClusterSnap, bool, bool)> = Vec::with_capacity(clusters.len());
     let mut grapheme_merges = 0;
-    for c in clusters {
+    for (c, cont, rtl) in clusters {
+        let join = |last: &mut ClusterSnap, c: ClusterSnap| {
+            last.text.end = c.text.end;
+            last.glyphs.extend(c.glyphs);
+            last.advance += c.advance;
+        };
         match merged.last_mut() {
-            Some(last)
+            Some((last, _, _))
+                if cont && !rtl && last.text.end == c.text.start && !newline(text, &c.text) =>
+            {
+                join(last, c);
+            }
+            Some((last, lcont, true))
+                if *lcont && last.glyphs.is_empty() && last.text.end == c.text.start =>
+            {
+                join(last, c);
+                *lcont = cont;
+            }
+            Some((last, _, _))
                 if grapheme(c.text.start) != c.text.start && last.text.end == c.text.start =>
             {
                 grapheme_merges += 1;
-                last.text.end = c.text.end;
-                last.glyphs.extend(c.glyphs);
-                last.advance += c.advance;
+                join(last, c);
             }
-            _ => merged.push(c),
+            _ => merged.push((c, cont, rtl)),
         }
     }
-    let clusters = merged;
-    if advance_fixups == 0 {
-        width = layout.width();
-    }
+    let clusters: Vec<ClusterSnap> = merged.into_iter().map(|c| c.0).collect();
     Snapshot {
         grapheme_merges,
-        advance_fixups,
         rtl: layout.is_rtl(),
-        width,
+        width: layout.width(),
         height: layout.height(),
         lines,
         clusters,
@@ -465,6 +529,10 @@ pub struct Diff {
     /// trailing whitespace sits at the paragraph's end side in ours, and
     /// inside its embedded run in Parley's.
     pub l1_lines: usize,
+    /// Oracle lines compared by their glyph sum instead of their line
+    /// advance: verified emoji-defect lines whose raw advance is off
+    /// (`LineSnap::emoji_defect`). Tests assert the count per case.
+    pub advance_fixups: usize,
     /// Largest absolute differences, logical points.
     pub advance: f32,
     pub position: f32,
@@ -589,7 +657,16 @@ pub fn compare(a: &Snapshot, b: &Snapshot, text: &str) -> Diff {
                 // Line advance and offset: a sum over the line's glyphs
                 // and the alignment offset.
                 let s = x.advance + x.x.abs() + x.trailing;
-                d.check(Field::Metric, x.advance, y.advance, bound(n + 2, s));
+                // The raw line advance, except on a verified emoji-defect
+                // line whose raw advance is off: there, its glyph sum.
+                let mut y_advance = y.advance;
+                if y.emoji_defect
+                    && f64::from((y.advance - y.glyph_advance).abs()) > bound(n + 2, s)
+                {
+                    d.advance_fixups += 1;
+                    y_advance = y.glyph_advance;
+                }
+                d.check(Field::Metric, x.advance, y_advance, bound(n + 2, s));
                 d.check(Field::Metric, x.x, y.x, bound(n + 3, s));
                 let mut oracle = y.glyphs.clone();
                 let mut extra = 0;
@@ -655,8 +732,18 @@ pub fn compare(a: &Snapshot, b: &Snapshot, text: &str) -> Diff {
     );
     if d.l1_lines == 0 {
         // Parley's width counts L1 lines' embedded trailing whitespace.
+        // With emoji-defect lines, the oracle width comes from the same
+        // corrected advances.
         let n = a.lines.iter().map(|l| l.glyphs.len()).max().unwrap_or(0);
-        d.check(Field::Metric, a.width, b.width, bound(n + 3, a.width));
+        let width = if d.advance_fixups == 0 {
+            b.width
+        } else {
+            b.lines
+                .iter()
+                .map(|l| if l.emoji_defect { l.glyph_advance } else { l.advance } - l.trailing)
+                .fold(0.0, f32::max)
+        };
+        d.check(Field::Metric, a.width, width, bound(n + 3, a.width));
     }
     d
 }

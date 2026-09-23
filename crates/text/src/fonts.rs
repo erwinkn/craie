@@ -45,7 +45,9 @@ pub struct FontBlob {
     /// same id and index are the same face. Platform (fontique) blob ids
     /// come from fontique's process-wide counter and stay below
     /// `RAW_ID_BASE`; `RawFonts` ids come from its own process-wide
-    /// counter at or above it.
+    /// counter at or above it. A custom `FontSource` must take its ids
+    /// from one of these two counters (fontique blobs, or bytes handed to
+    /// `RawFonts`); an id it invents can alias another source's face.
     pub id: u64,
     pub index: u32,
     pub bytes: FaceBytes,
@@ -97,32 +99,50 @@ pub trait FontSource: Send {
     /// with the synthesis the match needs. None: no such family.
     fn select(&mut self, family: &str, attrs: FontAttrs) -> Option<FontBlob>;
 
-    /// Faces to try, in priority order, for character `ch` of `script`
-    /// that the selected faces do not cover. `emoji`: the cluster asks
-    /// for emoji presentation (`emoji_presentation`), so emoji faces go
-    /// first. The order must not depend on enumeration order.
+    /// Faces to try, in priority order, for a grapheme `cluster` of
+    /// `script` that the selected face does not cover: every face that
+    /// covers its first character needing a glyph (`ignorable`), up to and
+    /// including the first that covers the whole cluster (the source may
+    /// stop there, never before). `emoji`: the cluster asks for emoji
+    /// presentation (`emoji_presentation`), so emoji faces go first. The
+    /// order must not depend on enumeration order.
     fn fallback(
         &mut self,
-        ch: char,
+        cluster: &str,
         script: ScriptTag,
         attrs: FontAttrs,
         emoji: bool,
     ) -> Vec<FontBlob>;
 }
 
-/// Whether a cluster asks for emoji presentation: a variation selector
-/// 16, a keycap, or a first character with default emoji presentation
-/// (the pictograph, emoticon, transport, supplemental, and flag blocks).
-/// An approximation of UTS #51 Emoji_Presentation by block.
+/// Characters a font need not cover for a cluster to be covered
+/// (controls, zero-width and bidi formatting, variation selectors).
+pub fn ignorable(c: char) -> bool {
+    c.is_control()
+        || matches!(c, '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2060}'..='\u{206F}'
+            | '\u{FE00}'..='\u{FE0F}' | '\u{FEFF}' | '\u{E0100}'..='\u{E01EF}')
+}
+
+/// Whether a cluster asks for emoji presentation (UTS #51): a
+/// variation selector 15 asks for text; a variation selector 16 or a
+/// keycap asks for emoji; else the first character's Emoji_Presentation
+/// property decides (Unicode 17 tables, `unicode-properties`).
 pub fn emoji_presentation(cluster: &str) -> bool {
+    use unicode_properties::emoji::{EmojiStatus, UnicodeEmoji};
+    if cluster.contains('\u{FE0E}') {
+        return false;
+    }
     if cluster.contains(['\u{FE0F}', '\u{20E3}']) {
         return true;
     }
     cluster.chars().next().is_some_and(|c| {
-        matches!(c as u32,
-            0x1F1E6..=0x1F1FF | 0x1F300..=0x1F64F | 0x1F680..=0x1F6FF
-            | 0x1F900..=0x1F9FF | 0x1FA70..=0x1FAFF | 0x1F004 | 0x1F0CF | 0x1F18E
-            | 0x1F191..=0x1F19A)
+        matches!(
+            c.emoji_status(),
+            EmojiStatus::EmojiPresentation
+                | EmojiStatus::EmojiPresentationAndModifierBase
+                | EmojiStatus::EmojiPresentationAndEmojiComponent
+                | EmojiStatus::EmojiPresentationAndModifierAndEmojiComponent
+        )
     })
 }
 
@@ -440,12 +460,16 @@ impl FontSource for RawFonts {
 
     fn fallback(
         &mut self,
-        ch: char,
+        cluster: &str,
         _script: ScriptTag,
         attrs: FontAttrs,
         _emoji: bool,
     ) -> Vec<FontBlob> {
-        // One face per family that covers `ch`, in registration order.
+        let Some(ch) = cluster.chars().find(|&c| !ignorable(c)) else {
+            return Vec::new();
+        };
+        // One face per family that covers `ch`, in registration order: the
+        // complete set (the engine picks the first covering the cluster).
         let mut families: Vec<&str> = Vec::new();
         for f in &self.faces {
             if families.contains(&f.family.as_str()) {
@@ -570,11 +594,32 @@ mod tests {
         // ✕ is not in Noto Sans: the symbols face covers it.
         let r = store.instance_of(&regular).unwrap();
         assert!(!store.covers(r, '✕'));
-        let fb = src.fallback('✕', ScriptTag::of('✕'), FontAttrs::default(), false);
+        let fb = src.fallback("✕", ScriptTag::of('✕'), FontAttrs::default(), false);
         let f = store.instance_of(&fb[0]).unwrap();
         assert!(store.covers(f, '✕'));
         assert_eq!(ScriptTag::of('ب'), ScriptTag(*b"Arab"));
         // Interning is stable.
         assert_eq!(store.instance_of(&regular), Some(r));
+    }
+
+    /// UTS #51 presentation: Emoji_Presentation from the tables, VS15
+    /// forces text, VS16 and keycaps force emoji.
+    #[test]
+    fn emoji_presentation_follows_the_property() {
+        for (cluster, emoji) in [
+            ("\u{2705}", true),          // ✅ Emoji_Presentation=Yes
+            ("\u{2705}\u{FE0E}", false), // ✅ with VS15
+            ("\u{2715}", false),         // ✕ not emoji
+            ("\u{263A}", false),         // ☺ Emoji=Yes, default text
+            ("\u{263A}\u{FE0F}", true),  // ☺ with VS16
+            ("\u{2764}", false),         // ❤ default text
+            ("1\u{FE0F}\u{20E3}", true), // keycap
+            ("1", false),
+            ("\u{1F1EF}\u{1F1F5}", true), // flag
+            ("\u{1F44D}\u{1F3FD}", true), // skin tone
+            ("\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}", true),
+        ] {
+            assert_eq!(emoji_presentation(cluster), emoji, "{cluster:?}");
+        }
     }
 }

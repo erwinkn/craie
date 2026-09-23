@@ -62,11 +62,11 @@ pub struct Fonts {
     /// (family, attrs) -> primary instance. Few entries: a linear scan,
     /// no key allocation per lookup.
     primary: Vec<(String, FontAttrs, Option<FontInstanceId>)>,
-    /// The source's fallback candidates per (first character, script,
-    /// attrs, emoji), in its priority order. Each cluster picks the first
-    /// candidate covering all of it, so the answer depends on the cluster
-    /// alone, never on text laid out before.
-    candidates: HashMap<(char, ScriptTag, FontAttrs, bool), Vec<FontInstanceId>>,
+    /// The source's fallback candidates per (script, attrs, emoji) and
+    /// cluster, in its priority order. A cluster picks the first candidate
+    /// covering all of it, so the answer depends on the cluster alone,
+    /// never on text laid out before.
+    candidates: HashMap<(ScriptTag, FontAttrs, bool), HashMap<Box<str>, Vec<FontInstanceId>>>,
 }
 
 impl Fonts {
@@ -111,18 +111,18 @@ impl Resolve for Fonts {
         script: ScriptTag,
         attrs: FontAttrs,
     ) -> Option<FontInstanceId> {
-        let first = cluster.chars().find(|&c| !paragraph::ignorable(c))?;
+        cluster.chars().find(|&c| !fonts::ignorable(c))?;
         let emoji = fonts::emoji_presentation(cluster);
-        let key = (first, script, attrs, emoji);
-        if !self.candidates.contains_key(&key) {
-            let blobs = self.source.fallback(first, script, attrs, emoji);
+        let by_cluster = self.candidates.entry((script, attrs, emoji)).or_default();
+        if !by_cluster.contains_key(cluster) {
+            let blobs = self.source.fallback(cluster, script, attrs, emoji);
             let list = blobs
                 .iter()
                 .filter_map(|b| self.store.instance_of(b))
                 .collect();
-            self.candidates.insert(key, list);
+            by_cluster.insert(cluster.into(), list);
         }
-        let list = &self.candidates[&key];
+        let list = &by_cluster[cluster];
         let store = &mut self.store;
         // The first candidate that covers the whole cluster; else the first
         // (it covers the first character).

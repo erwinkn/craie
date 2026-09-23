@@ -14,7 +14,7 @@ fn owned_paragraph_matches_parley() {
     let mut oracle = Oracle::new();
     let mut failures = Vec::new();
     for case in e01::cases() {
-        for &w in &case.widths {
+        for (k, &w) in case.widths.iter().enumerate() {
             let p = e01::layout(&mut engine, &case.text, &case.spans, w);
             // The pinned fonts cover every case but the missing-glyph one.
             let notdef = p.glyphs.iter().any(|g| g.id == 0);
@@ -32,11 +32,23 @@ fn owned_paragraph_matches_parley() {
                 d.glyph_ids,
                 d.l1_lines,
                 theirs.grapheme_merges,
-                theirs.advance_fixups,
+                d.advance_fixups,
                 d.advance,
                 d.position,
                 d.metrics,
                 d.worst
+            );
+            assert_eq!(
+                theirs.grapheme_merges, case.grapheme_merges,
+                "{} w={w:?}: GB9c merges",
+                case.name
+            );
+            // Parley's emoji advance defect: exactly the expected lines.
+            let fixups = case.advance_fixups.get(k).copied().unwrap_or(0);
+            assert_eq!(
+                d.advance_fixups, fixups,
+                "{} w={w:?}: advance fixups",
+                case.name
             );
             if !d.pass() {
                 failures.push(format!("{} w={w:?}: {d:?}", case.name));
@@ -103,6 +115,14 @@ fn comparison_detects_differences() {
     let mut m = a.clone();
     m.lines[2].glyphs[1].font ^= 1;
     assert_eq!(e01::compare(&m, &b, &case.text).glyph_ids, 1);
+
+    // A line-advance difference on a non-emoji oracle line is never
+    // excused, however its glyphs sum.
+    let mut m = b.clone();
+    m.lines[1].advance += 0.5;
+    let d = e01::compare(&a, &m, &case.text);
+    assert_eq!(d.advance_fixups, 0);
+    assert!(!d.pass(), "{d:?}");
 
     let mut m = a.clone();
     m.lines[2].glyphs[1].x += 0.01;
@@ -258,5 +278,114 @@ fn no_break_spaces_follow_uax14_where_parley_differs() {
                 "at {w}: {s}"
             );
         }
+    }
+}
+
+/// The emoji advance correction applies only to verified emoji-defect
+/// lines: without the flag, the emoji case's raw Parley advances fail
+/// the comparison; with it, the count is the expected one.
+#[test]
+fn emoji_advance_correction_is_scoped() {
+    let mut engine = e01::engine();
+    let mut oracle = Oracle::new();
+    let cases = e01::cases();
+    let case = cases.iter().find(|c| c.name == "emoji").unwrap();
+    let p = e01::layout(&mut engine, &case.text, &case.spans, None);
+    let a = e01::ours(&engine, &p, &case.text);
+    let b = e01::parley(&oracle.layout(&case.text, &case.spans, None), &case.text);
+    let d = e01::compare(&a, &b, &case.text);
+    assert!(d.pass() && d.advance_fixups == 1, "{d:?}");
+    let mut m = b.clone();
+    for l in &mut m.lines {
+        l.emoji_defect = false;
+    }
+    let d = e01::compare(&a, &m, &case.text);
+    assert!(!d.pass() && d.advance_fixups == 0, "{d:?}");
+}
+
+fn one_span(size: f32) -> [craie_text::paragraph::SpanStyle; 1] {
+    [craie_text::paragraph::SpanStyle {
+        start: 0,
+        style: craie_text::paragraph::TextStyle {
+            size,
+            weight: 400,
+            italic: false,
+        },
+    }]
+}
+
+/// Exact cluster guards. The conjunct स्ते (UAX #29 GB9c) is one cluster
+/// over bytes 0..12 at every width, with no interior boundary, and
+/// Parley needs exactly one merge for it. The Latin ffi ligature spans
+/// three graphemes: the whole shaper cluster maps both ways. (The pinned
+/// fonts have no ligature across graphemes with a mark: a mark blocks fi,
+/// and Noto Sans Arabic draws lam-alef as two glyphs. Marked Arabic,
+/// where Parley lists a glyph-less continuation before its start, is the
+/// E01 `ligatures` case.)
+#[test]
+fn grapheme_and_ligature_clusters_are_exact() {
+    let mut engine = e01::engine();
+    let mut oracle = Oracle::new();
+    let spans = one_span(16.0);
+    for (text, range) in [("स्ते", 0..12u32), ("ffi", 0..3)] {
+        for w in [None, Some(0.0), Some(2.0)] {
+            let p = e01::layout(&mut engine, text, &spans, w);
+            let map: Vec<std::ops::Range<u32>> =
+                p.cluster_map().into_iter().map(|(t, _)| t).collect();
+            assert_eq!(map, [range.clone()], "{text:?} at {w:?}");
+            assert_eq!(
+                p.lines.len(),
+                1,
+                "{text:?} at {w:?}: a line boundary inside"
+            );
+            for b in range.clone() {
+                assert_eq!(p.cluster_at(b), Some(range.clone()), "{text:?} byte {b}");
+            }
+            // Hits land only on the cluster's edges.
+            let line = &p.lines[0];
+            let y = line.top + line.height * 0.5;
+            for k in 0..=20 {
+                let x = line.x + line.advance * k as f32 / 20.0;
+                let h = p.hit(x, y).offset;
+                assert!(
+                    h == range.start || h == range.end,
+                    "{text:?}: hit {h} inside"
+                );
+            }
+        }
+        let theirs = e01::parley(&oracle.layout(text, &spans, None), text);
+        let merges = if text == "स्ते" { 1 } else { 0 };
+        assert_eq!(theirs.grapheme_merges, merges, "{text:?}");
+        assert_eq!(theirs.clusters.len(), 1, "{text:?}");
+    }
+}
+
+/// Marked Arabic at a narrow width, where Parley differs from UAX #14
+/// (LB9): Parley starts a line between a base and its mark, inside a
+/// grapheme. Ours starts lines only at UAX #14 opportunities.
+#[test]
+fn marked_arabic_breaks_follow_uax14_where_parley_differs() {
+    use unicode_linebreak::linebreaks;
+    use unicode_segmentation::UnicodeSegmentation;
+    let text = "لا لَا بِلَا end";
+    let spans = one_span(16.0);
+    let allowed: Vec<usize> = linebreaks(text).map(|(i, _)| i).collect();
+    let graphemes: Vec<usize> = text.grapheme_indices(true).map(|(i, _)| i).collect();
+    let p = e01::layout(&mut e01::engine(), text, &spans, Some(40.0));
+    let ours: Vec<usize> = p.lines.iter().map(|l| l.text.start as usize).collect();
+    assert!(ours[1..].iter().all(|s| allowed.contains(s)), "{ours:?}");
+    let l = Oracle::new().layout(text, &spans, Some(40.0));
+    let theirs: Vec<usize> = l.lines().map(|l| l.text_range().start).collect();
+    let inside: Vec<usize> = theirs
+        .iter()
+        .copied()
+        .filter(|s| !graphemes.contains(s))
+        .collect();
+    assert!(
+        !inside.is_empty(),
+        "Parley no longer breaks inside a grapheme: {theirs:?}"
+    );
+    for s in inside {
+        assert!(!allowed.contains(&s) && !ours.contains(&s), "{s}");
     }
 }

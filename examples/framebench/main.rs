@@ -14,6 +14,12 @@
 //! then:
 //!
 //!   cargo run --release --example framebench -- <dir> <rows> [--reps 3]
+//!     [--family name]
+//!
+//! Text lays out in the Text default family, `system-ui` (SF on macOS),
+//! unless `--family` names another; `sans-serif` (Helvetica on macOS),
+//! step 2's Parley default, is the reference for comparisons with it.
+//! Each JSON row records the requested family and the resolved face.
 //!
 //! Deliberate differences from the gpui-react fixture, matching what
 //! Craie can do today:
@@ -204,6 +210,27 @@ fn draw(ui: &mut Ui, gpu: &mut Option<GpuSide>) -> (f64, f64, f64) {
     (layout_ms + paint_ms + ms(t), layout_ms, paint_ms)
 }
 
+/// The family name of the face `family` resolves to for 400 upright text.
+fn resolved_face(ui: &mut Ui, family: &str) -> String {
+    use craie_text::paragraph::Resolve;
+    let attrs = craie_text::fonts::FontAttrs {
+        weight: 400,
+        italic: false,
+    };
+    let Some(font) = ui.text.fonts.primary(family, attrs) else {
+        return String::new();
+    };
+    let store = &ui.text.fonts.store;
+    let face = store.face_data(store.instance_data(font).face);
+    craie_text::swash::FontRef::from_index(face.bytes.as_ref().as_ref(), face.index as usize)
+        .and_then(|f| {
+            f.localized_strings()
+                .find_by_id(craie_text::swash::StringId::Family, None)
+        })
+        .map(|s| s.chars().collect())
+        .unwrap_or_default()
+}
+
 // -------------------------------------------------------------------- main
 
 fn main() {
@@ -336,8 +363,15 @@ fn main() {
                 s.median, s.mean, s.min
             )
         };
+        // The requested family and the face it resolved to (the row text
+        // resolved it before the first draw).
+        let requested = ui.text.default_family.clone();
+        let face = resolved_face(&mut ui, &requested);
+        if rep == 0 {
+            eprintln!("  family {requested:?} -> face {face:?}");
+        }
         json += &format!(
-            "  {{\"rows\":{rows},\"rep\":{rep},\"mountMs\":{mount_ms:.4},\"firstDrawMs\":{first_draw:.4},\
+            "  {{\"rows\":{rows},\"rep\":{rep},\"family\":{requested:?},\"face\":{face:?},\"mountMs\":{mount_ms:.4},\"firstDrawMs\":{first_draw:.4},\
              \"updateApplyMs\":{},\"updateDrawMs\":{},\"scrollApplyMs\":{},\"scrollDrawMs\":{},\
              \"removeMs\":{remove_ms:.4},\"emptyDrawMs\":{empty_draw:.4},\
              \"liveBytes\":{{\"baseline\":{baseline},\"afterMount\":{after_mount},\"afterFirstDraw\":{after_first_draw},\

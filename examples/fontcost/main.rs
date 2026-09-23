@@ -44,13 +44,13 @@ impl FontSource for Counting {
     }
     fn fallback(
         &mut self,
-        ch: char,
+        cluster: &str,
         script: ScriptTag,
         attrs: FontAttrs,
         emoji: bool,
     ) -> Vec<FontBlob> {
         self.fallbacks.fetch_add(1, Ordering::Relaxed);
-        self.inner.fallback(ch, script, attrs, emoji)
+        self.inner.fallback(cluster, script, attrs, emoji)
     }
 }
 
