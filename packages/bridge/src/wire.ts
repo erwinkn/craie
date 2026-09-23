@@ -164,7 +164,20 @@ export const EVENT_KIND = {
   /** A list's rendered range: a = first, b = end, x = kept item index
    * (-1), y = the list's splice revision (mod 2^24), key = kept item id. */
   listRange: 14,
+  /** An `animate` tween ended: key = property | reason << 8. */
+  animationEnd: 15,
 } as const
+
+/** Why a tween ended — mirror animation.rs `end_reason`. */
+export const END_REASON = ["finished", "cancelled", "retargeted", "removed"] as const
+export type EndReason = (typeof END_REASON)[number]
+
+/** What `node.animate` resolves with: `finished` when it reached its
+ * target. */
+export interface AnimationEnd {
+  finished: boolean
+  reason: EndReason
+}
 
 export const EVENT_MASK = {
   pointerMove: 1 << 0,

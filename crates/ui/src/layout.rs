@@ -70,6 +70,9 @@ pub struct Layouts {
     cache: Vec<Cache>,
     unrounded: Vec<Layout>,
     rects: Vec<LayoutData>,
+    /// Slots created since their last layout: their `rects` row is the
+    /// previous occupant's.
+    unlaid: Vec<bool>,
     /// Layout passes run (cost counter).
     pub passes: u64,
     /// Taffy cache behavior, for experiments: hits/misses since `new`.
@@ -100,6 +103,7 @@ impl Layouts {
             cache: Vec::new(),
             unrounded: Vec::new(),
             rects: Vec::new(),
+            unlaid: Vec::new(),
             cache_hits: 0,
             moved: Default::default(),
             resized: Default::default(),
@@ -114,6 +118,20 @@ impl Layouts {
             .get(id.0 as usize)
             .map(|d| d.rect)
             .unwrap_or(Rect::ZERO)
+    }
+
+    /// A new occupant of `id`'s slot: its layout is unknown until the
+    /// next pass lays it out.
+    pub fn forget(&mut self, id: NodeId) {
+        if self.unlaid.len() <= id.index() {
+            self.unlaid.resize(id.index() + 1, false);
+        }
+        self.unlaid[id.index()] = true;
+    }
+
+    /// Whether `id`'s current occupant has been laid out.
+    pub fn is_laid_out(&self, id: NodeId) -> bool {
+        id.index() < self.rects.len() && !self.unlaid.get(id.index()).copied().unwrap_or(false)
     }
 
     /// Full paint-relevant data for a node, or defaults.
@@ -690,6 +708,9 @@ impl RoundTree for TreeView<'_> {
 
     fn set_final_layout(&mut self, node_id: TaffyId, layout: &Layout) {
         let id = from_taffy(node_id);
+        if let Some(u) = self.store.unlaid.get_mut(id.0 as usize) {
+            *u = false;
+        }
         let data = row_mut(&mut self.store.rects, id.0 as usize);
         let before = *data;
         data.rect = Rect::new(

@@ -141,6 +141,9 @@ pub mod out_kind {
     /// b = end (exclusive), x = the item kept rendered for focus (-1:
     /// none).
     pub const LIST_RANGE: u8 = 14;
+    /// An `Animate` tween ended (always sent): key = property | reason
+    /// << 8 (`animation::end_reason`).
+    pub const ANIMATION_END: u8 = 15;
 }
 
 /// One event bound for JS: which node, what, pointer position (logical),

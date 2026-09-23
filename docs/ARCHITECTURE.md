@@ -792,14 +792,23 @@ starts a tween from the value on screen. `render` first advances every
 animation to the UI clock and writes the rows through the mutation's
 own writers (`set_layout`, `set_spatial`, `set_paint`); the final frame
 writes the declared value. A size target that is not a length is
-resolved by one probe layout; a padding or gap that is not a length
-jumps (`LEDGER.md` DF-4). Transforms interpolate as rotation x
+resolved by one probe: a layout compute with every running layout
+animation at its declared value, without anchoring, scroll commands,
+or offset clamps, after which the rows go back and the frame lays out
+in full. A padding or gap that is not a length jumps (`LEDGER.md`
+DF-4). A size starts from the laid-out size only when the slot's
+current occupant has been laid out (`Layouts::is_laid_out`); a retarget
+starts from the sampled value clamped as the row writer clamps it. Transforms interpolate as rotation x
 upper-triangular x translation; colors premultiplied. Curves are CSS
 cubic-bezier; springs are damped oscillators from rest. `needs_paint`
 holds while anything runs, and the platform asks for the next frame
 after each one. JS: `style.transition` (per property: a duration,
 delay, and easing, or a spring; milliseconds) and `node.animate(prop,
-to, timing)`.
+to, timing)`, which resolves with how the tween ended: an
+`ANIMATION_END` event (node, generation, property, and reason:
+finished, cancelled, retargeted, or removed) on the event channel,
+routed per property in call order; releasing a node resolves its
+pending calls as removed.
 
 **Target.** A native transition driver on the UI thread.
 

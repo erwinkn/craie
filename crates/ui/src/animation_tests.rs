@@ -428,3 +428,322 @@ fn animation_ops_round_trip_and_validate() {
     ui.apply(&buf).unwrap();
     assert!(ui.animating());
 }
+
+fn column(width: f32) -> taffy::Style {
+    taffy::Style {
+        flex_direction: taffy::FlexDirection::Column,
+        size: taffy::Size {
+            width: taffy::Dimension::length(width),
+            height: taffy::Dimension::auto(),
+        },
+        ..taffy::Style::default()
+    }
+}
+
+fn width_transition(id: u32, prop: Prop, t: &mut Transaction<'static>) {
+    t.transition(
+        id,
+        &[Transition {
+            prop,
+            timing: linear(1.0),
+        }],
+    );
+}
+
+/// S4-01: the probe that resolves an `auto` target leaves scroll offsets
+/// alone; the frame's layout clamps them against the frame's geometry.
+#[test]
+fn probe_keeps_scroll_offsets() {
+    let mut ui = Ui::new(1.0);
+    let mut t = Transaction::new(1);
+    let scroller = taffy::Style {
+        flex_direction: taffy::FlexDirection::Column,
+        overflow: taffy::Point {
+            x: taffy::Overflow::Visible,
+            y: taffy::Overflow::Scroll,
+        },
+        ..sized(200.0, 100.0)
+    };
+    t.create(0, NodeKind::View)
+        .layout(0, &scroller)
+        .place(NIL, 0, NIL);
+    t.create(1, NodeKind::View)
+        .layout(1, &sized(200.0, 400.0))
+        .place(0, 1, NIL);
+    width_transition(1, Prop::Height, &mut t);
+    t.create(2, NodeKind::View)
+        .layout(2, &sized(200.0, 200.0))
+        .place(1, 2, NIL);
+    ui.apply_txn(&t).unwrap();
+    at(&mut ui, 0.0);
+    ui.scroll_to(NodeId(0), 0.0, 300.0);
+    at(&mut ui, 0.0);
+    assert_eq!(ui.host.spatial[0].scroll[1], 300.0);
+    apply(&mut ui, |t| {
+        let auto = taffy::Style {
+            size: taffy::Size {
+                width: taffy::Dimension::length(200.0),
+                height: taffy::Dimension::auto(),
+            },
+            ..sized(0.0, 0.0)
+        };
+        t.layout(1, &auto);
+    });
+    at(&mut ui, 0.0);
+    assert_eq!(ui.layouts.data(NodeId(1)).rect.size.height, 400.0);
+    assert_eq!(
+        ui.host.spatial[0].scroll[1], 300.0,
+        "the probe does not clamp"
+    );
+    at(&mut ui, 1.0);
+    assert_eq!(ui.layouts.data(NodeId(1)).rect.size.height, 200.0);
+    assert_eq!(ui.host.spatial[0].scroll[1], 100.0, "the frame clamps");
+}
+
+/// S4-02: targets that depend on other layout tweens resolve with those
+/// at their declared values: a stretched child's `auto` height follows
+/// its parent's target width (aspect ratio 2).
+#[test]
+fn probe_applies_every_declared_layout_target() {
+    let mut ui = Ui::new(1.0);
+    let mut t = Transaction::new(1);
+    t.create(0, NodeKind::View)
+        .layout(0, &column(100.0))
+        .place(NIL, 0, NIL);
+    width_transition(0, Prop::Width, &mut t);
+    let child = |h: taffy::Dimension| taffy::Style {
+        aspect_ratio: Some(2.0),
+        size: taffy::Size {
+            width: taffy::Dimension::auto(),
+            height: h,
+        },
+        ..taffy::Style::default()
+    };
+    t.create(1, NodeKind::View)
+        .layout(1, &child(taffy::Dimension::length(10.0)))
+        .place(0, 1, NIL);
+    width_transition(1, Prop::Height, &mut t);
+    ui.apply_txn(&t).unwrap();
+    at(&mut ui, 0.0);
+    apply(&mut ui, |t| {
+        t.layout(0, &column(300.0))
+            .layout(1, &child(taffy::Dimension::auto()));
+    });
+    let h = |ui: &Ui| ui.layouts.data(NodeId(1)).rect.size.height;
+    at(&mut ui, 0.5);
+    assert!(near(h(&ui), 80.0), "{}", h(&ui));
+    at(&mut ui, 0.999);
+    assert!((h(&ui) - 150.0).abs() < 0.5, "{}", h(&ui));
+    at(&mut ui, 1.0);
+    assert!(near(h(&ui), 150.0));
+}
+
+/// S4-03: a padding target that is not a length jumps (DF-4).
+#[test]
+fn percent_padding_jumps() {
+    let mut ui = Ui::new(1.0);
+    let mut t = Transaction::new(1);
+    t.create(0, NodeKind::View)
+        .layout(0, &column(300.0))
+        .place(NIL, 0, NIL);
+    t.create(1, NodeKind::View)
+        .layout(1, &sized(100.0, 40.0))
+        .place(0, 1, NIL);
+    width_transition(1, Prop::Padding, &mut t);
+    ui.apply_txn(&t).unwrap();
+    at(&mut ui, 0.0);
+    let pct = taffy::LengthPercentage::percent(0.1);
+    apply(&mut ui, |t| {
+        let s = taffy::Style {
+            padding: taffy::Rect {
+                left: pct,
+                right: pct,
+                top: pct,
+                bottom: pct,
+            },
+            ..sized(100.0, 40.0)
+        };
+        t.layout(1, &s);
+    });
+    assert!(!ui.animating());
+    at(&mut ui, 0.5);
+    assert_eq!(ui.layouts.data(NodeId(1)).content, [30.0, 30.0]);
+}
+
+/// S4-04: a recycled id tweens like a fresh one: the previous occupant's
+/// laid-out size is not a start value.
+#[test]
+fn recycled_ids_do_not_inherit_layout() {
+    let halfway = |recycle: bool| {
+        let mut ui = Ui::new(1.0);
+        let mut t = Transaction::new(1);
+        t.create(0, NodeKind::View)
+            .layout(0, &column(300.0))
+            .place(NIL, 0, NIL);
+        t.create(1, NodeKind::View)
+            .layout(1, &sized(100.0, 40.0))
+            .place(0, 1, NIL);
+        ui.apply_txn(&t).unwrap();
+        at(&mut ui, 0.0);
+        let id = if recycle { 1 } else { 2 };
+        apply(&mut ui, |t| {
+            t.remove(1)
+                .create(id, NodeKind::View)
+                .place(0, id, NIL)
+                .animate(
+                    id,
+                    Prop::Width,
+                    Value::Size(taffy::Dimension::length(200.0)),
+                    linear(1.0),
+                );
+        });
+        at(&mut ui, 0.5);
+        ui.layouts.data(NodeId(id)).rect.size.width
+    };
+    assert_eq!(halfway(true), halfway(false));
+}
+
+/// S4-05: retargeting a tween whose `auto` target is not resolved yet
+/// tweens from its start value.
+#[test]
+fn unresolved_targets_retarget_from_their_start() {
+    let mut ui = row_ui();
+    apply(&mut ui, |t| width_transition(1, Prop::Width, t));
+    let auto = taffy::Style {
+        flex_shrink: 0.0,
+        size: taffy::Size {
+            width: taffy::Dimension::auto(),
+            height: taffy::Dimension::length(40.0),
+        },
+        ..taffy::Style::default()
+    };
+    apply(&mut ui, |t| {
+        t.layout(1, &auto);
+    });
+    apply(&mut ui, |t| {
+        t.layout(1, &sized(200.0, 40.0));
+    });
+    assert!(ui.animating());
+    at(&mut ui, 0.5);
+    assert!(near(ui.layouts.data(NodeId(1)).rect.size.width, 150.0));
+}
+
+/// S4-06: a retarget starts from the value the row shows (a spring's
+/// overshoot clamped), and intermediate frames follow from there.
+#[test]
+fn retarget_starts_from_the_clamped_value() {
+    let mut ui = row_ui();
+    apply(&mut ui, |t| {
+        t.animate(
+            1,
+            Prop::Opacity,
+            Value::Opacity(0.0),
+            Timing::Spring {
+                delay: 0.0,
+                stiffness: 100.0,
+                damping: 5.0,
+                mass: 1.0,
+            },
+        );
+    });
+    at(&mut ui, 0.3);
+    assert_eq!(ui.host.spatial[1].opacity, 0.0, "the overshoot clamps");
+    apply(&mut ui, |t| {
+        width_transition(1, Prop::Opacity, t);
+        t.opacity(1, 1.0);
+    });
+    at(&mut ui, 0.8);
+    assert!(
+        near(ui.host.spatial[1].opacity, 0.5),
+        "{}",
+        ui.host.spatial[1].opacity
+    );
+}
+
+/// S4-07: a large finite transform target tweens through finite rows.
+#[test]
+fn large_transforms_stay_finite() {
+    let mut ui = row_ui();
+    apply(&mut ui, |t| {
+        t.animate(
+            1,
+            Prop::Transform,
+            Value::Transform(Affine::scale(1e30, 1.0)),
+            linear(1.0),
+        );
+    });
+    at(&mut ui, 0.5);
+    let m = ui.host.spatial[1].transform;
+    assert!(m.0.iter().all(|v| v.is_finite()), "{m:?}");
+    // Interpolated, not the last frame kept: x scale halfway.
+    assert!((m.0[0] / 5e29 - 1.0).abs() < 1e-3, "{m:?}");
+    at(&mut ui, 1.0);
+    assert_eq!(ui.host.spatial[1].transform, Affine::scale(1e30, 1.0));
+}
+
+/// `Animate` tweens report their end to JS (DF-3, promoted into step 4):
+/// finished, cancelled by a plain set, retargeted by another tween, or
+/// removed with their node (the removed occupant's generation);
+/// transition tweens report nothing.
+#[test]
+fn animate_reports_how_it_ended() {
+    use crate::animation::end_reason::*;
+    use crate::events::out_kind::ANIMATION_END;
+    let ends = |ui: &mut Ui| -> Vec<(u32, u16, u32, u32)> {
+        ui.take_events()
+            .into_iter()
+            .filter(|e| e.kind == ANIMATION_END)
+            .map(|e| (e.node, e.generation, e.key & 0xFF, e.key >> 8))
+            .collect()
+    };
+    let mut ui = row_ui();
+    ui.take_events();
+    let o = Prop::Opacity as u32;
+    apply(&mut ui, |t| {
+        t.animate(1, Prop::Opacity, Value::Opacity(0.0), linear(1.0));
+    });
+    at(&mut ui, 0.5);
+    assert_eq!(ends(&mut ui), []);
+    at(&mut ui, 1.0);
+    assert_eq!(ends(&mut ui), [(1, 0, o, FINISHED)]);
+
+    apply(&mut ui, |t| {
+        t.animate(1, Prop::Opacity, Value::Opacity(1.0), linear(1.0));
+    });
+    apply(&mut ui, |t| {
+        t.opacity(1, 0.5);
+    });
+    assert_eq!(ends(&mut ui), [(1, 0, o, CANCELLED)]);
+
+    apply(&mut ui, |t| {
+        t.animate(1, Prop::Opacity, Value::Opacity(1.0), linear(1.0));
+    });
+    apply(&mut ui, |t| {
+        t.animate(1, Prop::Opacity, Value::Opacity(0.0), linear(1.0));
+    });
+    assert_eq!(ends(&mut ui), [(1, 0, o, RETARGETED)]);
+    apply(&mut ui, |t| {
+        t.remove(1).create(1, NodeKind::View).place(0, 1, NIL);
+    });
+    assert_eq!(ends(&mut ui), [(1, 0, o, REMOVED)]);
+
+    // Nothing to tween from (never laid out): it ends at once.
+    apply(&mut ui, |t| {
+        t.animate(
+            1,
+            Prop::Width,
+            Value::Size(taffy::Dimension::length(10.0)),
+            linear(1.0),
+        );
+    });
+    assert_eq!(ends(&mut ui), [(1, 1, Prop::Width as u32, FINISHED)]);
+
+    // Transition tweens report nothing.
+    apply(&mut ui, |t| {
+        width_transition(2, Prop::Opacity, t);
+        t.opacity(2, 0.0);
+    });
+    at(&mut ui, 5.0);
+    assert!(!ui.animating());
+    assert_eq!(ends(&mut ui), []);
+}

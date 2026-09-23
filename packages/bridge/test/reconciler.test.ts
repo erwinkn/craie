@@ -682,3 +682,43 @@ test("animate sends one tween command", async () => {
   expect(ops[2]!.f.slice(0, 7).map(r)).toEqual([0, 1, 0, 0, 1, 5, 0])
   expect(() => n.animate("gap", [1, 2, 3], { duration: 1 })).toThrow()
 })
+
+// DF-3 promoted into step 4: node.animate resolves from the native end
+// event (per property, in call order); releasing the node resolves what
+// is pending as removed; a node that is not mounted resolves cancelled.
+test("animate resolves when native reports its end", async () => {
+  const t = new FakeTransport()
+  const root = createRoot(t)
+  let node: HostNode | null = null
+  function App({ show }: { show: boolean }) {
+    return show ? createElement(View, { ref: (n: HostNode | null) => { node = n } }) : null
+  }
+  root.renderSync(createElement(App, { show: true }))
+  await tick()
+  const n = node as unknown as HostNode
+  const id = t.ops(0).find(o => o.tag === 0x01)!.id
+  const end = (prop: number, reason: number, generation = 0): UiEvent => ({
+    kind: 15, node: id, generation, revision: 0, x: 0, y: 0, a: 0, b: 0,
+    key: prop | (reason << 8), text: "",
+  })
+  const results: unknown[] = []
+  const first = n.animate("opacity", 0, { duration: 100 }).then(r => results.push(["first", r]))
+  const second = n.animate("opacity", 1, { duration: 100 }).then(r => results.push(["second", r]))
+  const width = n.animate("width", 50, { duration: 100 }).then(r => results.push(["width", r]))
+  t.eventCb!(end(1, 2)) // the first opacity tween: retargeted
+  t.eventCb!(end(4, 0)) // width: finished
+  t.eventCb!(end(1, 0)) // the second: finished
+  await Promise.all([first, second, width])
+  expect(results).toEqual([
+    ["first", { finished: false, reason: "retargeted" }],
+    ["width", { finished: true, reason: "finished" }],
+    ["second", { finished: true, reason: "finished" }],
+  ])
+  // Pending at release: removed; the native event after it is dropped.
+  const pending = n.animate("gap", 4, { duration: 100 })
+  root.renderSync(createElement(App, { show: false }))
+  await tick()
+  expect(await pending).toEqual({ finished: false, reason: "removed" })
+  t.eventCb!(end(7, 3))
+  expect(await n.animate("opacity", 0, { duration: 1 })).toEqual({ finished: false, reason: "cancelled" })
+})

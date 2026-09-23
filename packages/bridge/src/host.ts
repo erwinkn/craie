@@ -18,6 +18,9 @@ import {
   type AccessibilityRole,
   type Affine,
   type AnimProp,
+  type AnimationEnd,
+  ANIM_PROP,
+  END_REASON,
   type Timing,
   type Transitions,
   type ItemDesc,
@@ -94,6 +97,9 @@ export interface HostNode {
    * `Paragraph::revision`): a span event from another revision was
    * hit-tested against an older span table. */
   paragraphRev?: number
+  /** `animate` calls not ended yet, oldest first (native keeps one tween
+   * per property, so ends arrive in call order per property). */
+  pendingAnims?: { prop: number; resolve: (end: AnimationEnd) => void }[]
   focus(): void
   blur(): void
   scrollTo(x: number, y: number): void
@@ -103,8 +109,11 @@ export interface HostNode {
   /** Tweens one property natively to `to` (the value it keeps after,
    * until a commit sets that property again): transform an RN
    * transform list, colors as in props, padding a number or [left,
-   * right, top, bottom], gap a number or [column, row]. */
-  animate(prop: AnimProp, to: unknown, timing: Timing): void
+   * right, top, bottom], gap a number or [column, row]. Resolves when
+   * the tween ends: finished, cancelled (a commit set the property),
+   * retargeted (another tween replaced it), or removed (with its
+   * node). */
+  animate(prop: AnimProp, to: unknown, timing: Timing): Promise<AnimationEnd>
 }
 
 export interface Transport {
@@ -460,7 +469,11 @@ export class CraieHost {
       },
       animate(prop: AnimProp, to: unknown, timing: Timing) {
         const value = animValue(prop, to)
-        this.root.cmd(this, (e, id) => e.animate(id, prop, value, timing))
+        if (!this.mounted) return Promise.resolve({ finished: false, reason: "cancelled" as const })
+        return new Promise<AnimationEnd>((resolve) => {
+          (this.pendingAnims ??= []).push({ prop: ANIM_PROP[prop], resolve })
+          this.root.cmd(this, (e, id) => e.animate(id, prop, value, timing))
+        })
       },
     }
     return n
@@ -509,6 +522,14 @@ export class CraieHost {
       case EVENT_KIND.change: p.onChangeText?.(ev.text); break
       case EVENT_KIND.submit: p.onSubmit?.(ev.text); break
       case EVENT_KIND.scroll: p.onScroll?.({ target: n, x: ev.a, y: ev.b }); break
+      case EVENT_KIND.animationEnd: {
+        const prop = ev.key & 0xff
+        const reason = END_REASON[(ev.key >>> 8) & 0xff] ?? "cancelled"
+        const list = root.pendingAnims ?? []
+        const i = list.findIndex(p => p.prop === prop)
+        if (i >= 0) list.splice(i, 1)[0]!.resolve({ finished: reason === "finished", reason })
+        break
+      }
       case EVENT_KIND.listRange: {
         // The kept (focused) item by identity: its index may be stale by
         // the time this arrives. Indices apply only to the item order
@@ -624,6 +645,8 @@ export class CraieHost {
     }
     if (!n.mounted) return
     this.nodes.delete(n.id)
+    // Its native end events will not reach it (the generation moves).
+    for (const p of n.pendingAnims?.splice(0) ?? []) p.resolve({ finished: false, reason: "removed" })
     if (this.ready()) this.encoder.remove(n.id)
     this.gens[n.id] = (this.gens[n.id]! + 1) & 0xffff
     this.freeIds.push(n.id)

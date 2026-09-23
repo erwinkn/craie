@@ -471,9 +471,29 @@ impl Ui {
     /// Unconditional layout pass, instrumented: returns (root-layout ms,
     /// finalize ms).
     pub fn layout_timed(&mut self, size: Size) -> (f64, f64) {
-        let mut total = (0.0, 0.0);
         self.laid_out = Some(size);
         self.relayout = true;
+        let total = self.compute_layout(size);
+        // Anchored scrollers first; explicit scroll commands win.
+        self.restore_anchors();
+        self.apply_pending_scrolls();
+        // Content that shrank below a scroll offset pulls the offset back
+        // into range, as browsers do.
+        for id in self.layouts.extents.take() {
+            let node = NodeId(id);
+            if self.host.is_live(node) {
+                let [x, y] = self.host.spatial[node.index()].scroll;
+                self.scroll_to(node, x, y);
+            }
+        }
+        total
+    }
+
+    /// Taffy over every root at `size`, and nothing else: no anchoring,
+    /// no scroll commands, no offset clamping (the animation probe runs
+    /// it; `layout_timed` adds those).
+    pub(crate) fn compute_layout(&mut self, size: Size) -> (f64, f64) {
+        let mut total = (0.0, 0.0);
         self.layouts.passes += 1;
         let roots: Vec<NodeId> = self.host.children(crate::host::ROOT).to_vec();
         layout::invalidate(&mut self.host, &mut self.layouts);
@@ -489,18 +509,6 @@ impl Ui {
             );
             total.0 += c;
             total.1 += r;
-        }
-        // Anchored scrollers first; explicit scroll commands win.
-        self.restore_anchors();
-        self.apply_pending_scrolls();
-        // Content that shrank below a scroll offset pulls the offset back
-        // into range, as browsers do.
-        for id in self.layouts.extents.take() {
-            let node = NodeId(id);
-            if self.host.is_live(node) {
-                let [x, y] = self.host.spatial[node.index()].scroll;
-                self.scroll_to(node, x, y);
-            }
         }
         total
     }

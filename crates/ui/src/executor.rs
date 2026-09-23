@@ -527,6 +527,8 @@ impl Ui {
             Mutation::Detach { id } => self.host.detach(NodeId(*id)),
             Mutation::Remove { id } => {
                 let node = NodeId(*id);
+                // Its tweens end before the slot's generation moves.
+                self.end_animations_of(node, crate::animation::end_reason::REMOVED);
                 self.host.remove(node);
                 self.forget_node_state(node);
                 for slot in [&mut self.focus, &mut self.hover, &mut self.pressed] {
@@ -594,8 +596,10 @@ impl Ui {
                 timing,
             } => {
                 let node = NodeId(*id);
-                if self.start_animation(node, *prop, *value, *timing) {
+                if self.start_animation(node, *prop, *value, *timing, true) {
+                    // Applied at once: it ends now.
                     self.write_value(node, *prop, *value);
+                    self.report_end(node, *prop, crate::animation::end_reason::FINISHED);
                 }
             }
             Mutation::Paragraph { id, text, spans } => {
@@ -803,6 +807,7 @@ impl Ui {
         }
         self.inputs.remove(node.0);
         self.animations.forget(node);
+        self.layouts.forget(node);
     }
 
     /// Writes a node's layout row; the one writer for layout inputs

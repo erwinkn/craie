@@ -364,7 +364,8 @@ impl Decomposed {
         // M = R(angle) * [[sx, u], [0, sy]] (columns (a, b), (c, d)).
         let angle = b.atan2(a);
         let (sin, cos) = angle.sin_cos();
-        let sx = (a * a + b * b).sqrt();
+        // hypot: no overflow for large finite scales.
+        let sx = a.hypot(b);
         let u = cos * c + sin * d;
         let sy = -sin * c + cos * d;
         Decomposed {
@@ -454,6 +455,31 @@ pub(crate) struct Anim {
     pub declared: Value,
     pub start: f64,
     pub timing: Timing,
+    /// Started by `Animate`: its end is reported to JS
+    /// (`out_kind::ANIMATION_END`).
+    pub notify: bool,
+}
+
+/// Why an `Animate` tween ended (`out_kind::ANIMATION_END`, key bits
+/// 8..16).
+pub mod end_reason {
+    /// It reached its target.
+    pub const FINISHED: u32 = 0;
+    /// A mutation set the property with no transition.
+    pub const CANCELLED: u32 = 1;
+    /// Another tween of the property replaced it.
+    pub const RETARGETED: u32 = 2;
+    /// Its node was removed.
+    pub const REMOVED: u32 = 3;
+}
+
+/// The value a row would hold for `v`: the clamps of the row writer.
+fn clamped(prop: Prop, v: Num) -> Num {
+    match v {
+        Num::Scalar(o) if prop == Prop::Opacity => Num::Scalar(o.clamp(0.0, 1.0)),
+        Num::Lengths(l) => Num::Lengths(l.map(|x| x.max(0.0))),
+        v => v,
+    }
 }
 
 /// Active animations (the driver's state).
@@ -469,7 +495,7 @@ impl Animations {
             .position(|a| a.node == node && a.prop == prop)
     }
 
-    /// Drops a node's animations (removed or recreated).
+    /// Drops a node's animations (a recycled slot starts clean).
     pub(crate) fn forget(&mut self, node: NodeId) {
         self.active.retain(|a| a.node != node);
     }
@@ -556,7 +582,10 @@ impl Ui {
             Value::Size(d) => match dim_length(d) {
                 Some(v) => Num::Lengths([v, 0.0, 0.0, 0.0]),
                 None => {
-                    self.laid_out?;
+                    // The laid-out size of this occupant of the slot.
+                    if !self.layouts.is_laid_out(node) {
+                        return None;
+                    }
                     let r = self.layouts.data(node).rect.size;
                     let v = if prop == Prop::Width {
                         r.width
@@ -611,40 +640,49 @@ impl Ui {
         }
         let Some(timing) = self.transition(node, prop) else {
             if let Some(i) = running {
-                self.animations.active.swap_remove(i);
+                self.end_animation(i, end_reason::CANCELLED);
             }
             return true;
         };
         if running.is_none() && self.row_value(node, prop) == next {
             return true;
         }
-        self.start_animation(node, prop, next, timing)
+        self.start_animation(node, prop, next, timing, false)
     }
 
-    /// Starts (or retargets) a tween of `prop` to `declared`. Returns
-    /// whether the caller writes the value now instead (nothing to tween
-    /// from, or no time to tween in).
+    /// Starts (or retargets) a tween of `prop` to `declared`; `notify`
+    /// reports its end to JS. Returns whether the caller writes the
+    /// value now instead: nothing to tween from (never laid out, a
+    /// percent padding or gap), a padding or gap target that is not a
+    /// length (`LEDGER.md` DF-4), or no time to tween in.
     pub(crate) fn start_animation(
         &mut self,
         node: NodeId,
         prop: Prop,
         declared: Value,
         timing: Timing,
+        notify: bool,
     ) -> bool {
         let running = self.animations.find(node, prop);
         let from = match running {
-            // Retarget from the value on screen now.
+            // Retarget from the value on screen now: the sample, clamped
+            // as the row writer clamps it; an unresolved target has not
+            // moved from its start yet.
             Some(i) => {
                 let a = &self.animations.active[i];
                 let p = a.timing.progress(self.time - a.start) as f32;
-                a.to.map(|to| a.from.lerp(&to, p))
+                Some(clamped(prop, a.to.map_or(a.from, |to| a.from.lerp(&to, p))))
             }
             None => self.current_num(node, prop),
         };
         if let Some(i) = running {
-            self.animations.active.swap_remove(i);
+            self.end_animation(i, end_reason::RETARGETED);
         }
-        let Some(from) = from else { return true };
+        let to = Self::declared_num(&declared);
+        let resolvable = to.is_some() || matches!(prop, Prop::Width | Prop::Height);
+        let Some(from) = from.filter(|_| resolvable) else {
+            return true;
+        };
         if timing.total_secs() <= 0.0 {
             return true;
         }
@@ -652,18 +690,41 @@ impl Ui {
             node,
             prop,
             from,
-            to: Self::declared_num(&declared),
+            to,
             declared,
             start: self.time,
             timing,
+            notify,
         });
         self.force_paint = true;
         false
     }
 
+    /// Removes animation `i`, reporting its end when JS started it.
+    fn end_animation(&mut self, i: usize, reason: u32) {
+        let a = self.animations.active.swap_remove(i);
+        if a.notify {
+            self.report_end(a.node, a.prop, reason);
+        }
+    }
+
+    /// Queues an `ANIMATION_END` event for JS.
+    pub(crate) fn report_end(&mut self, node: NodeId, prop: Prop, reason: u32) {
+        let mut e = self.event(crate::events::out_kind::ANIMATION_END, node);
+        e.key = prop as u32 | reason << 8;
+        self.pending_events.push(e);
+    }
+
+    /// Ends every animation of `node` (it is being removed).
+    pub(crate) fn end_animations_of(&mut self, node: NodeId, reason: u32) {
+        while let Some(i) = self.animations.active.iter().position(|a| a.node == node) {
+            self.end_animation(i, reason);
+        }
+    }
+
     /// Advances every animation to the clock and writes the rows (the
-    /// top of `render`). A target layout must resolve first runs one
-    /// probe layout at `size`.
+    /// top of `render`). Targets layout must resolve first run one probe
+    /// layout at `size`.
     pub(crate) fn run_animations(&mut self, size: Size) {
         if self.animations.is_empty() {
             return;
@@ -679,7 +740,7 @@ impl Ui {
             let t = now - a.start;
             if t >= a.timing.total_secs() {
                 self.write_value(a.node, a.prop, a.declared);
-                self.animations.active.swap_remove(k);
+                self.end_animation(k, end_reason::FINISHED);
                 continue;
             }
             let p = a.timing.progress(t) as f32;
@@ -691,46 +752,60 @@ impl Ui {
         self.force_paint = true;
     }
 
-    /// Lays out once with each unresolved target declared, reads the
-    /// resolved sizes, and puts the start values back.
+    /// Resolves size targets that are not lengths: one layout compute
+    /// with every running layout animation at its declared value (so
+    /// targets that depend on each other resolve together), then every
+    /// row back as it was. The compute has no side effects beyond the
+    /// layout results: no anchoring, scroll commands, or offset clamps;
+    /// the frame's own layout pass runs those.
     fn probe_targets(&mut self, size: Size) {
-        let probing: Vec<usize> = (0..self.animations.active.len())
-            .filter(|&i| self.animations.active[i].to.is_none())
-            .collect();
-        for &i in &probing {
+        let mut saved: Vec<(NodeId, taffy::Style)> = Vec::new();
+        for i in 0..self.animations.active.len() {
             let a = self.animations.active[i].clone();
+            if !a.prop.is_layout() {
+                continue;
+            }
+            if !saved.iter().any(|(n, _)| *n == a.node) {
+                saved.push((a.node, self.host.layout[a.node.index()].clone()));
+            }
             self.write_value(a.node, a.prop, a.declared);
         }
-        self.layout(size);
-        for &i in &probing {
-            let a = &self.animations.active[i];
+        self.compute_layout(size);
+        for a in self.animations.active.iter_mut().filter(|a| a.to.is_none()) {
             let r = self.layouts.data(a.node).rect.size;
             let v = if a.prop == Prop::Width {
                 r.width
             } else {
                 r.height
             };
-            let (node, prop, from) = (a.node, a.prop, a.from);
-            self.animations.active[i].to = Some(Num::Lengths([v, 0.0, 0.0, 0.0]));
-            self.write_num(node, prop, from);
+            a.to = Some(Num::Lengths([v, 0.0, 0.0, 0.0]));
         }
+        for (node, style) in saved {
+            self.set_layout(node, style);
+        }
+        // The frame lays out in full after this (anchors, scrolls,
+        // clamps) even if every row came back unchanged.
+        self.laid_out = None;
     }
 
-    /// Writes an interpolated number to the row.
+    /// Writes an interpolated number to the row (clamped as rows are; a
+    /// transform that does not come out finite keeps the last frame).
     fn write_num(&mut self, node: NodeId, prop: Prop, v: Num) {
-        let value = match (prop, v) {
-            (Prop::Transform, Num::Transform(d)) => Value::Transform(d.affine()),
-            (Prop::Opacity, Num::Scalar(o)) => Value::Opacity(o.clamp(0.0, 1.0)),
+        let value = match (prop, clamped(prop, v)) {
+            (Prop::Transform, Num::Transform(d)) => {
+                let m = d.affine();
+                if !m.0.iter().all(|x| x.is_finite()) {
+                    return;
+                }
+                Value::Transform(m)
+            }
+            (Prop::Opacity, Num::Scalar(o)) => Value::Opacity(o),
             (Prop::Fill | Prop::BorderColor, Num::Color(c)) => Value::Color(c),
-            (Prop::Width | Prop::Height, Num::Lengths(l)) => {
-                Value::Size(Dimension::length(l[0].max(0.0)))
-            }
-            (Prop::Padding, Num::Lengths(l)) => {
-                Value::Padding(l.map(|v| LengthPercentage::length(v.max(0.0))))
-            }
+            (Prop::Width | Prop::Height, Num::Lengths(l)) => Value::Size(Dimension::length(l[0])),
+            (Prop::Padding, Num::Lengths(l)) => Value::Padding(l.map(LengthPercentage::length)),
             (Prop::Gap, Num::Lengths(l)) => Value::Gap([
-                LengthPercentage::length(l[0].max(0.0)),
-                LengthPercentage::length(l[1].max(0.0)),
+                LengthPercentage::length(l[0]),
+                LengthPercentage::length(l[1]),
             ]),
             _ => return,
         };

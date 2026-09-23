@@ -112,18 +112,6 @@ Reviewer minors and nitpicks not fixed yet.
   span of the hovered text node and emits enter and leave with it),
   when a consumer needs it.
 
-### DF-3: no completion signal for `animate`
-
-- Source: step 4 implementation (own finding).
-- Where: crates/ui/src/animation.rs, packages/bridge/src/host.ts
-  (`HostNode.animate`).
-- Claim: JS cannot await the end of a native tween (no event, no
-  promise), so sequencing animations needs timers.
-- Why deferred: not in the section 12 target; the event family needs a
-  listener bit and a routing rule.
-- Resolves in: an animation-end event (kind, node, property) when a
-  consumer needs sequencing.
-
 ### DF-4: padding and gap tweens need lengths
 
 - Source: step 4 implementation (own finding).
@@ -160,3 +148,9 @@ Reviewer minors and nitpicks not fixed yet.
   ancestors) and S3C-17..19 (a press in an input clears, copy keeps
   empty paragraphs, exact distance under shear): fixed in step 3c
   round 2.
+- DF-3 (no completion signal for `animate`): promoted into step 4 by
+  the parent and done in round 1 (`ANIMATION_END` event, a promise from
+  `node.animate`).
+- S4-01..07 (probe side effects, dependent probe targets, percent
+  padding and gap, recycled layout, unresolved retargets, clamped
+  retarget starts, overflow in transforms): fixed in step 4 round 1.
