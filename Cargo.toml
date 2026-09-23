@@ -2,6 +2,7 @@
 resolver = "3"
 members = [
     "crates/core",
+    "crates/layout",
     "crates/scene",
     "crates/render",
     "crates/text",
@@ -16,6 +17,7 @@ members = [
 # `cargo test` leaves it out.
 default-members = [
     "crates/core",
+    "crates/layout",
     "crates/scene",
     "crates/render",
     "crates/text",
@@ -34,6 +36,7 @@ repository = "https://github.com/erwinkn/craie"
 
 [workspace.dependencies]
 craie-core = { path = "crates/core" }
+craie-layout = { path = "crates/layout" }
 craie-scene = { path = "crates/scene" }
 craie-render = { path = "crates/render" }
 craie-text = { path = "crates/text" }

@@ -1253,7 +1253,7 @@ fn malformed_style_rejects_transaction() {
     let mut t = Transaction::new(1);
     t.create(0, NodeKind::View).append(NIL, 0);
     ui.apply_txn(&t).unwrap();
-    let before = ui.host.style(NodeId(0)).clone();
+    let before = *ui.host.style(NodeId(0));
     let seq = ui.seq;
     let mut t = Transaction::new(7);
     t.layout(0, &sized(10.0, 10.0));
@@ -1348,7 +1348,10 @@ fn views_default_to_no_shrink() {
 #[test]
 fn rn_flex_defaults_matrix() {
     use crate::wire::field;
-    let flex = |s: &taffy::Style| (s.flex_grow, s.flex_shrink, s.flex_basis);
+    let flex = |s: &craie_layout::LayoutRow| {
+        let t = s.to_taffy();
+        (t.flex_grow, t.flex_shrink, t.flex_basis)
+    };
     let rn = (0.0, 0.0, taffy::Dimension::auto());
     let row = |w: f32| taffy::Style {
         flex_direction: taffy::FlexDirection::Row,
@@ -1408,7 +1411,8 @@ fn rn_flex_defaults_matrix() {
     assert_eq!(flex(&ui.host.layout[1]), rn, "omitted");
     assert_eq!(flex(&ui.host.layout[2]), rn, "partial");
     assert_eq!(
-        ui.host.layout[2].size, child.size,
+        ui.host.layout[2].size(),
+        child.size,
         "partial keeps its fields"
     );
     assert_ne!(flex(&ui.host.layout[3]), rn, "explicit");

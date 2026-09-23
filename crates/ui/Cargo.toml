@@ -8,6 +8,7 @@ repository.workspace = true
 
 [dependencies]
 craie-core.workspace = true
+craie-layout.workspace = true
 craie-scene.workspace = true
 craie-text.workspace = true
 craie-vector.workspace = true

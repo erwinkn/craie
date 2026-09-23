@@ -100,7 +100,7 @@ impl Ui {
     fn hit_node(&self, id: NodeId, p: Point) -> Option<NodeId> {
         self.host.node(id)?;
         let style = self.host.style(id);
-        if style.display == taffy::Display::None {
+        if style.display() == taffy::Display::None {
             return None;
         }
         let data = self.layouts.data(id);
@@ -111,8 +111,9 @@ impl Ui {
             let m = t.about(Point::new(size.width / 2.0, size.height / 2.0));
             q = m.invert()?.apply(q);
         }
-        let clips = style.overflow.x != taffy::Overflow::Visible
-            || style.overflow.y != taffy::Overflow::Visible;
+        let overflow = style.overflow();
+        let clips =
+            overflow.x != taffy::Overflow::Visible || overflow.y != taffy::Overflow::Visible;
         let (clip, radius, open) = self.clip_shape(id, [0.0, 0.0], &data);
         if !clips || in_clip(q, &clip, radius, open) {
             let [sx, sy] = self.scroll_offset_if_scrolls(id);
@@ -202,10 +203,11 @@ impl Ui {
         while let Some(id) = cur {
             self.host.node(id)?;
             let style = self.host.style(id);
+            let overflow = style.overflow();
             let scrolls = if dy {
-                style.overflow.y == taffy::Overflow::Scroll
+                overflow.y == taffy::Overflow::Scroll
             } else {
-                style.overflow.x == taffy::Overflow::Scroll
+                overflow.x == taffy::Overflow::Scroll
             };
             if scrolls {
                 return Some(id);

@@ -326,8 +326,9 @@ impl Ui {
         let mut cur = self.host.parent(id);
         while cur.is_node() {
             let style = self.host.style(cur);
-            let sx = style.overflow.x == taffy::Overflow::Scroll;
-            let sy = style.overflow.y == taffy::Overflow::Scroll;
+            let overflow = style.overflow();
+            let sx = overflow.x == taffy::Overflow::Scroll;
+            let sy = overflow.y == taffy::Overflow::Scroll;
             if sx || sy {
                 let c = self.abs_rect(cur);
                 let cur_off = self.host.spatial[cur.index()].scroll;
@@ -360,8 +361,9 @@ impl Ui {
     pub fn scroll_to(&mut self, id: NodeId, x: f32, y: f32) -> Option<[f32; 2]> {
         self.host.node(id)?;
         let style = self.host.style(id);
-        let x_ok = style.overflow.x == taffy::Overflow::Scroll;
-        let y_ok = style.overflow.y == taffy::Overflow::Scroll;
+        let overflow = style.overflow();
+        let x_ok = overflow.x == taffy::Overflow::Scroll;
+        let y_ok = overflow.y == taffy::Overflow::Scroll;
         if !x_ok && !y_ok {
             return None;
         }
@@ -589,9 +591,8 @@ impl Ui {
     /// The scroll offset a container applies to its children.
     pub(crate) fn scroll_offset_if_scrolls(&self, id: NodeId) -> [f32; 2] {
         let style = self.host.style(id);
-        if style.overflow.x == taffy::Overflow::Scroll
-            || style.overflow.y == taffy::Overflow::Scroll
-        {
+        let overflow = style.overflow();
+        if overflow.x == taffy::Overflow::Scroll || overflow.y == taffy::Overflow::Scroll {
             self.host.spatial[id.index()].scroll
         } else {
             [0.0; 2]

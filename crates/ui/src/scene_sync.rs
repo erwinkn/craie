@@ -437,13 +437,14 @@ impl Ui {
     fn visit_node(&mut self, id: NodeId, ctx: Ctx, topo: bool, out: &mut Topo) -> Option<Ctx> {
         self.host.node(id)?;
         let style = self.host.style(id);
-        if style.display == taffy::Display::None {
+        if style.display() == taffy::Display::None {
             return None;
         }
-        let clips = style.overflow.x != taffy::Overflow::Visible
-            || style.overflow.y != taffy::Overflow::Visible;
-        let scrolls = style.overflow.x == taffy::Overflow::Scroll
-            || style.overflow.y == taffy::Overflow::Scroll;
+        let overflow = style.overflow();
+        let clips =
+            overflow.x != taffy::Overflow::Visible || overflow.y != taffy::Overflow::Visible;
+        let scrolls =
+            overflow.x == taffy::Overflow::Scroll || overflow.y == taffy::Overflow::Scroll;
         let data = self.layouts.data(id);
         let spatial = self.host.spatial[id.index()];
         let origin = [
@@ -633,8 +634,8 @@ impl Ui {
     ) -> (Rect, f32, [bool; 2]) {
         let style = self.host.style(id);
         let open = [
-            style.overflow.x == taffy::Overflow::Visible,
-            style.overflow.y == taffy::Overflow::Visible,
+            style.overflow().x == taffy::Overflow::Visible,
+            style.overflow().y == taffy::Overflow::Visible,
         ];
         let rect = Rect::new(
             offset[0] + data.clip_box.origin.x,

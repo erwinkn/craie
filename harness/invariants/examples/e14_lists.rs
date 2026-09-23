@@ -74,7 +74,7 @@ fn text(i: u32) -> String {
 }
 
 fn scroller() -> taffy::Style {
-    let mut s = craie_ui::host::default_style();
+    let mut s = craie_ui::host::default_style().to_taffy();
     s.size = taffy::Size {
         width: taffy::Dimension::percent(1.0),
         height: taffy::Dimension::percent(1.0),

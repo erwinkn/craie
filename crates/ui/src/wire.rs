@@ -1244,7 +1244,7 @@ impl<'a> Reader<'a> {
         if mask & !field::ALL != 0 {
             return Err(WireError::BadRef("style field"));
         }
-        let mut s = crate::host::default_style();
+        let mut s = crate::host::default_style().to_taffy();
         if mask & field::DISPLAY != 0 {
             s.display = match self.u8()? {
                 0 => Display::Flex,

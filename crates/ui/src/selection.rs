@@ -49,7 +49,8 @@ impl Ui {
         let mut out = Vec::new();
         let mut stack = vec![domain];
         while let Some(id) = stack.pop() {
-            if self.host.node(id).is_none() || self.host.style(id).display == taffy::Display::None {
+            if self.host.node(id).is_none() || self.host.style(id).display() == taffy::Display::None
+            {
                 continue;
             }
             if self.host.kind(id) == Some(NodeKind::Text) {

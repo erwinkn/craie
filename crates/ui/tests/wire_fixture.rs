@@ -58,7 +58,7 @@ fn js_fixture_decodes_and_executes() {
     assert_eq!(ui.inputs.text(2), "seed");
 
     // The root owns its layout row.
-    let style = host.style(NodeId(0));
+    let style = host.style(NodeId(0)).to_taffy();
     assert_eq!(style.flex_direction, FlexDirection::Column);
     assert_eq!(style.gap.width, LengthPercentage::length(12.0));
     assert_eq!(style.padding.left, LengthPercentage::length(16.0));

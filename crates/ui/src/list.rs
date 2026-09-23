@@ -578,7 +578,7 @@ impl crate::host::Host {
             return false;
         };
         let shown = |r: NodeId| {
-            self.list_index[r.index()] < l.len() && self.style(r).display != taffy::Display::None
+            self.list_index[r.index()] < l.len() && self.style(r).display() != taffy::Display::None
         };
         if !shown(row) {
             return false;
@@ -617,11 +617,11 @@ impl crate::ui::Ui {
             }
             let style = self.host.style(cur);
             let offset = self.host.spatial[cur.index()].scroll;
-            if style.overflow.y == taffy::Overflow::Scroll {
+            if style.overflow().y == taffy::Overflow::Scroll {
                 let d = self.layouts.data(cur);
                 break (cur, d.clip_box, offset, d.scroll_extent[1]);
             }
-            if style.overflow.x == taffy::Overflow::Scroll {
+            if style.overflow().x == taffy::Overflow::Scroll {
                 to_view = Affine::translate(-offset[0], -offset[1]).mul(&to_view);
             }
             to_view = local(cur).mul(&to_view);

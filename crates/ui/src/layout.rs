@@ -18,7 +18,7 @@ use taffy::util::{MaybeResolve, ResolveOrZero};
 use taffy::{
     AvailableSpace, Cache, CacheTree, Layout, LayoutFlexboxContainer, LayoutInput, LayoutOutput,
     LayoutPartialTree, Line, NodeId as TaffyId, Point, RequestedAxis, RoundTree, RunMode,
-    Size as TSize, SizingMode, Style, TraversePartialTree, TraverseTree, compute_cached_layout,
+    Size as TSize, SizingMode, TraversePartialTree, TraverseTree, compute_cached_layout,
     compute_flexbox_layout, compute_hidden_layout, compute_leaf_layout, compute_root_layout,
 };
 
@@ -28,6 +28,7 @@ use crate::input::Inputs;
 use crate::mutation::NodeKind;
 use crate::text::TextEngine;
 use crate::text::paragraph::{Paragraph as TextParagraph, SpanStyle, TextSpec, TextStyle};
+use craie_layout::LayoutRow;
 
 /// Computed border box for a node, relative to its parent's content box,
 /// in logical units. Written by `round_layout`, read by paint and
@@ -66,7 +67,7 @@ pub struct MeasuredText {
 /// each node owns its row in `Host::layout`.
 pub struct Layouts {
     /// Style for ids outside the host arena.
-    default: Style,
+    default: LayoutRow,
     cache: Vec<Cache>,
     unrounded: Vec<Layout>,
     rects: Vec<LayoutData>,
@@ -242,7 +243,7 @@ struct TreeView<'a> {
 }
 
 impl TreeView<'_> {
-    fn style_of(&self, id: NodeId) -> &Style {
+    fn style_of(&self, id: NodeId) -> &LayoutRow {
         self.host
             .layout
             .get(id.index())
@@ -308,7 +309,7 @@ impl TreeView<'_> {
                 return TSize::ZERO;
             };
             let style = self.style_of(id);
-            let size = style.size;
+            let size = style.size();
             let content = |known: Option<f32>, set: bool, avail: AvailableSpace| {
                 (known.is_some() || set)
                     .then(|| avail.into_option())
@@ -318,13 +319,13 @@ impl TreeView<'_> {
             // (Taffy's rules: padding and border percentages against its
             // width); under border-box sizing they lose padding and
             // border to become content sizes.
-            let padding = style.padding.resolve_or_zero(parent.width, no_calc);
-            let border = style.border.resolve_or_zero(parent.width, no_calc);
+            let padding = style.padding().resolve_or_zero(parent.width, no_calc);
+            let border = style.border().resolve_or_zero(parent.width, no_calc);
             let inset = [
                 padding.left + padding.right + border.left + border.right,
                 padding.top + padding.bottom + border.top + border.bottom,
             ];
-            let content_box = style.box_sizing == taffy::BoxSizing::ContentBox;
+            let content_box = style.box_sizing() == taffy::BoxSizing::ContentBox;
             let limit = |d: taffy::LengthPercentageAuto, of: Option<f32>, axis: usize| {
                 d.maybe_resolve(of, no_calc).map(|v| {
                     if content_box {
@@ -341,12 +342,12 @@ impl TreeView<'_> {
                     content(known.height, !size.height.is_auto(), available.height),
                 ],
                 [
-                    limit(style.min_size.width, parent.width, 0),
-                    limit(style.min_size.height, parent.height, 1),
+                    limit(style.min_size().width, parent.width, 0),
+                    limit(style.min_size().height, parent.height, 1),
                 ],
                 [
-                    limit(style.max_size.width, parent.width, 0),
-                    limit(style.max_size.height, parent.height, 1),
+                    limit(style.max_size().width, parent.width, 0),
+                    limit(style.max_size().height, parent.height, 1),
                 ],
             );
             return TSize { width, height };
@@ -413,7 +414,7 @@ impl TreeView<'_> {
         &mut self,
         node_id: TaffyId,
         inputs: LayoutInput,
-        style: &Style,
+        style: &LayoutRow,
     ) -> LayoutOutput {
         let id = from_taffy(node_id);
         // A probe (the animation driver's) lays rows out without
@@ -421,8 +422,8 @@ impl TreeView<'_> {
         let commit = inputs.run_mode == RunMode::PerformLayout;
         let record = commit && !self.store.probing;
         let parent_w = inputs.parent_size.width;
-        let inset = style.padding.resolve_or_zero(parent_w, no_calc)
-            + style.border.resolve_or_zero(parent_w, no_calc);
+        let inset = style.padding().resolve_or_zero(parent_w, no_calc)
+            + style.border().resolve_or_zero(parent_w, no_calc);
         // The definite content height, as flex resolves a percentage row
         // gap against it: the known height, else the style's (clamped
         // by min/max), minus the insets of a border box.
@@ -431,7 +432,7 @@ impl TreeView<'_> {
         let parent_h = inputs.parent_size.height;
         let inset_v = inset.top + inset.bottom;
         let to_inner = |h: f32| {
-            if style.box_sizing == taffy::BoxSizing::ContentBox {
+            if style.box_sizing() == taffy::BoxSizing::ContentBox {
                 h
             } else {
                 (h - inset_v).max(0.0)
@@ -440,12 +441,12 @@ impl TreeView<'_> {
         let (min_inner, max_inner) = match inputs.sizing_mode {
             SizingMode::InherentSize => (
                 style
-                    .min_size
+                    .min_size()
                     .height
                     .maybe_resolve(parent_h, no_calc)
                     .map(to_inner),
                 style
-                    .max_size
+                    .max_size()
                     .height
                     .maybe_resolve(parent_h, no_calc)
                     .map(to_inner),
@@ -460,15 +461,16 @@ impl TreeView<'_> {
             Some(h) => Some((h - inset_v).max(0.0)),
             None => match inputs.sizing_mode {
                 SizingMode::InherentSize => style
-                    .size
+                    .size()
                     .height
                     .maybe_resolve(parent_h, no_calc)
                     .map(|h| clamp(to_inner(h))),
                 SizingMode::ContentSize => None,
             },
         };
-        let gap = style.gap.height;
-        let mut out = compute_leaf_layout(inputs, style, no_calc, |known, available| {
+        let gap = style.gap().height;
+        let style_for_leaf = style.to_taffy();
+        let mut out = compute_leaf_layout(inputs, &style_for_leaf, no_calc, |known, available| {
             // The content-box width: Taffy resolves padding, border,
             // min/max, and percentages into the available width. (A
             // known width in a size probe is the border box.)
@@ -544,12 +546,15 @@ impl TreeView<'_> {
         let children: Vec<NodeId> = self.host.children(id).to_vec();
         for row in children {
             let index = self.host.list_index[row.index()];
-            let hidden_style = self.style_of(row).display == taffy::Display::None;
+            let hidden_style = self.style_of(row).display() == taffy::Display::None;
             if index >= count || hidden_style || rows.iter().any(|r| r.1 == index) {
                 hidden.push(row);
                 continue;
             }
-            let margin = self.style_of(row).margin.resolve_or_zero(Some(w), no_calc);
+            let margin = self
+                .style_of(row)
+                .margin()
+                .resolve_or_zero(Some(w), no_calc);
             let rw = (w - margin.left - margin.right).max(0.0);
             // A row at the row width, its height from its content.
             let out = self.compute_child_layout(
@@ -628,8 +633,8 @@ impl TreeView<'_> {
         for (k, (r, y)) in rows.iter().zip(offsets).enumerate() {
             let (row, _, extent, margin, overflow) = *r;
             let st = self.style_of(row);
-            let padding = st.padding.resolve_or_zero(Some(w), no_calc);
-            let border = st.border.resolve_or_zero(Some(w), no_calc);
+            let padding = st.padding().resolve_or_zero(Some(w), no_calc);
+            let border = st.border().resolve_or_zero(Some(w), no_calc);
             let size = TSize {
                 width: (w - margin.left - margin.right).max(0.0),
                 height: extent - margin.top - margin.bottom,
@@ -690,7 +695,7 @@ impl TraverseTree for TreeView<'_> {}
 
 impl LayoutPartialTree for TreeView<'_> {
     type CoreContainerStyle<'a>
-        = &'a Style
+        = &'a LayoutRow
     where
         Self: 'a;
     type CustomIdent = String;
@@ -712,8 +717,8 @@ impl LayoutPartialTree for TreeView<'_> {
             let hidden = tree.host.node(id).is_none();
             // Clone the style: the leaf arm borrows `tree` mutably for the
             // measure callback while Taffy still holds the style ref.
-            let style = tree.style_of(id).clone();
-            if hidden || style.display == taffy::Display::None {
+            let style = *tree.style_of(id);
+            if hidden || style.display() == taffy::Display::None {
                 return compute_hidden_layout(tree, node_id);
             }
             if tree.host.kind(id) == Some(NodeKind::List) {
@@ -737,11 +742,11 @@ impl LayoutPartialTree for TreeView<'_> {
 
 impl LayoutFlexboxContainer for TreeView<'_> {
     type FlexboxContainerStyle<'a>
-        = &'a Style
+        = &'a LayoutRow
     where
         Self: 'a;
     type FlexboxItemStyle<'a>
-        = &'a Style
+        = &'a LayoutRow
     where
         Self: 'a;
 

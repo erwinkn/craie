@@ -156,7 +156,10 @@ fn width_tween_reflows_siblings() {
     at(&mut ui, 1.0);
     assert!(near(x2(&ui), 200.0));
     assert!(!ui.animating());
-    assert_eq!(ui.host.layout[1], sized(200.0, 40.0));
+    assert_eq!(
+        ui.host.layout[1],
+        craie_layout::LayoutRow::from(&sized(200.0, 40.0))
+    );
 }
 
 /// A tween to `auto` finds its end by one probe layout and restores
@@ -205,7 +208,7 @@ fn size_tweens_to_and_from_auto() {
     assert!(near(width(&ui), 200.0), "{}", width(&ui));
     at(&mut ui, 1.0);
     assert!(near(width(&ui), 300.0));
-    assert!(ui.host.layout[1].size.width.is_auto(), "auto restored");
+    assert!(ui.host.layout[1].size().width.is_auto(), "auto restored");
     // Back from auto: starts at the laid-out 300.
     apply(&mut ui, |t| {
         t.layout(1, &sized(50.0, 40.0));
@@ -213,7 +216,10 @@ fn size_tweens_to_and_from_auto() {
     at(&mut ui, 1.5);
     assert!(near(width(&ui), 175.0), "{}", width(&ui));
     at(&mut ui, 2.0);
-    assert_eq!(ui.host.layout[1], sized(50.0, 40.0));
+    assert_eq!(
+        ui.host.layout[1],
+        craie_layout::LayoutRow::from(&sized(50.0, 40.0))
+    );
 }
 
 /// A resent equal value leaves a tween running; a new one retargets it

@@ -51,7 +51,7 @@ fn scroller_style() -> taffy::Style {
             x: taffy::Overflow::Visible,
             y: taffy::Overflow::Scroll,
         },
-        ..craie_ui::host::default_style()
+        ..craie_ui::host::default_style().to_taffy()
     }
 }
 
@@ -168,7 +168,7 @@ fn oracle_with(list_style: taffy::Style, what: &str, expect_exact: bool) {
                         width: taffy::Dimension::length(50.0),
                         height: taffy::Dimension::length(30.0),
                     },
-                    ..craie_ui::host::default_style()
+                    ..craie_ui::host::default_style().to_taffy()
                 },
             )
             .append(SCROLLER, sibling);
@@ -391,7 +391,7 @@ fn oracle_with(list_style: taffy::Style, what: &str, expect_exact: bool) {
 #[test]
 fn virtualized_equals_plain_column() {
     use taffy::{LengthPercentage as LP, Rect};
-    let base = craie_ui::host::default_style();
+    let base = craie_ui::host::default_style().to_taffy();
     oracle(base.clone(), "plain");
     let padded = taffy::Style {
         padding: Rect {
@@ -1316,7 +1316,7 @@ fn probe_and_final_agree_on_wide_corrections() {
                     width: taffy::Dimension::length(10.0),
                     height: taffy::Dimension::length(10.0),
                 },
-                ..craie_ui::host::default_style()
+                ..craie_ui::host::default_style().to_taffy()
             },
         )
         .append(SCROLLER, sibling);
@@ -1332,7 +1332,7 @@ fn probe_and_final_agree_on_wide_corrections() {
                     width: taffy::Dimension::auto(),
                     height: taffy::Dimension::length(0.01),
                 },
-                ..craie_ui::host::default_style()
+                ..craie_ui::host::default_style().to_taffy()
             },
         )
         .list_index(100, 0)
@@ -1387,14 +1387,14 @@ fn percentage_gap_follows_min_max_height() {
                 width: LP::length(0.0),
                 height: LP::percent(0.1),
             },
-            ..craie_ui::host::default_style()
+            ..craie_ui::host::default_style().to_taffy()
         };
         let row = taffy::Style {
             size: taffy::Size {
                 width: D::auto(),
                 height: D::length(20.0),
             },
-            ..craie_ui::host::default_style()
+            ..craie_ui::host::default_style().to_taffy()
         };
         let build = |virtual_list: bool| {
             let mut ui = Ui::new(1.0);

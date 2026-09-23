@@ -28,7 +28,7 @@ use craie_core::dirty::DirtyQueue;
 use craie_core::geom::Affine;
 use craie_core::rev::Rev;
 use craie_core::span::{Span, SpanPool};
-use taffy::Style;
+use craie_layout::LayoutRow;
 
 use crate::mutation::{NIL, NodeKind, Role, TextSpan};
 
@@ -67,12 +67,8 @@ pub const ROOT: NodeId = NodeId::NIL;
 /// decodes over: React Native defaults (flex, column, stretch, no
 /// shrink), so a cross-platform kit needs no normalization
 /// (ARCHITECTURE.md §4).
-pub fn default_style() -> Style {
-    Style {
-        flex_direction: taffy::FlexDirection::Column,
-        flex_shrink: 0.0,
-        ..Style::default()
-    }
+pub fn default_style() -> LayoutRow {
+    LayoutRow::default()
 }
 
 /// Node ids index dense stores, so they are bounded: 2^24 slots. The
@@ -268,7 +264,7 @@ pub struct Host {
     child_pool: SpanPool<NodeId>,
     roots: Span,
     live: usize,
-    pub layout: Vec<Style>,
+    pub layout: Vec<LayoutRow>,
     pub spatial: Vec<Spatial>,
     pub paint: Vec<BoxPaint>,
     pub paragraphs: Vec<Paragraph>,
@@ -596,7 +592,7 @@ impl Host {
             .map(|_| &self.paragraphs[id.index()])
     }
 
-    pub fn style(&self, id: NodeId) -> &Style {
+    pub fn style(&self, id: NodeId) -> &LayoutRow {
         &self.layout[id.index()]
     }
 
@@ -604,7 +600,7 @@ impl Host {
     pub fn display_none(&self, id: NodeId) -> bool {
         self.layout
             .get(id.index())
-            .is_some_and(|s| s.display == taffy::Display::None)
+            .is_some_and(|s| s.display() == taffy::Display::None)
     }
 
     pub fn label(&self, id: NodeId) -> Option<&str> {

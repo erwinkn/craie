@@ -139,14 +139,15 @@ impl Ui {
     fn a11y_node(&self, id: NodeId, out: &mut Vec<(A11yId, Node)>) -> Option<A11yId> {
         let node = self.host.node(id)?;
         let style = self.host.style(id);
-        if style.display == taffy::Display::None {
+        if style.display() == taffy::Display::None {
             return None;
         }
         let props = self.host.interaction(id);
         let kind = node.kind;
 
-        let scroll_x = style.overflow.x == taffy::Overflow::Scroll;
-        let scroll_y = style.overflow.y == taffy::Overflow::Scroll;
+        let overflow = style.overflow();
+        let scroll_x = overflow.x == taffy::Overflow::Scroll;
+        let scroll_y = overflow.y == taffy::Overflow::Scroll;
 
         let mut an = Node::new(ak_role(props.role));
         match props.role {
@@ -190,9 +191,7 @@ impl Ui {
             x1: (r.origin.x + r.size.width) as f64,
             y1: (r.origin.y + r.size.height) as f64,
         });
-        if style.overflow.x != taffy::Overflow::Visible
-            || style.overflow.y != taffy::Overflow::Visible
-        {
+        if overflow.x != taffy::Overflow::Visible || overflow.y != taffy::Overflow::Visible {
             an.set_clips_children();
         }
         // A list row reports its place among all items, rendered or not.

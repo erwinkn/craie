@@ -288,7 +288,7 @@ fn list_ui() -> Ui {
     use craie_ui::mutation::ItemDesc;
     let mut ui = Ui::new(2.0);
     let mut d = ListDriver::new(1, 100, 14.0);
-    let mut s = craie_ui::host::default_style();
+    let mut s = craie_ui::host::default_style().to_taffy();
     s.size = taffy::Size {
         width: taffy::Dimension::percent(1.0),
         height: taffy::Dimension::percent(1.0),

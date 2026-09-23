@@ -18,7 +18,7 @@ craie-render.workspace = true
 wgpu.workspace = true
 craie-ui.workspace = true
 craie-vector.workspace = true
-taffy.workspace = true
+taffy = { workspace = true, features = ["taffy_tree"] }
 accesskit.workspace = true
 # E01 oracle: Parley over the pinned fonts.
 parley.workspace = true

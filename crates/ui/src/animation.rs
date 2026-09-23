@@ -12,6 +12,7 @@
 //! frame restores the declared value. Idle means no work.
 
 use craie_core::geom::Affine;
+use craie_layout::LayoutRow;
 use taffy::prelude::{Dimension, LengthPercentage};
 
 use crate::geom::Size;
@@ -558,15 +559,15 @@ impl Ui {
             Prop::Opacity => Value::Opacity(self.host.spatial[i].opacity),
             Prop::Fill => Value::Color(self.host.paint[i].fill),
             Prop::BorderColor => Value::Color(self.host.paint[i].border_color),
-            Prop::Width => Value::Size(s.size.width),
-            Prop::Height => Value::Size(s.size.height),
+            Prop::Width => Value::Size(s.size().width),
+            Prop::Height => Value::Size(s.size().height),
             Prop::Padding => Value::Padding([
-                s.padding.left,
-                s.padding.right,
-                s.padding.top,
-                s.padding.bottom,
+                s.padding().left,
+                s.padding().right,
+                s.padding().top,
+                s.padding().bottom,
             ]),
-            Prop::Gap => Value::Gap([s.gap.width, s.gap.height]),
+            Prop::Gap => Value::Gap([s.gap().width, s.gap().height]),
         }
     }
 
@@ -759,14 +760,14 @@ impl Ui {
     /// layout results: no anchoring, scroll commands, or offset clamps;
     /// the frame's own layout pass runs those.
     fn probe_targets(&mut self, size: Size) {
-        let mut saved: Vec<(NodeId, taffy::Style)> = Vec::new();
+        let mut saved: Vec<(NodeId, LayoutRow)> = Vec::new();
         for i in 0..self.animations.active.len() {
             let a = self.animations.active[i].clone();
             if !a.prop.is_layout() {
                 continue;
             }
             if !saved.iter().any(|(n, _)| *n == a.node) {
-                saved.push((a.node, self.host.layout[a.node.index()].clone()));
+                saved.push((a.node, self.host.layout[a.node.index()]));
             }
             self.write_value(a.node, a.prop, a.declared);
         }
@@ -833,24 +834,20 @@ impl Ui {
             }
             Value::Color(c) => self.set_paint(node, None, None, Some(c), None),
             _ => {
-                let mut style = self.host.layout[node.index()].clone();
+                let mut style = self.host.layout[node.index()];
                 match v {
-                    Value::Size(d) if prop == Prop::Width => style.size.width = d,
-                    Value::Size(d) => style.size.height = d,
-                    Value::Padding([l, r, t, b]) => {
-                        style.padding = taffy::Rect {
-                            left: l,
-                            right: r,
-                            top: t,
-                            bottom: b,
-                        }
-                    }
-                    Value::Gap([w, h]) => {
-                        style.gap = taffy::Size {
-                            width: w,
-                            height: h,
-                        }
-                    }
+                    Value::Size(d) if prop == Prop::Width => style.set_width(d),
+                    Value::Size(d) => style.set_height(d),
+                    Value::Padding([l, r, t, b]) => style.set_padding(taffy::Rect {
+                        left: l,
+                        right: r,
+                        top: t,
+                        bottom: b,
+                    }),
+                    Value::Gap([w, h]) => style.set_gap(taffy::Size {
+                        width: w,
+                        height: h,
+                    }),
                     _ => return,
                 }
                 self.set_layout(node, style);

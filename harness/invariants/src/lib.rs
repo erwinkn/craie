@@ -52,7 +52,7 @@ pub fn snapshot(ui: &Ui) -> Transaction<'static> {
         t.create(id.0, kind);
         let style = host.style(id);
         if *style != default {
-            t.layout(id.0, style);
+            t.layout(id.0, &style.to_taffy());
         }
         let s = host.spatial[id.index()];
         if s.transform != Affine::IDENTITY || s.opacity != 1.0 {
@@ -197,7 +197,7 @@ pub fn without_animation(t: &Transaction<'static>, twin: &Ui) -> Transaction<'st
                         out.paint(*id, None, None, Some((c, w)));
                     }
                     _ => {
-                        let mut style = twin.host.layout[i].clone();
+                        let mut style = twin.host.layout[i].to_taffy();
                         match *value {
                             Value::Size(d) if m_prop(m) == craie_ui::animation::Prop::Width => {
                                 style.size.width = d
@@ -1025,7 +1025,7 @@ impl Gen {
             .model
             .attached()
             .into_iter()
-            .filter(|id| ui.host.style(NodeId(*id)).overflow.y == taffy::Overflow::Scroll)
+            .filter(|id| ui.host.style(NodeId(*id)).overflow().y == taffy::Overflow::Scroll)
             .collect();
         if scrollers.is_empty() {
             return None;

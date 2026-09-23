@@ -10,6 +10,7 @@
 use std::collections::HashMap;
 
 use craie_core::geom::Affine;
+use craie_layout::LayoutRow;
 
 use crate::animation::{Prop, Value};
 use crate::host::{Host, MAX_NODES, NodeId};
@@ -551,7 +552,7 @@ impl Ui {
             Mutation::Layout { id, style } => {
                 let node = NodeId(*id);
                 let mut new = if *style == NIL {
-                    crate::host::default_style()
+                    crate::host::default_style().to_taffy()
                 } else {
                     txn.styles[*style as usize].clone()
                 };
@@ -564,7 +565,7 @@ impl Ui {
                         set_layout_field(&mut new, prop, current);
                     }
                 }
-                self.set_layout(node, new);
+                self.set_layout(node, LayoutRow::from(&new));
             }
             Mutation::Spatial {
                 id,
@@ -844,13 +845,13 @@ impl Ui {
 
     /// Writes a node's layout row; the one writer for layout inputs
     /// (mutations and the animation driver).
-    pub(crate) fn set_layout(&mut self, node: NodeId, new: taffy::Style) {
+    pub(crate) fn set_layout(&mut self, node: NodeId, new: LayoutRow) {
         let old = &self.host.layout[node.index()];
         if *old == new {
             return;
         }
-        let display_changed = old.display != new.display;
-        let overflow_changed = old.overflow != new.overflow;
+        let display_changed = old.display() != new.display();
+        let overflow_changed = old.overflow() != new.overflow();
         self.host.layout[node.index()] = new;
         self.host.revs.layout_input.bump();
         self.host.mark_layout(node);
