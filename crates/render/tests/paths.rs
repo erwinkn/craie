@@ -701,3 +701,62 @@ fn path_layers_keep_painter_order() {
     assert_eq!(px(&img, 38, 18), [0, 0, 255, 255]);
     assert_eq!(r.stats.layers, 1);
 }
+
+/// S5A-19: two meshes sharing an edge (a square's diagonal) draw it
+/// without a seam, also with disjoint content drawn between them.
+#[test]
+fn adjacent_meshes_stay_seamless_across_disjoint_content() {
+    let Some((gpu, mut r)) = gpu() else {
+        eprintln!("no GPU adapter: skipped");
+        return;
+    };
+    let draw = |r: &mut Renderer, between: bool| {
+        let mut s = scene();
+        let mut w = ChunkWriter::new();
+        let tri = |a: [f32; 2], b: [f32; 2], c: [f32; 2]| Mesh {
+            vertices: vec![a, b, c],
+            indices: vec![0, 1, 2],
+        };
+        mesh(
+            &mut w,
+            &tri([8.0, 8.0], [40.0, 8.0], [8.0, 40.0]),
+            0xFFFF_FFFF,
+        );
+        s.commit_chunk(0, &mut w);
+        let green = w.paint(0x00FF_00FF);
+        w.rect(Rect::new(48.0, 48.0, 8.0, 8.0), 0.0, green);
+        s.commit_chunk(1, &mut w);
+        mesh(
+            &mut w,
+            &tri([40.0, 8.0], [40.0, 40.0], [8.0, 40.0]),
+            0xFFFF_FFFF,
+        );
+        s.commit_chunk(2, &mut w);
+        for id in 0..3 {
+            place(&mut s, id);
+        }
+        let order = if between {
+            vec![
+                OrderItem::Chunk(0),
+                OrderItem::Chunk(1),
+                OrderItem::Chunk(2),
+            ]
+        } else {
+            vec![
+                OrderItem::Chunk(0),
+                OrderItem::Chunk(2),
+                OrderItem::Chunk(1),
+            ]
+        };
+        s.set_order(order, vec![]);
+        let img = render(&gpu, r, &mut s);
+        assert_eq!(r.stats.layers, 1);
+        img
+    };
+    let (a, b) = (draw(&mut r, false), draw(&mut r, true));
+    assert_same(&a, &b, (0, 0, W, W));
+    // On the diagonal: fully white, no seam.
+    for k in 10..38 {
+        assert_eq!(px(&a, k, 47 - k), [255, 255, 255, 255], "({k}, {})", 47 - k);
+    }
+}

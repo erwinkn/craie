@@ -90,9 +90,11 @@ target shape.
   broke analytic anti-aliasing of rects, glyphs, and clips (step 5a
   review rounds 1 to 3); correct painter order wins over pass count
   (section 8).
-- Resolves in: merging runs whose bounds do not overlap the content
-  between them (reordering is then invisible), and E07 (coverage/strip
-  preparation needs no multisampling at all).
+- Partly resolved (step 5a round 4): content that overlaps none of the
+  open run draws before it and the run goes on. Meshes on two sides of
+  overlapping content still resolve apart (a seam on a shared edge).
+- Resolves in: E07 (coverage/strip preparation needs no
+  multisampling at all), or a sample-preserving path target.
 - Re-test: `crates/render/tests/paths.rs` (`stats.layers`), and a
   framebench scene with icons once 5b lands.
 
@@ -193,3 +195,6 @@ Reviewer minors and nitpicks not fixed yet.
   3 (rects and glyphs never render multisampled; per-clip sample tests;
   a dimensionless gradient parameter in the oracle), with regression
   tests; reviewed in round 4.
+- S5A-19 (seams where disjoint content split a run) and S5A-20
+  (gradient tolerance near hard stops): fixed after step 5a round 4;
+  reviewed with the 5b range (which starts at `e9200c7`).

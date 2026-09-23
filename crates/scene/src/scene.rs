@@ -348,8 +348,10 @@ impl Scene {
         let mut layers = std::mem::take(&mut self.open_layers);
         layers.clear();
         let mut skip_depth = 0usize;
-        // The open run of meshes: (its BeginLayer's index, its bounds).
-        let mut run: Option<(usize, Rect)> = None;
+        // The open run of meshes: its bounds, and its draws (emitted in a
+        // multisampled layer when it closes).
+        let mut run: Option<Rect> = None;
+        let mut run_cmds: Vec<DrawCmd> = Vec::new();
         for item in &self.order {
             match *item {
                 OrderItem::BeginLayer(l) => {
@@ -357,7 +359,7 @@ impl Scene {
                         skip_depth += 1;
                         continue;
                     }
-                    close_run(&mut cmds, &mut run, screen);
+                    close_run(&mut cmds, &mut run, &mut run_cmds, screen);
                     layers.push((cmds.len(), None));
                     cmds.push(DrawCmd::BeginLayer {
                         opacity: self.layers[l as usize],
@@ -370,7 +372,7 @@ impl Scene {
                         skip_depth -= 1;
                         continue;
                     }
-                    close_run(&mut cmds, &mut run, screen);
+                    close_run(&mut cmds, &mut run, &mut run_cmds, screen);
                     let (at, bounds) = layers.pop().expect("unbalanced layer order");
                     match bounds
                         .map(|b| b.intersect(&screen))
@@ -427,24 +429,21 @@ impl Scene {
                         } as u32;
                         let start = base + s.start;
                         // A run of meshes draws in a multisampled layer of
-                        // its own; anything else ends the run.
-                        if s.kind == SegKind::Paths {
-                            match &mut run {
-                                Some((_, rb)) => *rb = rb.union(&b),
-                                None => {
-                                    run = Some((cmds.len(), b));
-                                    cmds.push(DrawCmd::BeginLayer {
-                                        opacity: 1.0,
-                                        bounds: [0; 4],
-                                        msaa: true,
-                                    });
-                                }
-                            }
+                        // its own. Other content that overlaps none of the
+                        // run so far draws before the whole run (it only
+                        // has to stay below the run's later meshes), so the
+                        // run goes on; content that overlaps it ends it.
+                        let target = if s.kind == SegKind::Paths {
+                            run = Some(run.map_or(b, |rb| rb.union(&b)));
+                            &mut run_cmds
                         } else {
-                            close_run(&mut cmds, &mut run, screen);
-                        }
+                            if run.is_some_and(|rb| rb.intersects(&b)) {
+                                close_run(&mut cmds, &mut run, &mut run_cmds, screen);
+                            }
+                            &mut cmds
+                        };
                         // Merge with the previous draw when contiguous.
-                        match (s.kind, cmds.last_mut()) {
+                        match (s.kind, target.last_mut()) {
                             (SegKind::Rects, Some(DrawCmd::Rects { start: s0, count }))
                             | (SegKind::Glyphs, Some(DrawCmd::Glyphs { start: s0, count }))
                             | (SegKind::Paths, Some(DrawCmd::Paths { start: s0, count }))
@@ -452,17 +451,17 @@ impl Scene {
                             {
                                 *count += s.len
                             }
-                            (SegKind::Rects, _) => cmds.push(DrawCmd::Rects {
+                            (SegKind::Rects, _) => target.push(DrawCmd::Rects {
                                 start,
                                 count: s.len,
                             }),
-                            (SegKind::Glyphs, _) => cmds.push(DrawCmd::Glyphs {
+                            (SegKind::Glyphs, _) => target.push(DrawCmd::Glyphs {
                                 start,
                                 count: s.len,
                             }),
                             (SegKind::Paths, _) => {
                                 paths = true;
-                                cmds.push(DrawCmd::Paths {
+                                target.push(DrawCmd::Paths {
                                     start,
                                     count: s.len,
                                 })
@@ -472,7 +471,7 @@ impl Scene {
                 }
             }
         }
-        close_run(&mut cmds, &mut run, screen);
+        close_run(&mut cmds, &mut run, &mut run_cmds, screen);
         debug_assert!(layers.is_empty(), "unbalanced layer order");
         self.clip_bounds = clip_bounds;
         self.open_layers = layers;
@@ -613,8 +612,8 @@ impl Scene {
                             SegKind::Paths => {
                                 // One entry per segment: its device-space
                                 // bounds; in `geometry`, per indexed vertex
-                                // its device position and gradient
-                                // parameter; in `aux`, every vertex's paint
+                                // its device position and its place on the
+                                // gradient (device px); in `aux`, every vertex's paint
                                 // kind or color, each gradient's stops
                                 // (offsets and colors), and the index
                                 // count.
@@ -641,28 +640,59 @@ impl Scene {
                                         mix(words[at] as u64);
                                         continue;
                                     }
-                                    // The vertex's gradient parameter, as the
-                                    // fragment evaluates it: t along a linear
-                                    // gradient; offset from a radial one's
-                                    // center over its radius. Dimensionless,
-                                    // so the tolerance means the same color
-                                    // error at any gradient scale.
+                                    // Where the vertex falls on the gradient,
+                                    // in device px: along a linear gradient,
+                                    // its distance from the start and the
+                                    // gradient's length; for a radial one,
+                                    // its offset from the center and the
+                                    // radius. So the tolerance bounds how
+                                    // far any gradient feature (a hard stop
+                                    // too) moves on screen, at any scale.
                                     let f = |k: usize| f32::from_bits(words[at + 1 + k]);
                                     let m = |k: usize| f32::from_bits(words[at + 5 + k]);
                                     let g = [
                                         m(0) * v.pos[0] + m(2) * v.pos[1] + m(4),
                                         m(1) * v.pos[0] + m(3) * v.pos[1] + m(5),
                                     ];
+                                    let [a, b, c, d] = [w.0[0], w.0[1], w.0[2], w.0[3]];
+                                    let det = a * d - b * c;
                                     let head = words[at];
                                     if head & 0xFFFF == crate::prim::gradient::LINEAR {
-                                        let d = [f(2) - f(0), f(3) - f(1)];
-                                        let len2 = (d[0] * d[0] + d[1] * d[1]).max(1e-12);
-                                        geometry.push(
-                                            ((g[0] - f(0)) * d[0] + (g[1] - f(1)) * d[1]) / len2,
-                                        );
+                                        let dir = [f(2) - f(0), f(3) - f(1)];
+                                        let len2 = (dir[0] * dir[0] + dir[1] * dir[1]).max(1e-12);
+                                        let t = ((g[0] - f(0)) * dir[0] + (g[1] - f(1)) * dir[1])
+                                            / len2;
+                                        // d t / d local, then d t / d device.
+                                        let gx = (m(0) * dir[0] + m(1) * dir[1]) / len2;
+                                        let gy = (m(2) * dir[0] + m(3) * dir[1]) / len2;
+                                        let grad = if det.abs() > 1e-12 {
+                                            ((d * gx - b * gy) / det).hypot((a * gy - c * gx) / det)
+                                        } else {
+                                            0.0
+                                        };
+                                        // Distance from the start and the
+                                        // gradient's length, both in device
+                                        // px (t itself where it has none).
+                                        if grad > 1e-12 {
+                                            geometry.extend([t / grad, 1.0 / grad]);
+                                        } else {
+                                            geometry.extend([t, 0.0]);
+                                        }
                                     } else {
-                                        let r = f(2).max(1e-12);
-                                        geometry.extend([(g[0] - f(0)) / r, (g[1] - f(1)) / r]);
+                                        // Device px per gradient unit.
+                                        let tdet = (m(0) * m(3) - m(1) * m(2)).abs();
+                                        let k = if tdet > 1e-24 {
+                                            (det.abs() / tdet).sqrt()
+                                        } else {
+                                            1.0
+                                        };
+                                        // Offset from the center and the
+                                        // radius, in device px.
+                                        geometry.extend([
+                                            (g[0] - f(0)) * k,
+                                            (g[1] - f(1)) * k,
+                                            f(2) * k,
+                                        ]);
                                     }
                                     mix(head as u64 | 1 << 40);
                                     if last_paint == Some(v.paint) {
@@ -721,24 +751,32 @@ impl Scene {
     }
 }
 
-/// Ends the open run of meshes: its layer covers the run's bounds (on
-/// screen, in whole pixels), or goes when nothing of it is on screen.
-fn close_run(cmds: &mut Vec<DrawCmd>, run: &mut Option<(usize, Rect)>, screen: Rect) {
-    let Some((at, b)) = run.take() else { return };
-    match Some(b.intersect(&screen)).filter(|b| b.size.width > 0.0 && b.size.height > 0.0) {
-        Some(b) => {
-            if let DrawCmd::BeginLayer { bounds, .. } = &mut cmds[at] {
-                *bounds = [
-                    b.origin.x.floor() as i32,
-                    b.origin.y.floor() as i32,
-                    b.max_x().ceil() as i32,
-                    b.max_y().ceil() as i32,
-                ];
-            }
-            cmds.push(DrawCmd::EndLayer);
-        }
-        None => cmds.truncate(at),
+/// Ends the open run of meshes: a multisampled layer covering the run's
+/// bounds (on screen, in whole pixels) around its draws; nothing when
+/// none of it is on screen.
+fn close_run(
+    cmds: &mut Vec<DrawCmd>,
+    run: &mut Option<Rect>,
+    run_cmds: &mut Vec<DrawCmd>,
+    screen: Rect,
+) {
+    let Some(b) = run.take() else { return };
+    let b = b.intersect(&screen);
+    if b.size.width > 0.0 && b.size.height > 0.0 {
+        cmds.push(DrawCmd::BeginLayer {
+            opacity: 1.0,
+            bounds: [
+                b.origin.x.floor() as i32,
+                b.origin.y.floor() as i32,
+                b.max_x().ceil() as i32,
+                b.max_y().ceil() as i32,
+            ],
+            msaa: true,
+        });
+        cmds.append(run_cmds);
+        cmds.push(DrawCmd::EndLayer);
     }
+    run_cmds.clear();
 }
 
 /// One primitive in world space (device px), for equivalence checks.
@@ -756,8 +794,8 @@ pub struct Resolved {
     /// Corner radius of the innermost clip.
     pub clip_radius: f32,
     /// Path mesh segments: per indexed vertex, its device-space position
-    /// and, for a gradient, its dimensionless gradient parameter; empty
-    /// for rects and glyphs.
+    /// and, for a gradient, where it falls on the gradient in device px;
+    /// empty for rects and glyphs.
     pub geometry: Vec<f32>,
 }
 
@@ -1153,9 +1191,109 @@ mod tests {
         };
         assert!(same(&tiny(0.001), &tiny(0.001)));
         assert!(!same(&tiny(0.001), &tiny(0.002)), "tiny gradient space");
+        // S5A-20: a hard stop (red to blue at 0.5) moved 0.6 px paints a
+        // pixel in the other color: the view sees it; a move of 0.001 px
+        // is within the tolerance.
+        let hard = |shift: f32| {
+            let mut s = Scene::new();
+            let root = s.transforms.alloc(Affine::IDENTITY, NONE);
+            s.transforms.set_order(vec![root]);
+            let mut w = ChunkWriter::new();
+            let slot = w.gradient(&crate::chunk::GradientPaint {
+                kind: crate::prim::gradient::LINEAR,
+                geometry: [0.0, 0.0, 64.0, 0.0],
+                to_gradient: [1.0, 0.0, 0.0, 1.0, shift, 0.0],
+                stops: vec![(0.0, r), (0.5, r), (0.5, b), (1.0, b)],
+            });
+            let v = [[0.0, 0.0], [64.0, 0.0], [64.0, 64.0], [0.0, 64.0]];
+            assert!(w.mesh(&v, &[0, 1, 2, 0, 2, 3], slot, true));
+            s.commit_chunk(0, &mut w);
+            s.set_placement(
+                0,
+                Placement {
+                    offset: [0.0, 0.0],
+                    transform: root,
+                    clip: NONE,
+                },
+            );
+            s.set_order(vec![OrderItem::Chunk(0)], vec![]);
+            s.transforms.derive();
+            s
+        };
+        assert!(same(&hard(0.0), &hard(0.001)));
+        assert!(!same(&hard(0.0), &hard(-0.6)), "hard stop moved");
         let (a, b2) = (square(64.0, 1.0), square(32.0, 2.0));
         assert!(a.resolve(&|_| 0)[0].bounds == b2.resolve(&|_| 0)[0].bounds);
         assert!(!same(&a, &b2), "gradient space");
+    }
+
+    /// S5A-19: content between meshes that overlaps none of the open
+    /// run draws before it, so the run (one multisampled layer) goes on;
+    /// content that overlaps it ends the run.
+    #[test]
+    fn mesh_runs_continue_past_disjoint_content() {
+        let build = |rect_x: f32| {
+            let mut s = Scene::new();
+            let root = s.transforms.alloc(Affine::IDENTITY, NONE);
+            s.transforms.set_order(vec![root]);
+            let mut w = ChunkWriter::new();
+            let place = |s: &mut Scene, id| {
+                s.set_placement(
+                    id,
+                    Placement {
+                        offset: [0.0, 0.0],
+                        transform: root,
+                        clip: NONE,
+                    },
+                )
+            };
+            let white = w.paint(0xFFFF_FFFF);
+            assert!(w.mesh(
+                &[[0.0, 0.0], [16.0, 0.0], [0.0, 16.0]],
+                &[0, 1, 2],
+                white,
+                false
+            ));
+            s.commit_chunk(0, &mut w);
+            let green = w.paint(0x00FF_00FF);
+            w.rect(Rect::new(rect_x, 0.0, 8.0, 8.0), 0.0, green);
+            s.commit_chunk(1, &mut w);
+            let white = w.paint(0xFFFF_FFFF);
+            assert!(w.mesh(
+                &[[16.0, 0.0], [16.0, 16.0], [0.0, 16.0]],
+                &[0, 1, 2],
+                white,
+                false
+            ));
+            s.commit_chunk(2, &mut w);
+            for id in 0..3 {
+                place(&mut s, id);
+            }
+            s.set_order((0..3).map(OrderItem::Chunk).collect(), vec![]);
+            let mut missing = Vec::new();
+            s.prepare(Size::new(100.0, 100.0), &mut missing)
+                .cmds
+                .clone()
+        };
+        let kinds = |cmds: &[DrawCmd]| -> Vec<&'static str> {
+            cmds.iter()
+                .map(|c| match c {
+                    DrawCmd::Rects { .. } => "rects",
+                    DrawCmd::Glyphs { .. } => "glyphs",
+                    DrawCmd::Paths { .. } => "paths",
+                    DrawCmd::BeginLayer { .. } => "begin",
+                    DrawCmd::EndLayer => "end",
+                })
+                .collect()
+        };
+        // Disjoint (x 40..48): the rect first, then one run of both.
+        let k = kinds(&build(40.0));
+        assert_eq!(k.first(), Some(&"rects"));
+        assert_eq!(k.iter().filter(|&&k| k == "begin").count(), 1);
+        // Overlapping the first mesh (x 2..10): two runs around it.
+        let k = kinds(&build(2.0));
+        assert_eq!(k.iter().filter(|&&k| k == "begin").count(), 2);
+        assert_eq!(k.first(), Some(&"begin"));
     }
 
     /// S5A-05: a mesh with a partial triangle, an index out of range, or

@@ -808,8 +808,13 @@ and render target so a host can embed it.
   unwritten (about 1 in 20 runs; none in 160 since). Inside a path
   layer, fragments shade per sample and test each clip of the chain at
   the sample's position (the standard 4-sample pattern), so path and
-  clip coverage never multiply. Cost: one offscreen pass and one
-  composite per run (`LEDGER.md` AR-5).
+  clip coverage never multiply. Content between meshes that overlaps
+  none of the open run draws before the run (it only has to stay below
+  the run's later meshes), so the run goes on; content that overlaps
+  the run ends it, and meshes on the two sides of it anti-alias apart
+  (a shared edge then shows a faint seam, as it does between separately
+  drawn shapes in browsers). Cost: one offscreen pass and one composite
+  per run (`LEDGER.md` AR-5).
 
 ## 12. Animation
 
