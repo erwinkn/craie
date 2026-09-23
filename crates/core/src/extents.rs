@@ -186,6 +186,11 @@ impl Extents {
         pos.min(n - 1)
     }
 
+    /// `total` without rounding to f32 (for sums that add corrections).
+    pub fn total_f64(&self) -> f64 {
+        self.offset_f64(self.size.len())
+    }
+
     fn offset_f64(&self, i: usize) -> f64 {
         let mut j = i.min(self.size.len());
         let mut s = 0.0;

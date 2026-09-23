@@ -743,11 +743,13 @@ fn wire_roundtrip_is_exact() {
                     template: 0,
                     text_len: 42,
                     id: 7,
+                    unchanged: false,
                 },
                 crate::mutation::ItemDesc {
                     template: 3,
                     text_len: 70_000,
                     id: NIL,
+                    unchanged: false,
                 },
             ],
         )
@@ -1680,6 +1682,7 @@ fn list_ops_validate_atomically() {
         template: 0,
         text_len: 5,
         id: NIL,
+        unchanged: false,
     };
     let mut ui = Ui::new(1.0);
     let mut t = Transaction::new(1);
@@ -1750,6 +1753,7 @@ fn list_count_resets_on_id_reuse() {
         template: 0,
         text_len: 5,
         id: NIL,
+        unchanged: false,
     };
     let batch = |at: u32| {
         let mut t = Transaction::new(2);
@@ -1779,6 +1783,84 @@ fn list_count_resets_on_id_reuse() {
         assert_eq!(ui.seq, 1);
         apply(&mut ui, &batch(0)).unwrap();
         assert_eq!(ui.host.lists.get(1).unwrap().len(), 1);
+        ui.render(Size::new(100.0, 100.0));
+    }
+}
+
+/// Item identities are unique within a list as each batch leaves it:
+/// a duplicate within one insertion, against surviving items, or across
+/// several splices of one batch rejects the whole batch; moving an id
+/// (removed and inserted), repeated NIL, and reuse after the list's id is
+/// re-created are valid. Through the direct API and the wire.
+#[test]
+fn list_identities_are_unique() {
+    use crate::mutation::ItemDesc;
+    fn item(id: u32) -> ItemDesc {
+        ItemDesc {
+            template: 0,
+            text_len: 5,
+            id,
+            unchanged: false,
+        }
+    }
+    for wire_path in [false, true] {
+        let mut ui = Ui::new(1.0);
+        let mut t = Transaction::new(1);
+        t.create(0, NodeKind::View).append(NIL, 0);
+        t.create(1, NodeKind::List)
+            .list_splice(1, 0, 0, &[item(1), item(2), item(3), item(7)])
+            .append(0, 1);
+        ui.apply_txn(&t).unwrap();
+        let apply = |ui: &mut Ui, t: &Transaction| {
+            if wire_path {
+                ui.apply(&wire::encode(t)).map(|_| ())
+            } else {
+                ui.apply_txn(t).map(|_| ())
+            }
+        };
+        let bad: [(&str, fn(&mut Transaction)); 4] = [
+            ("twice in one insertion", |t| {
+                t.list_splice(1, 0, 0, &[item(9), item(9)]);
+            }),
+            ("against a surviving item", |t| {
+                t.list_splice(1, 0, 1, &[item(7)]);
+            }),
+            ("across two splices", |t| {
+                t.list_splice(1, 0, 0, &[item(9)]);
+                t.list_splice(1, 5, 0, &[item(9)]);
+            }),
+            ("a later splice against an earlier one's survivor", |t| {
+                t.list_splice(1, 0, 1, &[item(8)]);
+                t.list_splice(1, 4, 0, &[item(3)]);
+            }),
+        ];
+        for (what, f) in bad {
+            let mut t = Transaction::new(2);
+            // An earlier valid mutation: it must not apply.
+            t.fill(0, 0xFF00_00FF);
+            f(&mut t);
+            assert!(apply(&mut ui, &t).is_err(), "{what} (wire {wire_path})");
+            assert_eq!(ui.host.paint[0].fill, 0, "{what}: atomic");
+            assert_eq!(ui.host.lists.get(1).unwrap().len(), 4, "{what}: atomic");
+        }
+        // Valid: move id 7 to the front across two splices, repeat NIL.
+        let mut t = Transaction::new(3);
+        t.list_splice(1, 3, 1, &[])
+            .list_splice(1, 0, 0, &[item(7), item(NIL), item(NIL)]);
+        apply(&mut ui, &t).unwrap();
+        let l = ui.host.lists.get(1).unwrap();
+        assert_eq!(
+            l.descs.iter().map(|d| d.id).collect::<Vec<_>>(),
+            [7, NIL, NIL, 1, 2, 3]
+        );
+        // Re-creating the list's id starts a fresh identity space.
+        let mut t = Transaction::new(4);
+        t.remove(1)
+            .create(1, NodeKind::List)
+            .append(0, 1)
+            .list_splice(1, 0, 0, &[item(1), item(7)]);
+        apply(&mut ui, &t).unwrap();
+        assert_eq!(ui.host.lists.get(1).unwrap().len(), 2);
         ui.render(Size::new(100.0, 100.0));
     }
 }

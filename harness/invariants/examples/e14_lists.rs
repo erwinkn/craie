@@ -104,6 +104,7 @@ fn virtualized(n: u32) -> Virtual {
             template: 0,
             text_len: text(i).chars().count() as u32,
             id: i,
+            unchanged: false,
         })
         .collect();
     let base = live();
@@ -241,6 +242,7 @@ fn estimate_error() -> (f32, f32) {
                     template: 0,
                     text_len: text(i).chars().count() as u32,
                     id: i,
+                    unchanged: false,
                 })
                 .collect::<Vec<_>>(),
         )
@@ -328,5 +330,5 @@ fn main() {
         mean * 100.0,
         p95 * 100.0
     );
-    println!("bridge bytes per item: 10 (template u16, text length u32, id u32)");
+    println!("bridge bytes per item: 11 (template u16, text length u32, id u32, flags u8)");
 }

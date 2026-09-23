@@ -143,11 +143,12 @@ a measurement.
 
 **Current.** CRW2 as targeted, minus the animation family (step 4).
 The list family (0x90) carries list configuration (overscan, fallback
-extent, row templates), item splices (10 bytes per item: template
-u16, text length u32, identity u32, borrowed from the buffer), a row's
-item index, and a scroll container's anchor policy. Validation tracks
-each list's item count through the batch; creating or removing a node
-resets it. Header: magic, version, flags, seq, then counts and
+extent, row templates), item splices (11 bytes per item: template
+u16, text length u32, identity u32, flags u8, borrowed from the buffer),
+a row's item index, and a scroll container's anchor policy. Validation
+tracks each list's item count and identities through the batch (every
+non-NIL identity once per list; creating or removing a node resets
+both). Header: magic, version, flags, seq, then counts and
 per-transaction tables for strings, layout styles (u64 presence mask +
 positional fields), and text spans (16 bytes each). Ops are u8-tagged,
 grouped by family in the high nibble. `wire::decode` yields a
@@ -385,10 +386,17 @@ container:
   deltas): offsets, the item at an offset, and updates are O(log n); a
   splice rebuilds it in O(n). The list's row gap enters offsets and
   lookups arithmetically (a prefix of k items holds k gaps), not as a
-  second store. About 25 bytes per item; 2^24 items at most.
+  second store; a percentage gap resolves against a definite content
+  height, else the list sizes without it and places rows with it
+  resolved against that size, as flex does. About 35 bytes per item
+  with the identity index; 2^24 items at most.
 - Items have identity: the bridge interns each item's React key to a
-  u32. An item that moves within a splice unchanged keeps its extent
-  and measurement; an edited one is estimated again.
+  u32, and each list keeps an index of its identities. Identity keeps
+  a scroll anchor and a focused row on their item. What proves a
+  measured height still valid is the `unchanged` flag: the bridge sets
+  it when the item is the same (immutable) object it removed under
+  that key, so a move keeps its measurement and an edit, however its
+  estimate inputs compare, is estimated again.
 - Estimates are native: each row template gives a fixed extent, a
   horizontal inset, and a font size; per-size metrics (average advance,
   line height) come from shaping a sample once. An item's estimate is
@@ -422,7 +430,9 @@ container:
   anchor item keeps its place; `stick-to-end` holds the end when it was
   there. A splice moves the anchor with its item: to its new place
   when it moved, to the splice start only when it was removed.
-  Positions go through the same transforms as the range. Explicit
+  Positions go through the same transforms as the range; the anchor is
+  the visually top item and its visually top edge, so a flipped list
+  anchors its far end. Explicit
   `ScrollTo`
   commands in the same batch win. Anchor corrections are motion for the
   snap policy (§8).
@@ -797,14 +807,17 @@ that includes text and span lists; real-GPU checks (upload bytes, 1x
 and 2x pixel readback, half-pixel edges against the resolver, a glyph
 larger than a page); list tests (only the reported range renders; a
 virtualized list equals a plain column of every row once measured;
-padded, bordered, gapped, and max-width lists with a following
-sibling; keep-visible under measurement, inserts above, and reorders
+padded, bordered, gapped (fixed and percentage), definite-height, and
+max-width lists with a following sibling; size probes against final
+layout on wide corrections; keep-visible under measurement, inserts above, and reorders
 across the viewport, with a no-anchor control; stick-to-end; range
 hysteresis; transforms on the list and on an ancestor, checked by hit
-testing; a fallback change against a rebuild; layout visits per
+testing; a flipped list; identity uniqueness through the batch;
+edits against moves for measurement retention; a fallback change
+against a rebuild; layout visits per
 rendered row; a focused row stays and survives splices above; seeded
-splices, edits, and scrolls equal a clean rebuild; list frames through
-the whole renderer allocate nothing in Craie phases; accessibility
+splices, edits, and scrolls equal a clean rebuild; list frames allocate
+nothing in the UI (always) and in Craie's renderer phases (on a GPU); accessibility
 positions and hidden rows);
 the release-graph
 and layer-map checks; and the E10 and E14 benches. `prepare_frame` in

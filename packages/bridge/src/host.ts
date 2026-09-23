@@ -497,11 +497,16 @@ export class CraieHost {
             }
             return v
           }
+          // Removed items by key: an added item that is the same object
+          // moved (items are immutable) keeps its measured height; a new
+          // object under the same key is an edit and is estimated again.
+          const removedByKey = new Map<unknown, unknown>()
+          for (let i = pre; i < before.length - suf; i++) removedByKey.set(keyOf(before[i], i), before[i])
           const addedKeys = new Set<unknown>()
           const descs = added.map((item, k) => {
             const key = keyOf(item, pre + k)
             addedKeys.add(key)
-            return { ...describe(item), id: intern(key) }
+            return { ...describe(item), id: intern(key), unchanged: removedByKey.get(key) === item }
           })
           for (let i = pre; i < before.length - suf; i++) {
             const key = keyOf(before[i], i)

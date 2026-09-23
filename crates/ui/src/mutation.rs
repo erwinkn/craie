@@ -155,21 +155,29 @@ pub struct ItemTemplate {
     pub font_size: f32,
 }
 
-/// One item description: its template, its text length in chars, and
-/// a stable identity (the bridge interns the item's React key; NIL: none).
-/// Identity lets an item that moves within a splice keep its measured
-/// extent, a scroll anchor, and a focused row.
+/// One item description: its template, its text length in chars, a
+/// stable identity (the bridge interns the item's React key; NIL: none),
+/// and whether it is the unchanged item that the same splice removes
+/// under that identity (a move).
+///
+/// Identity keeps a scroll anchor and a focused row on their item. Only
+/// `unchanged` keeps a measured extent: estimate inputs say nothing about
+/// whether the content (and so the height) is the same. The bridge sets
+/// it when the new item is the same object as the removed one.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ItemDesc {
     pub template: u16,
     pub text_len: u32,
     pub id: u32,
+    pub unchanged: bool,
 }
 
 impl ItemDesc {
     /// Wire size of one description (template u16, text length u32,
-    /// id u32).
-    pub const BYTES: usize = 10;
+    /// id u32, flags u8).
+    pub const BYTES: usize = 11;
+    /// Flags bit: `unchanged`.
+    pub const UNCHANGED: u8 = 1;
 
     /// Decodes packed descriptions (`BYTES` each, little endian).
     pub fn iter(bytes: &[u8]) -> impl Iterator<Item = ItemDesc> + '_ {
@@ -177,6 +185,7 @@ impl ItemDesc {
             template: u16::from_le_bytes([c[0], c[1]]),
             text_len: u32::from_le_bytes([c[2], c[3], c[4], c[5]]),
             id: u32::from_le_bytes([c[6], c[7], c[8], c[9]]),
+            unchanged: c[10] & Self::UNCHANGED != 0,
         })
     }
 
@@ -187,6 +196,7 @@ impl ItemDesc {
             out.extend_from_slice(&d.template.to_le_bytes());
             out.extend_from_slice(&d.text_len.to_le_bytes());
             out.extend_from_slice(&d.id.to_le_bytes());
+            out.push(if d.unchanged { Self::UNCHANGED } else { 0 });
         }
         out
     }

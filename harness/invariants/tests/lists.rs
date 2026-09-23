@@ -36,6 +36,7 @@ fn desc_as(i: u32, id: u32) -> ItemDesc {
         template: 0,
         text_len: text(i).chars().count() as u32,
         id,
+        unchanged: false,
     }
 }
 
@@ -250,6 +251,34 @@ fn virtualized_equals_plain_column() {
             ..padded
         },
         "padded, gap, max width",
+    );
+    // Percentage row gaps: against a definite height (with padding), and
+    // with an auto height (sized without the gap, then placed with it).
+    oracle(
+        taffy::Style {
+            gap: taffy::Size {
+                width: LP::length(0.0),
+                height: LP::percent(0.1),
+            },
+            // Inner height 200 (padding 20, border 2): the gap is exactly
+            // 20, so f32 sums in the plain column add no rounding.
+            size: taffy::Size {
+                width: taffy::Dimension::auto(),
+                height: taffy::Dimension::length(222.0),
+            },
+            ..padded.clone()
+        },
+        "percent gap, definite height",
+    );
+    oracle(
+        taffy::Style {
+            gap: taffy::Size {
+                width: LP::length(0.0),
+                height: LP::percent(0.01),
+            },
+            ..base.clone()
+        },
+        "percent gap, auto height",
     );
 }
 
@@ -478,6 +507,7 @@ fn list_incremental_equals_rebuild() {
                                 template: 0,
                                 text_len: s.chars().count() as u32,
                                 id,
+                                unchanged: false,
                             })
                             .collect();
                         t.list_splice(LIST, at, rm, &descs);
@@ -499,6 +529,7 @@ fn list_incremental_equals_rebuild() {
                                 template: 0,
                                 text_len: s.chars().count() as u32,
                                 id: ids[i as usize],
+                                unchanged: false,
                             }],
                         );
                         texts[i as usize] = s;
@@ -772,7 +803,14 @@ fn reorders_keep_the_anchor_item() {
             LIST,
             lo,
             hi - lo + 1,
-            &moved.iter().map(|&id| desc(id)).collect::<Vec<_>>(),
+            // The same items moved: the bridge marks them unchanged.
+            &moved
+                .iter()
+                .map(|&id| ItemDesc {
+                    unchanged: true,
+                    ..desc(id)
+                })
+                .collect::<Vec<_>>(),
         );
         let old = order.clone();
         order.splice(lo as usize..=hi as usize, moved.iter().copied());
@@ -844,4 +882,231 @@ fn focus_survives_splices_above() {
     assert_eq!(range.y, ui.host.lists.get(LIST).unwrap().revision as f32);
     assert_eq!(ui.focused(), Some(NodeId(id)));
     assert_eq!(ui.host.node(NodeId(id)).unwrap().generation, generation);
+}
+
+/// What proves a measurement still valid is the bridge's `unchanged`
+/// flag (the same object moved), not equal estimate inputs: an item
+/// edited off-window with the same template and length is estimated
+/// again; the same item moved keeps its measurement.
+#[test]
+fn only_unchanged_items_keep_measurements() {
+    let (mut ui, mut d) = mount(1_000, 100.0);
+    d.settle(&mut ui, VIEW, &text, 8);
+    let i = 3u32;
+    assert!(
+        ui.host
+            .lists
+            .get(LIST)
+            .unwrap()
+            .extents
+            .is_measured(i as usize)
+    );
+    // Scroll away: the row unmounts, its measurement stays.
+    scroll(&mut ui, &mut d, 30_000.0);
+    assert!(!d.rows.contains_key(&i));
+    let l = ui.host.lists.get(LIST).unwrap();
+    assert!(l.extents.is_measured(i as usize));
+    let measured = l.extents.size(i as usize);
+    // Edited content, same key, same description: estimated again.
+    let mut t = Transaction::new(70);
+    t.list_splice(LIST, i, 1, &[desc(i)]);
+    ui.apply_txn(&t).unwrap();
+    d.settle(&mut ui, VIEW, &text, 8);
+    let l = ui.host.lists.get(LIST).unwrap();
+    assert!(
+        !l.extents.is_measured(i as usize),
+        "an edit drops the measurement"
+    );
+    let _ = measured;
+    // Measure it again, then move it unchanged: the measurement stays.
+    scroll(&mut ui, &mut d, 0.0);
+    let l = ui.host.lists.get(LIST).unwrap();
+    assert!(l.extents.is_measured(i as usize));
+    let size = l.extents.size(i as usize);
+    scroll(&mut ui, &mut d, 30_000.0);
+    let mut t = Transaction::new(71);
+    t.list_splice(
+        LIST,
+        i,
+        2,
+        &[
+            desc(i + 1),
+            ItemDesc {
+                unchanged: true,
+                ..desc(i)
+            },
+        ],
+    );
+    ui.apply_txn(&t).unwrap();
+    d.settle(&mut ui, VIEW, &text, 8);
+    let l = ui.host.lists.get(LIST).unwrap();
+    assert!(l.extents.is_measured(i as usize + 1), "a move keeps it");
+    assert_eq!(l.extents.size(i as usize + 1), size);
+}
+
+/// A flipped list (scaleY(-1)): the visually top item is the list's far
+/// end. Growing a row visually below it moves nothing, anchored or not
+/// (an anchor on the wrong item would move it); growing a row visually
+/// above it moves it unless keep-visible holds it. Visual positions come
+/// from layout rects and the flip, independent of the anchor code.
+#[test]
+fn flipped_list_keeps_the_visual_top_item() {
+    use craie_core::geom::{Affine, Point};
+    for (anchor, above) in [
+        (Anchor::KeepVisible, false),
+        (Anchor::None, false),
+        (Anchor::KeepVisible, true),
+        (Anchor::None, true),
+    ] {
+        let (mut ui, mut d) = mount(300, 200.0);
+        let mut t = Transaction::new(2);
+        t.transform(LIST, Affine::scale(1.0, -1.0))
+            .scroll_anchor(SCROLLER, anchor);
+        ui.apply_txn(&t).unwrap();
+        d.settle(&mut ui, VIEW, &text, 8);
+        scroll(&mut ui, &mut d, 3_000.0);
+        // Visual top of row `i`, from layout and the flip about the
+        // list's center.
+        let visual_top = |ui: &Ui, d: &ListDriver, i: u32| {
+            let list = ui.layouts.data(NodeId(LIST));
+            let m = Affine::translate(list.rect.origin.x, list.rect.origin.y).mul(
+                &Affine::scale(1.0, -1.0).about(Point::new(
+                    list.rect.size.width / 2.0,
+                    list.rect.size.height / 2.0,
+                )),
+            );
+            let row = ui.layouts.data(NodeId(d.rows[&i])).rect;
+            let a = m.apply(Point::new(0.0, row.origin.y)).y;
+            let b = m.apply(Point::new(0.0, row.max_y())).y;
+            a.min(b) - scroll_y(ui)
+        };
+        // The row whose visual span holds the viewport top.
+        let top = *d
+            .rows
+            .keys()
+            .find(|&&i| {
+                let y = visual_top(&ui, &d, i);
+                let h = ui.layouts.data(NodeId(d.rows[&i])).rect.size.height;
+                y <= 0.0 && y + h > 0.0
+            })
+            .expect("a row at the visual top");
+        let before = visual_top(&ui, &d, top);
+        // Flipped: a higher index is visually higher.
+        let k = if above { top + 1 } else { top - 2 };
+        let id = *d.rows.get(&k).expect("the grown row is rendered");
+        let long = format!("{} {}", text(k), text(k + 1));
+        let mut t = Transaction::new(3);
+        t.text(id, long.clone(), FONT, 0xFFFF_FFFF).list_splice(
+            LIST,
+            k,
+            1,
+            &[ItemDesc {
+                text_len: long.chars().count() as u32,
+                ..desc(k)
+            }],
+        );
+        ui.apply_txn(&t).unwrap();
+        let grown = long.clone();
+        d.settle(
+            &mut ui,
+            VIEW,
+            &move |i| if i == k { grown.clone() } else { text(i) },
+            8,
+        );
+        let drift = (visual_top(&ui, &d, top) - before).abs();
+        let what = format!(
+            "{anchor:?}, grown row {}",
+            if above { "above" } else { "below" }
+        );
+        if above && anchor == Anchor::None {
+            assert!(drift > 5.0, "{what}: control moves ({drift})");
+        } else {
+            assert!(drift < 0.01, "{what}: drift {drift}");
+        }
+    }
+}
+
+/// A size probe and the final layout agree on a wide, fractional
+/// correction (an estimate of 1e6 measured as 0.01), at an unchanged
+/// width and after a width change: the list is as tall as its items and
+/// the sibling after it follows.
+#[test]
+fn probe_and_final_agree_on_wide_corrections() {
+    let sibling = 2;
+    let mut ui = Ui::new(1.0);
+    let mut t = Transaction::new(1);
+    t.create(SCROLLER, NodeKind::View)
+        .layout(SCROLLER, &scroller_style())
+        .append(NIL, SCROLLER);
+    t.create(LIST, NodeKind::List)
+        .list_config(
+            LIST,
+            0.0,
+            20.0,
+            &[craie_ui::mutation::ItemTemplate {
+                base: 1.0e6,
+                inset: 0.0,
+                font_size: 0.0,
+            }],
+        )
+        .list_splice(
+            LIST,
+            0,
+            0,
+            &[ItemDesc {
+                template: 0,
+                text_len: 0,
+                id: 1,
+                unchanged: false,
+            }],
+        )
+        .append(SCROLLER, LIST);
+    t.create(sibling, NodeKind::View)
+        .layout(
+            sibling,
+            &taffy::Style {
+                size: taffy::Size {
+                    width: taffy::Dimension::length(10.0),
+                    height: taffy::Dimension::length(10.0),
+                },
+                ..craie_ui::host::default_style()
+            },
+        )
+        .append(SCROLLER, sibling);
+    ui.apply_txn(&t).unwrap();
+    // Estimates at the width first; then the row renders, 0.01 tall.
+    ui.render(VIEW);
+    let mut t = Transaction::new(2);
+    t.create(100, NodeKind::View)
+        .layout(
+            100,
+            &taffy::Style {
+                size: taffy::Size {
+                    width: taffy::Dimension::auto(),
+                    height: taffy::Dimension::length(0.01),
+                },
+                ..craie_ui::host::default_style()
+            },
+        )
+        .list_index(100, 0)
+        .append(LIST, 100);
+    ui.apply_txn(&t).unwrap();
+    for (what, view) in [
+        ("same width", VIEW),
+        (
+            "after a width change",
+            Size::new(VIEW.width + 40.0, VIEW.height),
+        ),
+    ] {
+        ui.render(view);
+        let total = ui.host.lists.get(LIST).unwrap().total();
+        let list = ui.layouts.data(NodeId(LIST)).rect;
+        assert!((total - 0.01).abs() < 1e-6, "{what}: total {total}");
+        assert!(
+            (list.size.height - total).abs() < 1e-6,
+            "{what}: list {list:?}"
+        );
+        let y = ui.layouts.data(NodeId(sibling)).rect.origin.y;
+        assert!((y - list.max_y()).abs() < 1e-6, "{what}: sibling at {y}");
+    }
 }

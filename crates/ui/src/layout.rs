@@ -14,7 +14,7 @@
 //! Taffy features are restricted to `flexbox`; block/grid/float/calc are
 //! compiled out until Craie needs them.
 
-use taffy::util::ResolveOrZero;
+use taffy::util::{MaybeResolve, ResolveOrZero};
 use taffy::{
     AvailableSpace, Cache, CacheTree, Layout, LayoutFlexboxContainer, LayoutInput, LayoutOutput,
     LayoutPartialTree, Line, NodeId as TaffyId, Point, RequestedAxis, RoundTree, RunMode,
@@ -342,10 +342,30 @@ impl TreeView<'_> {
         let parent_w = inputs.parent_size.width;
         let inset = style.padding.resolve_or_zero(parent_w, no_calc)
             + style.border.resolve_or_zero(parent_w, no_calc);
-        // Row gap between items (a percentage of an indefinite height
-        // resolves to nothing).
-        let gap = style.gap.height.resolve_or_zero(None, no_calc);
-        compute_leaf_layout(inputs, style, no_calc, |known, available| {
+        // The definite content height, as flex resolves a percentage row
+        // gap against it: the known height, else the style's (clamped
+        // by min/max), minus the insets of a border box.
+        let inner_h = {
+            let parent_h = inputs.parent_size.height;
+            let styled = style.size.height.maybe_resolve(parent_h, no_calc).map(|h| {
+                let min = style.min_size.height.maybe_resolve(parent_h, no_calc);
+                let max = style.max_size.height.maybe_resolve(parent_h, no_calc);
+                let h = max.map_or(h, |m| h.min(m));
+                let h = min.map_or(h, |m| h.max(m));
+                if style.box_sizing == taffy::BoxSizing::ContentBox {
+                    h + inset.top + inset.bottom
+                } else {
+                    h
+                }
+            });
+            let outer = inputs.known_dimensions.height.or(match inputs.sizing_mode {
+                SizingMode::InherentSize => styled,
+                SizingMode::ContentSize => None,
+            });
+            outer.map(|h| (h - inset.top - inset.bottom).max(0.0))
+        };
+        let gap = style.gap.height;
+        let mut out = compute_leaf_layout(inputs, style, no_calc, |known, available| {
             // The content-box width: Taffy resolves padding, border,
             // min/max, and percentages into the available width. (A
             // known width in a size probe is the border box.)
@@ -356,7 +376,7 @@ impl TreeView<'_> {
             match width {
                 Some(w) => TSize {
                     width: w,
-                    height: self.list_rows(id, w, gap, commit, [inset.left, inset.top]),
+                    height: self.list_rows(id, w, gap, inner_h, commit, [inset.left, inset.top]),
                 },
                 // An intrinsic-size probe: no width to wrap rows at.
                 None => TSize {
@@ -364,14 +384,36 @@ impl TreeView<'_> {
                     height: self.host.lists.get(id.0).map_or(0.0, |l| l.total()),
                 },
             }
-        })
+        });
+        // Rows placed with a percentage gap resolved after sizing can
+        // extend past the list: they still scroll into view.
+        if commit && let Some(l) = self.host.lists.get(id.0) {
+            let o = &mut out.scrollable_overflow_rect;
+            o.bottom = o.bottom.max(inset.top + l.total());
+        }
+        out
     }
 
     /// Lays out list `id`'s rendered rows at content width `w` and
     /// returns the list's content height. With `commit` (final layout)
     /// the rows' heights become measurements and each row is placed at
     /// `origin` + its item offset; otherwise nothing is recorded.
-    fn list_rows(&mut self, id: NodeId, w: f32, gap: f32, commit: bool, origin: [f32; 2]) -> f32 {
+    /// `gap` resolves against `inner_h` (a definite content height). A
+    /// percentage without one sizes the list without gaps, then places
+    /// rows with the gap resolved against that size, as flex does.
+    fn list_rows(
+        &mut self,
+        id: NodeId,
+        w: f32,
+        gap: taffy::LengthPercentage,
+        inner_h: Option<f32>,
+        commit: bool,
+        origin: [f32; 2],
+    ) -> f32 {
+        let (size_gap, deferred) = match gap.maybe_resolve(inner_h, no_calc) {
+            Some(g) => (g, false),
+            None => (0.0, true),
+        };
         let count = self.host.lists.get(id.0).map_or(0, |l| l.len());
         if commit {
             self.host.lists.estimate(self.text, id.0, w);
@@ -436,17 +478,24 @@ impl TreeView<'_> {
         }
         if !commit {
             let measured: Vec<(u32, f32)> = rows.iter().map(|r| (r.1, r.2)).collect();
-            return self.host.lists.total_at(self.text, id.0, w, gap, &measured);
+            return self
+                .host
+                .lists
+                .total_at(self.text, id.0, w, size_gap, &measured);
         }
         let Some(list) = self.host.lists.map.get_mut(&id.0) else {
             return 0.0;
         };
-        list.gap = gap;
         for r in &rows {
             list.extents.measure(r.1 as usize, r.2);
         }
+        let size = list.extents.total_gap(size_gap);
+        list.gap = if deferred {
+            gap.maybe_resolve(Some(size), no_calc).unwrap_or(0.0)
+        } else {
+            size_gap
+        };
         let offsets: Vec<f32> = rows.iter().map(|r| list.offset(r.1 as usize)).collect();
-        let total = list.total();
         for (k, (r, y)) in rows.iter().zip(offsets).enumerate() {
             let (row, _, extent, margin, overflow) = *r;
             let st = self.style_of(row);
@@ -476,7 +525,7 @@ impl TreeView<'_> {
         for row in hidden {
             compute_hidden_layout(self, to_taffy(row));
         }
-        total
+        size
     }
 }
 

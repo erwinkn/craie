@@ -10,7 +10,7 @@
 use std::collections::HashMap;
 
 use crate::host::{Host, MAX_NODES, NodeId};
-use crate::list::MAX_ITEMS;
+use crate::list::{IdSet, MAX_ITEMS};
 use crate::mutation::{Command, ItemDesc, Mutation, NIL, NodeKind, TextSpan, Transaction};
 use crate::ui::Ui;
 use crate::wire::WireError;
@@ -67,6 +67,108 @@ fn valid_spans(text: &str, spans: &[TextSpan]) -> Result<(), WireError> {
     Ok(())
 }
 
+/// A list the batch splices, as the batch leaves it.
+enum Touch {
+    /// The host's list plus splices recorded (item count after them).
+    /// The first splice checks identities against the host's index; a
+    /// second one on the same list materializes the sequence.
+    Host {
+        len: u32,
+        splices: Vec<(u32, u32, Vec<u32>)>,
+    },
+    /// The whole identity sequence and its set.
+    Seq { ids: Vec<u32>, set: IdSet },
+}
+
+impl Touch {
+    fn empty() -> Touch {
+        Touch::Seq {
+            ids: Vec::new(),
+            set: IdSet::default(),
+        }
+    }
+
+    fn len(&self) -> u32 {
+        match self {
+            Touch::Host { len, .. } => *len,
+            Touch::Seq { ids, .. } => ids.len() as u32,
+        }
+    }
+
+    /// Checks one splice (range, item limit, identities unique across the
+    /// list as the batch leaves it) and records it. `fresh` holds the
+    /// inserted non-NIL identities, already unique among themselves.
+    fn splice(
+        &mut self,
+        base: Option<&crate::list::ListState>,
+        at: u32,
+        remove: u32,
+        inserted: Vec<u32>,
+        fresh: &IdSet,
+    ) -> Result<(), WireError> {
+        let cur = self.len();
+        if at > cur || remove > cur - at {
+            return Err(invalid("list splice out of range"));
+        }
+        let next = cur as u64 - remove as u64 + inserted.len() as u64;
+        if next > MAX_ITEMS as u64 {
+            return Err(invalid("list longer than the item limit"));
+        }
+        let range = at as usize..(at + remove) as usize;
+        if let Touch::Host { splices, .. } = self {
+            if splices.is_empty() {
+                // First splice: the host's items and index, unmodified.
+                let base = base.expect("a host touch has a host list");
+                let removed: IdSet = base.descs[range.clone()]
+                    .iter()
+                    .map(|d| d.id)
+                    .filter(|&i| i != NIL)
+                    .collect();
+                if fresh
+                    .iter()
+                    .any(|i| base.ids.contains(i) && !removed.contains(i))
+                {
+                    return Err(invalid("duplicate item identity in a list"));
+                }
+                splices.push((at, remove, inserted));
+                *self = Touch::Host {
+                    len: next as u32,
+                    splices: std::mem::take(splices),
+                };
+                return Ok(());
+            }
+            // Materialize: the host's sequence with the recorded splices.
+            let base = base.expect("a host touch has a host list");
+            let mut ids: Vec<u32> = base.descs.iter().map(|d| d.id).collect();
+            for (a, r, ins) in splices.drain(..) {
+                ids.splice(a as usize..(a + r) as usize, ins);
+            }
+            let set = ids.iter().copied().filter(|&i| i != NIL).collect();
+            *self = Touch::Seq { ids, set };
+        }
+        let Touch::Seq { ids, set } = self else {
+            unreachable!()
+        };
+        let removed: IdSet = ids[range.clone()]
+            .iter()
+            .copied()
+            .filter(|&i| i != NIL)
+            .collect();
+        if fresh
+            .iter()
+            .any(|i| set.contains(i) && !removed.contains(i))
+        {
+            return Err(invalid("duplicate item identity in a list"));
+        }
+        for i in &removed {
+            set.remove(i);
+        }
+        set.extend(fresh.iter().copied());
+        ids.splice(range, inserted);
+        Ok(())
+    }
+}
+
 /// Liveness and parent overlay over the host for validation.
 struct Overlay<'h> {
     host: &'h Host,
@@ -119,8 +221,9 @@ pub fn validate(host: &Host, txn: &Transaction<'_>) -> Result<(), WireError> {
         removed: HashMap::new(),
         created: 0,
     };
-    // Item counts of lists the batch splices, as the batch leaves them.
-    let mut counts: HashMap<u32, u32> = HashMap::new();
+    // Lists the batch splices, as the batch leaves them (item counts and
+    // identities).
+    let mut lists: HashMap<u32, Touch> = HashMap::new();
     let need_live = |o: &Overlay, id: u32, why: &'static str| {
         if o.live(id) {
             Ok(())
@@ -151,7 +254,7 @@ pub fn validate(host: &Host, txn: &Transaction<'_>) -> Result<(), WireError> {
                 o.parents.insert(*id, (NodeId::DETACHED.0, step));
                 // A node created here holds no items, whatever an earlier
                 // occupant of the id held.
-                counts.insert(*id, 0);
+                lists.insert(*id, Touch::empty());
             }
             Mutation::Place {
                 parent,
@@ -192,7 +295,7 @@ pub fn validate(host: &Host, txn: &Transaction<'_>) -> Result<(), WireError> {
                 o.kinds.insert(*id, None);
                 o.parents.insert(*id, (NodeId::DETACHED.0, step));
                 o.removed.insert(*id, step);
-                counts.insert(*id, 0);
+                lists.insert(*id, Touch::empty());
             }
             Mutation::Layout { id, style } => {
                 need_live(&o, *id, "layout on an absent node")?;
@@ -292,21 +395,23 @@ pub fn validate(host: &Host, txn: &Transaction<'_>) -> Result<(), WireError> {
                 if o.kind(*id) != Some(NodeKind::List) {
                     return Err(invalid("list splice on a non-list node"));
                 }
-                // A list created (or re-created) in this batch starts empty.
-                let cur = match counts.get(id) {
-                    Some(&c) => c,
-                    None if o.kinds.contains_key(id) => 0,
-                    None => host.lists.get(*id).map_or(0, |l| l.len()),
-                };
-                let inserted = (items.len() / ItemDesc::BYTES) as u64;
-                if *at > cur || *remove > cur - at {
-                    return Err(invalid("list splice out of range"));
+                let inserted: Vec<u32> = ItemDesc::iter(items).map(|d| d.id).collect();
+                let mut fresh: IdSet = IdSet::default();
+                for &i in inserted.iter().filter(|&&i| i != NIL) {
+                    if !fresh.insert(i) {
+                        return Err(invalid("duplicate item identity in a splice"));
+                    }
                 }
-                let next = cur as u64 - *remove as u64 + inserted;
-                if next > MAX_ITEMS as u64 {
-                    return Err(invalid("list longer than the item limit"));
-                }
-                counts.insert(*id, next as u32);
+                let base = host.lists.get(*id);
+                let touch = lists.entry(*id).or_insert_with(|| match base {
+                    // A list created in this batch starts empty.
+                    None => Touch::empty(),
+                    Some(l) => Touch::Host {
+                        len: l.len(),
+                        splices: Vec::new(),
+                    },
+                });
+                touch.splice(base, *at, *remove, inserted, &fresh)?;
             }
             Mutation::ListIndex { id, .. } => {
                 need_live(&o, *id, "list index on an absent node")?;

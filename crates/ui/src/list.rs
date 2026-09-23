@@ -16,7 +16,7 @@
 //! extents above it change; with `StickToEnd` a scroller at its end
 //! stays at its end.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 
 use craie_core::extents::Extents;
@@ -35,6 +35,30 @@ use craie_core::Affine;
 /// fields of range events.
 pub const MAX_ITEMS: u32 = 1 << 24;
 
+/// Hashes u32 item identities by Fibonacci multiplication: ids are
+/// interned counters, not attacker-chosen keys, so no seeded hash is
+/// needed, and the top bits (which the table's control bytes use) mix
+/// well.
+#[derive(Clone, Copy, Default)]
+pub struct IdHasher(u64);
+
+impl std::hash::Hasher for IdHasher {
+    fn write(&mut self, bytes: &[u8]) {
+        for &b in bytes {
+            self.0 = (self.0.rotate_left(8) ^ b as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+        }
+    }
+    fn write_u32(&mut self, i: u32) {
+        self.0 = (i as u64 ^ self.0).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    }
+    fn finish(&self) -> u64 {
+        self.0
+    }
+}
+
+/// A set of item identities.
+pub type IdSet = HashSet<u32, std::hash::BuildHasherDefault<IdHasher>>;
+
 /// Sample text for per-size metrics: a mix of letters, digits, and
 /// spaces close to running prose.
 const SAMPLE: &str = "The quick brown fox jumps over the lazy dog, 0123456789 times.";
@@ -42,6 +66,9 @@ const SAMPLE: &str = "The quick brown fox jumps over the lazy dog, 0123456789 ti
 pub struct ListState {
     pub templates: Vec<ItemTemplate>,
     pub descs: Vec<ItemDesc>,
+    /// The identities in `descs` (NIL excluded): each appears once, which
+    /// validation checks against this index.
+    pub ids: IdSet,
     pub extents: Extents,
     /// Extra distance rendered beyond the viewport, each side (logical
     /// points).
@@ -72,6 +99,7 @@ impl Default for ListState {
         ListState {
             templates: Vec::new(),
             descs: Vec::new(),
+            ids: IdSet::default(),
             extents: Extents::new(),
             overscan: 0.0,
             fallback: 0.0,
@@ -112,14 +140,17 @@ impl ListState {
     }
 }
 
-/// A scroller's captured anchor: list item `index` of `list` sat
-/// `delta` points below the viewport top (`list` NIL: no list item was
-/// visible). `at_end`: the scroller was at its end.
+/// A scroller's captured anchor: the visually top edge of list item
+/// `index` of `list` sat `delta` points below the viewport top (`list`
+/// NIL: no list item was visible). `bottom`: that edge is the item's
+/// bottom (the list's y axis points up in the view). `at_end`: the
+/// scroller was at its end.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Saved {
     pub list: u32,
     pub index: u32,
     pub delta: f32,
+    pub bottom: bool,
     pub at_end: bool,
 }
 
@@ -178,7 +209,7 @@ impl Lists {
     }
 
     /// Replaces items `at..at + remove` with `items`. An item that moves
-    /// within the splice unchanged (same id and description removed and
+    /// within the splice marked `unchanged` (same id removed and
     /// inserted) keeps its extent and measurement; other new items are estimated at the list's width
     /// when it is known (else at the next layout). A captured anchor
     /// follows its item: to its new place when it moved, to the splice
@@ -219,9 +250,10 @@ impl Lists {
         for (k, d) in ItemDesc::iter(items).enumerate() {
             if let Some(&(old, before, e, m)) = removed.get(&d.id) {
                 moved.insert(old, at + k as u32);
-                // Unchanged, it keeps its extent; edited, it is estimated
-                // again (its row, if rendered, measures it).
-                if before == d {
+                // Only the bridge knows the content is the same (the same
+                // object moved): then it keeps its extent. Otherwise it is
+                // estimated again (its row, if rendered, measures it).
+                if d.unchanged && before.template == d.template {
                     new_items.push((e, m));
                     continue;
                 }
@@ -241,6 +273,11 @@ impl Lists {
         }
         let l = self.map.get_mut(&id).unwrap();
         let inserted = new_items.len();
+        for d in &l.descs[range.clone()] {
+            l.ids.remove(&d.id);
+        }
+        l.ids
+            .extend(ItemDesc::iter(items).map(|d| d.id).filter(|&i| i != NIL));
         l.descs.splice(range.clone(), ItemDesc::iter(items));
         l.extents.splice_items(range, new_items);
         if !width.is_finite() {
@@ -361,13 +398,15 @@ impl Lists {
         let Some(l) = self.map.get(&id) else {
             return 0.0;
         };
-        let gaps = l.descs.len().saturating_sub(1) as f32 * gap;
+        // In f64 throughout, rounded once at the end: an f32 correction
+        // of widely differing extents rounds away (1e6 -> 0.01 is -1e6).
+        let gaps = l.descs.len().saturating_sub(1) as f64 * gap as f64;
         if l.width == width && !l.stale {
-            let mut t = l.extents.total();
+            let mut t = l.extents.total_f64();
             for &(i, e) in rows {
-                t += e - l.extents.size(i as usize);
+                t += e as f64 - l.extents.size(i as usize) as f64;
             }
-            return t + gaps;
+            return (t + gaps) as f32;
         }
         let sizes: Vec<f32> = l.templates.iter().map(|t| t.font_size).collect();
         let metrics: Vec<(f32, f32)> = sizes
@@ -395,9 +434,9 @@ impl Lists {
         };
         let mut t: f64 = (0..l.descs.len()).map(|i| item(i) as f64).sum();
         for &(i, e) in rows {
-            t += (e - item(i as usize)) as f64;
+            t += e as f64 - item(i as usize) as f64;
         }
-        t as f32 + gaps
+        (t + gaps) as f32
     }
 }
 
@@ -435,7 +474,13 @@ struct Placement {
 }
 
 impl Placement {
-    /// Where the top of item offset `y` sits below the viewport top.
+    /// Whether the list's y axis points up in the view (a flip on the
+    /// list or an ancestor): the visual top is then the list's far end.
+    fn flipped(&self) -> bool {
+        self.to_view.0[3] < 0.0
+    }
+
+    /// Where list content offset `y` sits below the viewport top.
     fn view_y(&self, y: f32) -> f32 {
         let p = self
             .to_view
@@ -571,8 +616,11 @@ impl crate::ui::Ui {
                     if p.scroller != sc || s.index >= l.len() {
                         continue;
                     }
-                    // The scroll that puts the item `delta` below the top.
-                    p.scroll[1] + p.view_y(l.offset(s.index as usize)) - s.delta
+                    // The scroll that puts the item's edge `delta` below the
+                    // viewport top.
+                    let i = s.index as usize;
+                    let edge = l.offset(i) + if s.bottom { l.extents.size(i) } else { 0.0 };
+                    p.scroll[1] + p.view_y(edge) - s.delta
                 }
             };
             let cur = self.host.spatial[sc.index()].scroll;
@@ -613,11 +661,20 @@ impl crate::ui::Ui {
             if p.scroller.is_node() && !anchored.contains(&p.scroller.0) {
                 let at_end = p.scroll[1] >= p.max_scroll - 0.5;
                 let saved = if visible {
-                    let index = l.item_at(p.v0.max(0.0));
+                    // The visually top item: the list's near end, or its
+                    // far end when the list's y axis points up.
+                    let bottom = p.flipped();
+                    let index = if bottom {
+                        l.item_at(p.v1.min(total - 1e-3).max(0.0))
+                    } else {
+                        l.item_at(p.v0.max(0.0))
+                    };
+                    let edge = l.offset(index) + if bottom { l.extents.size(index) } else { 0.0 };
                     Saved {
                         list: id,
                         index: index as u32,
-                        delta: p.view_y(l.offset(index)),
+                        delta: p.view_y(edge),
+                        bottom,
                         at_end,
                     }
                 } else {
@@ -625,6 +682,7 @@ impl crate::ui::Ui {
                         list: NIL,
                         index: 0,
                         delta: 0.0,
+                        bottom: false,
                         at_end,
                     }
                 };

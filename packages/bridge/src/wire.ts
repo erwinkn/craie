@@ -66,6 +66,8 @@ export interface ItemDesc {
   template?: number
   textLength?: number
   id?: number
+  /** The same (unchanged) item the splice removes under `id`: a move. */
+  unchanged?: boolean
 }
 
 // Field mask bits — mirror wire.rs `spatial_field` / `paint_field`.
@@ -673,7 +675,7 @@ export class Encoder {
       b.f32(t.fontSize ?? 0)
     }
   }
-  /** Replaces items `at..at + remove` with `items` (10 bytes each). */
+  /** Replaces items `at..at + remove` with `items` (11 bytes each). */
   listSplice(id: number, at: number, remove: number, items: readonly ItemDesc[]) {
     const b = this.ops
     b.u8(Op.ListSplice)
@@ -681,11 +683,12 @@ export class Encoder {
     b.u32(at)
     b.u32(remove)
     b.u32(items.length)
-    b.reserve(items.length * 10)
+    b.reserve(items.length * 11)
     for (const d of items) {
       b.u16(d.template ?? 0)
       b.u32(d.textLength ?? 0)
       b.u32(d.id ?? NIL)
+      b.u8(d.unchanged ? 1 : 0)
     }
   }
   /** Tags a list row with its item index (NIL clears). */

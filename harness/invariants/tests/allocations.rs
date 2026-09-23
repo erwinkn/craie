@@ -281,18 +281,11 @@ fn whole_frame_budgets() {
     }
 }
 
-/// A virtualized list over the whole frame on a real device: warm
-/// scrolls inside the rendered range, idle frames, and the settle frame
-/// that snaps the content at rest. Craie phases allocate nothing; wgpu's
-/// upload and encode stay within their budgets. Frames that change the
-/// range (rows mount) and the mount itself are excluded: they create
-/// nodes. Without a GPU the UI phase is still measured.
-#[test]
-fn list_frames_do_not_allocate() {
+/// A window-sized scroller with a 10,000-item list, its first range
+/// rendered.
+fn list_ui() -> Ui {
     use craie_harness::ListDriver;
-    use craie_ui::host::NodeId;
     use craie_ui::mutation::ItemDesc;
-    let text = |i: u32| format!("item {i} with some words in it");
     let mut ui = Ui::new(2.0);
     let mut d = ListDriver::new(1, 100, 14.0);
     let mut s = craie_ui::host::default_style();
@@ -306,8 +299,9 @@ fn list_frames_do_not_allocate() {
     let items: Vec<ItemDesc> = (0..10_000)
         .map(|i| ItemDesc {
             template: 0,
-            text_len: text(i).len() as u32,
+            text_len: list_text(i).len() as u32,
             id: i,
+            unchanged: false,
         })
         .collect();
     t.create(1, NodeKind::List)
@@ -315,52 +309,104 @@ fn list_frames_do_not_allocate() {
         .list_splice(1, 0, 0, &items)
         .append(0, 1);
     ui.apply_txn(&t).unwrap();
-    d.settle(&mut ui, VIEW, &text, 8);
-    let Some(mut g) = GpuFrames::new() else {
-        eprintln!("no GPU adapter: UI phase only");
+    d.settle(&mut ui, VIEW, &list_text, 8);
+    ui
+}
+
+fn list_text(i: u32) -> String {
+    format!("item {i} with some words in it")
+}
+
+/// The scroll positions the list tests measure: all inside the range
+/// rendered at mount (overscan 300).
+fn list_scrolls() -> impl Iterator<Item = f32> {
+    (1..8).map(|k| 10.0 * k as f32)
+}
+
+/// A virtualized list, UI phase (no GPU needed, so it always runs):
+/// after one warm pass over the same scroll positions, unchanged frames
+/// and scrolls inside the rendered range allocate nothing. The warm pass
+/// builds the row chunks that come near the viewport once.
+#[test]
+fn list_ui_frames_do_not_allocate() {
+    use craie_ui::host::NodeId;
+    let mut ui = list_ui();
+    for y in list_scrolls() {
+        ui.scroll_to(NodeId(0), 0.0, y);
         ui.render(VIEW);
-        assert_eq!(allocs(|| drop(ui.render(VIEW))), 0, "unchanged frame");
-        for k in 2..6 {
-            let n = allocs(|| {
-                ui.scroll_to(NodeId(0), 0.0, 10.0 * k as f32);
-                ui.render(VIEW);
-            });
-            assert_eq!(n, 0, "scroll {k}");
-        }
+        ui.render(VIEW);
+    }
+    ui.scroll_to(NodeId(0), 0.0, 0.0);
+    ui.render(VIEW);
+    let n = allocs(|| {
+        ui.render(VIEW);
+    });
+    assert_eq!(n, 0, "unchanged frame");
+    for y in list_scrolls() {
+        let n = allocs(|| {
+            ui.scroll_to(NodeId(0), 0.0, y);
+            ui.render(VIEW);
+        });
+        assert_eq!(n, 0, "scroll to {y}");
+        let n = allocs(|| {
+            ui.render(VIEW);
+        });
+        assert_eq!(n, 0, "idle after scroll to {y}");
+    }
+    assert!(
+        !ui.take_events()
+            .iter()
+            .any(|e| e.kind == craie_ui::events::out_kind::LIST_RANGE),
+        "the measured frames stayed inside the rendered range"
+    );
+}
+
+/// The same list over the whole frame on a real device: warm scrolls
+/// inside the rendered range, idle frames, and the settle frame that
+/// snaps the content at rest. Craie phases allocate nothing; wgpu's
+/// upload and encode stay within their budgets. Frames that change the
+/// range (rows mount) and the mount itself are excluded: they create
+/// nodes. Skips without a GPU adapter (the UI phase is covered above).
+#[test]
+fn list_frames_do_not_allocate() {
+    use craie_ui::host::NodeId;
+    let Some(mut g) = GpuFrames::new() else {
+        eprintln!("no GPU adapter: skipped");
         return;
     };
+    let mut ui = list_ui();
     // Warm: the first frames upload everything and grow buffers; one pass
     // over the scroll positions builds the row chunks that come near the
     // viewport (a first build uploads glyphs: content, not scroll cost).
     g.frame(&mut ui, |_| {});
-    for k in 1..8 {
+    for y in list_scrolls() {
         g.frame(&mut ui, |ui| {
-            ui.scroll_to(NodeId(0), 0.0, 10.0 * k as f32);
+            ui.scroll_to(NodeId(0), 0.0, y);
         });
         g.frame(&mut ui, |_| {});
     }
     g.frame(&mut ui, |ui| {
         ui.scroll_to(NodeId(0), 0.0, 0.0);
     });
-    for k in 2..8 {
+    for y in list_scrolls() {
         let f = g.frame(&mut ui, |ui| {
-            ui.scroll_to(NodeId(0), 0.0, 10.0 * k as f32);
+            ui.scroll_to(NodeId(0), 0.0, y);
         });
         assert_eq!(
             (f.render, f.collect, f.plan),
             (0, 0, 0),
-            "scroll {k}: {f:?}"
+            "scroll to {y}: {f:?}"
         );
-        assert!(f.upload <= WGPU_WRITE, "scroll {k}: {f:?}");
+        assert!(f.upload <= WGPU_WRITE, "scroll to {y}: {f:?}");
         assert!(
             f.encode <= budget(f.passes) + WGPU_WRITE_SUBMIT,
-            "scroll {k}: {f:?}"
+            "scroll to {y}: {f:?}"
         );
         let idle = g.frame(&mut ui, |_| {});
         assert_eq!(
             (idle.render, idle.collect, idle.upload, idle.plan),
             (0, 0, 0, 0),
-            "idle after scroll {k}: {idle:?}"
+            "idle after scroll to {y}: {idle:?}"
         );
         assert!(idle.encode <= budget(idle.passes), "{idle:?}");
     }

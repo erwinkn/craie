@@ -103,8 +103,10 @@ fn js_fixture_decodes_and_executes() {
     assert_eq!(l.templates[1].base, 48.0);
     assert_eq!(l.templates[1].font_size, 0.0);
     assert_eq!(l.len(), 2);
-    assert_eq!(l.descs[0].text_len, 42);
-    assert_eq!(l.descs[1].text_len, 70_000);
+    // Moved (swapped) unchanged, identities kept.
+    assert_eq!(l.descs[0].text_len, 70_000);
+    assert_eq!((l.descs[0].id, l.descs[0].unchanged), (7, true));
+    assert_eq!((l.descs[1].id, l.descs[1].text_len), (5, 42));
     assert_eq!(host.list_index[5], 1);
     assert_eq!(host.lists.policy(0), craie_ui::mutation::Anchor::StickToEnd);
 }

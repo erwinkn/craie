@@ -56,8 +56,9 @@ enc.place(0, 1, NIL)
 enc.remove(1)
 enc.create(4, 4)                                    // list
 enc.listConfig(4, 250, 36, [{ base: 12, inset: 16, fontSize: 14 }, { base: 48 }])
-enc.listSplice(4, 0, 0, [{ template: 0, textLength: 42 }, { template: 1 }, { textLength: 70000 }])
-enc.listSplice(4, 1, 1, [])
+enc.listSplice(4, 0, 0, [{ template: 0, textLength: 42, id: 5 }, { template: 1, id: 6 }, { textLength: 70000, id: 7 }])
+enc.listSplice(4, 1, 1, [])                         // removes id 6
+enc.listSplice(4, 0, 2, [{ textLength: 70000, id: 7, unchanged: true }, { template: 0, textLength: 42, id: 5, unchanged: true }])
 enc.place(0, 4, NIL)
 enc.create(5, 0)                                    // a row
 enc.listIndex(5, 1)

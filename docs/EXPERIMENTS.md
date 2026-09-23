@@ -89,13 +89,17 @@ machine (load average 9 to 12): times are indicative.
 
 | items | list mount | plain mount | scroll (in range) | jump | list heap | plain heap | layout visits |
 |-------|-----------:|------------:|------------------:|-----:|----------:|-----------:|--------------:|
-| 1k    | 29.0 ms | 68.1 ms  | 0.005 ms (plain 0.028) | 2.0 ms | 5.0 MiB  | 15.0 MiB  | 64 (plain 4,001) |
-| 10k   | 33.2 ms | 339.7 ms | 0.004 ms (plain 0.217) | 1.8 ms | 5.2 MiB  | 104.3 MiB | 64 (plain 40,001) |
-| 100k  | 30.2 ms | -        | 0.003 ms               | 1.4 ms | 7.3 MiB  | -         | 64 |
-| 1M    | 73.8 ms | -        | 0.007 ms               | 2.8 ms | 28.8 MiB | -         | 64 |
+| 1k    | 27.0 ms | 52.7 ms  | 0.006 ms (plain 0.013) | 1.9 ms | 5.0 MiB  | 15.0 MiB  | 64 (plain 4,001) |
+| 10k   | 18.3 ms | 350.9 ms | 0.002 ms (plain 0.244) | 0.9 ms | 5.3 MiB  | 104.3 MiB | 64 (plain 40,001) |
+| 100k  | 47.3 ms | -        | 0.002 ms               | 1.1 ms | 8.0 MiB  | -         | 64 |
+| 1M    | 73.8 ms | -        | 0.003 ms               | 2.1 ms | 38.8 MiB | -         | 64 |
 
 About 5 MiB of each heap is the text engine's font data. The list adds
-about 25 bytes per item (21 before item identity); 27 rows render. Estimates against measured
+about 35 bytes per item: 21 for descriptions and extents before item
+identity, 4 for the identity, about 10 for the identity index that
+validation checks against. With the default (SipHash) hasher that
+index doubled the 1M mount (180 ms); a multiplicative hasher for u32
+ids brought it back. 27 rows render. Estimates against measured
 heights: mean error 2.4%, p95 25% (a wrap boundary costs a line). After
 a jump to 61% of a 100k list the top item holds its place and the item
 at the viewport bottom moves 14 pt once, when the rows measure.
@@ -135,6 +139,25 @@ all valid, all fixed with regression tests and negative controls:
   before the renderer. All fixed; the full-frame list test then found
   that dirty queues swapped buffers with their drains, so a warm scroll
   could still grow one: drains copy now.
+
+Review round 2 of step 2: two new majors, two partly resolved, two
+minors, all fixed with regression tests and negative controls:
+
+- Identities were not checked for uniqueness; a duplicate made a move
+  copy the wrong measurement. Validation now checks every identity
+  against the list as the batch leaves it (a persistent index for the
+  first splice, the materialized sequence for later ones).
+- Equal estimate inputs were taken as proof that a measurement still
+  held (a regression from the round-1 fix): an edit with the same
+  length kept a stale height. The bridge now marks a move `unchanged`
+  (the same object); only that keeps a measurement.
+- A flipped list anchored its bottom visible item: the anchor is now
+  the visually top item's visually top edge.
+- Percentage row gaps resolved to zero; they follow flex now. The
+  plain column sums gaps in f32: the definite-height case uses a gap
+  f32 holds exactly, so the oracle's tolerance stays.
+- Size probes subtracted in f32; they sum in f64 now. The UI-phase
+  list allocation test warms its scroll path and runs without a GPU.
 
 ### E10: span pool versus `Vec` side table
 

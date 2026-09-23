@@ -216,7 +216,7 @@ test("List sends config and items, renders the reported range, diffs splices", a
   expect(config.f).toEqual([300, 44, 8, 0, 14])
   const splice = ops.find(o => o.tag === 0x91)!
   expect(splice.f.slice(0, 3)).toEqual([0, 0, 1000])
-  expect(splice.f.slice(3, 6)).toEqual([0, "item 0".length, 0]) // template, length, id
+  expect(splice.f.slice(3, 7)).toEqual([0, "item 0".length, 0, 0]) // template, length, id, flags
   expect(ops.find(o => o.tag === 0x93)!.f).toEqual([1]) // stick-to-end
   // Initial rows 0..5, each tagged with its item index.
   expect(ops.filter(o => o.tag === 0x92).map(o => o.f[0])).toEqual([0, 1, 2, 3, 4])
@@ -330,4 +330,36 @@ test("List keeps the focused item's row across splices by identity", async () =>
   root.renderSync(createElement(App, { items }))
   await settle()
   expect(ops().some(o => o.tag === 0x04 && o.id === row)).toBe(true)
+})
+
+test("List marks moved items unchanged and edited items changed", async () => {
+  const t = new FakeTransport()
+  const root = createRoot(t)
+  type Item = { id: number; text: string }
+  let items: Item[] = Array.from({ length: 6 }, (_, i) => ({ id: i, text: `item ${i}` }))
+  const App = ({ items }: { items: Item[] }) =>
+    createElement(ScrollView, null,
+      createElement(List<Item>, {
+        items,
+        keyOf: (it) => it.id,
+        describe: (it) => ({ textLength: it.text.length }),
+        renderItem: (it) => createElement(Text, null, it.text),
+      }))
+  const splice = () => t.ops().filter(o => o.tag === 0x91).at(-1)!
+  // (id, flags) per inserted item, after at, remove, count.
+  const flags = () => { const f = splice().f; const out = []; for (let i = 3; i < f.length; i += 4) out.push([f[i + 2], f[i + 3]]); return out }
+  root.renderSync(createElement(App, { items }))
+  await tick()
+  // Swap items 1 and 4: the same objects move.
+  items = [items[0]!, items[4]!, items[2]!, items[3]!, items[1]!, items[5]!]
+  root.renderSync(createElement(App, { items }))
+  await tick()
+  expect(splice().f.slice(0, 3)).toEqual([1, 4, 4])
+  expect(flags()).toEqual([[4, 1], [2, 1], [3, 1], [1, 1]])
+  // Edit item 2 in place: a new object with the same key and length.
+  items = items.map(it => it.id === 2 ? { id: 2, text: "item X" } : it)
+  root.renderSync(createElement(App, { items }))
+  await tick()
+  expect(splice().f.slice(0, 3)).toEqual([2, 1, 1])
+  expect(flags()).toEqual([[2, 0]])
 })
