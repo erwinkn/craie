@@ -363,3 +363,80 @@ test("List marks moved items unchanged and edited items changed", async () => {
   expect(splice().f.slice(0, 3)).toEqual([2, 1, 1])
   expect(flags()).toEqual([[2, 0]])
 })
+
+// Paragraph span rows of a frame's paragraph op on `id`.
+function paragraphOf(t: FakeTransport, id: number, frame = -1) {
+  const f = readFrame(t.frames.at(frame)!)
+  const op = f.ops.find(o => o.tag === 0x40 && o.id === id)
+  if (!op) return undefined
+  const [start, count] = op.f as [number, number]
+  return { text: op.s, spans: f.spans.slice(start, start + count) }
+}
+
+test("nested Text flattens to spans of one paragraph node", async () => {
+  const t = new FakeTransport()
+  const root = createRoot(t)
+  function App({ word, show }: { word: string; show: boolean }) {
+    return createElement(Text, { fontSize: 16, color: "#ffffff", lineHeight: 22 },
+      "Hé ",
+      createElement(Text, { fontWeight: "bold", color: "#ff0000", fontFamily: "monospace" }, word),
+      show ? createElement(Text, { textDecorationLine: "underline" }, " tail") : null,
+      "!")
+  }
+  root.renderSync(createElement(App, { word: "wörld", show: true }))
+  await tick()
+  // One native text node: nested Text and string children are virtual.
+  const creates = t.ops(0).filter(o => o.tag === 0x01)
+  expect(creates.length).toBe(1)
+  const id = creates[0]!.id
+  const p = paragraphOf(t, id, 0)!
+  expect(p.text).toBe("Hé wörld tail!")
+  // Byte offsets: "Hé " is 4 bytes, "wörld" 6.
+  expect(p.spans.map(s => s.start)).toEqual([0, 4, 10, 15])
+  const [base, bold, under, bang] = p.spans
+  expect([base!.fontSize, base!.weight, base!.lineHeight]).toEqual([16, 400, 22])
+  expect([bold!.weight, bold!.color, bold!.family, bold!.fontSize]).toEqual([700, 0xff0000ff, "monospace", 16])
+  expect([under!.decoration, under!.weight, under!.color]).toEqual([1, 400, 0xffffffff])
+  expect([bang!.weight, bang!.decoration]).toEqual([400, 0])
+
+  // A nested change resends only the paragraph.
+  t.frames.length = 0
+  root.renderSync(createElement(App, { word: "all", show: true }))
+  await tick()
+  expect(t.ops().map(o => o.tag)).toEqual([0x40])
+  expect(paragraphOf(t, id)!.text).toBe("Hé all tail!")
+
+  // Removing a nested Text recomposes; no native removal.
+  t.frames.length = 0
+  root.renderSync(createElement(App, { word: "all", show: false }))
+  await tick()
+  expect(t.ops().map(o => o.tag)).toEqual([0x40])
+  expect(paragraphOf(t, id)!.text).toBe("Hé all!")
+})
+
+test("pointer events on a span reach its nested Text", async () => {
+  const t = new FakeTransport()
+  const root = createRoot(t)
+  const hits: string[] = []
+  root.renderSync(
+    createElement(Text, { fontSize: 14, onPress: () => hits.push("outer") },
+      "tap ",
+      createElement(Text, { onPress: () => hits.push("link") }, "here"),
+      createElement(Text, { fontWeight: "bold" }, " bold"))
+  )
+  await tick()
+  const id = t.ops(0).find(o => o.tag === 0x01)!.id
+  // The root's listener mask covers its nested Texts' listeners.
+  const inter = t.ops(0).find(o => o.tag === 0x60 && o.id === id)!
+  expect((inter.f[0]! & (1 << 2)) !== 0).toBe(true)
+  const spans = paragraphOf(t, id, 0)!.spans
+  expect(spans.length).toBe(3)
+  const up = (span: number): UiEvent => ({
+    kind: 3, node: id, generation: 0, x: 0, y: 0, a: 0, b: 0,
+    key: (1 << 8) | ((span + 1) << 16), text: "",
+  })
+  t.eventCb!(up(1)) // "here": the nested link
+  t.eventCb!(up(0)) // "tap ": the root
+  t.eventCb!(up(2)) // " bold": no handler of its own, so the root
+  expect(hits).toEqual(["link", "outer", "outer"])
+})

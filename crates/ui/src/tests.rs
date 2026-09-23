@@ -2271,3 +2271,63 @@ fn span_family_resolves_when_applied() {
     let fonts = &ui.host.paragraph(NodeId(0)).unwrap().fonts;
     assert_eq!(fonts[1], ui.text.font("Noto Sans Arabic", 400, false));
 }
+
+/// A pointer event on a text node carries the span under the pointer
+/// (key bits 16+, span + 1), found from the placements; 0 past the text.
+#[test]
+fn text_pointer_events_carry_the_span() {
+    let mut ui = Ui::new(1.0);
+    let mut t = Transaction::new(1);
+    let spans = [
+        TextSpan::default(),
+        TextSpan {
+            start: 4,
+            weight: 700,
+            ..TextSpan::default()
+        },
+        TextSpan {
+            start: 8,
+            ..TextSpan::default()
+        },
+    ];
+    // A box wider than the text: past its end is inside the node.
+    let wide = taffy::Style {
+        size: taffy::Size {
+            width: taffy::Dimension::length(300.0),
+            height: taffy::Dimension::auto(),
+        },
+        ..taffy::Style::default()
+    };
+    t.create(0, NodeKind::Text)
+        .layout(0, &wide)
+        .paragraph(0, "tap here bold", &spans)
+        .interaction(0, mask::POINTER_DOWN, false)
+        .place(NIL, 0, NIL);
+    ui.apply_txn(&t).unwrap();
+    ui.render(Size::new(400.0, 300.0));
+    let p = ui.text_layout(NodeId(0)).unwrap().clone();
+    let line = &p.lines[0];
+    let y = line.top + line.height * 0.5;
+    let mut down = |x: f32| -> u32 {
+        ui.take_events();
+        ui.dispatch(&Event::PointerDown {
+            x,
+            y,
+            button: Button::Primary,
+            mods: Mods::default(),
+        });
+        ui.take_events()
+            .iter()
+            .find(|e| e.kind == out_kind::POINTER_DOWN)
+            .map_or(u32::MAX, |e| e.key >> 16)
+    };
+    for v in p.visual_clusters(0) {
+        let want = match v.text.start {
+            0..4 => 1,
+            4..8 => 2,
+            _ => 3,
+        };
+        assert_eq!(down((v.left + v.right) * 0.5), want, "cluster {:?}", v.text);
+    }
+    assert_eq!(down(line.x + line.advance + 5.0), 0, "past the text");
+}

@@ -101,8 +101,13 @@ export interface PressableProps extends ViewProps {
   /** Primary pointer released over the node. */
   onPress?: (e: PointerEvt) => void
 }
-export interface TextProps {
+/** Text props. A Text nested in a Text has no native node: its text and
+ * style become spans of the outermost Text's paragraph, and its pointer
+ * listeners (`onPress` too) receive the events over its own span. */
+export interface TextProps extends ListenerProps {
   style?: StyleProps
+  /** Primary pointer released over this text (or this nested span). */
+  onPress?: (e: PointerEvt) => void
   fontSize?: number
   color?: string | number
   fontWeight?: number | "normal" | "bold"
@@ -188,7 +193,16 @@ export function Pressable({ onPress, ...props }: PressableProps) {
     },
   })
 }
-export function Text(props: TextProps) {
+export function Text({ onPress, ...rest }: TextProps) {
+  const props: TextProps = onPress
+    ? {
+        ...rest,
+        onPointerUp: (e: PointerEvt) => {
+          rest.onPointerUp?.(e)
+          if ((e.button ?? 1) === 1) onPress(e)
+        },
+      }
+    : rest
   // Flatten primitive children ("a" {b} "c") into a single `text` prop so
   // mixed string/expression JSX still forms one paragraph. Nested
   // non-primitive children (styled spans) keep their instances.

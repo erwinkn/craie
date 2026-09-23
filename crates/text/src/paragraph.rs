@@ -838,6 +838,18 @@ impl Paragraph {
         })
     }
 
+    /// The cluster under `(x, y)` (paragraph space), from the
+    /// placements: None past a line's content or below the last line.
+    pub fn cluster_at_point(&self, x: f32, y: f32) -> Option<Range<u32>> {
+        let line = self
+            .lines
+            .iter()
+            .position(|l| y >= l.top && y < l.top + l.height)?;
+        self.line_clusters(line)
+            .find(|v| x >= v.left && x < v.right)
+            .map(|v| v.text)
+    }
+
     /// The byte offset nearest `(x, y)` (paragraph space).
     pub fn hit(&self, x: f32, y: f32) -> Hit {
         let Some(li) = self

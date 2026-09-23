@@ -133,6 +133,18 @@ impl Ui {
         in_rounded(q, &Rect::new(0.0, 0.0, size.width, size.height), own_radius).then_some(id)
     }
 
+    /// The span of text node `id` under window point (x, y).
+    fn span_at(&self, id: NodeId, x: f32, y: f32) -> Option<u32> {
+        if self.host.kind(id) != Some(NodeKind::Text) {
+            return None;
+        }
+        let (lx, ly) = self.to_content(id, x, y);
+        let cluster = self.text_layout(id)?.cluster_at_point(lx, ly)?;
+        let spans = &self.host.paragraph(id)?.spans;
+        let k = spans.partition_point(|s| s.start <= cluster.start);
+        Some(k.saturating_sub(1) as u32)
+    }
+
     /// Focusable nodes in document order (for Tab traversal).
     fn focusables(&self) -> Vec<NodeId> {
         let mut out = Vec::new();
@@ -409,6 +421,9 @@ impl Ui {
             if self.host.interaction(id).listeners & bit == 0 {
                 continue;
             }
+            // A text node's event carries the span under the pointer (key
+            // bits 16+, span + 1; 0: none): nested Text routes by it.
+            let span = self.span_at(id, x, y).map_or(0, |s| s + 1);
             let local = self
                 .node_to_window(id)
                 .invert()
@@ -418,7 +433,7 @@ impl Ui {
             e.y = y;
             e.a = local.x;
             e.b = local.y;
-            e.key = key;
+            e.key = key | span << 16;
             self.pending_events.push(e);
         }
     }

@@ -73,6 +73,17 @@ export interface HostNode {
   initial: HostNode[]
   /** List nodes only. */
   list?: ListKeys
+  /** Text nodes: nested text nodes, in order. They have no native node
+   * (virtual); their text and style become spans of the root's
+   * paragraph. */
+  textKids?: HostNode[]
+  /** A virtual text node's parent text node. */
+  textParent?: HostNode
+  /** A text root: the node that owns each span it last sent (event
+   * routing), and what it last sent. */
+  spanOwners?: HostNode[]
+  sentParagraph?: string
+  sentInteraction?: string
   focus(): void
   blur(): void
   scrollTo(x: number, y: number): void
@@ -114,6 +125,43 @@ function textOf(props: Record<string, any>): string {
   return ""
 }
 
+/** Pointer event kind -> the listener prop a nested Text may hold. */
+const POINTER_HANDLER: Record<number, string> = {
+  [EVENT_KIND.pointerMove]: "onPointerMove",
+  [EVENT_KIND.pointerDown]: "onPointerDown",
+  [EVENT_KIND.pointerUp]: "onPointerUp",
+}
+
+/** UTF-8 byte length of `s` (span starts are byte offsets natively). */
+function utf8Length(s: string): number {
+  let n = 0
+  for (let i = 0; i < s.length; i++) {
+    const c = s.charCodeAt(i)
+    if (c < 0x80) n += 1
+    else if (c < 0x800) n += 2
+    else if (c >= 0xd800 && c < 0xdc00 && i + 1 < s.length) { n += 4; i++ }
+    else n += 3
+  }
+  return n
+}
+
+/** A nested Text's span style: its parent's, with the props it sets
+ * itself. Line height is the paragraph's (the root's) only. */
+function inheritSpan(parent: TextSpanIn, props: Record<string, any>): TextSpanIn {
+  const own = spanStyle(props)
+  return {
+    start: 0,
+    fontSize: props.fontSize !== undefined ? own.fontSize : parent.fontSize,
+    color: props.color !== undefined ? own.color : parent.color,
+    weight: props.fontWeight !== undefined ? own.weight : parent.weight,
+    italic: props.fontStyle !== undefined ? own.italic : parent.italic,
+    fontFamily: props.fontFamily !== undefined ? own.fontFamily : parent.fontFamily,
+    decoration: props.textDecorationLine !== undefined ? own.decoration : parent.decoration,
+    letterSpacing: props.letterSpacing !== undefined ? own.letterSpacing : parent.letterSpacing,
+    lineHeight: parent.lineHeight,
+  }
+}
+
 /** Span zero of a text node: the base style. */
 function decorationOf(line: unknown): number {
   if (typeof line !== "string") return 0
@@ -136,10 +184,6 @@ export function spanStyle(props: Record<string, any>): TextSpanIn {
     letterSpacing: props.letterSpacing ?? 0,
     lineHeight: props.lineHeight ?? 0,
   }
-}
-
-function baseSpan(props: Record<string, any>): TextSpanIn {
-  return spanStyle(props)
 }
 
 function sameSpan(a: TextSpanIn, b: TextSpanIn): boolean {
@@ -258,8 +302,75 @@ export class CraieHost {
   }
 
   private seal() {
+    this.flushTexts()
     const seq = ++this.seq
     this.transport.send(this.encoder.finish(seq))
+  }
+
+  /** Text roots whose paragraph (own props or virtual descendants)
+   * changed in this commit. */
+  private dirtyTexts = new Set<HostNode>()
+
+  private textRoot(n: HostNode): HostNode {
+    while (n.textParent) n = n.textParent
+    return n
+  }
+
+  private markText(n: HostNode) {
+    if (this.ready()) this.dirtyTexts.add(this.textRoot(n))
+  }
+
+  /** Sends each dirty root's composed paragraph and listener mask, when
+   * they differ from what it last sent. */
+  private flushTexts() {
+    for (const r of this.dirtyTexts) {
+      if (r.mounted && !r.textParent) this.emitComposite(r)
+    }
+    this.dirtyTexts.clear()
+  }
+
+  /** A root text node's paragraph: its own text, then each nested Text
+   * in order, each piece a span with its inherited style and its owner.
+   * Hidden nested Text drops out. The native listener mask is the union
+   * of the root's and its nested Texts' listeners. */
+  private emitComposite(r: HostNode) {
+    let text = ""
+    let bytes = 0
+    const spans: TextSpanIn[] = []
+    const owners: HostNode[] = []
+    let mask = 0
+    const walk = (n: HostNode, style: TextSpanIn) => {
+      mask |= listenerMask(n.props)
+      if (n.suspended || n.props.hidden) return
+      const own = textOf(n.props)
+      if (own) {
+        const last = spans.at(-1)
+        if (!(last && owners.at(-1) === n && sameSpan(last, style))) {
+          spans.push({ ...style, start: bytes })
+          owners.push(n)
+        }
+        text += own
+        bytes += utf8Length(own)
+      }
+      for (const k of n.textKids ?? []) walk(k, inheritSpan(style, k.props))
+    }
+    const base = spanStyle(r.props)
+    walk(r, base)
+    if (spans.length === 0 || spans[0]!.start !== 0) {
+      spans.unshift({ ...base, start: 0 })
+      owners.unshift(r)
+    }
+    r.spanOwners = owners
+    const key = JSON.stringify([text, spans])
+    if (key !== r.sentParagraph) {
+      r.sentParagraph = key
+      this.encoder.paragraph(r.id, text, spans)
+    }
+    const interaction = `${mask},${!!r.props.focusable}`
+    if (interaction !== r.sentInteraction) {
+      r.sentInteraction = interaction
+      this.encoder.interaction(r.id, mask, !!r.props.focusable)
+    }
   }
 
   /** Sends pending ops and resolves once native acks the transaction. */
@@ -297,8 +408,12 @@ export class CraieHost {
   /** Routes a native event record to the target node's listener props.
    * Events for a previous occupant of the id are dropped. */
   private dispatchEvent(ev: UiEvent) {
-    const n = this.nodes.get(ev.node)
-    if (!n || n.gen !== ev.generation) return
+    const root = this.nodes.get(ev.node)
+    if (!root || root.gen !== ev.generation) return
+    // A pointer event on a text root carries the span under the pointer
+    // (key bits 16+, 0: none): it goes to the innermost nested Text of
+    // that span with a listener for it, else to the root.
+    const n = this.spanTarget(root, ev)
     const p = n.props
     const e = { target: n, x: ev.x, y: ev.y }
     // Pointer events pack mods into the low 4 key bits and the button
@@ -341,6 +456,17 @@ export class CraieHost {
     }
   }
 
+  private spanTarget(root: HostNode, ev: UiEvent): HostNode {
+    const span = ev.key >>> 16
+    const handler = POINTER_HANDLER[ev.kind]
+    if (!root.spanOwners || span === 0 || !handler) return root
+    for (let n: HostNode | undefined = root.spanOwners[span - 1]; n; n = n.textParent) {
+      if (typeof n.props[handler] === "function") return n
+      if (n === root) break
+    }
+    return root
+  }
+
   /** Emits create + props + placement for a subtree root. Children that
    * arrived before mount are replayed by the reconciler's place calls. */
   materialize(n: HostNode, parent: HostNode | null, before: HostNode | null) {
@@ -359,6 +485,10 @@ export class CraieHost {
   }
 
   place(parent: HostNode | null, child: HostNode, before: HostNode | null) {
+    if (parent && parent.type === "text" && child.type === "text") {
+      this.placeVirtual(parent, child, before)
+      return
+    }
     if (!child.mounted) {
       this.materialize(child, parent, before)
       return
@@ -368,9 +498,41 @@ export class CraieHost {
     }
   }
 
+  /** A text node inside a text node: no native node; it joins the
+   * parent's list of nested text and the root's paragraph. A node that
+   * had a native node gives it up. Children that arrived before it was
+   * placed join it too. */
+  private placeVirtual(parent: HostNode, child: HostNode, before: HostNode | null) {
+    if (child.mounted && !child.textParent) this.release(child)
+    this.unlinkVirtual(child)
+    const kids = (parent.textKids ??= [])
+    const at = before ? kids.indexOf(before) : -1
+    if (at >= 0) kids.splice(at, 0, child)
+    else kids.push(child)
+    child.textParent = parent
+    for (const c of child.initial) this.place(child, c, null)
+    child.initial = []
+    this.markText(parent)
+  }
+
+  /** Removes a virtual text node from its parent's nested list. */
+  private unlinkVirtual(n: HostNode) {
+    const p = n.textParent
+    if (!p) return
+    this.markText(p)
+    const kids = p.textKids ?? []
+    const i = kids.indexOf(n)
+    if (i >= 0) kids.splice(i, 1)
+    n.textParent = undefined
+  }
+
   /** Unlinks `n` without freeing its slot — removal unmounts it; the
    * node's own `release` (via detachDeletedInstance) frees it. */
   detach(n: HostNode) {
+    if (n.textParent) {
+      this.unlinkVirtual(n)
+      return
+    }
     if (!n.mounted) return
     if (this.ready()) this.encoder.detach(n.id)
   }
@@ -378,6 +540,10 @@ export class CraieHost {
   /** React deleted `n` for good: free the native slot and recycle the
    * id at once. The generation bump keeps stale events out. */
   release(n: HostNode) {
+    if (n.textParent) {
+      this.unlinkVirtual(n)
+      return
+    }
     if (!n.mounted) return
     this.nodes.delete(n.id)
     if (this.ready()) this.encoder.remove(n.id)
@@ -389,6 +555,11 @@ export class CraieHost {
   /** React (Suspense) hides or reveals a node: `display: none`. */
   setSuspended(n: HostNode, hidden: boolean) {
     if (n.suspended === hidden) return
+    if (n.textParent) {
+      n.suspended = hidden
+      this.markText(n)
+      return
+    }
     const before = styleKey(layoutOf(n.props, n.suspended))
     n.suspended = hidden
     const layout = layoutOf(n.props, n.suspended)
@@ -398,12 +569,20 @@ export class CraieHost {
   /** Prop diff -> ops for the fields that changed. */
   update(n: HostNode, oldProps: Record<string, any>, props: Record<string, any>) {
     n.props = props
+    if (n.textParent) {
+      this.markText(n)
+      return
+    }
     if (this.ready()) this.emitProps(n, oldProps, props, true)
   }
 
   setTextContent(n: HostNode, text: string) {
     const old = n.props
     n.props = { ...n.props, text, children: undefined }
+    if (n.textParent) {
+      this.markText(n)
+      return
+    }
     if (this.ready()) this.emitProps(n, old, n.props, true)
   }
 
@@ -434,11 +613,8 @@ export class CraieHost {
     }
 
     if (n.kind === 1) {
-      const oldText = textOf(oldProps), newText = textOf(props)
-      const oldSpan = baseSpan(oldProps), newSpan = baseSpan(props)
-      if (!mounted || oldText !== newText || !sameSpan(oldSpan, newSpan)) {
-        enc.paragraph(id, newText, [newSpan])
-      }
+      // Paragraph and listeners: composed with nested Text at the seal.
+      this.markText(n)
     } else {
       // Box paint: fill, corner radius, border — each an optional masked
       // field; emit only what changed.
@@ -573,9 +749,9 @@ export class CraieHost {
       }
     }
 
-    // Listener mask + focusable flag.
+    // Listener mask + focusable flag (a text root's: at the seal).
     const oldMask = listenerMask(oldProps), newMask = listenerMask(props)
-    if (oldMask !== newMask || !!oldProps.focusable !== !!props.focusable) {
+    if (n.kind !== 1 && (oldMask !== newMask || !!oldProps.focusable !== !!props.focusable)) {
       enc.interaction(id, newMask, !!props.focusable)
     }
 
