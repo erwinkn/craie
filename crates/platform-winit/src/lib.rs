@@ -196,6 +196,15 @@ pub trait App: 'static {
         true
     }
 
+    /// When the app next needs `timer` (the loop sleeps until then or
+    /// until other work arrives). `None` sleeps indefinitely.
+    fn next_timer(&self) -> Option<std::time::Instant> {
+        None
+    }
+
+    /// The time from `next_timer` was reached.
+    fn timer(&mut self, _window: &Window) {}
+
     /// Shared accessibility state. `Some` opts the app into the platform
     /// AccessKit adapter (created before the window is shown).
     fn a11y_shared(&self) -> Option<Arc<A11yShared>> {

@@ -315,3 +315,72 @@ fn oversized_glyph_draws_full_size() {
         black
     );
 }
+
+/// Scroll content half a device pixel off the grid: while moving, its
+/// edge pixel is half covered; once settled, the snap reaches the GPU
+/// and the edge is crisp. At 1x and 2x.
+#[test]
+fn settled_scroll_content_is_crisp() {
+    let Some(gpu) = Gpu::try_headless() else {
+        eprintln!("no GPU adapter: skipped");
+        return;
+    };
+    for scale in [1.0f32, 2.0] {
+        let mut ui = Ui::new(scale);
+        ui.clear = 0x0000_00FF;
+        let sized = |w: f32, h: f32| {
+            let mut s = taffy::Style::default();
+            s.size = taffy::Size {
+                width: taffy::Dimension::length(w),
+                height: taffy::Dimension::length(h),
+            };
+            s.flex_shrink = 0.0;
+            s
+        };
+        let mut scroller = sized(100.0, 60.0);
+        scroller.flex_direction = taffy::FlexDirection::Column;
+        scroller.overflow = taffy::Point {
+            x: taffy::Overflow::Scroll,
+            y: taffy::Overflow::Scroll,
+        };
+        let mut t = Transaction::new(1);
+        t.create(0, NodeKind::View)
+            .layout(0, &scroller)
+            .append(NIL, 0);
+        // A 20-px gap, then a white block: its top edge is what moves.
+        t.create(1, NodeKind::View)
+            .layout(1, &sized(100.0, 20.0))
+            .append(0, 1);
+        t.create(2, NodeKind::View)
+            .layout(2, &sized(100.0, 200.0))
+            .fill(2, 0xFFFF_FFFF)
+            .append(0, 2);
+        ui.apply_txn(&t).unwrap();
+        let (w, h) = ((100.0 * scale) as u32, (60.0 * scale) as u32);
+        ui.render(Size::new(100.0, 60.0));
+        ui.scroll_to(NodeId(0), 0.0, 0.5 / scale);
+        ui.set_time(1.0);
+        // The block's top edge sits at 20*scale - 0.5 device px: the
+        // pixel row above 20*scale is half covered.
+        let row = (20.0 * scale) as u32 - 1;
+        let moving = pixel(&gpu, &mut ui, w, h, (10, row));
+        assert!(
+            moving[0] > 40 && moving[0] < 230,
+            "scale {scale}: moving edge half covered, got {moving:?}"
+        );
+        ui.set_time(1.0 + craie_ui::ui::SETTLE_SECS * 1.5);
+        assert!(ui.settle());
+        // Ties to even: -0.5 snaps to 0, so the row above is clear and
+        // the edge row is fully white.
+        assert_eq!(
+            pixel(&gpu, &mut ui, w, h, (10, row)),
+            [0, 0, 0, 255],
+            "scale {scale}"
+        );
+        assert_eq!(
+            pixel(&gpu, &mut ui, w, h, (10, row + 1)),
+            [255, 255, 255, 255],
+            "scale {scale}"
+        );
+    }
+}

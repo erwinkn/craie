@@ -292,7 +292,10 @@ their subpixel buckets are relative to the chunk origin, which the
 renderer snaps to the device-pixel grid. Retained Parley layouts are
 the memory floor (about 27 MiB for 5k rows). INPUT nodes hold a Parley
 `PlainEditor` each; `TextInput` is uncontrolled (`value` is sent once at
-mount; `setText` replaces the text). Validation bounds font sizes to
+mount; `setText` replaces the text). Editor reshapes count where
+Parley shapes: each edit, preedit, commit, and finished composition,
+and a dirty layout refreshed before navigation (Parley pinned to
+0.11.1). Validation bounds font sizes to
 `MAX_FONT_SIZE` (2048 logical points). A glyph larger than an atlas
 page renders: it is rasterized at a smaller size that fits, and its
 quad draws the bitmap scaled up (softer, never missing). The cache
@@ -456,13 +459,17 @@ Scene
   nearest record's space (2026-09-23). A scroll patches one record and
   uploads 32 bytes; a layout move patches placements of moved subtrees.
 - Snapping is a policy of the transform record (2026-09-23, revised
-  after review). The window root snaps chunk origins and rect edges to
-  device pixels (ties to even, as WGSL `round` lowers), so static text
-  is crisp and a moved chunk reuses every raster. Scroll content and
-  transformed subtrees do not snap: their chunks move by fractions, so
-  scrolling and motion never step. At rest a fractional scroll offset
-  draws fractionally; snapping at rest needs a settle signal and waits
-  for the animation driver (step 4). Glyph subpixel buckets stay
+  after review rounds 1 to 3). The window root snaps chunk origins and
+  rect edges to device pixels (ties to even, as WGSL `round` lowers),
+  so static text is crisp and a moved chunk reuses every raster. Scroll
+  content and transformed subtrees snap at rest: a new record or a
+  changed local matrix is motion and stops snapping, so scrolling and
+  animation never step; a record that has not moved for `SETTLE_SECS`
+  (0.1 s) snaps again, so text at a fractional offset is crisp once
+  motion stops. The settle signal is the UI clock (`Ui::set_time`, set
+  by the host): `Ui::next_settle` tells the host when to wake, and
+  `Ui::settle` snaps the rested records (one world row each). Scroll
+  anchoring (step 2) uses the same signal. Glyph subpixel buckets stay
   relative to the chunk origin in all cases.
 - Chunks build on demand within half a viewport of the screen; farther
   chunks wait and build in the frame they come into range (2026-09-23).
@@ -707,23 +714,28 @@ without changing publication rules.
 
 **Current.** `harness/invariants` holds: incremental equals clean
 rebuild over seeded mutation sequences (layout, drawn scene, hit
-tests, semantics; 8 seeds x 60 steps at 1x and 2x, plus resize and
+tests, semantics; 8 seeds x 60 steps at 1x and 2x with a moving
+clock, compared at rest, plus resize and
 atlas-pressure cases); the cost invariants that apply today (color
 change, translation, scroll, unchanged frame, tween, atlas
-relocation, input color, typing shapes); allocation tests over the
-whole frame on a real device with separate budgets per phase (UI
-render, renderer prepare, and `plan_frame` allocate nothing on an
-unchanged frame or a warm color or transform patch; `encode_frame` is
-wgpu's own recording and submission, a fixed 56 allocations per frame
-plus 23 per extra pass on Metal, the same every frame; a buffer write
-costs wgpu 8 in prepare and 5 at submission); a copied-bytes counter
+relocation, input color, typing shapes with composition controls and
+a layout-identity oracle); allocation tests over the whole frame on a
+real device with a separate budget per phase. Craie's phases (UI
+render, `Renderer::collect`, `plan_frame`) allocate nothing on an
+unchanged frame, a warm color or transform patch, or patch and idle
+frames in alternation (dirty ranges merge in place). wgpu's phases are
+measured apart: `upload` costs wgpu 8 allocations per buffer write,
+and `encode_frame` a fixed 56 per frame plus 23 per extra pass on
+Metal (5 more after a write), the same every frame; a copied-bytes counter
 that includes text and span lists; real-GPU checks (upload bytes, 1x
 and 2x pixel readback, half-pixel edges against the resolver, a glyph
 larger than a page); the release-graph
 and layer-map checks; and the E10 bench. `prepare_frame` in
 platform-winit is the one frame path for commits and native input;
 accessibility bounds and the IME area publish only after it.
-`CRAIE_CAPTURE=<png>` makes the host write one settled frame and exit
+The host sets the UI clock and wakes at `Ui::next_settle` to snap
+rested content. `CRAIE_CAPTURE=<png>` makes the host write one settled
+frame and exit
 (used to check the JS examples' layouts). Crate tests cover the span pool,
 scene, host, wire, executor, dispatch, editing, and a11y. `bun test`
 covers the encoder and the reconciler. Benchmarks: `examples/bench`,

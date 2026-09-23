@@ -96,6 +96,10 @@ pub(crate) struct SceneSync {
     pub built: Vec<u32>,
     pub paint_ids: Vec<u32>,
     pub spatial_ids: Vec<u32>,
+    /// Snap-at-rest records in motion, and the clock time each last
+    /// moved (by record id; NaN at rest).
+    pub moving: Vec<u32>,
+    pub moved_at: Vec<f64>,
     /// Nodes whose chunk build waits until their box nears the viewport.
     pub deferred: DirtyQueue,
     /// Visibility inputs the deferred set was last checked against:
@@ -119,6 +123,8 @@ impl SceneSync {
             built: Vec::new(),
             paint_ids: Vec::new(),
             spatial_ids: Vec::new(),
+            moving: Vec::new(),
+            moved_at: Vec::new(),
             deferred: DirtyQueue::new(),
             checked: None,
         }
@@ -160,6 +166,62 @@ fn self_local(origin: [f32; 2], t: Affine, size: Size) -> Affine {
 }
 
 impl Ui {
+    /// Starts or continues motion of snap-at-rest record `rec`: it stops
+    /// snapping until it has rested for `SETTLE_SECS`.
+    fn mark_moving(&mut self, rec: u32) {
+        let i = rec as usize;
+        if self.sync.moved_at.len() <= i {
+            self.sync.moved_at.resize(i + 1, f64::NAN);
+        }
+        if self.sync.moved_at[i].is_nan() {
+            self.sync.moving.push(rec);
+        }
+        self.sync.moved_at[i] = self.time;
+        self.scene.transforms.set_snap(rec, false);
+    }
+
+    /// Writes the local matrix of a snap-at-rest record; a change is
+    /// motion.
+    fn set_moving_local(&mut self, rec: u32, local: Affine) {
+        if self.scene.transforms.get(rec).local != local {
+            self.scene.transforms.set_local(rec, local);
+            self.mark_moving(rec);
+        }
+    }
+
+    /// Frees a snap-at-rest record and forgets its motion.
+    fn free_moving(&mut self, rec: u32) {
+        self.scene.transforms.free(rec);
+        if let Some(t) = self.sync.moved_at.get_mut(rec as usize)
+            && !t.is_nan()
+        {
+            *t = f64::NAN;
+            self.sync.moving.retain(|&r| r != rec);
+        }
+    }
+
+    /// Snaps records that rested for `SETTLE_SECS`. Returns whether any
+    /// did.
+    pub(crate) fn settle_moving(&mut self) -> bool {
+        let mut any = false;
+        let mut i = 0;
+        while i < self.sync.moving.len() {
+            let rec = self.sync.moving[i];
+            let at = &mut self.sync.moved_at[rec as usize];
+            // A microsecond of slack: a host timer set for exactly the
+            // settle time must find the space settled, not spin.
+            if self.time - *at >= crate::ui::SETTLE_SECS - 1e-6 {
+                *at = f64::NAN;
+                self.sync.moving.swap_remove(i);
+                self.scene.transforms.set_snap(rec, true);
+                any = true;
+            } else {
+                i += 1;
+            }
+        }
+        any
+    }
+
     fn space_mut(&mut self, id: NodeId) -> &mut NodeSpace {
         let i = id.index();
         if self.sync.spaces.len() <= i {
@@ -173,6 +235,8 @@ impl Ui {
     /// is logical.
     pub(crate) fn sync_scene(&mut self, viewport: Size, layout_ran: bool) {
         self.scene.begin_frame();
+        // A frame past a settle time snaps the rested spaces itself.
+        self.settle_moving();
         self.scene.scale = self.scale;
         self.scene.clear = crate::scene::Color(self.clear);
 
@@ -296,10 +360,12 @@ impl Ui {
                     continue;
                 }
                 let s = &mut self.sync.spaces[id as usize];
-                for rec in [&mut s.self_rec, &mut s.content_rec] {
-                    if *rec != NONE {
-                        self.scene.transforms.free(*rec);
-                        *rec = NONE;
+                let recs = [s.self_rec, s.content_rec];
+                s.self_rec = NONE;
+                s.content_rec = NONE;
+                for rec in recs {
+                    if rec != NONE {
+                        self.free_moving(rec);
                     }
                 }
             }
@@ -392,26 +458,26 @@ impl Ui {
             s.claimed = epoch;
             if spatial.transformed() {
                 if s.self_rec == NONE {
+                    // A transformed subtree moves by fractions: its
+                    // placement stays fractional while it moves and snaps
+                    // at rest (`settle`). A new record starts moving.
                     s.self_rec = self.scene.transforms.alloc(Affine::IDENTITY, NONE);
-                    // A transformed subtree moves by fractions: keep its
-                    // placement fractional so motion stays smooth.
-                    self.scene.transforms.set_snap(s.self_rec, false);
+                    self.mark_moving(s.self_rec);
                 }
             } else if s.self_rec != NONE {
-                self.scene.transforms.free(s.self_rec);
+                self.free_moving(s.self_rec);
                 s.self_rec = NONE;
             }
             if scrolls {
                 if s.content_rec == NONE {
-                    s.content_rec = self.scene.transforms.alloc(Affine::IDENTITY, NONE);
                     // Scroll content moves by fractions (wheel deltas,
-                    // commands): its placement stays fractional so the
-                    // motion never steps. There is no snap at rest: it
-                    // needs a settle signal (the animation driver).
-                    self.scene.transforms.set_snap(s.content_rec, false);
+                    // commands): fractional while it moves, so motion
+                    // never steps; snapped at rest, so text is crisp.
+                    s.content_rec = self.scene.transforms.alloc(Affine::IDENTITY, NONE);
+                    self.mark_moving(s.content_rec);
                 }
             } else if s.content_rec != NONE {
-                self.scene.transforms.free(s.content_rec);
+                self.free_moving(s.content_rec);
                 s.content_rec = NONE;
             }
             s.layer = if spatial.layered() {
@@ -433,7 +499,7 @@ impl Ui {
         // The node's own space.
         let (space, offset) = if s.self_rec != NONE {
             self.scene.transforms.set_parent(s.self_rec, ctx.space);
-            self.scene.transforms.set_local(
+            self.set_moving_local(
                 s.self_rec,
                 self_local(origin, spatial.transform, data.rect.size),
             );
@@ -480,7 +546,7 @@ impl Ui {
         let child_ctx = if s.content_rec != NONE {
             self.scene.transforms.set_parent(s.content_rec, space);
             let [sx, sy] = spatial.scroll;
-            self.scene.transforms.set_local(
+            self.set_moving_local(
                 s.content_rec,
                 Affine::translate(offset[0] - sx, offset[1] - sy),
             );
@@ -521,16 +587,12 @@ impl Ui {
             let size = self.layouts.data(node).rect.size;
             let mut base = s.origin;
             if s.self_rec != NONE {
-                self.scene
-                    .transforms
-                    .set_local(s.self_rec, self_local(s.origin, spatial.transform, size));
+                self.set_moving_local(s.self_rec, self_local(s.origin, spatial.transform, size));
                 base = [0.0, 0.0];
             }
             if s.content_rec != NONE {
                 let [sx, sy] = spatial.scroll;
-                self.scene
-                    .transforms
-                    .set_local(s.content_rec, Affine::translate(base[0] - sx, base[1] - sy));
+                self.set_moving_local(s.content_rec, Affine::translate(base[0] - sx, base[1] - sy));
             }
             if s.layer != NONE {
                 self.scene.set_layer_opacity(s.layer, spatial.opacity);

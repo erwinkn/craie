@@ -32,6 +32,8 @@ pub struct HostApp {
     /// `CRAIE_CAPTURE`: write one settled frame to this PNG, then exit.
     capture: Option<(PathBuf, Duration)>,
     capture_due: Option<Instant>,
+    /// Zero of the UI clock (`Ui::set_time`).
+    start: Instant,
 }
 
 struct Inner {
@@ -56,6 +58,15 @@ impl HostApp {
                 (PathBuf::from(p), Duration::from_millis(ms))
             }),
             capture_due: None,
+            start: Instant::now(),
+        }
+    }
+
+    /// Sets the UI clock to now; called at the top of every callback.
+    fn tick(&mut self) {
+        let t = self.start.elapsed().as_secs_f64();
+        if let Some(inner) = &mut self.inner {
+            inner.ui.set_time(t);
         }
     }
 
@@ -168,6 +179,7 @@ impl App for HostApp {
         let surface = WindowSurface::new(&gpu, surface, w, h);
         let renderer = Renderer::new(&gpu, surface.config.format);
         let mut ui = Ui::new(window.scale_factor() as f32);
+        ui.set_time(self.start.elapsed().as_secs_f64());
         for (kind, painter) in self.surfaces.drain(..) {
             ui.register_surface(kind, painter);
         }
@@ -198,6 +210,7 @@ impl App for HostApp {
         if self.session.is_closed() {
             return true;
         }
+        self.tick();
         if let Some(inner) = &mut self.inner {
             inner.sync(window, &self.session, true);
             // Assistive-tech action requests arrive through the shared
@@ -232,6 +245,7 @@ impl App for HostApp {
     }
 
     fn resized(&mut self, window: &Window) {
+        self.tick();
         let Some(inner) = &mut self.inner else { return };
         let (w, h) = window.size();
         inner.surface.resize(&inner.gpu, w, h);
@@ -250,6 +264,7 @@ impl App for HostApp {
     }
 
     fn event(&mut self, window: &Window, event: &Event) {
+        self.tick();
         let Some(inner) = &mut self.inner else { return };
         inner.ui.dispatch(event);
         Inner::flush_out(&mut inner.ui, &self.session);
@@ -260,7 +275,22 @@ impl App for HostApp {
         Some(self.a11y.clone())
     }
 
+    fn next_timer(&self) -> Option<Instant> {
+        let at = self.inner.as_ref()?.ui.next_settle()?;
+        Some(self.start + Duration::from_secs_f64(at.max(0.0)))
+    }
+
+    /// A moving space may have come to rest: snap it and repaint.
+    fn timer(&mut self, window: &Window) {
+        self.tick();
+        let Some(inner) = &mut self.inner else { return };
+        if inner.ui.settle() {
+            window.request_redraw();
+        }
+    }
+
     fn redraw(&mut self, window: &Window) {
+        self.tick();
         let Some(inner) = &mut self.inner else { return };
         let (w, h) = window.size();
         if w == 0 || h == 0 {
@@ -353,6 +383,22 @@ mod tests {
         assert_eq!(
             renderer.stats.upload_bytes,
             size_of::<craie_scene::WorldGpu>() as u64
+        );
+        // The settle signal: the content is due to rest SETTLE_SECS after
+        // the wheel; the host timer settles it and the frame path uploads
+        // the one world row whose snap flag changed.
+        let due = ui.next_settle().expect("scrolled content is moving");
+        ui.set_time(due);
+        assert!(ui.settle());
+        assert!(prepare_frame(&mut ui, &mut renderer, &gpu, (200, 200), 1.0));
+        assert_eq!(
+            renderer.stats.upload_bytes,
+            size_of::<craie_scene::WorldGpu>() as u64
+        );
+        assert_eq!(ui.next_settle(), None);
+        assert!(
+            !prepare_frame(&mut ui, &mut renderer, &gpu, (200, 200), 1.0),
+            "at rest: idle"
         );
     }
 }

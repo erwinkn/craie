@@ -24,7 +24,12 @@ fn run(seed: u64, scale: f32) {
     let mut ui = Ui::new(scale);
     ui.apply_txn(&g.mount()).unwrap();
     ui.render(VIEW);
+    // The clock: frame-sized steps, with a pause (past the settle time)
+    // every few steps, so spaces move, settle, and move again.
+    let mut now = 0.0;
     for step in 0..STEPS {
+        now += if step % 4 == 3 { 0.25 } else { 0.016 };
+        ui.set_time(now);
         let t = g.step(&ui);
         ui.apply_txn(&t).unwrap_or_else(|e| {
             panic!(
@@ -40,6 +45,12 @@ fn run(seed: u64, scale: f32) {
             ui.render(VIEW);
         }
         if step % 5 == 4 {
+            // Compare at rest: settle everything, as a clean build is.
+            now += craie_ui::ui::SETTLE_SECS * 1.5;
+            ui.set_time(now);
+            ui.settle();
+            ui.render(VIEW);
+            assert_eq!(ui.next_settle(), None, "seed {seed} step {step}: at rest");
             let clean = rebuild(&ui, VIEW);
             if let Err(m) = compare(&ui, &clean, VIEW, TOL) {
                 panic!("seed {seed} scale {scale} step {step}: {}", m.0);

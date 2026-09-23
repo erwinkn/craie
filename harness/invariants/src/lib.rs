@@ -109,8 +109,18 @@ pub fn rebuild(ui: &Ui, viewport: Size) -> Ui {
     if scrolled {
         clean.render(viewport);
     }
+    // A clean build's spaces start moving; when `ui` has everything at
+    // rest, so does the rebuild.
+    if ui.next_settle().is_none() {
+        clean.set_time(crate::SETTLED);
+        clean.settle();
+        clean.render(viewport);
+    }
     clean
 }
+
+/// A clock time past any motion in a fresh `Ui`.
+pub const SETTLED: f64 = craie_ui::ui::SETTLE_SECS * 2.0;
 
 /// The drawn scene with glyphs keyed by a stable raster identity.
 pub fn drawn(ui: &Ui) -> Vec<Resolved> {

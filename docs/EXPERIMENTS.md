@@ -139,9 +139,10 @@ regression tests:
 - The CPU resolver rounds half to even, like WGSL `round`; a GPU test
   checks half-pixel edges at 2x.
 - Scroll content has no snap: fractional offsets move it by fractions
-  at 1x and 2x.
+  at 1x and 2x. (Partial: it stayed unsnapped at rest; round 3.)
 - Editor operations count shapes (a text signature per operation); a
-  typing test is the positive control.
+  typing test is the positive control. (Partial: composition-only
+  reshapes were missed; round 3.)
 - Unknown paint and spatial mask bits reject the transaction.
 - Allocations are measured over the whole frame on a real device, per
   phase. Three frame-path allocations were removed: the paint and
@@ -151,6 +152,8 @@ regression tests:
   frame and a warm color or transform patch now allocate 0 times in
   Craie code (was 1 for a patch). wgpu's own encode cost on Metal: 56
   allocations per frame, 23 per extra pass, 8 + 5 per buffer write.
+  (Partial: range normalization still allocated, hidden inside the
+  write allowance; round 3.)
 - The copy counter includes span lists (16 bytes per span).
 
 Captures of the JS examples (`CRAIE_CAPTURE`) found one more deviation
@@ -160,6 +163,28 @@ in React Native; the todo text column sets `flexShrink: 1`. The todo,
 widgets, and demo screens were checked by eye after the change. The
 Rust app and text screenshots are pixel-identical to the round-1
 references.
+
+### Review round 3 (GPT-6 Astra): satisfied, three minors
+
+Fixed as the first commits of step 2:
+
+- Snap at rest. A settle signal from the UI clock: a snap-at-rest
+  record that has not moved for 0.1 s snaps, and the host wakes at
+  `Ui::next_settle` to paint it. Tests: moving and settled output at
+  1x and 2x (and under a transformed ancestor) in the resolver, crisp
+  edges on the GPU after settling, the frame path's one-row upload,
+  and the incremental harness with a moving clock, compared at rest.
+- Editor reshapes count where Parley shapes, not from buffer hashes.
+  Repeated preedits that only move the caret, finishing a composition,
+  and an empty preedit each count one; clean navigation counts zero.
+  An oracle outside the counter (a reshape moves the layout's shaped
+  data) agrees on every case. An empty preedit, which platforms send
+  before a commit, used to reach Parley's non-empty assertion.
+- Dirty ranges merge in place (unstable sort, compaction). Prepare
+  splits into `collect` (Craie, 0 allocations on patch and idle frames
+  in alternation) and `upload` (wgpu).
+- A test matrix for React Native flex defaults (grow, shrink, basis)
+  across an omitted style, a partial wire style, and a NIL reset.
 
 ### Visual checks
 

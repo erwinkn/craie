@@ -1433,6 +1433,13 @@ fn transformed_chunks_move_fractionally() {
             "step {i}: moved {dx}, want {want}"
         );
     }
+    // At rest the transformed chunk snaps: its origin, at 0.5 px, rounds
+    // to even (0), and the glyph returns to its static position.
+    ui.set_time(crate::ui::SETTLE_SECS * 1.5);
+    assert!(ui.settle());
+    ui.render(Size::new(300.0, 100.0));
+    let x = resolved(ui.scene())[0].bounds.origin.x;
+    assert_eq!(x, x0 + 0.5f32.round_ties_even(), "at rest");
 }
 
 /// Unknown op-mask bits (paint, spatial) reject the whole transaction.
@@ -1500,8 +1507,16 @@ fn scroll_content_moves_fractionally() {
                 .origin
                 .y
         };
+        // Settle the mount first: content at rest snaps.
+        ui.set_time(1.0);
+        ui.settle();
+        ui.render(Size::new(300.0, 300.0));
         let y0 = y(&ui);
+        assert_eq!(y0, y0.round(), "scale {scale}: at rest before motion");
+        let mut now = 1.0;
         for step in 1..=4 {
+            now += 0.016;
+            ui.set_time(now);
             ui.scroll_to(NodeId(1), 0.0, step as f32 * 0.05);
             ui.render(Size::new(300.0, 300.0));
             let dy = y0 - y(&ui);
@@ -1511,6 +1526,29 @@ fn scroll_content_moves_fractionally() {
                 "scale {scale} step {step}: {dy} vs {want}"
             );
         }
+        // Stop half a device pixel off the grid: fractional while moving,
+        // snapped (ties to even) once at rest.
+        let half = 0.5 / scale;
+        now += 0.016;
+        ui.set_time(now);
+        ui.scroll_to(NodeId(1), 0.0, half);
+        ui.render(Size::new(300.0, 300.0));
+        let moving = y(&ui);
+        assert_eq!(moving, y0 - 0.5, "scale {scale}: moving");
+        assert_eq!(ui.next_settle(), Some(now + crate::ui::SETTLE_SECS));
+        ui.set_time(now + crate::ui::SETTLE_SECS * 0.5);
+        assert!(!ui.settle(), "scale {scale}: still moving");
+        ui.set_time(now + crate::ui::SETTLE_SECS * 1.5);
+        assert!(ui.settle(), "scale {scale}: settles");
+        assert!(ui.needs_paint());
+        ui.render(Size::new(300.0, 300.0));
+        let settled = y(&ui);
+        assert_eq!(settled, moving.round_ties_even(), "scale {scale}: at rest");
+        assert_eq!(ui.next_settle(), None);
+        // Motion again: fractional again.
+        ui.scroll_to(NodeId(1), 0.0, half * 3.0);
+        ui.render(Size::new(300.0, 300.0));
+        assert_eq!(y(&ui), y0 - 1.5, "scale {scale}: moving again");
     }
 }
 

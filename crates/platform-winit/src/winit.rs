@@ -1,7 +1,9 @@
 //! Winit driver: owns the event loop, delivers Craie-level callbacks.
 //!
 //! Control flow is `Wait`: the loop sleeps until the OS or the app requests
-//! work. `RedrawRequested` is the only place frames are produced.
+//! work, or until the app's next timer (`App::next_timer`, e.g. settling
+//! scroll content). `RedrawRequested` is the only place frames are
+//! produced.
 //!
 //! Input normalization lives here: winit window events become
 //! `events::Event`s in logical points, so nothing above this module names
@@ -9,7 +11,7 @@
 
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
-use winit::event::{ElementState, Ime, MouseButton, MouseScrollDelta, WindowEvent};
+use winit::event::{ElementState, Ime, MouseButton, MouseScrollDelta, StartCause, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{Key as WKey, NamedKey};
 use winit::window::{WindowAttributes, WindowId};
@@ -130,6 +132,22 @@ impl<A: App> ApplicationHandler for Driver<A> {
         self.app.ready(&window, &self.wake);
         window.request_redraw();
         self.window = Some(window);
+    }
+
+    fn new_events(&mut self, _event_loop: &ActiveEventLoop, cause: StartCause) {
+        if let StartCause::ResumeTimeReached { .. } = cause
+            && let Some(window) = &self.window
+        {
+            self.app.timer(window);
+        }
+    }
+
+    /// Sleeps until the app's next timer, if it has one.
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        event_loop.set_control_flow(match self.app.next_timer() {
+            Some(at) => ControlFlow::WaitUntil(at),
+            None => ControlFlow::Wait,
+        });
     }
 
     /// A `Wake::wake` arrived from another thread. The payload is implicit:

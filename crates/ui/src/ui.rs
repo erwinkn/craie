@@ -74,8 +74,16 @@ pub struct Ui {
     pub clear: u32,
     /// Last applied transaction sequence, for acknowledgements.
     pub seq: u64,
+    /// The host's clock, seconds. Drives settling (`settle`); the host
+    /// sets it before each callback with `set_time`.
+    pub(crate) time: f64,
     pub(crate) scene: Scene,
 }
+
+/// A moving space (scroll content, a transformed subtree) is at rest
+/// once it has not moved for this long, in seconds. At rest it snaps to
+/// the device-pixel grid; while moving it keeps fractional placement.
+pub const SETTLE_SECS: f64 = 0.1;
 
 impl Ui {
     pub fn new(scale: f32) -> Ui {
@@ -106,8 +114,34 @@ impl Ui {
             scale,
             clear: 0x1415_18FF,
             seq: 0,
+            time: 0.0,
             scene,
         }
+    }
+
+    /// Sets the clock (seconds, monotonic). Settling compares motion
+    /// times against it.
+    pub fn set_time(&mut self, secs: f64) {
+        self.time = secs;
+    }
+
+    /// Snaps the spaces that have rested for `SETTLE_SECS` (the settle
+    /// signal). Returns whether any did; they then need a paint.
+    pub fn settle(&mut self) -> bool {
+        let settled = self.settle_moving();
+        self.force_paint |= settled;
+        settled
+    }
+
+    /// When the next moving space comes to rest (clock seconds), if any
+    /// is moving. The host wakes then and calls `settle`.
+    pub fn next_settle(&self) -> Option<f64> {
+        self.sync
+            .moving
+            .iter()
+            .map(|&rec| self.sync.moved_at[rec as usize])
+            .min_by(f64::total_cmp)
+            .map(|t| t + SETTLE_SECS)
     }
 
     /// Decodes and applies one CRW2 transaction. Returns its seq. A
