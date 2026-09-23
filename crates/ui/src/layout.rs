@@ -73,6 +73,9 @@ pub struct Layouts {
     /// Slots created since their last layout: their `rects` row is the
     /// previous occupant's.
     unlaid: Vec<bool>,
+    /// A probe pass (`Ui::probe_targets`) is running: lists commit
+    /// nothing.
+    pub(crate) probing: bool,
     /// Layout passes run (cost counter).
     pub passes: u64,
     /// Taffy cache behavior, for experiments: hits/misses since `new`.
@@ -104,6 +107,7 @@ impl Layouts {
             unrounded: Vec::new(),
             rects: Vec::new(),
             unlaid: Vec::new(),
+            probing: false,
             cache_hits: 0,
             moved: Default::default(),
             resized: Default::default(),
@@ -358,7 +362,9 @@ impl TreeView<'_> {
         style: &Style,
     ) -> LayoutOutput {
         let id = from_taffy(node_id);
-        let commit = inputs.run_mode == RunMode::PerformLayout;
+        // A probe (the animation driver's) sizes lists without recording
+        // measurements or estimates.
+        let commit = inputs.run_mode == RunMode::PerformLayout && !self.store.probing;
         let parent_w = inputs.parent_size.width;
         let inset = style.padding.resolve_or_zero(parent_w, no_calc)
             + style.border.resolve_or_zero(parent_w, no_calc);

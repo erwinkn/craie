@@ -31,6 +31,9 @@ const MAX_BYTES: usize = 4 * 1024 * 1024;
 #[derive(Default)]
 pub struct Session {
     inner: Mutex<Inner>,
+    /// Held while a pump delivers, so pumps from the UI and JS threads
+    /// never interleave frames.
+    pumping: Mutex<()>,
     /// Signaled when `acks` gains entries or the session closes.
     changed: Condvar,
 }
@@ -42,8 +45,12 @@ struct Inner {
     commit_bytes: usize,
     /// Applied seqs awaiting JS delivery, UI -> JS.
     acks: VecDeque<u64>,
-    /// Encoded UI -> JS event frames awaiting pickup.
-    events: VecDeque<Vec<u8>>,
+    /// Encoded UI -> JS event frames awaiting pickup, each with whether
+    /// it must not drop (it carries animation ends).
+    events: VecDeque<(Vec<u8>, bool)>,
+    /// Tagged frames a pump could not deliver (the receiver's queue was
+    /// full), in order: delivered before anything newer.
+    stalled: VecDeque<Vec<u8>>,
     /// Platform-loop poke, installed when the window starts.
     wake: Option<WakeFn>,
     /// UI -> JS poke: installed by the N-API client (`subscribe`). Called
@@ -62,9 +69,21 @@ pub mod out_tag {
     pub const EVENTS: u8 = 1;
 }
 
-/// Bound on queued event frames; past it the newest frames drop (stale
-/// UI events are worthless to a JS side that isn't draining).
+/// Bound on queued event frames; past it the oldest droppable frame
+/// drops (stale UI events are worthless to a JS side that isn't
+/// draining). Reliable frames (animation ends: a promise waits on each)
+/// never drop.
 const MAX_EVENT_FRAMES: usize = 1024;
+
+/// What a pump's sender did with one frame.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Delivery {
+    Sent,
+    /// The receiver's queue is full: retry later (`Session::pump`).
+    Full,
+    /// The receiver is gone: the session closes.
+    Closed,
+}
 
 impl Session {
     pub fn new() -> Arc<Session> {
@@ -119,19 +138,74 @@ impl Session {
         }
     }
 
-    /// UI thread: queues one encoded event frame for JS.
-    pub fn post_events(&self, frame: Vec<u8>) {
+    /// UI thread: queues one encoded event frame for JS; `reliable`
+    /// frames never drop.
+    pub fn post_events(&self, frame: Vec<u8>, reliable: bool) {
         let notify = {
             let mut inner = self.inner.lock().unwrap();
             if inner.closed.is_some() {
                 return;
             }
-            if inner.events.len() >= MAX_EVENT_FRAMES {
-                inner.events.pop_front();
+            if inner.events.len() >= MAX_EVENT_FRAMES
+                && let Some(i) = inner.events.iter().position(|(_, r)| !r)
+            {
+                inner.events.remove(i);
             }
-            inner.events.push_back(frame);
+            inner.events.push_back((frame, reliable));
             inner.notify.clone()
         };
+        if let Some(notify) = notify {
+            notify();
+        }
+    }
+
+    /// Delivers pending UI -> JS output through `send`, in order: frames
+    /// stalled earlier first, then (once those are through) new ones.
+    /// A `Full` frame and everything after it wait for the next pump;
+    /// `Closed` closes the session.
+    pub fn pump(&self, mut send: impl FnMut(Vec<u8>) -> Delivery) {
+        let _one = self.pumping.lock().unwrap();
+        loop {
+            let mut frames: VecDeque<Vec<u8>> = {
+                let mut inner = self.inner.lock().unwrap();
+                if !inner.stalled.is_empty() {
+                    std::mem::take(&mut inner.stalled)
+                } else {
+                    Self::take_out_locked(&mut inner).into()
+                }
+            };
+            if frames.is_empty() {
+                return;
+            }
+            while let Some(frame) = frames.pop_front() {
+                match send(frame.clone()) {
+                    Delivery::Sent => {}
+                    Delivery::Full => {
+                        frames.push_front(frame);
+                        let mut inner = self.inner.lock().unwrap();
+                        frames.extend(inner.stalled.drain(..));
+                        inner.stalled = frames;
+                        return;
+                    }
+                    Delivery::Closed => {
+                        drop(_one);
+                        self.close("event delivery failed");
+                        return;
+                    }
+                }
+            }
+        }
+    }
+
+    /// Frames wait for a pump (the receiver was full).
+    pub fn is_stalled(&self) -> bool {
+        !self.inner.lock().unwrap().stalled.is_empty()
+    }
+
+    /// Runs the notifier (a pump) now, as the receiver does after it
+    /// takes a frame, so stalled frames go out once there is room.
+    pub fn poke_out(&self) {
+        let notify = self.inner.lock().unwrap().notify.clone();
         if let Some(notify) = notify {
             notify();
         }
@@ -146,7 +220,10 @@ impl Session {
     /// Drains pending UI -> JS output as tagged frames: one ACKS frame
     /// covering all pending acks, then every queued event frame.
     pub fn take_out(&self) -> Vec<Vec<u8>> {
-        let mut inner = self.inner.lock().unwrap();
+        Self::take_out_locked(&mut self.inner.lock().unwrap())
+    }
+
+    fn take_out_locked(inner: &mut Inner) -> Vec<Vec<u8>> {
         let mut out = Vec::with_capacity(inner.events.len() + 1);
         if !inner.acks.is_empty() {
             let mut frame = Vec::with_capacity(5 + inner.acks.len() * 8);
@@ -157,7 +234,7 @@ impl Session {
             }
             out.push(frame);
         }
-        for mut frame in inner.events.drain(..) {
+        for (mut frame, _) in inner.events.drain(..) {
             frame.insert(0, out_tag::EVENTS);
             out.push(frame);
         }
@@ -258,6 +335,55 @@ mod tests {
         s.ack(41);
         s.ack(42);
         assert_eq!(s.recv_acks(), vec![41, 42]);
+    }
+
+    /// S4-08: a full queue keeps reliable frames (animation ends) and
+    /// drops the oldest droppable one; a receiver that is full gets the
+    /// refused frame and everything after it again, in order, before
+    /// anything newer.
+    #[test]
+    fn reliable_frames_survive_full_queues() {
+        let s = Session::new();
+        s.post_events(vec![0xEE], true);
+        for i in 0..MAX_EVENT_FRAMES + 10 {
+            s.post_events((i as u32).to_le_bytes().to_vec(), false);
+        }
+        let out = s.take_out();
+        assert_eq!(out.len(), MAX_EVENT_FRAMES);
+        assert_eq!(
+            out[0],
+            [out_tag::EVENTS, 0xEE],
+            "the reliable frame stays first"
+        );
+        // The oldest droppable frames went.
+        assert_eq!(out[1][1..], 11u32.to_le_bytes());
+
+        let s = Session::new();
+        for i in 0..5u8 {
+            s.post_events(vec![i], i == 3);
+        }
+        let mut got: Vec<u8> = Vec::new();
+        let mut budget = 2;
+        let send = |f: Vec<u8>, got: &mut Vec<u8>, budget: &mut i32| {
+            if *budget == 0 {
+                return Delivery::Full;
+            }
+            *budget -= 1;
+            got.push(f[1]);
+            Delivery::Sent
+        };
+        s.pump(|f| send(f, &mut got, &mut budget));
+        assert_eq!(got, [0, 1]);
+        assert!(s.is_stalled());
+        s.post_events(vec![9], false);
+        budget = 100;
+        s.pump(|f| send(f, &mut got, &mut budget));
+        assert_eq!(got, [0, 1, 2, 3, 4, 9]);
+        assert!(!s.is_stalled());
+        // A receiver that is gone closes the session.
+        s.post_events(vec![7], true);
+        s.pump(|_| Delivery::Closed);
+        assert!(s.submit(b"x".to_vec()).is_err());
     }
 
     #[test]

@@ -490,19 +490,37 @@ function mul(p: Affine, c: Affine): Affine {
 }
 
 /** A timing on the wire: kind u8, delay f32, five f32 (a curve:
- * duration, x1, y1, x2, y2; a spring: stiffness, damping, mass, 0, 0).
- * Seconds natively. */
-function putTiming(b: Writer, t: Timing) {
-  const delay = (t.delay ?? 0) / 1000
+ * duration, x1, y1, x2, y2; a spring: stiffness, damping, mass, 0, 0),
+ * seconds natively. Checks what native checks (finite, delays and
+ * durations up to 600 s, curve x in [0, 1], positive springs) and
+ * throws. */
+export function timingValues(t: Timing): number[] {
+  const secs = (ms: unknown, what: string) => {
+    if (typeof ms !== "number" || !Number.isFinite(ms) || ms < 0 || ms > 600_000) {
+      throw Error(`bad ${what} ${String(ms)}`)
+    }
+    return ms / 1000
+  }
+  const delay = secs(t.delay ?? 0, "delay")
   if ("spring" in t) {
-    b.u8(1)
-    for (const v of [delay, t.spring.stiffness ?? 170, t.spring.damping ?? 26, t.spring.mass ?? 1, 0, 0]) b.f32(v)
-    return
+    const s = [t.spring.stiffness ?? 170, t.spring.damping ?? 26, t.spring.mass ?? 1]
+    if (!s.every(v => typeof v === "number" && Number.isFinite(v) && v > 0)) {
+      throw Error("spring stiffness, damping, and mass must be positive")
+    }
+    return [1, delay, ...s, 0, 0]
   }
   const e = typeof t.easing === "object" ? t.easing : EASING[t.easing ?? "ease"]
-  if (!e) throw Error(`unknown easing "${String(t.easing)}"`)
-  b.u8(0)
-  for (const v of [delay, t.duration / 1000, ...e]) b.f32(v)
+  if (!e || e.length !== 4 || !e.every(v => typeof v === "number" && Number.isFinite(v))) {
+    throw Error(`unknown easing "${String(t.easing)}"`)
+  }
+  if (!(e[0]! >= 0 && e[0]! <= 1 && e[2]! >= 0 && e[2]! <= 1)) throw Error("easing x outside [0, 1]")
+  return [0, delay, secs(t.duration, "duration"), ...e]
+}
+
+/** Writes values from `timingValues`. */
+function putTiming(b: Writer, v: readonly number[]) {
+  b.u8(v[0]!)
+  for (let i = 1; i < 7; i++) b.f32(v[i]!)
 }
 
 /** Folds an RN-style transform list into one matrix. Like CSS, the list
@@ -800,13 +818,16 @@ export class Encoder {
   transition(id: number, transitions: Transitions | undefined) {
     const b = this.ops
     const list = (Object.keys(ANIM_PROP) as AnimProp[]).filter(p => transitions?.[p] !== undefined)
+    // Every timing checked before a byte is written: a bad one throws
+    // with the op buffer unchanged.
+    const timings = list.map(p => timingValues(transitions![p]!))
     b.u8(Op.Transition)
     b.u32(id)
     b.u8(list.length)
-    for (const p of list) {
+    list.forEach((p, i) => {
       b.u8(ANIM_PROP[p])
-      putTiming(b, transitions![p]!)
-    }
+      putTiming(b, timings[i]!)
+    })
   }
 
   /** Tweens one property to `value`, in the property's wire shape:
@@ -814,12 +835,18 @@ export class Encoder {
    * top, bottom], gap [column, row], others one number. */
   animate(id: number, prop: AnimProp, value: readonly number[], timing: Timing) {
     const b = this.ops
+    const code = ANIM_PROP[prop]
+    const want = [6, 1, 1, 1, 1, 1, 4, 2][code]
+    if (want === undefined || value.length !== want || !value.every(Number.isFinite)) {
+      throw Error(`bad ${String(prop)} animation target`)
+    }
+    const t = timingValues(timing)
     b.u8(Op.Animate)
     b.u32(id)
-    b.u8(ANIM_PROP[prop])
+    b.u8(code)
     if (prop === "backgroundColor" || prop === "borderColor") b.u32(value[0]! >>> 0)
     else for (const v of value) b.f32(v)
-    putTiming(b, timing)
+    putTiming(b, t)
   }
 
   /** Seals the transaction and resets every table for the next one. */

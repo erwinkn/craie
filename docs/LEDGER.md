@@ -154,3 +154,6 @@ Reviewer minors and nitpicks not fixed yet.
 - S4-01..07 (probe side effects, dependent probe targets, percent
   padding and gap, recycled layout, unresolved retargets, clamped
   retarget starts, overflow in transforms): fixed in step 4 round 1.
+- S4-08..10 (lossless delivery of animation ends, list state through
+  the probe, rejected `animate` calls with no side effects): fixed in
+  step 4 round 2.

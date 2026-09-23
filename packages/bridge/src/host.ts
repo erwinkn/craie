@@ -468,12 +468,20 @@ export class CraieHost {
         this.root.cmd(this, (e, id) => e.cmdSetText(id, text))
       },
       animate(prop: AnimProp, to: unknown, timing: Timing) {
-        const value = animValue(prop, to)
-        if (!this.mounted) return Promise.resolve({ finished: false, reason: "cancelled" as const })
-        return new Promise<AnimationEnd>((resolve) => {
-          (this.pendingAnims ??= []).push({ prop: ANIM_PROP[prop], resolve })
+        // Encode first: a bad call rejects with no op written and nothing
+        // pending.
+        let resolve!: (end: AnimationEnd) => void
+        const done = new Promise<AnimationEnd>(r => { resolve = r })
+        try {
+          if (!(prop in ANIM_PROP)) throw Error(`unknown animated property "${String(prop)}"`)
+          const value = animValue(prop, to)
+          if (!this.mounted) return Promise.resolve({ finished: false, reason: "cancelled" as const })
           this.root.cmd(this, (e, id) => e.animate(id, prop, value, timing))
-        })
+        } catch (err) {
+          return Promise.reject(err)
+        }
+        ;(this.pendingAnims ??= []).push({ prop: ANIM_PROP[prop], resolve })
+        return done
       },
     }
     return n

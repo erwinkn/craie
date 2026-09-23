@@ -722,3 +722,29 @@ test("animate resolves when native reports its end", async () => {
   t.eventCb!(end(7, 3))
   expect(await n.animate("opacity", 0, { duration: 1 })).toEqual({ finished: false, reason: "cancelled" })
 })
+
+// S4-10: a rejected animate call leaves nothing behind: no pending
+// entry (a later call's end resolves that call) and no bytes in the
+// transaction.
+test("a rejected animate call writes nothing and holds nothing", async () => {
+  const t = new FakeTransport()
+  const root = createRoot(t)
+  let node: HostNode | null = null
+  root.renderSync(createElement(View, { ref: (n: HostNode | null) => { node = n } }))
+  await tick()
+  const n = node as unknown as HostNode
+  const id = t.ops(0).find(o => o.tag === 0x01)!.id
+  t.frames.length = 0
+  await expect(n.animate("opacity", 0, { duration: 100, easing: "bad" as any })).rejects.toThrow()
+  await expect(n.animate("opacity", 0, { duration: -1 })).rejects.toThrow()
+  await expect(n.animate("gap", [1, 2, 3], { duration: 1 })).rejects.toThrow()
+  await expect(n.animate("nope" as any, 1, { duration: 1 })).rejects.toThrow()
+  expect(n.pendingAnims ?? []).toEqual([])
+  const ok = n.animate("opacity", 0, { duration: 100 })
+  await tick()
+  expect(t.ops().map(o => o.tag)).toEqual([0xa1])
+  t.eventCb!({
+    kind: 15, node: id, generation: 0, revision: 0, x: 0, y: 0, a: 0, b: 0, key: 1, text: "",
+  })
+  expect(await ok).toEqual({ finished: true, reason: "finished" })
+})

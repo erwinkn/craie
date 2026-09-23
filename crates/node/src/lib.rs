@@ -12,7 +12,7 @@ use std::sync::{Arc, OnceLock};
 
 use craie_core::geom::Size;
 use craie_platform_winit::app::HostApp;
-use craie_ui::bridge::{Session, Sessions};
+use craie_ui::bridge::{Delivery, Session, Sessions};
 use napi::bindgen_prelude::Uint8Array;
 use napi::threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode};
 use napi::{Env, Error, Result, Status};
@@ -194,18 +194,31 @@ impl NativeClient {
         let tsfn = Arc::new(callback);
         let session = self.session.clone();
         let weak = Arc::downgrade(&session);
-        let pump_tsfn = tsfn.clone();
+        // A frame the bounded queue refuses waits in the session and goes
+        // out, in order, on the next pump (`resume` runs one after each
+        // delivered frame); a closed queue closes the session.
         session.set_out_notify(move || {
             let Some(s) = weak.upgrade() else { return };
-            for frame in s.take_out() {
-                pump_tsfn.call(frame.into(), ThreadsafeFunctionCallMode::NonBlocking);
-            }
+            s.pump(|frame| {
+                match tsfn.call(frame.into(), ThreadsafeFunctionCallMode::NonBlocking) {
+                    Status::Ok => Delivery::Sent,
+                    Status::QueueFull => Delivery::Full,
+                    _ => Delivery::Closed,
+                }
+            });
         });
-        // Drain anything queued before the subscription landed.
-        for frame in session.take_out() {
-            tsfn.call(frame.into(), ThreadsafeFunctionCallMode::NonBlocking);
-        }
+        // Deliver anything queued before the subscription landed.
+        session.poke_out();
         Ok(())
+    }
+
+    /// The JS side took a frame: frames the full queue refused go out
+    /// now (a no-op unless some wait).
+    #[napi]
+    pub fn resume(&self) {
+        if self.session.is_stalled() {
+            self.session.poke_out();
+        }
     }
 
     #[napi]

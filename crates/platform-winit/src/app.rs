@@ -158,7 +158,11 @@ impl Inner {
     fn flush_out(ui: &mut Ui, session: &Session) {
         let events = ui.take_events();
         if !events.is_empty() {
-            session.post_events(events::encode_events(&events));
+            // Animation ends resolve JS promises: those frames never drop.
+            let reliable = events
+                .iter()
+                .any(|e| e.kind == events::out_kind::ANIMATION_END);
+            session.post_events(events::encode_events(&events), reliable);
         }
     }
 

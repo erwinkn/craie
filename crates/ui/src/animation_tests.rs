@@ -747,3 +747,131 @@ fn animate_reports_how_it_ended() {
     assert!(!ui.animating());
     assert_eq!(ends(&mut ui), []);
 }
+
+/// S4-09: the probe sizes lists without recording: a measured item with
+/// no rendered row keeps its measurement through a probe at another
+/// width (a delayed width tween to `auto`, still at its start).
+#[test]
+fn probe_keeps_list_measurements() {
+    use crate::mutation::ItemDesc;
+    let mut ui = Ui::new(1.0);
+    let mut t = Transaction::new(1);
+    t.create(0, NodeKind::View)
+        .layout(0, &column(100.0))
+        .place(NIL, 0, NIL);
+    t.transition(
+        0,
+        &[Transition {
+            prop: Prop::Width,
+            timing: linear(1.0).with_delay(0.5),
+        }],
+    );
+    let item = |id| ItemDesc {
+        template: 0,
+        text_len: 0,
+        id,
+        unchanged: false,
+    };
+    t.create(1, NodeKind::List)
+        .list_config(1, 400.0, 20.0, &[])
+        .list_splice(1, 0, 0, &[item(10), item(11)])
+        .place(0, 1, NIL);
+    for (row, index) in [(2, 0), (3, 1)] {
+        t.create(row, NodeKind::View)
+            .layout(
+                row,
+                &taffy::Style {
+                    size: taffy::Size {
+                        width: taffy::Dimension::auto(),
+                        height: taffy::Dimension::length(100.0),
+                    },
+                    ..taffy::Style::default()
+                },
+            )
+            .list_index(row, index)
+            .place(1, row, NIL);
+    }
+    ui.apply_txn(&t).unwrap();
+    at(&mut ui, 0.0);
+    let total = |ui: &Ui| ui.layouts.data(NodeId(1)).rect.size.height;
+    let y3 = |ui: &Ui| ui.layouts.data(NodeId(3)).rect.origin.y;
+    assert_eq!((total(&ui), y3(&ui)), (200.0, 100.0));
+    // The first row goes (its item stays, measured).
+    apply(&mut ui, |t| {
+        t.remove(2);
+    });
+    at(&mut ui, 0.0);
+    assert_eq!((total(&ui), y3(&ui)), (200.0, 100.0));
+    apply(&mut ui, |t| {
+        let auto = taffy::Style {
+            flex_direction: taffy::FlexDirection::Column,
+            ..taffy::Style::default()
+        };
+        t.layout(0, &auto);
+    });
+    at(&mut ui, 0.1);
+    assert!(ui.animating());
+    assert_eq!(ui.layouts.data(NodeId(0)).rect.size.width, 100.0);
+    assert_eq!((total(&ui), y3(&ui)), (200.0, 100.0));
+}
+
+/// S4-09: a list changed in the transaction that starts a probe is laid
+/// out in full by the frame (the probe's list result has no rows).
+#[test]
+fn list_changed_with_a_probe_places_its_rows() {
+    use crate::mutation::ItemDesc;
+    let mut ui = Ui::new(1.0);
+    let mut t = Transaction::new(1);
+    t.create(0, NodeKind::View)
+        .layout(0, &column(100.0))
+        .place(NIL, 0, NIL);
+    let item = |id| ItemDesc {
+        template: 0,
+        text_len: 0,
+        id,
+        unchanged: false,
+    };
+    let row = |t: &mut Transaction<'static>, row: u32, index: u32| {
+        t.create(row, NodeKind::View)
+            .layout(row, &sized(100.0, 100.0))
+            .list_index(row, index)
+            .place(1, row, NIL);
+    };
+    t.create(1, NodeKind::List)
+        .list_config(1, 400.0, 20.0, &[])
+        .list_splice(1, 0, 0, &[item(10)])
+        .place(0, 1, NIL);
+    row(&mut t, 2, 0);
+    // The tweened node is another root: the list's layout inputs are
+    // the same in the probe and in the frame.
+    t.create(5, NodeKind::View)
+        .layout(5, &sized(100.0, 10.0))
+        .place(NIL, 5, NIL);
+    width_transition(5, Prop::Height, &mut t);
+    t.create(6, NodeKind::View)
+        .layout(6, &sized(100.0, 50.0))
+        .place(5, 6, NIL);
+    ui.apply_txn(&t).unwrap();
+    at(&mut ui, 0.0);
+    // One transaction: an item and its row, the first row grown, and a
+    // tween to `auto`.
+    apply(&mut ui, |t| {
+        t.list_splice(1, 1, 0, &[item(11)]);
+        row(t, 3, 1);
+        t.layout(2, &sized(100.0, 150.0));
+        let auto = taffy::Style {
+            size: taffy::Size {
+                width: taffy::Dimension::length(100.0),
+                height: taffy::Dimension::auto(),
+            },
+            ..taffy::Style::default()
+        };
+        t.layout(5, &auto);
+    });
+    at(&mut ui, 0.0);
+    assert!(ui.animating());
+    let r3 = ui.layouts.data(NodeId(3)).rect;
+    assert_eq!(ui.layouts.data(NodeId(2)).rect.size.height, 150.0);
+    assert_eq!((r3.origin.y, r3.size.height), (150.0, 100.0));
+    assert_eq!(ui.layouts.data(NodeId(1)).rect.size.height, 250.0);
+}

@@ -143,3 +143,15 @@ test("span lists with delimiter-like families do not share rows", () => {
   expect(ref(3)).toEqual(ref(4))
   expect(g.spans.length).toBe(2)
 })
+
+// S4-10: a bad timing throws before the encoder writes a byte.
+test("bad timings leave the encoder unchanged", () => {
+  const enc = new Encoder()
+  enc.create(1, 0)
+  expect(() => enc.transition(1, { opacity: { duration: 100 }, width: { duration: 100, easing: [2, 0, 1, 1] } })).toThrow()
+  expect(() => enc.animate(1, "opacity", [0], { spring: { damping: 0 } })).toThrow()
+  expect(() => enc.animate(1, "opacity", [0, 1], { duration: 1 })).toThrow()
+  enc.place(NIL, 1, NIL)
+  const f = readFrame(enc.finish(1n))
+  expect(f.ops.map(o => o.tag)).toEqual([0x01, 0x02])
+})

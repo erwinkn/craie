@@ -947,7 +947,13 @@ event loop, the window, the device, or the render target.
 One threadsafe function delivers `ack | events` frames. JS recycles
 ids at once and mirrors each slot's generation; events carry the
 generation and JS drops stale ones; the ack only resolves `flush()`.
-Payload ops copy typed-array bytes once. Protocol version 2.
+Payload ops copy typed-array bytes once. Protocol version 3 (36-byte
+event records). Delivery is lossless where a promise waits: frames
+carrying animation ends never drop from the session's bounded queue
+(the oldest droppable frame goes instead), and a frame the threadsafe
+function's queue refuses waits in the session, in order, until the
+next pump (JS calls `resume` after each frame it takes); a closed
+receiver closes the session.
 
 **Target.** The same transport with CRW2 payloads. The bridge exposes
 `submit` and `subscribe` only, so an embedded JS engine could replace

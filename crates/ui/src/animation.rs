@@ -770,7 +770,9 @@ impl Ui {
             }
             self.write_value(a.node, a.prop, a.declared);
         }
+        self.layouts.probing = true;
         self.compute_layout(size);
+        self.layouts.probing = false;
         for a in self.animations.active.iter_mut().filter(|a| a.to.is_none()) {
             let r = self.layouts.data(a.node).rect.size;
             let v = if a.prop == Prop::Width {
@@ -782,6 +784,14 @@ impl Ui {
         }
         for (node, style) in saved {
             self.set_layout(node, style);
+        }
+        // Lists laid out by the probe cached sizes without their rows:
+        // the frame lays them out again.
+        let lists: Vec<u32> = self.host.lists.map.keys().copied().collect();
+        for id in lists {
+            if self.host.is_live(NodeId(id)) {
+                self.host.mark_layout(NodeId(id));
+            }
         }
         // The frame lays out in full after this (anchors, scrolls,
         // clamps) even if every row came back unchanged.

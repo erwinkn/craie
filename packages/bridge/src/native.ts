@@ -25,6 +25,9 @@ export interface NativeClientHandle {
    * binary frame — tag 0 = ack batch (`u32 count` + `u64 seq`s), tag 1 =
    * event batch (see `decodeEvents`). */
   subscribe(callback: (frame: Uint8Array) => void): void
+  /** Sends frames the full callback queue refused (call after taking a
+   * frame; a no-op unless some wait). */
+  resume(): void
   close(reason: string): void
 }
 
@@ -103,6 +106,8 @@ export class NativeTransport implements Transport {
         break
       }
     }
+    // Room in the queue now: frames it refused go out.
+    this.client.resume()
   }
 
   send(frame: Uint8Array) {
