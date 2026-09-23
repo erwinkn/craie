@@ -84,7 +84,7 @@ Correctness: `cargo test -p craie-harness --test e01_text`. Cost:
 `cargo run --release -p craie-harness --example e01_text`. Both sides
 get the same pinned font bytes (`assets/fonts`) and the same fallback
 order (Parley through a font stack of the pinned families; Craie
-through `RawFonts` registration order). Twelve cases at 33 widths.
+through `RawFonts` registration order). Thirteen cases at 34 widths.
 Wrapped: Latin at 120/240/480 and unbounded, and at 40/90 with an
 overflowing word. Styled: bold, italic, and 24-pt spans, and bold and
 italic Arabic and Hebrew with synthesis. Multilingual: Latin, Devanagari
@@ -95,8 +95,11 @@ line. Breaks: LF, CR, LS, and PS, at widths down to 0. Emoji: ZWJ
 sequences, a skin tone, keycaps, a flag, and VS16. Fallback: stacked
 Latin marks, Arabic shadda and keycap on a digit, a dotted circle.
 Missing: Thai and Ethiopic, which no pinned face covers (both sides
-draw `.notdef`; every other case asserts none). Editable cases are
-step 3b.
+draw `.notdef`; every other case asserts none). Ligatures: Latin ffi
+across three graphemes, and marked Arabic. Editable cases are step 3b.
+`grapheme_and_ligature_clusters_are_exact` asserts the literal clusters
+of स्ते (bytes 0..12, one line at any width, hits only on its edges,
+exactly one oracle merge) and of the ffi ligature.
 
 Correctness per case (every width):
 
@@ -114,6 +117,7 @@ Correctness per case (every width):
 | emoji                    | equal       | equal        | equal        | bit-equal | 0.067                            |
 | fallback                 | equal       | equal        | equal        | bit-equal | 0.000                            |
 | missing                  | equal       | equal        | equal        | bit-equal | 0.025                            |
+| ligatures (unbounded)    | equal       | equal        | equal        | bit-equal | 0.028                            |
 
 A drawn glyph is compared by glyph id, source cluster, and the pinned
 file it comes from, in visual order. A cluster map is each glyph
@@ -148,6 +152,9 @@ test that asserts the exact difference:
 - No-break spaces (LB12). At narrow widths Parley breaks after NBSP,
   narrow NBSP, and figure space. Craie keeps each protected phrase on
   one line (`no_break_spaces_follow_uax14_where_parley_differs`).
+- Breaks inside a marked grapheme (LB9). At 40 pt, Parley starts a
+  line between an Arabic base and its kasra. Craie's line starts are
+  UAX #14 opportunities (`marked_arabic_breaks_follow_uax14_where_parley_differs`).
 - One font per grapheme. For a dotted circle with a Hebrew point, which
   Noto Sans covers in part, Craie draws both from Noto Sans Hebrew;
   Parley draws the base from Noto Sans and the mark from Noto Sans
@@ -159,9 +166,18 @@ test that asserts the exact difference:
 - Oracle metrics. Parley's `trailing_whitespace` counts only a visual
   last run, so on L1 lines it reads 0. With emoji ZWJ ligatures,
   Parley's `LineMetrics::advance` is not the sum of its own glyph
-  advances (1.47 pt short on a 306 pt line). The oracle takes each
-  line's advance from its glyphs and counts these lines (1 or 2 per
-  emoji width).
+  advances (1.47 pt short on a 306 pt line; its run advances sum
+  correctly). The comparison keeps the raw metric on every line except
+  a verified defect line (a multi-codepoint emoji sequence, with
+  Parley's run advances equal to its glyph sum within the f32 bound),
+  where it uses the glyph sum. Each case asserts the expected count per
+  width (emoji: 1, 2, 2; all others 0), and two negative controls fail:
+  a changed advance on a non-emoji line, and the emoji case without the
+  flag (`emoji_advance_correction_is_scoped`).
+- Oracle normalization. Parley lists a right-to-left ligature
+  continuation (glyph-less) before its ligature start in logical order;
+  the comparison joins it to the start after it, not to the cluster
+  before, and does not count it as a grapheme merge.
 
 Cost at each case's first bounded width (median of 1,001 interleaved
 calls; host load average 30 to 85 on 18 cores during this round, so
@@ -196,7 +212,9 @@ allocation counts are the reliable part):
   counted allocations are that growth). Craie takes 0.69 to 1.48 times
   Parley's time. It is slower on Latin at 120 (1.48), latin-narrow
   (1.17), and styled (1.21): Craie rebuilds its cluster scratch from
-  the glyph store on each rewrap, and Parley keeps its clusters.
+  the glyph store on each rewrap, and Parley keeps its clusters. An
+  accepted trade (LEDGER.md AR-2), with a follow-up E01 measurement of
+  cluster reconstruction against placement traversal.
 - Edit (one character inserted in the middle): both lay the paragraph
   out again. Incremental reflow is E04.
 - Span color: Craie does no layout work (the span index is the paint

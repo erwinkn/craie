@@ -323,8 +323,10 @@ bitmap geometry per `GlyphKey` (instance, glyph, size bits, subpixel)
 and no positions. A glyph's span index is its paint slot, so a color
 change patches a paint record and touches no placement. `rewrap` lays
 an already shaped paragraph out at another width over engine scratch:
-Parley's greedy line breaking and line metrics under UAX #14 (whitespace
-hangs only where a break may follow it; no-break spaces are content),
+Parley's greedy line breaking and line metrics under UAX #14
+(overflowing whitespace hangs and never breaks by itself, so it stays
+on the line a following hard break closes; no-break spaces are
+content),
 then UAX #9 L1 and L2 per line, in place. A segment whose L1 level has
 another direction than its run places its clusters in reverse, and the
 mapping reads that direction. A width change does no shaping and, once
@@ -333,7 +335,8 @@ line breaks, cluster maps, byte-to-cluster queries, and drawn glyphs
 (id, cluster, font) equal on every oracle case; the known differences,
 each with its own test, are Craie's L1 at soft line ends, GB9c
 graphemes, one break for CRLF and one after NEL, unbroken no-break
-spaces, and one font per grapheme. A retained paragraph holds 0.29 to
+spaces, no break inside a marked grapheme, and one font per
+grapheme. A retained paragraph holds 0.29 to
 0.75 times Parley's bytes. The Text default family is the engine's
 `default_family`, `system-ui` (Decisions). INPUT nodes still hold a Parley
 `PlainEditor` each until step 3b. Its contexts are made on first use,
@@ -417,8 +420,13 @@ identity and index: fontique blob ids from fontique's process-wide
 counter, and `RawFonts` ids from its own process-wide counter at or
 above `RAW_ID_BASE` (2^63), so a replaced source never reaches another
 source's faces. Discovery and fallback come through the `FontSource`
-trait (`select(family, attrs)`, `fallback(char, script, attrs,
-emoji)`), which returns font bytes in priority order. `RawFonts` is the
+trait (`select(family, attrs)`, `fallback(cluster, script, attrs,
+emoji)`), which returns font bytes in priority order: every face that
+covers the cluster's first character, up to and including the first
+that covers the whole cluster. `emoji` is UTS #51 presentation
+(Emoji_Presentation from the Unicode 17 tables, VS15 and VS16).
+A custom source takes byte ids from fontique's or `RawFonts`'s
+counter. `RawFonts` is the
 byte-only source (browser profiles, tests): family by name, nearest
 weight and italic with synthesis, fallback by coverage in registration
 order. The `pinned-fonts` feature embeds the harness fonts from
@@ -428,10 +436,11 @@ under OFL). Tests and the harness lay text out on them. On desktop,
 `craie-platform-winit/src/fonts.rs` implements `FontSource` over
 fontique: the emoji family first for emoji-presentation clusters, then
 the script's fallback list, then a last resort in a stable order (a
-per-platform priority list, then every family by name). The platform
+per-platform priority list, then every family by name), each step only
+while no face covers the whole cluster, with no cap on candidates. The platform
 installs it as the default source at startup. The engine caches the
 primary instance per (family, attrs) and the source's candidates per
-(first character, script, attrs, emoji); each cluster takes the first
+(script, attrs, emoji) and cluster; each cluster takes the first
 candidate that covers all of it, so the choice depends on the cluster
 alone. Until step 3b, Parley (for inputs) still brings fontique into
 craie-text's graph.
