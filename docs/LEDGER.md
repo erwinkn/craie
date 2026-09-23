@@ -239,3 +239,6 @@ Reviewer minors and nitpicks not fixed yet.
 - S5B-11..15 (viewport clipping, size limits and the aspect ratio,
   stylesheet vector-effect, implicit subpath starts under transforms,
   assets past runtime limits): fixed in step 5b round 2.
+- S5B-16 (size limits: percentages against the containing block, box
+  sizing): fixed after step 5b round 3 (the last); reviewed with the
+  step 6 range, which starts at its commit.

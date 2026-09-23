@@ -269,11 +269,13 @@ impl TreeView<'_> {
     /// content box to wrap at, `MaxContent` measures unwrapped, and
     /// `MinContent` wraps at every break opportunity (wrap width zero).
     /// `known` dimensions are already final — nothing to measure.
+    /// `parent` is the containing block's size (percentages).
     fn measure(
         &mut self,
         id: NodeId,
         known: TSize<Option<f32>>,
         available: TSize<AvailableSpace>,
+        parent: TSize<Option<f32>>,
     ) -> TSize<f32> {
         if let (Some(w), Some(h)) = (known.width, known.height) {
             return TSize {
@@ -312,27 +314,25 @@ impl TreeView<'_> {
                     .then(|| avail.into_option())
                     .flatten()
             };
-            // Min and max sizes are border boxes: less padding and border
-            // (lengths; a percentage counts as 0 here).
-            let len = |l: taffy::LengthPercentage| match l.expand() {
-                taffy::style::ExpandedLengthPercentage::Length(v) => v,
-                _ => 0.0,
-            };
+            // Min and max sizes resolve against the containing block
+            // (Taffy's rules: padding and border percentages against its
+            // width); under border-box sizing they lose padding and
+            // border to become content sizes.
+            let padding = style.padding.resolve_or_zero(parent.width, no_calc);
+            let border = style.border.resolve_or_zero(parent.width, no_calc);
             let inset = [
-                len(style.padding.left)
-                    + len(style.padding.right)
-                    + len(style.border.left)
-                    + len(style.border.right),
-                len(style.padding.top)
-                    + len(style.padding.bottom)
-                    + len(style.border.top)
-                    + len(style.border.bottom),
+                padding.left + padding.right + border.left + border.right,
+                padding.top + padding.bottom + border.top + border.bottom,
             ];
-            let limit = |d: taffy::LengthPercentageAuto, axis: usize| match d.expand() {
-                taffy::style::ExpandedLengthPercentageAuto::Length(v) => {
-                    Some((v - inset[axis]).max(0.0))
-                }
-                _ => None,
+            let content_box = style.box_sizing == taffy::BoxSizing::ContentBox;
+            let limit = |d: taffy::LengthPercentageAuto, of: Option<f32>, axis: usize| {
+                d.maybe_resolve(of, no_calc).map(|v| {
+                    if content_box {
+                        v
+                    } else {
+                        (v - inset[axis]).max(0.0)
+                    }
+                })
             };
             let [width, height] = crate::vector::constrained(
                 a.view_box,
@@ -341,12 +341,12 @@ impl TreeView<'_> {
                     content(known.height, !size.height.is_auto(), available.height),
                 ],
                 [
-                    limit(style.min_size.width, 0),
-                    limit(style.min_size.height, 1),
+                    limit(style.min_size.width, parent.width, 0),
+                    limit(style.min_size.height, parent.height, 1),
                 ],
                 [
-                    limit(style.max_size.width, 0),
-                    limit(style.max_size.height, 1),
+                    limit(style.max_size.width, parent.width, 0),
+                    limit(style.max_size.height, parent.height, 1),
                 ],
             );
             return TSize { width, height };
@@ -723,11 +723,12 @@ impl LayoutPartialTree for TreeView<'_> {
                 // Every container is flex for now.
                 compute_flexbox_layout(tree, node_id, inputs)
             } else {
+                let parent = inputs.parent_size;
                 compute_leaf_layout(
                     inputs,
                     &style,
                     |_, _| 0.0,
-                    |known, available| tree.measure(id, known, available),
+                    |known, available| tree.measure(id, known, available, parent),
                 )
             }
         })

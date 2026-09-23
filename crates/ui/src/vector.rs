@@ -627,6 +627,66 @@ mod review_tests {
         assert_eq!(limited(&|s| s.max_size.height = l(3.0)), (6.0, 3.0));
     }
 
+    /// S5B-16: limits resolve against the containing block (percent
+    /// sizes and padding) and follow box sizing, in a 100-wide parent:
+    /// max width 10% gives 10 x 5; min width 48 with 5% padding gives 48
+    /// x 29; content-box min width 48 with padding 5 gives 58 x 34.
+    #[test]
+    fn size_limits_follow_percentages_and_box_sizing() {
+        let limited = |f: &dyn Fn(&mut taffy::Style)| {
+            let mut ui = Ui::new(1.0);
+            let mut t = Transaction::new(1);
+            let parent = taffy::Style {
+                flex_direction: taffy::FlexDirection::Column,
+                align_items: Some(taffy::AlignItems::START),
+                size: taffy::Size {
+                    width: taffy::Dimension::length(100.0),
+                    height: taffy::Dimension::length(100.0),
+                },
+                ..taffy::Style::default()
+            };
+            let mut s = taffy::Style::default();
+            f(&mut s);
+            t.create(0, NodeKind::View)
+                .layout(0, &parent)
+                .place(NIL, 0, NIL);
+            t.create(1, NodeKind::Vector)
+                .layout(1, &s)
+                .payload(1, red_box())
+                .place(0, 1, NIL);
+            ui.apply_txn(&t).unwrap();
+            ui.render(Size::new(300.0, 300.0));
+            let r = ui.layouts.data(NodeId(1)).rect;
+            (r.size.width, r.size.height)
+        };
+        let pad = |p: taffy::LengthPercentage| taffy::Rect {
+            left: p,
+            right: p,
+            top: p,
+            bottom: p,
+        };
+        let l = taffy::LengthPercentageAuto::length;
+        assert_eq!(
+            limited(&|s| s.max_size.width = taffy::LengthPercentageAuto::percent(0.1)),
+            (10.0, 5.0)
+        );
+        assert_eq!(
+            limited(&|s| {
+                s.min_size.width = l(48.0);
+                s.padding = pad(taffy::LengthPercentage::percent(0.05));
+            }),
+            (48.0, 29.0)
+        );
+        assert_eq!(
+            limited(&|s| {
+                s.min_size.width = l(48.0);
+                s.padding = pad(taffy::LengthPercentage::length(5.0));
+                s.box_sizing = taffy::BoxSizing::ContentBox;
+            }),
+            (58.0, 34.0)
+        );
+    }
+
     /// S5B-04: a display-scale change re-tessellates vector chunks (the
     /// tolerance is in device px): the meshes equal a fresh build's.
     #[test]
