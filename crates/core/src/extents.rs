@@ -37,7 +37,8 @@ impl Extents {
     }
 
     /// `splice` with (extent, measured) per new item: an item moved
-    /// within one splice keeps its measurement. O(n) (one rebuild).
+    /// within one splice keeps its measurement. O(n) (one rebuild),
+    /// except a pure append: O(k log n), so streaming appends stay cheap.
     pub fn splice_items(
         &mut self,
         range: Range<usize>,
@@ -45,6 +46,12 @@ impl Extents {
     ) {
         let n = self.size.len();
         let range = range.start.min(n)..range.end.min(n).max(range.start.min(n));
+        if range.start == n {
+            for (e, m) in items {
+                self.push(e, m);
+            }
+            return;
+        }
         let (size, measured): (Vec<f32>, Vec<bool>) = items.into_iter().unzip();
         self.size.splice(range.clone(), size);
         self.measured.splice(range, measured);
@@ -79,6 +86,19 @@ impl Extents {
                 self.tree[parent] += v;
             }
         }
+    }
+
+    /// Appends one item: Fenwick node `j` covers items (j - lowbit(j), j],
+    /// so its sum is the new size plus the prefix it spans. O(log n).
+    fn push(&mut self, e: f32, measured: bool) {
+        self.size.push(e);
+        self.measured.push(measured);
+        let j = self.size.len();
+        if self.tree.is_empty() {
+            self.tree.push(0.0);
+        }
+        let span = self.offset_f64(j - 1) - self.offset_f64(j - (j & j.wrapping_neg()));
+        self.tree.push(e as f64 + span);
     }
 
     fn add(&mut self, i: usize, delta: f64) {

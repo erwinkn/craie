@@ -121,7 +121,37 @@ fn scroll(ui: &mut Ui, d: &mut ListDriver, y: f32) {
 /// row sits where it sits in a plain column holding every row with the
 /// same box style (padding, border, row gap), the list is as tall, and
 /// a sibling after it lands in the same place.
+/// f32 unit roundoff.
+const U: f64 = 1.0 / (1u64 << 24) as f64;
+
+/// The classic bound on a floating-point sum of `k` additions of
+/// nonnegative terms: |computed - exact| <= gamma(k) * exact.
+fn gamma(k: usize) -> f64 {
+    let ku = k as f64 * U;
+    ku / (1.0 - ku)
+}
+
+/// The oracle compares both paths with a reference: the same f32 terms
+/// (content top, each row's f32 height, the f32 gap) summed in f64.
+///
+/// - The plain Taffy column adds each item's term to a running f32 total
+///   (a term is itself its gap, margins, and size: at most 3 f32
+///   additions per item), so row `i` is within `gamma(3i + 3)` of the
+///   reference.
+/// - The list sums extents in f64 (error far below f32's), rounds once
+///   to f32, and adds its origin and margin: within `gamma(4)`.
+///
+/// Visual limit: the list's bound stays under 1/8 device pixel at 2x
+/// (it does for offsets up to about 2^18 pt; past that f32 layout itself
+/// cannot place rows more finely). With `exact` inputs (every partial sum
+/// representable) the two paths must also agree within 0.01 pt
+/// directly; with fractional inputs only the bounds hold, and the plain
+/// column is the less accurate path.
 fn oracle(list_style: taffy::Style, what: &str) {
+    oracle_with(list_style, what, true)
+}
+
+fn oracle_with(list_style: taffy::Style, what: &str, exact: bool) {
     let n = 200;
     let sibling = 2;
     let tail = |t: &mut Transaction| {
@@ -182,31 +212,82 @@ fn oracle(list_style: taffy::Style, what: &str) {
     plain.apply_txn(&t).unwrap();
     plain.render(VIEW);
     let content_top = ui.layouts.data(NodeId(LIST)).content[1];
+    let gap = l.gap as f64;
+    let within =
+        |got: f32, reference: f64, bound: f64| (got as f64 - reference).abs() <= bound + 1e-9;
+    // The reference offset of every item, from the plain rows' heights.
+    let mut reference = Vec::with_capacity(n as usize);
+    let mut acc = content_top as f64;
     for i in 0..n {
-        let want = plain.layouts.data(NodeId(100 + i)).rect.origin.y;
-        let got = content_top + l.offset(i as usize);
-        assert!(
-            (got - want).abs() < 1e-2,
-            "{what}: item {i}: {got} vs {want}"
-        );
+        let h = plain.layouts.data(NodeId(100 + i)).rect.size.height;
+        assert_eq!(l.extents.size(i as usize), h, "{what}: item {i} height");
+        reference.push(acc);
+        acc += h as f64 + gap;
     }
-    let a = ui.layouts.data(NodeId(LIST)).rect;
-    let b = plain.layouts.data(NodeId(LIST)).rect;
-    assert!(
-        (a.size.height - b.size.height).abs() < 1e-2,
-        "{what}: height {a:?} vs {b:?}"
+    let content_end = acc - gap;
+    for i in 0..n as usize {
+        let (r, ours) = (reference[i], content_top + l.offset(i));
+        let plain_y = plain.layouts.data(NodeId(100 + i as u32)).rect.origin.y;
+        assert!(
+            within(ours, r, gamma(4) * r),
+            "{what}: item {i}: {ours} vs reference {r}"
+        );
+        assert!(
+            within(plain_y, r, gamma(3 * i + 3) * r),
+            "{what}: plain item {i}: {plain_y} vs reference {r}"
+        );
+        assert!(
+            gamma(4) * r * 2.0 < 0.125,
+            "{what}: visual limit at item {i}"
+        );
+        if exact {
+            assert!(
+                (ours - plain_y).abs() < 1e-2,
+                "{what}: item {i}: {ours} vs {plain_y}"
+            );
+        }
+    }
+    // The list box and the sibling after it: one or two more additions.
+    let k = 3 * n as usize + 3;
+    let bottom = ui.layouts.data(NodeId(LIST)).rect.size.height - content_top - l.total();
+    let (a, b) = (
+        ui.layouts.data(NodeId(LIST)).rect,
+        plain.layouts.data(NodeId(LIST)).rect,
     );
-    let a = ui.layouts.data(NodeId(sibling)).rect.origin;
-    let b = plain.layouts.data(NodeId(sibling)).rect.origin;
-    assert!((a.y - b.y).abs() < 1e-2, "{what}: sibling {a:?} vs {b:?}");
-    // Rendered rows are laid out exactly like their plain twins.
+    let r = content_end + bottom as f64;
+    assert!(
+        within(a.size.height, r, gamma(5) * r),
+        "{what}: height {a:?}"
+    );
+    assert!(
+        within(b.size.height, r, gamma(k + 1) * r),
+        "{what}: plain height {b:?}"
+    );
+    let (sa, sb) = (
+        ui.layouts.data(NodeId(sibling)).rect.origin.y,
+        plain.layouts.data(NodeId(sibling)).rect.origin.y,
+    );
+    let r = a.origin.y as f64 + r;
+    assert!(within(sa, r, gamma(6) * r), "{what}: sibling {sa} vs {r}");
+    assert!(
+        within(sb, r, gamma(k + 2) * r),
+        "{what}: plain sibling {sb} vs {r}"
+    );
+    if exact {
+        assert!(
+            (a.size.height - b.size.height).abs() < 1e-2,
+            "{what}: {a:?} vs {b:?}"
+        );
+        assert!((sa - sb).abs() < 1e-2, "{what}: sibling {sa} vs {sb}");
+    }
+    // Rendered rows sit at their reference offsets, sized like their
+    // plain twins.
     for (&i, &id) in &d.rows {
         let a = ui.layouts.data(NodeId(id)).rect;
         let b = plain.layouts.data(NodeId(100 + i)).rect;
+        let r = reference[i as usize];
         assert!(
-            (a.origin.y - b.origin.y).abs() < 1e-2
-                && (a.origin.x - b.origin.x).abs() < 1e-2
-                && a.size == b.size,
+            within(a.origin.y, r, gamma(4) * r) && a.origin.x == b.origin.x && a.size == b.size,
             "{what}: row {i}: {a:?} vs {b:?}"
         );
     }
@@ -261,14 +342,31 @@ fn virtualized_equals_plain_column() {
                 height: LP::percent(0.1),
             },
             // Inner height 200 (padding 20, border 2): the gap is exactly
-            // 20, so f32 sums in the plain column add no rounding.
+            // 20, so every partial sum is exact: the control.
             size: taffy::Size {
                 width: taffy::Dimension::auto(),
                 height: taffy::Dimension::length(222.0),
             },
             ..padded.clone()
         },
-        "percent gap, definite height",
+        "percent gap, definite height, exact",
+    );
+    // Inner height 178: the gap is 17.8, not an f32 value; the plain
+    // column's running f32 sum drifts within its bound.
+    oracle_with(
+        taffy::Style {
+            gap: taffy::Size {
+                width: LP::length(0.0),
+                height: LP::percent(0.1),
+            },
+            size: taffy::Size {
+                width: taffy::Dimension::auto(),
+                height: taffy::Dimension::length(200.0),
+            },
+            ..padded.clone()
+        },
+        "percent gap, definite height, fractional",
+        false,
     );
     oracle(
         taffy::Style {
@@ -490,7 +588,59 @@ fn list_incremental_equals_rebuild() {
                 ui.set_time(now);
                 let n = texts.len() as u32;
                 let mut t = Transaction::new(10_000 + step);
-                match rng.below(4) {
+                match rng.below(6) {
+                    4 => {
+                        // Two splices in one batch: insert here, remove
+                        // there (positions after the first splice).
+                        let at = rng.below(n + 1);
+                        let s1: Vec<String> = (0..2).map(|k| text(step as u32 * 17 + k)).collect();
+                        let ids1: Vec<u32> = (0..2).map(|k| next_id + k).collect();
+                        next_id += 2;
+                        let descs: Vec<ItemDesc> = s1
+                            .iter()
+                            .zip(&ids1)
+                            .map(|(s, &id)| ItemDesc {
+                                template: 0,
+                                text_len: s.chars().count() as u32,
+                                id,
+                                unchanged: false,
+                            })
+                            .collect();
+                        t.list_splice(LIST, at, 0, &descs);
+                        d.spliced(&mut t, at, 0, 2);
+                        texts.splice(at as usize..at as usize, s1);
+                        ids.splice(at as usize..at as usize, ids1);
+                        let n2 = texts.len() as u32;
+                        let at2 = rng.below(n2);
+                        let rm = rng.below(3).min(n2 - at2);
+                        t.list_splice(LIST, at2, rm, &[]);
+                        d.spliced(&mut t, at2, rm, 0);
+                        texts.drain(at2 as usize..(at2 + rm) as usize);
+                        ids.drain(at2 as usize..(at2 + rm) as usize);
+                    }
+                    5 if n > 8 => {
+                        // Reverse a short run: the same items move.
+                        let at = rng.below(n - 6);
+                        let len = 2 + rng.below(5);
+                        let (a, b) = (at as usize, (at + len) as usize);
+                        let old_ids = ids.clone();
+                        ids[a..b].reverse();
+                        texts[a..b].reverse();
+                        let descs: Vec<ItemDesc> = (a..b)
+                            .map(|k| ItemDesc {
+                                template: 0,
+                                text_len: texts[k].chars().count() as u32,
+                                id: ids[k],
+                                unchanged: true,
+                            })
+                            .collect();
+                        t.list_splice(LIST, at, len, &descs);
+                        let new_ids = ids.clone();
+                        d.remap(&mut t, &|i| {
+                            let id = old_ids[i as usize];
+                            Some(new_ids.iter().position(|&x| x == id).unwrap() as u32)
+                        });
+                    }
                     0 => {
                         let at = rng.below(n + 1);
                         let rm = rng.below(4).min(n - at);
@@ -543,6 +693,8 @@ fn list_incremental_equals_rebuild() {
                 if !t.mutations.is_empty() {
                     ui.apply_txn(&t).unwrap();
                 }
+                craie_harness::check_list_index(&ui)
+                    .unwrap_or_else(|e| panic!("seed {seed} step {step}: {e}"));
                 let texts2 = texts.clone();
                 d.settle(&mut ui, VIEW, &move |i| texts2[i as usize].clone(), 8);
                 if step % 5 == 4 {
@@ -1108,5 +1260,81 @@ fn probe_and_final_agree_on_wide_corrections() {
         );
         let y = ui.layouts.data(NodeId(sibling)).rect.origin.y;
         assert!((y - list.max_y()).abs() < 1e-6, "{what}: sibling at {y}");
+    }
+}
+
+/// A root list (the window is its viewport) with an auto height bounded
+/// by min/max and a percentage gap: the gap resolves against the used
+/// (clamped) content height, as in a plain flex column of the same rows.
+#[test]
+fn percentage_gap_follows_min_max_height() {
+    use taffy::{Dimension as D, LengthPercentage as LP, LengthPercentageAuto as LPA};
+    let cases: [(&str, u32, Option<f32>, Option<f32>); 3] = [
+        ("min = max = 200", 3, Some(200.0), Some(200.0)),
+        ("max below the rows", 10, None, Some(100.0)),
+        ("min above the rows", 3, Some(300.0), None),
+    ];
+    for (what, n, min, max) in cases {
+        let style = taffy::Style {
+            size: taffy::Size {
+                width: D::length(200.0),
+                height: D::auto(),
+            },
+            min_size: taffy::Size {
+                width: LPA::auto(),
+                height: min.map_or(LPA::auto(), LPA::length),
+            },
+            max_size: taffy::Size {
+                width: LPA::auto(),
+                height: max.map_or(LPA::auto(), LPA::length),
+            },
+            gap: taffy::Size {
+                width: LP::length(0.0),
+                height: LP::percent(0.1),
+            },
+            ..craie_ui::host::default_style()
+        };
+        let row = taffy::Style {
+            size: taffy::Size {
+                width: D::auto(),
+                height: D::length(20.0),
+            },
+            ..craie_ui::host::default_style()
+        };
+        let build = |virtual_list: bool| {
+            let mut ui = Ui::new(1.0);
+            let mut t = Transaction::new(1);
+            if virtual_list {
+                t.create(LIST, NodeKind::List)
+                    .layout(LIST, &style)
+                    .list_splice(LIST, 0, 0, &(0..n).map(desc).collect::<Vec<_>>());
+            } else {
+                t.create(LIST, NodeKind::View).layout(LIST, &style);
+            }
+            t.append(NIL, LIST);
+            for i in 0..n {
+                t.create(100 + i, NodeKind::View)
+                    .layout(100 + i, &row)
+                    .append(LIST, 100 + i);
+                if virtual_list {
+                    t.list_index(100 + i, i);
+                }
+            }
+            ui.apply_txn(&t).unwrap();
+            ui.render(VIEW);
+            ui.render(VIEW);
+            ui
+        };
+        let (list, plain) = (build(true), build(false));
+        for i in 0..n {
+            let a = list.layouts.data(NodeId(100 + i)).rect.origin.y;
+            let b = plain.layouts.data(NodeId(100 + i)).rect.origin.y;
+            assert_eq!(a, b, "{what}: row {i}");
+        }
+        assert_eq!(
+            list.layouts.data(NodeId(LIST)).rect.size,
+            plain.layouts.data(NodeId(LIST)).rect.size,
+            "{what}: list box"
+        );
     }
 }

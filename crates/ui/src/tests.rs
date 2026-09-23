@@ -1843,6 +1843,13 @@ fn list_identities_are_unique() {
             assert_eq!(ui.host.paint[0].fill, 0, "{what}: atomic");
             assert_eq!(ui.host.lists.get(1).unwrap().len(), 4, "{what}: atomic");
         }
+        // The index matches the items after every accepted batch.
+        let index_ok = |ui: &Ui| {
+            let l = ui.host.lists.get(1).unwrap();
+            let fresh = crate::list::IdIndex::build(l.descs.iter().map(|d| d.id));
+            !fresh.has_duplicates() && fresh == l.ids
+        };
+        assert!(index_ok(&ui));
         // Valid: move id 7 to the front across two splices, repeat NIL.
         let mut t = Transaction::new(3);
         t.list_splice(1, 3, 1, &[])
@@ -1853,6 +1860,7 @@ fn list_identities_are_unique() {
             l.descs.iter().map(|d| d.id).collect::<Vec<_>>(),
             [7, NIL, NIL, 1, 2, 3]
         );
+        assert!(index_ok(&ui));
         // Re-creating the list's id starts a fresh identity space.
         let mut t = Transaction::new(4);
         t.remove(1)
@@ -1861,6 +1869,53 @@ fn list_identities_are_unique() {
             .list_splice(1, 0, 0, &[item(1), item(7)]);
         apply(&mut ui, &t).unwrap();
         assert_eq!(ui.host.lists.get(1).unwrap().len(), 2);
+        assert!(index_ok(&ui), "after node reuse");
         ui.render(Size::new(100.0, 100.0));
+    }
+}
+
+/// Unknown bits in an item's flags byte, or a partial description,
+/// reject the whole batch (an earlier valid op must not apply), through
+/// the wire and the direct API.
+#[test]
+fn list_item_flags_are_strict() {
+    use crate::mutation::ItemDesc;
+    let item = ItemDesc {
+        template: 0,
+        text_len: 3,
+        id: 5,
+        unchanged: true,
+    };
+    for (what, flags, cut) in [
+        ("unknown bit", 0x80u8, 0usize),
+        ("unknown bit with unchanged", 0x81, 0),
+        ("partial description", 0x01, 1),
+    ] {
+        for wire_path in [false, true] {
+            let mut ui = Ui::new(1.0);
+            let mut t = Transaction::new(1);
+            t.create(0, NodeKind::View).append(NIL, 0);
+            t.create(1, NodeKind::List).append(0, 1);
+            ui.apply_txn(&t).unwrap();
+            let mut bytes = ItemDesc::pack(&[item]);
+            *bytes.last_mut().unwrap() = flags;
+            bytes.truncate(bytes.len() - cut);
+            let mut t = Transaction::new(2);
+            t.fill(0, 0xFF00_00FF);
+            t.push(Mutation::ListSplice {
+                id: 1,
+                at: 0,
+                remove: 0,
+                items: bytes.into(),
+            });
+            let r = if wire_path {
+                ui.apply(&wire::encode(&t)).map(|_| ())
+            } else {
+                ui.apply_txn(&t)
+            };
+            assert!(r.is_err(), "{what} (wire {wire_path})");
+            assert_eq!(ui.host.paint[0].fill, 0, "{what}: atomic");
+            assert!(ui.host.lists.get(1).is_none_or(|l| l.is_empty()));
+        }
     }
 }

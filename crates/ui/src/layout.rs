@@ -345,24 +345,46 @@ impl TreeView<'_> {
         // The definite content height, as flex resolves a percentage row
         // gap against it: the known height, else the style's (clamped
         // by min/max), minus the insets of a border box.
-        let inner_h = {
-            let parent_h = inputs.parent_size.height;
-            let styled = style.size.height.maybe_resolve(parent_h, no_calc).map(|h| {
-                let min = style.min_size.height.maybe_resolve(parent_h, no_calc);
-                let max = style.max_size.height.maybe_resolve(parent_h, no_calc);
-                let h = max.map_or(h, |m| h.min(m));
-                let h = min.map_or(h, |m| h.max(m));
-                if style.box_sizing == taffy::BoxSizing::ContentBox {
-                    h + inset.top + inset.bottom
-                } else {
-                    h
-                }
-            });
-            let outer = inputs.known_dimensions.height.or(match inputs.sizing_mode {
-                SizingMode::InherentSize => styled,
+        // Min/max heights as content-box bounds (the used size of an auto
+        // height is the content clamped by them).
+        let parent_h = inputs.parent_size.height;
+        let inset_v = inset.top + inset.bottom;
+        let to_inner = |h: f32| {
+            if style.box_sizing == taffy::BoxSizing::ContentBox {
+                h
+            } else {
+                (h - inset_v).max(0.0)
+            }
+        };
+        let (min_inner, max_inner) = match inputs.sizing_mode {
+            SizingMode::InherentSize => (
+                style
+                    .min_size
+                    .height
+                    .maybe_resolve(parent_h, no_calc)
+                    .map(to_inner),
+                style
+                    .max_size
+                    .height
+                    .maybe_resolve(parent_h, no_calc)
+                    .map(to_inner),
+            ),
+            SizingMode::ContentSize => (None, None),
+        };
+        let clamp = |h: f32| {
+            let h = max_inner.map_or(h, |m| h.min(m));
+            min_inner.map_or(h, |m| h.max(m))
+        };
+        let inner_h = match inputs.known_dimensions.height {
+            Some(h) => Some((h - inset_v).max(0.0)),
+            None => match inputs.sizing_mode {
+                SizingMode::InherentSize => style
+                    .size
+                    .height
+                    .maybe_resolve(parent_h, no_calc)
+                    .map(|h| clamp(to_inner(h))),
                 SizingMode::ContentSize => None,
-            });
-            outer.map(|h| (h - inset.top - inset.bottom).max(0.0))
+            },
         };
         let gap = style.gap.height;
         let mut out = compute_leaf_layout(inputs, style, no_calc, |known, available| {
@@ -376,7 +398,15 @@ impl TreeView<'_> {
             match width {
                 Some(w) => TSize {
                     width: w,
-                    height: self.list_rows(id, w, gap, inner_h, commit, [inset.left, inset.top]),
+                    height: self.list_rows(
+                        id,
+                        w,
+                        gap,
+                        inner_h,
+                        &clamp,
+                        commit,
+                        [inset.left, inset.top],
+                    ),
                 },
                 // An intrinsic-size probe: no width to wrap rows at.
                 None => TSize {
@@ -400,13 +430,16 @@ impl TreeView<'_> {
     /// `origin` + its item offset; otherwise nothing is recorded.
     /// `gap` resolves against `inner_h` (a definite content height). A
     /// percentage without one sizes the list without gaps, then places
-    /// rows with the gap resolved against that size, as flex does.
+    /// rows with the gap resolved against that size as min/max clamp it
+    /// (`clamp`), as flex does.
+    #[allow(clippy::too_many_arguments)]
     fn list_rows(
         &mut self,
         id: NodeId,
         w: f32,
         gap: taffy::LengthPercentage,
         inner_h: Option<f32>,
+        clamp: &dyn Fn(f32) -> f32,
         commit: bool,
         origin: [f32; 2],
     ) -> f32 {
@@ -491,7 +524,7 @@ impl TreeView<'_> {
         }
         let size = list.extents.total_gap(size_gap);
         list.gap = if deferred {
-            gap.maybe_resolve(Some(size), no_calc).unwrap_or(0.0)
+            gap.maybe_resolve(Some(clamp(size)), no_calc).unwrap_or(0.0)
         } else {
             size_gap
         };

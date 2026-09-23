@@ -706,6 +706,36 @@ impl Gen {
     }
 }
 
+/// The identity index oracle: every list's index equals a fresh sorted
+/// projection of its items' non-NIL identities, which are unique.
+pub fn check_list_index(ui: &Ui) -> Result<(), String> {
+    for i in 0..ui.host.slot_count() as u32 {
+        let Some(l) = ui.host.lists.get(i) else {
+            continue;
+        };
+        let fresh = craie_ui::list::IdIndex::build(l.descs.iter().map(|d| d.id));
+        if fresh.has_duplicates() {
+            return Err(format!("list {i}: duplicate identities"));
+        }
+        if fresh != l.ids {
+            let (a, b) = (l.ids.as_slice(), fresh.as_slice());
+            let k = a
+                .iter()
+                .zip(b)
+                .position(|(x, y)| x != y)
+                .unwrap_or(a.len().min(b.len()));
+            return Err(format!(
+                "list {i}: index ({} ids) differs from items ({} ids) at {k}: {:?} vs {:?}",
+                a.len(),
+                b.len(),
+                a.get(k),
+                b.get(k)
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Plays the React side of a virtualized list: renders a row (a text
 /// node) for every item in the range the list reports, and removes rows
 /// that left it. `text(i)` is item `i`'s text.

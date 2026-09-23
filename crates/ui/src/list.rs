@@ -16,7 +16,7 @@
 //! extents above it change; with `StickToEnd` a scroller at its end
 //! stays at its end.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::ops::Range;
 
 use craie_core::extents::Extents;
@@ -35,29 +35,81 @@ use craie_core::Affine;
 /// fields of range events.
 pub const MAX_ITEMS: u32 = 1 << 24;
 
-/// Hashes u32 item identities by Fibonacci multiplication: ids are
-/// interned counters, not attacker-chosen keys, so no seeded hash is
-/// needed, and the top bits (which the table's control bytes use) mix
-/// well.
-#[derive(Clone, Copy, Default)]
-pub struct IdHasher(u64);
+/// The identities of a list's items (NIL excluded), sorted. Ids come
+/// from the public wire, so they are adversarial input: a sorted vector
+/// has no hash to aim collisions at. Membership is a binary search;
+/// an update is one merge pass, O(n + k log k), in line with the O(n)
+/// extents rebuild every splice already does. 4 bytes per item.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct IdIndex(Vec<u32>);
 
-impl std::hash::Hasher for IdHasher {
-    fn write(&mut self, bytes: &[u8]) {
-        for &b in bytes {
-            self.0 = (self.0.rotate_left(8) ^ b as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+impl IdIndex {
+    pub fn contains(&self, id: u32) -> bool {
+        self.0.binary_search(&id).is_ok()
+    }
+
+    pub fn as_slice(&self) -> &[u32] {
+        &self.0
+    }
+
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    /// The index of `ids` (NIL dropped); duplicates stay (a caller that
+    /// requires uniqueness checks `has_duplicates`).
+    pub fn build(ids: impl IntoIterator<Item = u32>) -> IdIndex {
+        let mut v: Vec<u32> = ids.into_iter().filter(|&i| i != NIL).collect();
+        v.sort_unstable();
+        IdIndex(v)
+    }
+
+    pub fn has_duplicates(&self) -> bool {
+        self.0.windows(2).any(|w| w[0] == w[1])
+    }
+
+    /// Removes `removed` (present ids) and adds `added` (absent ids);
+    /// NIL is ignored in both.
+    pub fn update(&mut self, removed: &[u32], added: &[u32]) {
+        let removed: Vec<u32> = removed.iter().copied().filter(|&i| i != NIL).collect();
+        let added: Vec<u32> = added.iter().copied().filter(|&i| i != NIL).collect();
+        if removed.len() + added.len() <= 16 {
+            // A few ids: in place (one memmove each).
+            for r in removed {
+                if let Ok(p) = self.0.binary_search(&r) {
+                    self.0.remove(p);
+                }
+            }
+            for a in added {
+                if let Err(p) = self.0.binary_search(&a) {
+                    self.0.insert(p, a);
+                }
+            }
+            return;
         }
-    }
-    fn write_u32(&mut self, i: u32) {
-        self.0 = (i as u64 ^ self.0).wrapping_mul(0x9E37_79B9_7F4A_7C15);
-    }
-    fn finish(&self) -> u64 {
-        self.0
+        let gone = IdIndex::build(removed);
+        let new = IdIndex::build(added);
+        let mut out = Vec::with_capacity(self.0.len() - gone.len() + new.len());
+        let mut a = new.0.iter().copied().peekable();
+        for x in self.0.iter().copied().filter(|x| !gone.contains(*x)) {
+            while let Some(&y) = a.peek() {
+                if y < x {
+                    out.push(y);
+                    a.next();
+                } else {
+                    break;
+                }
+            }
+            out.push(x);
+        }
+        out.extend(a);
+        self.0 = out;
     }
 }
-
-/// A set of item identities.
-pub type IdSet = HashSet<u32, std::hash::BuildHasherDefault<IdHasher>>;
 
 /// Sample text for per-size metrics: a mix of letters, digits, and
 /// spaces close to running prose.
@@ -68,7 +120,7 @@ pub struct ListState {
     pub descs: Vec<ItemDesc>,
     /// The identities in `descs` (NIL excluded): each appears once, which
     /// validation checks against this index.
-    pub ids: IdSet,
+    pub ids: IdIndex,
     pub extents: Extents,
     /// Extra distance rendered beyond the viewport, each side (logical
     /// points).
@@ -99,7 +151,7 @@ impl Default for ListState {
         ListState {
             templates: Vec::new(),
             descs: Vec::new(),
-            ids: IdSet::default(),
+            ids: IdIndex::default(),
             extents: Extents::new(),
             overscan: 0.0,
             fallback: 0.0,
@@ -231,25 +283,30 @@ impl Lists {
         let range = at as usize..(at + remove) as usize;
         let (width, fallback) = (l.width, l.fallback);
         let templates = l.templates.clone();
-        // Removed items by identity: (old index, description, extent,
-        // measured).
-        let removed: HashMap<u32, (u32, ItemDesc, f32, bool)> = range
+        // Removed items by identity, sorted: (id, description, extent,
+        // measured). Binary search, no hashing of wire ids.
+        let mut removed: Vec<(u32, ItemDesc, f32, bool)> = range
             .clone()
             .filter(|&i| l.descs[i].id != NIL)
             .map(|i| {
-                let d = l.descs[i];
                 (
-                    d.id,
-                    (i as u32, d, l.extents.size(i), l.extents.is_measured(i)),
+                    l.descs[i].id,
+                    l.descs[i],
+                    l.extents.size(i),
+                    l.extents.is_measured(i),
                 )
             })
             .collect();
+        removed.sort_unstable_by_key(|r| r.0);
+        let find = |id: u32| {
+            removed
+                .binary_search_by_key(&id, |r| r.0)
+                .ok()
+                .map(|p| removed[p])
+        };
         let mut new_items = Vec::with_capacity(items.len() / ItemDesc::BYTES);
-        // Old index -> new index of items that moved within the splice.
-        let mut moved: HashMap<u32, u32> = HashMap::new();
-        for (k, d) in ItemDesc::iter(items).enumerate() {
-            if let Some(&(old, before, e, m)) = removed.get(&d.id) {
-                moved.insert(old, at + k as u32);
+        for d in ItemDesc::iter(items) {
+            if let Some((_, before, e, m)) = find(d.id) {
                 // Only the bridge knows the content is the same (the same
                 // object moved): then it keeps its extent. Otherwise it is
                 // estimated again (its row, if rendered, measures it).
@@ -273,11 +330,29 @@ impl Lists {
         }
         let l = self.map.get_mut(&id).unwrap();
         let inserted = new_items.len();
-        for d in &l.descs[range.clone()] {
-            l.ids.remove(&d.id);
+        let gone: Vec<u32> = l.descs[range.clone()].iter().map(|d| d.id).collect();
+        let added: Vec<u32> = ItemDesc::iter(items).map(|d| d.id).collect();
+        l.ids.update(&gone, &added);
+        // Where each saved anchor's item went: its new place if the
+        // splice re-inserted it, else the splice start.
+        let anchor_to = |old: u32| {
+            let id = l.descs[old as usize].id;
+            if id == NIL {
+                return at;
+            }
+            added
+                .iter()
+                .position(|&a| a == id)
+                .map_or(at, |k| at + k as u32)
+        };
+        let shift = inserted as i64 - remove as i64;
+        for s in self.saved.values_mut().filter(|s| s.list == id) {
+            if s.index >= at + remove {
+                s.index = (s.index as i64 + shift) as u32;
+            } else if s.index >= at {
+                s.index = anchor_to(s.index);
+            }
         }
-        l.ids
-            .extend(ItemDesc::iter(items).map(|d| d.id).filter(|&i| i != NIL));
         l.descs.splice(range.clone(), ItemDesc::iter(items));
         l.extents.splice_items(range, new_items);
         if !width.is_finite() {
@@ -285,18 +360,6 @@ impl Lists {
         }
         l.revision = l.revision.wrapping_add(1);
         l.resend = true;
-        let shift = inserted as i64 - remove as i64;
-        for s in self.saved.values_mut().filter(|s| s.list == id) {
-            if s.index >= at + remove {
-                s.index = (s.index as i64 + shift) as u32;
-            } else if s.index >= at {
-                s.index = match moved.get(&s.index) {
-                    Some(&to) => to,
-                    // The anchor item went away: anchor to its place.
-                    None => at,
-                };
-            }
-        }
     }
 
     /// (average advance, line height) at `font_size`, measured once by

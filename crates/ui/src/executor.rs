@@ -10,7 +10,7 @@
 use std::collections::HashMap;
 
 use crate::host::{Host, MAX_NODES, NodeId};
-use crate::list::{IdSet, MAX_ITEMS};
+use crate::list::{IdIndex, MAX_ITEMS};
 use crate::mutation::{Command, ItemDesc, Mutation, NIL, NodeKind, TextSpan, Transaction};
 use crate::ui::Ui;
 use crate::wire::WireError;
@@ -76,15 +76,15 @@ enum Touch {
         len: u32,
         splices: Vec<(u32, u32, Vec<u32>)>,
     },
-    /// The whole identity sequence and its set.
-    Seq { ids: Vec<u32>, set: IdSet },
+    /// The whole identity sequence and its index.
+    Seq { ids: Vec<u32>, index: IdIndex },
 }
 
 impl Touch {
     fn empty() -> Touch {
         Touch::Seq {
             ids: Vec::new(),
-            set: IdSet::default(),
+            index: IdIndex::default(),
         }
     }
 
@@ -96,15 +96,16 @@ impl Touch {
     }
 
     /// Checks one splice (range, item limit, identities unique across the
-    /// list as the batch leaves it) and records it. `fresh` holds the
-    /// inserted non-NIL identities, already unique among themselves.
+    /// list as the batch leaves it) and records it. `fresh` is the index
+    /// of the inserted identities, already free of duplicates. Sorting
+    /// and binary search only: wire ids never reach a hash.
     fn splice(
         &mut self,
         base: Option<&crate::list::ListState>,
         at: u32,
         remove: u32,
         inserted: Vec<u32>,
-        fresh: &IdSet,
+        fresh: &IdIndex,
     ) -> Result<(), WireError> {
         let cur = self.len();
         if at > cur || remove > cur - at {
@@ -115,19 +116,18 @@ impl Touch {
             return Err(invalid("list longer than the item limit"));
         }
         let range = at as usize..(at + remove) as usize;
+        let clash = |index: &IdIndex, removed: &IdIndex| {
+            fresh
+                .as_slice()
+                .iter()
+                .any(|&i| index.contains(i) && !removed.contains(i))
+        };
         if let Touch::Host { splices, .. } = self {
+            let base = base.expect("a host touch has a host list");
             if splices.is_empty() {
                 // First splice: the host's items and index, unmodified.
-                let base = base.expect("a host touch has a host list");
-                let removed: IdSet = base.descs[range.clone()]
-                    .iter()
-                    .map(|d| d.id)
-                    .filter(|&i| i != NIL)
-                    .collect();
-                if fresh
-                    .iter()
-                    .any(|i| base.ids.contains(i) && !removed.contains(i))
-                {
+                let removed = IdIndex::build(base.descs[range].iter().map(|d| d.id));
+                if clash(&base.ids, &removed) {
                     return Err(invalid("duplicate item identity in a list"));
                 }
                 splices.push((at, remove, inserted));
@@ -138,32 +138,21 @@ impl Touch {
                 return Ok(());
             }
             // Materialize: the host's sequence with the recorded splices.
-            let base = base.expect("a host touch has a host list");
             let mut ids: Vec<u32> = base.descs.iter().map(|d| d.id).collect();
             for (a, r, ins) in splices.drain(..) {
                 ids.splice(a as usize..(a + r) as usize, ins);
             }
-            let set = ids.iter().copied().filter(|&i| i != NIL).collect();
-            *self = Touch::Seq { ids, set };
+            let index = IdIndex::build(ids.iter().copied());
+            *self = Touch::Seq { ids, index };
         }
-        let Touch::Seq { ids, set } = self else {
+        let Touch::Seq { ids, index } = self else {
             unreachable!()
         };
-        let removed: IdSet = ids[range.clone()]
-            .iter()
-            .copied()
-            .filter(|&i| i != NIL)
-            .collect();
-        if fresh
-            .iter()
-            .any(|i| set.contains(i) && !removed.contains(i))
-        {
+        let removed = IdIndex::build(ids[range.clone()].iter().copied());
+        if clash(index, &removed) {
             return Err(invalid("duplicate item identity in a list"));
         }
-        for i in &removed {
-            set.remove(i);
-        }
-        set.extend(fresh.iter().copied());
+        index.update(removed.as_slice(), fresh.as_slice());
         ids.splice(range, inserted);
         Ok(())
     }
@@ -395,12 +384,21 @@ pub fn validate(host: &Host, txn: &Transaction<'_>) -> Result<(), WireError> {
                 if o.kind(*id) != Some(NodeKind::List) {
                     return Err(invalid("list splice on a non-list node"));
                 }
+                // Whole descriptions with only known flag bits (the direct
+                // API can hand over raw bytes too).
+                if items.len() % ItemDesc::BYTES != 0 {
+                    return Err(invalid("list items not whole descriptions"));
+                }
+                if items
+                    .chunks_exact(ItemDesc::BYTES)
+                    .any(|c| c[ItemDesc::BYTES - 1] & !ItemDesc::UNCHANGED != 0)
+                {
+                    return Err(invalid("unknown list item flags"));
+                }
                 let inserted: Vec<u32> = ItemDesc::iter(items).map(|d| d.id).collect();
-                let mut fresh: IdSet = IdSet::default();
-                for &i in inserted.iter().filter(|&&i| i != NIL) {
-                    if !fresh.insert(i) {
-                        return Err(invalid("duplicate item identity in a splice"));
-                    }
+                let fresh = IdIndex::build(inserted.iter().copied());
+                if fresh.has_duplicates() {
+                    return Err(invalid("duplicate item identity in a splice"));
                 }
                 let base = host.lists.get(*id);
                 let touch = lists.entry(*id).or_insert_with(|| match base {

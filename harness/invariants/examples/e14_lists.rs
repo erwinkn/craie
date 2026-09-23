@@ -272,6 +272,147 @@ fn estimate_error() -> (f32, f32) {
     (mean, errs[errs.len() * 95 / 100])
 }
 
+/// Identity patterns: (name, ids). Ids reach native through the public
+/// wire, so they include chosen, adversarial patterns.
+fn id_patterns(n: u32) -> Vec<(&'static str, Vec<u32>)> {
+    let mut x = 0x9E37_79B9_7F4A_7C15u64;
+    let mut random = || {
+        // splitmix64
+        x = x.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut z = x;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        (z ^ (z >> 31)) as u32
+    };
+    let mut rnd: Vec<u32> = Vec::with_capacity(n as usize);
+    let mut seen = std::collections::BTreeSet::new();
+    while rnd.len() < n as usize {
+        let v = random();
+        if v != u32::MAX && seen.insert(v) {
+            rnd.push(v);
+        }
+    }
+    vec![
+        ("sequential", (0..n).collect()),
+        ("stride 2^11", (0..n).map(|k| k << 11).collect()),
+        ("random", rnd),
+    ]
+}
+
+/// A multiplicative hasher (rejected in review round 3): keeps the low
+/// zero bits of strided ids, so they share buckets.
+#[derive(Default)]
+struct MulHasher(u64);
+impl std::hash::Hasher for MulHasher {
+    fn write(&mut self, _: &[u8]) {
+        unreachable!()
+    }
+    fn write_u32(&mut self, i: u32) {
+        self.0 = (i as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    }
+    fn finish(&self) -> u64 {
+        self.0
+    }
+}
+
+/// Builds a set of `ids` and queries each once: ms.
+fn set_cost(ids: &[u32], kind: &str) -> f64 {
+    use std::collections::HashSet;
+    let t = Instant::now();
+    match kind {
+        "sorted vec" => {
+            let ix = craie_ui::list::IdIndex::build(ids.iter().copied());
+            assert!(ids.iter().all(|&i| ix.contains(i)));
+        }
+        "std HashSet (SipHash, keyed)" => {
+            let set: HashSet<u32> = ids.iter().copied().collect();
+            assert!(ids.iter().all(|i| set.contains(i)));
+        }
+        _ => {
+            let set: HashSet<u32, std::hash::BuildHasherDefault<MulHasher>> =
+                ids.iter().copied().collect();
+            assert!(ids.iter().all(|i| set.contains(i)));
+        }
+    }
+    ms(t)
+}
+
+/// The native path with `ids`: one splice mounting the list
+/// (validation + apply), then 100 single-item appends. (mount ms,
+/// append µs each)
+fn native_cost(ids: &[u32]) -> (f64, f64) {
+    let items: Vec<ItemDesc> = ids
+        .iter()
+        .map(|&id| ItemDesc {
+            template: 0,
+            text_len: 20,
+            id,
+            unchanged: false,
+        })
+        .collect();
+    let mut ui = Ui::new(1.0);
+    let mut t = Transaction::new(1);
+    t.create(1, NodeKind::List).append(NIL, 1);
+    ui.apply_txn(&t).unwrap();
+    let mut t = Transaction::new(2);
+    t.list_splice(1, 0, 0, &items);
+    let t0 = Instant::now();
+    ui.apply_txn(&t).unwrap();
+    let mount = ms(t0);
+    let n = ids.len() as u32;
+    // Fresh ids for appends, outside every pattern (they are all even
+    // or below 2^31 except random, which the check below guards).
+    let fresh: Vec<u32> = (0..100u32)
+        .map(|k| 0xFFFF_0000 + 2 * k + 1)
+        .filter(|id| !ids.contains(id))
+        .collect();
+    let t1 = Instant::now();
+    for (k, &id) in fresh.iter().enumerate() {
+        let mut t = Transaction::new(3 + k as u64);
+        t.list_splice(
+            1,
+            n + k as u32,
+            0,
+            &[ItemDesc {
+                template: 0,
+                text_len: 20,
+                id,
+                unchanged: false,
+            }],
+        );
+        ui.apply_txn(&t).unwrap();
+    }
+    (mount, ms(t1) * 1000.0 / fresh.len() as f64)
+}
+
+fn identity_costs() {
+    println!();
+    println!("identity index: build + query all (ms), and the native splice path");
+    let adversarial: Vec<u32> = (0..4096u32).map(|k| k << 20).collect();
+    for (name, ids) in
+        std::iter::once(("k << 20 (4,096)", adversarial)).chain(id_patterns(1_000_000))
+    {
+        let kinds = [
+            "sorted vec",
+            "std HashSet (SipHash, keyed)",
+            "multiplicative",
+        ];
+        let costs: Vec<String> = kinds
+            .iter()
+            .map(|k| format!("{}: {:.2}", k, set_cost(&ids, k)))
+            .collect();
+        let (mount, append) = native_cost(&ids);
+        println!(
+            "  {:>16} ({:>9} ids) | {} | native mount {:.1} ms, append {:.0} us",
+            name,
+            ids.len(),
+            costs.join(", "),
+            mount,
+            append
+        );
+    }
+}
+
 fn main() {
     println!("E14 virtualized list vs plain column (480x720 @2x, chat texts)");
     println!(
@@ -331,4 +472,5 @@ fn main() {
         p95 * 100.0
     );
     println!("bridge bytes per item: 11 (template u16, text length u32, id u32, flags u8)");
+    identity_costs();
 }

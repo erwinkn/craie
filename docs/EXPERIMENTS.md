@@ -89,17 +89,30 @@ machine (load average 9 to 12): times are indicative.
 
 | items | list mount | plain mount | scroll (in range) | jump | list heap | plain heap | layout visits |
 |-------|-----------:|------------:|------------------:|-----:|----------:|-----------:|--------------:|
-| 1k    | 27.0 ms | 52.7 ms  | 0.006 ms (plain 0.013) | 1.9 ms | 5.0 MiB  | 15.0 MiB  | 64 (plain 4,001) |
-| 10k   | 18.3 ms | 350.9 ms | 0.002 ms (plain 0.244) | 0.9 ms | 5.3 MiB  | 104.3 MiB | 64 (plain 40,001) |
-| 100k  | 47.3 ms | -        | 0.002 ms               | 1.1 ms | 8.0 MiB  | -         | 64 |
-| 1M    | 73.8 ms | -        | 0.003 ms               | 2.1 ms | 38.8 MiB | -         | 64 |
+| 1k    | 36.7 ms | 68.8 ms  | 0.006 ms (plain 0.013) | 2.1 ms | 5.0 MiB  | 15.0 MiB  | 64 (plain 4,001) |
+| 10k   | 21.2 ms | 387.6 ms | 0.003 ms (plain 0.217) | 1.0 ms | 5.3 MiB  | 104.3 MiB | 64 (plain 40,001) |
+| 100k  | 35.7 ms | -        | 0.003 ms               | 1.1 ms | 8.1 MiB  | -         | 64 |
+| 1M    | 90.0 ms | -        | 0.006 ms               | 2.3 ms | 33.2 MiB | -         | 64 |
 
 About 5 MiB of each heap is the text engine's font data. The list adds
-about 35 bytes per item: 21 for descriptions and extents before item
-identity, 4 for the identity, about 10 for the identity index that
-validation checks against. With the default (SipHash) hasher that
-index doubled the 1M mount (180 ms); a multiplicative hasher for u32
-ids brought it back. 27 rows render. Estimates against measured
+about 29 bytes per item: descriptions (16), extents (13 with the tree),
+and the sorted identity index (4). 27 rows render.
+
+Identity index, build plus one query per id (ms), and the native path
+(one splice mounting the list, then single-item appends):
+
+| ids | sorted vec | std HashSet (SipHash, keyed) | multiplicative hash | native mount | append |
+|-----|-----------:|-----------------------------:|--------------------:|-------------:|-------:|
+| `k << 20`, 4,096 | 0.03 | 0.05 | 1.68 | 0.2 ms | 1 µs |
+| sequential, 1M   | 19.9 | 30.8 | 6.4   | 44.5 ms | 2 µs |
+| stride 2^11, 1M  | 22.8 | 39.8 | 228.8 | 22.9 ms | 5 µs |
+| random, 1M       | 78.5 | 53.6 | 12.7  | 53.2 ms | 9 µs |
+
+The multiplicative hash (round 2) degrades on chosen patterns (30x at
+4,096 ids, 36x at 1M strided): wire ids are adversarial, so it went.
+The sorted vector has no pattern to aim at, costs 4 bytes per id, and
+merges in O(n + k log k) per splice. Before the append path, one
+append to a 1M list took 3.8 ms (a full Fenwick rebuild). Estimates against measured
 heights: mean error 2.4%, p95 25% (a wrap boundary costs a line). After
 a jump to 61% of a 100k list the top item holds its place and the item
 at the viewport bottom moves 14 pt once, when the rows measure.
@@ -158,6 +171,20 @@ minors, all fixed with regression tests and negative controls:
   f32 holds exactly, so the oracle's tolerance stays.
 - Size probes subtracted in f32; they sum in f64 now. The UI-phase
   list allocation test warms its scroll path and runs without a GPU.
+
+Review round 3 of step 2: two majors, three minors, all fixed:
+
+- The multiplicative id hasher clustered chosen ids (see the table
+  above); the index is a sorted vector and validation sorts.
+- A deferred percentage gap resolved against the raw row sum, not the
+  min/max-clamped height (root lists).
+- The seeded list test now checks the identity index against the items
+  after every step (with multi-splice batches and moves); unknown item
+  flag bits reject.
+- Numerical equivalence with a fractional gap: both paths are checked
+  against an f64 reference within bounds derived from their additions.
+  At 200 rows the plain column drifts 0.026 pt (bound 0.48), the list
+  0.00003 pt (bound under 1/8 device px at 2x).
 
 ### E10: span pool versus `Vec` side table
 
