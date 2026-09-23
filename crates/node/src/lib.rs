@@ -213,12 +213,11 @@ impl NativeClient {
     }
 
     /// The JS side took a frame: frames the full queue refused go out
-    /// now (a no-op unless some wait).
+    /// now (`Session::resume`: always a pump, ordered after one that is
+    /// storing a refused frame).
     #[napi]
     pub fn resume(&self) {
-        if self.session.is_stalled() {
-            self.session.poke_out();
-        }
+        self.session.resume();
     }
 
     #[napi]

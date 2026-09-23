@@ -794,8 +794,9 @@ own writers (`set_layout`, `set_spatial`, `set_paint`); the final frame
 writes the declared value. A size target that is not a length is
 resolved by one probe: a layout compute with every running layout
 animation at its declared value, without anchoring, scroll commands,
-or offset clamps, after which the rows go back and the frame lays out
-in full. A padding or gap that is not a length jumps (`LEDGER.md`
+or offset clamps, and with list rows laid out but not recorded (no
+measurements, no estimates), after which the rows go back and the
+frame lays out in full, lists included. A padding or gap that is not a length jumps (`LEDGER.md`
 DF-4). A size starts from the laid-out size only when the slot's
 current occupant has been laid out (`Layouts::is_laid_out`); a retarget
 starts from the sampled value clamped as the row writer clamps it. Transforms interpolate as rotation x
@@ -952,8 +953,9 @@ event records). Delivery is lossless where a promise waits: frames
 carrying animation ends never drop from the session's bounded queue
 (the oldest droppable frame goes instead), and a frame the threadsafe
 function's queue refuses waits in the session, in order, until the
-next pump (JS calls `resume` after each frame it takes); a closed
-receiver closes the session.
+next pump (JS calls `resume` after each frame it takes, which always
+pumps: it waits for a pump that is storing a refused frame, then
+retries it); a closed receiver closes the session.
 
 **Target.** The same transport with CRW2 payloads. The bridge exposes
 `submit` and `subscribe` only, so an embedded JS engine could replace

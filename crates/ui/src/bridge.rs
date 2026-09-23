@@ -202,8 +202,16 @@ impl Session {
         !self.inner.lock().unwrap().stalled.is_empty()
     }
 
-    /// Runs the notifier (a pump) now, as the receiver does after it
-    /// takes a frame, so stalled frames go out once there is room.
+    /// The receiver took a frame: pump, so frames it refused go out now
+    /// that there is room. Always a pump, never an unlocked "anything
+    /// stalled?" check first: a pump that is about to store a refused
+    /// frame holds the pump lock, so this one runs after it and sees
+    /// the frame.
+    pub fn resume(&self) {
+        self.poke_out();
+    }
+
+    /// Runs the notifier (a pump) now.
     pub fn poke_out(&self) {
         let notify = self.inner.lock().unwrap().notify.clone();
         if let Some(notify) = notify {
@@ -384,6 +392,53 @@ mod tests {
         s.post_events(vec![7], true);
         s.pump(|_| Delivery::Closed);
         assert!(s.submit(b"x".to_vec()).is_err());
+    }
+
+    /// S4-11: a receiver that drains and resumes while a pump is about
+    /// to store a refused frame still gets it: the resume's pump waits
+    /// for that pump and then retries.
+    #[test]
+    fn resume_during_a_stalling_pump_delivers() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+        let s = Session::new();
+        let queue: Arc<Mutex<Vec<u8>>> = Arc::default();
+        // Room for one frame; the receiver drains between pumps.
+        let q = queue.clone();
+        let (full_tx, full_rx) = mpsc::channel::<()>();
+        let first = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let f = first.clone();
+        let weak = Arc::downgrade(&s);
+        s.set_out_notify(move || {
+            let Some(s) = weak.upgrade() else { return };
+            s.pump(|frame| {
+                let mut q = q.lock().unwrap();
+                if !q.is_empty() {
+                    if f.swap(false, Ordering::SeqCst) {
+                        // Refused: let the receiver drain and resume now,
+                        // before this pump stores the frame.
+                        drop(q);
+                        full_tx.send(()).unwrap();
+                        std::thread::sleep(Duration::from_millis(100));
+                    }
+                    return Delivery::Full;
+                }
+                q.push(frame[1]);
+                Delivery::Sent
+            });
+        });
+        s.post_events(vec![1], false);
+        let s2 = s.clone();
+        let q2 = queue.clone();
+        let receiver = std::thread::spawn(move || {
+            full_rx.recv().unwrap();
+            q2.lock().unwrap().clear();
+            s2.resume();
+        });
+        s.post_events(vec![2], true);
+        receiver.join().unwrap();
+        assert_eq!(*queue.lock().unwrap(), [2], "the refused frame arrived");
+        assert!(!s.is_stalled());
     }
 
     #[test]

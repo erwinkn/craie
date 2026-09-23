@@ -875,3 +875,60 @@ fn list_changed_with_a_probe_places_its_rows() {
     assert_eq!((r3.origin.y, r3.size.height), (150.0, 100.0));
     assert_eq!(ui.layouts.data(NodeId(1)).rect.size.height, 250.0);
 }
+
+/// S4-12: an `auto` target inside a list resolves: the probe lays rows
+/// out (without recording), so a row's height tween to `auto` runs to
+/// its content's height through the intermediate frames.
+#[test]
+fn list_row_tweens_to_auto_height() {
+    use crate::mutation::ItemDesc;
+    let mut ui = Ui::new(1.0);
+    let mut t = Transaction::new(1);
+    t.create(0, NodeKind::View)
+        .layout(0, &column(100.0))
+        .place(NIL, 0, NIL);
+    t.create(1, NodeKind::List)
+        .list_config(1, 400.0, 20.0, &[])
+        .list_splice(
+            1,
+            0,
+            0,
+            &[ItemDesc {
+                template: 0,
+                text_len: 0,
+                id: 10,
+                unchanged: false,
+            }],
+        )
+        .place(0, 1, NIL);
+    let row = |h: taffy::Dimension| taffy::Style {
+        flex_direction: taffy::FlexDirection::Column,
+        size: taffy::Size {
+            width: taffy::Dimension::auto(),
+            height: h,
+        },
+        ..taffy::Style::default()
+    };
+    t.create(2, NodeKind::View)
+        .layout(2, &row(taffy::Dimension::length(40.0)))
+        .list_index(2, 0)
+        .place(1, 2, NIL);
+    width_transition(2, Prop::Height, &mut t);
+    t.create(3, NodeKind::View)
+        .layout(3, &sized(100.0, 200.0))
+        .place(2, 3, NIL);
+    ui.apply_txn(&t).unwrap();
+    at(&mut ui, 0.0);
+    let h = |ui: &Ui| ui.layouts.data(NodeId(2)).rect.size.height;
+    assert_eq!(h(&ui), 40.0);
+    apply(&mut ui, |t| {
+        t.layout(2, &row(taffy::Dimension::auto()));
+    });
+    at(&mut ui, 0.5);
+    assert!(near(h(&ui), 120.0), "{}", h(&ui));
+    at(&mut ui, 0.999);
+    assert!((h(&ui) - 200.0).abs() < 0.5, "{}", h(&ui));
+    at(&mut ui, 1.0);
+    assert_eq!(h(&ui), 200.0);
+    assert_eq!(ui.layouts.data(NodeId(1)).rect.size.height, 200.0);
+}

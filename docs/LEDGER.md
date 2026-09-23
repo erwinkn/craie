@@ -157,3 +157,6 @@ Reviewer minors and nitpicks not fixed yet.
 - S4-08..10 (lossless delivery of animation ends, list state through
   the probe, rejected `animate` calls with no side effects): fixed in
   step 4 round 2.
+- S4-11 (a resume racing a stalling pump) and S4-12 (`auto` targets of
+  list rows): fixed after step 4 round 3, not reviewed again (three
+  rounds run).

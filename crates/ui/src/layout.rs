@@ -362,9 +362,10 @@ impl TreeView<'_> {
         style: &Style,
     ) -> LayoutOutput {
         let id = from_taffy(node_id);
-        // A probe (the animation driver's) sizes lists without recording
-        // measurements or estimates.
-        let commit = inputs.run_mode == RunMode::PerformLayout && !self.store.probing;
+        // A probe (the animation driver's) lays rows out without
+        // recording measurements or estimates.
+        let commit = inputs.run_mode == RunMode::PerformLayout;
+        let record = commit && !self.store.probing;
         let parent_w = inputs.parent_size.width;
         let inset = style.padding.resolve_or_zero(parent_w, no_calc)
             + style.border.resolve_or_zero(parent_w, no_calc);
@@ -431,6 +432,7 @@ impl TreeView<'_> {
                         inner_h,
                         &clamp,
                         commit,
+                        record,
                         [inset.left, inset.top],
                     ),
                 },
@@ -452,8 +454,10 @@ impl TreeView<'_> {
 
     /// Lays out list `id`'s rendered rows at content width `w` and
     /// returns the list's content height. With `commit` (final layout)
-    /// the rows' heights become measurements and each row is placed at
-    /// `origin` + its item offset; otherwise nothing is recorded.
+    /// each row is laid out and placed at `origin` + its item offset,
+    /// and with `record` too its height becomes a measurement (a probe
+    /// lays out without recording: offsets are the recorded ones);
+    /// otherwise nothing is recorded.
     /// `gap` resolves against `inner_h` (a definite content height). A
     /// percentage without one sizes the list without gaps, then places
     /// rows with the gap resolved against that size as min/max clamp it
@@ -467,6 +471,7 @@ impl TreeView<'_> {
         inner_h: Option<f32>,
         clamp: &dyn Fn(f32) -> f32,
         commit: bool,
+        record: bool,
         origin: [f32; 2],
     ) -> f32 {
         let (size_gap, deferred) = match gap.maybe_resolve(inner_h, no_calc) {
@@ -474,7 +479,7 @@ impl TreeView<'_> {
             None => (0.0, true),
         };
         let count = self.host.lists.get(id.0).map_or(0, |l| l.len());
-        if commit {
+        if record {
             self.host.lists.estimate(self.text, id.0, w);
         }
         // (row, index, extent, margin, overflow); a row with no index,
@@ -542,17 +547,28 @@ impl TreeView<'_> {
                 .lists
                 .total_at(self.text, id.0, w, size_gap, &measured);
         }
-        let Some(list) = self.host.lists.map.get_mut(&id.0) else {
-            return 0.0;
-        };
-        for r in &rows {
-            list.extents.measure(r.1 as usize, r.2);
-        }
-        let size = list.extents.total_gap(size_gap);
-        list.gap = if deferred {
-            gap.maybe_resolve(Some(clamp(size)), no_calc).unwrap_or(0.0)
+        let size = if record {
+            let Some(list) = self.host.lists.map.get_mut(&id.0) else {
+                return 0.0;
+            };
+            for r in &rows {
+                list.extents.measure(r.1 as usize, r.2);
+            }
+            let size = list.extents.total_gap(size_gap);
+            list.gap = if deferred {
+                gap.maybe_resolve(Some(clamp(size)), no_calc).unwrap_or(0.0)
+            } else {
+                size_gap
+            };
+            size
         } else {
-            size_gap
+            let measured: Vec<(u32, f32)> = rows.iter().map(|r| (r.1, r.2)).collect();
+            self.host
+                .lists
+                .total_at(self.text, id.0, w, size_gap, &measured)
+        };
+        let Some(list) = self.host.lists.map.get(&id.0) else {
+            return 0.0;
         };
         let offsets: Vec<f32> = rows.iter().map(|r| list.offset(r.1 as usize)).collect();
         for (k, (r, y)) in rows.iter().zip(offsets).enumerate() {
