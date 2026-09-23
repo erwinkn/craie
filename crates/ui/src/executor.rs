@@ -44,10 +44,17 @@ fn finite(v: f32) -> bool {
 }
 
 /// Checks `spans` as a paragraph style list over `text`.
+/// Spans per paragraph: pointer events carry `span + 1` in 16 key bits.
+pub const MAX_SPANS: usize = 0xFFFF;
+
 fn valid_spans(text: &str, spans: &[TextSpan], families: usize) -> Result<(), WireError> {
     let Some(first) = spans.first() else {
         return Err(invalid("paragraph without spans"));
     };
+    // Pointer events carry span + 1 in 16 bits (`dispatch`).
+    if spans.len() > MAX_SPANS {
+        return Err(invalid("paragraph with too many spans"));
+    }
     if first.start != 0 {
         return Err(invalid("paragraph span zero must start at 0"));
     }
@@ -588,6 +595,7 @@ impl Ui {
                 }
                 let spans = &next[..];
                 let p = &mut self.host.paragraphs[node.index()];
+                p.revision = p.revision.wrapping_add(1);
                 let text_changed = p.text != *text;
                 let metrics_changed = text_changed
                     || p.spans.len() != spans.len()

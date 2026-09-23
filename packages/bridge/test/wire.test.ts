@@ -115,3 +115,31 @@ test("payload copies typed-array bytes", () => {
   expect(op.tag).toBe(0x71)
   expect(new Float32Array(op.bytes!.buffer)).toEqual(values)
 })
+
+// S3C-07: span lists intern by an unambiguous key. Under a joined-field
+// key, one span whose family spells a row boundary collided with two
+// default spans ("foo" at 0, "bar" at 1): the second paragraph reused
+// the first's single row while claiming two.
+test("span lists with delimiter-like families do not share rows", () => {
+  const enc = new Encoder()
+  const base = { fontSize: 14, color: 0xffffffff }
+  enc.paragraph(1, "ab", [{ ...base, start: 0, fontFamily: "foo;1,14,4294967295,400,0,0,0,0,bar" }])
+  enc.paragraph(2, "ab", [
+    { ...base, start: 0, fontFamily: "foo" },
+    { ...base, start: 1, fontFamily: "bar" },
+  ])
+  const f = readFrame(enc.finish(1n))
+  const rows = (id: number) => {
+    const [start, count] = f.ops.find(o => o.tag === 0x40 && o.id === id)!.f as [number, number]
+    return f.spans.slice(start, start + count).map(s => [s.start, s.family])
+  }
+  expect(rows(1)).toEqual([[0, "foo;1,14,4294967295,400,0,0,0,0,bar"]])
+  expect(rows(2)).toEqual([[0, "foo"], [1, "bar"]])
+  // Equal lists still share rows.
+  enc.paragraph(3, "ab", [{ ...base, start: 0, fontFamily: "foo" }, { ...base, start: 1, fontFamily: "bar" }])
+  enc.paragraph(4, "ab", [{ ...base, start: 0, fontFamily: "foo" }, { ...base, start: 1, fontFamily: "bar" }])
+  const g = readFrame(enc.finish(2n))
+  const ref = (id: number) => g.ops.find(o => o.tag === 0x40 && o.id === id)!.f
+  expect(ref(3)).toEqual(ref(4))
+  expect(g.spans.length).toBe(2)
+})

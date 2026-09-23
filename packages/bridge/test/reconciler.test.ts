@@ -1,6 +1,7 @@
 import { test, expect } from "bun:test"
 import { createElement } from "react"
 import { createRoot, View, Text, TextInput, ScrollView, Pressable, Bars, List, ROLE } from "../src/index.js"
+import { CraieHost } from "../src/host.js"
 import type { Transport, UiEvent } from "../src/host.js"
 import { readFrame } from "./crw2.js"
 
@@ -98,7 +99,7 @@ test("ids recycle without waiting for an ack; events carry generations", async (
   // An event for the old occupant (generation 0) is dropped; the new
   // occupant (generation 1) receives its own.
   const ev = (generation: number): UiEvent => ({
-    kind: 2, node: idA, generation, x: 0, y: 0, a: 0, b: 0, key: 1 << 8, text: "",
+    kind: 2, node: idA, generation, revision: 0, x: 0, y: 0, a: 0, b: 0, key: 1 << 8, text: "",
   })
   t.eventCb!(ev(0))
   t.eventCb!(ev(1))
@@ -225,7 +226,7 @@ test("List sends config and items, renders the reported range, diffs splices", a
   // kept focused item).
   t.frames.length = 0
   // keep = item 900 (its id is 900: keys interned in order); revision 1.
-  t.eventCb!({ kind: 14, node: listId, generation: 0, x: 900, y: 1, a: 500, b: 503, key: 900, text: "" })
+  t.eventCb!({ kind: 14, node: listId, generation: 0, revision: 0, x: 900, y: 1, a: 500, b: 503, key: 900, text: "" })
   // The commit and React's deletion pass may seal separately: collect
   // every frame after both ran.
   for (let i = 0; i < 5; i++) await tick()
@@ -275,7 +276,7 @@ test("List keeps the focused item's row across splices by identity", async () =>
   const listId = ops().find(o => o.tag === 0x01 && o.f[0] === 4)!.id
   let revision = 1
   const range = (a: number, b: number, keepIndex: number, keepId: number, y = revision) =>
-    t.eventCb!({ kind: 14, node: listId, generation: 0, x: keepIndex, y, a, b, key: keepId, text: "" })
+    t.eventCb!({ kind: 14, node: listId, generation: 0, revision: 0, x: keepIndex, y, a, b, key: keepId, text: "" })
 
   // Native: rows 500..503 visible, item 900 (id 900) focused.
   t.frames.length = 0
@@ -431,14 +432,45 @@ test("pointer events on a span reach its nested Text", async () => {
   expect((inter.f[0]! & (1 << 2)) !== 0).toBe(true)
   const spans = paragraphOf(t, id, 0)!.spans
   expect(spans.length).toBe(3)
-  const up = (span: number): UiEvent => ({
-    kind: 3, node: id, generation: 0, x: 0, y: 0, a: 0, b: 0,
+  // Revision 1: native applied one paragraph op.
+  const up = (span: number, revision = 1): UiEvent => ({
+    kind: 3, node: id, generation: 0, revision, x: 0, y: 0, a: 0, b: 0,
     key: (1 << 8) | ((span + 1) << 16), text: "",
   })
   t.eventCb!(up(1)) // "here": the nested link
   t.eventCb!(up(0)) // "tap ": the root
   t.eventCb!(up(2)) // " bold": no handler of its own, so the root
   expect(hits).toEqual(["link", "outer", "outer"])
+})
+
+// S3C-06: a nested Text replaced by an identical one (same text and
+// style) still resends the paragraph, so the revision moves; an event
+// hit-tested before native applied it goes to the root, not to the new
+// owner.
+test("a span event from an older span table reaches the root", async () => {
+  const t = new FakeTransport()
+  const root = createRoot(t)
+  const hits: string[] = []
+  function App({ k }: { k: string }) {
+    return createElement(Text, { onPress: () => hits.push("outer") },
+      "tap ",
+      createElement(Text, { key: k, onPress: () => hits.push(k) }, "here"))
+  }
+  root.renderSync(createElement(App, { k: "old" }))
+  await tick()
+  const id = t.ops(0).find(o => o.tag === 0x01)!.id
+  t.frames.length = 0
+  root.renderSync(createElement(App, { k: "new" }))
+  await tick()
+  const all = t.frames.flatMap(f => readFrame(f).ops)
+  expect(all.filter(o => o.tag === 0x40 && o.id === id).length).toBe(1)
+  const up = (revision: number): UiEvent => ({
+    kind: 3, node: id, generation: 0, revision, x: 0, y: 0, a: 0, b: 0,
+    key: (1 << 8) | (2 << 16), text: "",
+  })
+  t.eventCb!(up(1)) // hit-tested before the resend: stale
+  t.eventCb!(up(2)) // after it: the new owner
+  expect(hits).toEqual(["outer", "new"])
 })
 
 test("selectable sets the interaction flag bit", async () => {
@@ -453,4 +485,69 @@ test("selectable sets the interaction flag bit", async () => {
   const flags = t.ops(0).filter(o => o.tag === 0x60).map(o => o.f[1])
   // The View and the selectable Text send flag bit 1 (selectable).
   expect(flags.filter(f => f === 2).length).toBe(2)
+})
+
+// S3C-04: a nested text placed under a native parent becomes a native
+// root with its own paragraph, and leaves its old root's; after root ->
+// nested -> root, the new native node gets its paragraph again.
+test("nested text moved to a native parent becomes a root", async () => {
+  const t = new FakeTransport()
+  const h = new CraieHost(t)
+  const r = h.node("text", { children: "A" })
+  const c = h.node("text", { children: "B" })
+  h.place(null, r, null)
+  h.place(r, c, null)
+  await tick()
+  const ops = () => t.frames.splice(0).flatMap(f => readFrame(f).ops)
+  const texts = (list: ReturnType<typeof ops>) =>
+    Object.fromEntries(list.filter(o => o.tag === 0x40).map(o => [o.id, o.s]))
+  let o = ops()
+  expect(o.filter(x => x.tag === 0x01).length).toBe(1)
+  expect(texts(o)).toEqual({ [r.id]: "AB" })
+
+  h.place(null, c, null) // nested -> root
+  await tick()
+  o = ops()
+  expect(o.filter(x => x.tag === 0x01).map(x => x.id)).toEqual([c.id])
+  expect(texts(o)).toEqual({ [r.id]: "A", [c.id]: "B" })
+
+  h.place(r, c, null) // root -> nested: its native node goes
+  await tick()
+  o = ops()
+  expect(o.some(x => x.tag === 0x04)).toBe(true) // remove
+  expect(texts(o)).toEqual({ [r.id]: "AB" })
+
+  h.place(null, c, null) // nested -> root again: sent fresh
+  await tick()
+  o = ops()
+  expect(texts(o)).toEqual({ [r.id]: "A", [c.id]: "B" })
+  expect(o.some(x => x.tag === 0x60 && x.id === c.id)).toBe(true)
+})
+
+// S3C-09: span starts are byte offsets of the text as encoded: a lone
+// high surrogate is U+FFFD (3 bytes), and a pair split across pieces is
+// one 4-byte character that stays in the span before.
+test("span starts follow the encoded text around surrogates", async () => {
+  const cases: [string[], number[]][] = [
+    [["\uD800é", "Z"], [0, 5]],
+    [["a\uD83D", "\uDE00b"], [0, 5]],
+    [["a\uD83D", "\uDE00", "c"], [0, 5]],
+  ]
+  for (const [pieces, starts] of cases) {
+    const t = new FakeTransport()
+    const root = createRoot(t)
+    const [first, ...rest] = pieces
+    root.renderSync(
+      createElement(Text, null, first,
+        ...rest.map((p, i) => createElement(Text, { key: i, fontWeight: i % 2 ? "bold" : "normal", fontSize: 10 + i }, p))))
+    await tick()
+    const id = t.ops(0).find(o => o.tag === 0x01)!.id
+    const p = paragraphOf(t, id, 0)!
+    expect(p.spans.map(s => s.start)).toEqual(starts)
+    const bytes = new TextEncoder().encode(pieces.join(""))
+    for (const s of p.spans) {
+      expect(s.start <= bytes.length).toBe(true)
+      if (s.start < bytes.length) expect(bytes[s.start]! & 0xc0).not.toBe(0x80)
+    }
+  }
 })

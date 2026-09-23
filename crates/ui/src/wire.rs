@@ -750,6 +750,9 @@ pub fn decode(buf: &[u8]) -> Result<Transaction<'_>, WireError> {
         let weight = r.u16()?;
         let flags = r.u8()?;
         let _reserved = r.u8()?;
+        if flags & !(span_flag::ITALIC | span_flag::UNDERLINE | span_flag::LINE_THROUGH) != 0 {
+            return Err(WireError::BadRef("span flags"));
+        }
         let family_ref = r.u32()?;
         let letter_spacing = r.f32()?;
         let line_height = r.f32()?;

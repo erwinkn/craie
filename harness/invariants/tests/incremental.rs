@@ -38,6 +38,10 @@ fn run(seed: u64, scale: f32) {
             )
         });
         ui.render(VIEW);
+        if let Some(t) = g.select(&mut ui) {
+            ui.apply_txn(&t).unwrap();
+        }
+        ui.render(VIEW);
         if step % 3 == 0
             && let Some((id, x, y)) = g.scroll(&ui)
         {

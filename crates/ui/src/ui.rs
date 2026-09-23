@@ -58,6 +58,10 @@ pub struct Ui {
     pub(crate) text_selection: Option<crate::selection::TextSelection>,
     pub(crate) selecting: bool,
     pub(crate) selection_highlight: Vec<(NodeId, std::ops::Range<u32>)>,
+    /// Generations of the selection's domain, anchor, and focus nodes
+    /// when it was set, and the host revisions it was last checked at.
+    pub(crate) selection_generations: [u16; 3],
+    pub(crate) selection_revs: crate::host::Revs,
     /// Events accumulated for the JS side since the last `take_events`.
     pub(crate) pending_events: Vec<UiEvent>,
     /// Set when anything observable to assistive tech changed.
@@ -114,6 +118,8 @@ impl Ui {
             text_selection: None,
             selecting: false,
             selection_highlight: Vec::new(),
+            selection_generations: [0; 3],
+            selection_revs: Default::default(),
             pending_events: Vec::new(),
             a11y_stale: true,
             force_paint: true,
@@ -160,6 +166,7 @@ impl Ui {
     pub fn apply(&mut self, buf: &[u8]) -> Result<u64, WireError> {
         let txn = wire::decode(buf)?;
         self.execute(&txn)?;
+        self.refresh_selection();
         self.a11y_stale = true;
         Ok(txn.seq)
     }
@@ -168,6 +175,7 @@ impl Ui {
     /// `apply`).
     pub fn apply_txn(&mut self, txn: &Transaction<'_>) -> Result<(), WireError> {
         self.execute(txn)?;
+        self.refresh_selection();
         self.a11y_stale = true;
         Ok(())
     }
@@ -496,6 +504,9 @@ impl Ui {
     /// layout. `viewport` is logical, for culling.
     pub fn paint(&mut self, viewport: Size) {
         let layout_ran = std::mem::take(&mut self.relayout);
+        if self.selection_revs != self.host.revs {
+            self.refresh_selection();
+        }
         self.sync_scene(viewport, layout_ran);
         self.force_paint = false;
         self.painted = Some(self.host.revs);

@@ -9,7 +9,7 @@
 
 use std::ops::Range;
 
-use craie_core::geom::Rect;
+use craie_core::geom::Point;
 
 use crate::host::NodeId;
 use crate::mutation::NodeKind;
@@ -57,36 +57,56 @@ impl Ui {
         out
     }
 
-    /// The text position nearest window point (x, y) in `domain`: the
-    /// first text (tree order) whose box the point is above goes from its
-    /// start; the first whose box spans the point's y takes the paragraph
-    /// hit there; past every box, the last text's end.
-    pub(crate) fn text_position(&self, domain: NodeId, x: f32, y: f32) -> Option<TextPoint> {
+    /// The text position for window point (x, y) in `domain`: in `hit`
+    /// when it is one of the domain's texts, else in the text whose
+    /// content box is nearest the point (both axes, in window space;
+    /// the first in tree order on a tie).
+    pub(crate) fn text_position(
+        &self,
+        domain: NodeId,
+        hit: Option<NodeId>,
+        x: f32,
+        y: f32,
+    ) -> Option<TextPoint> {
         let texts = self.domain_texts(domain);
-        for &t in &texts {
-            let data = self.layouts.data(t);
-            let content = Rect::new(
-                data.content[0],
-                data.content[1],
-                (data.rect.size.width - data.insets[0]).max(0.0),
-                (data.rect.size.height - data.insets[1]).max(0.0),
-            );
-            let b = self.node_to_window(t).map_rect(&content);
-            if y < b.origin.y {
-                return Some(TextPoint { node: t, offset: 0 });
+        let target = match hit.filter(|h| texts.contains(h)) {
+            Some(h) => h,
+            None => {
+                let mut best: Option<(f32, NodeId)> = None;
+                for &t in &texts {
+                    let d = self.window_distance(t, x, y);
+                    if best.is_none_or(|(b, _)| d < b) {
+                        best = Some((d, t));
+                    }
+                }
+                best?.1
             }
-            if y < b.origin.y + b.size.height {
-                let (lx, ly) = self.to_content(t, x, y);
-                let offset = self.text_layout(t).map_or(0, |p| p.hit(lx, ly).offset);
-                return Some(TextPoint { node: t, offset });
-            }
-        }
-        let last = *texts.last()?;
-        let len = self.host.paragraph(last).map_or(0, |p| p.text.len() as u32);
+        };
+        let (lx, ly) = self.to_content(target, x, y);
+        let offset = self.text_layout(target).map_or(0, |p| p.hit(lx, ly).offset);
         Some(TextPoint {
-            node: last,
-            offset: len,
+            node: target,
+            offset,
         })
+    }
+
+    /// Distance in window space from (x, y) to text `t`'s content box:
+    /// the point is clamped onto the box in the text's own frame and
+    /// mapped back, so transforms are honored.
+    fn window_distance(&self, t: NodeId, x: f32, y: f32) -> f32 {
+        let data = self.layouts.data(t);
+        let w = (data.rect.size.width - data.insets[0]).max(0.0);
+        let h = (data.rect.size.height - data.insets[1]).max(0.0);
+        let (lx, ly) = self.to_content(t, x, y);
+        if lx.is_nan() || ly.is_nan() {
+            return f32::INFINITY;
+        }
+        let near = Point::new(
+            lx.clamp(0.0, w) + data.content[0],
+            ly.clamp(0.0, h) + data.content[1],
+        );
+        let p = self.node_to_window(t).apply(near);
+        (p.x - x).hypot(p.y - y)
     }
 
     /// The highlighted range of text node `id`, clamped onto its text.
@@ -157,14 +177,43 @@ impl Ui {
         out
     }
 
+    /// The current selection.
+    pub fn text_selection(&self) -> Option<TextSelection> {
+        self.text_selection
+    }
+
     /// Replaces the selection; text nodes whose highlight changed rebuild
-    /// their chunk.
+    /// their chunk. A selection whose nodes are not live, whose domain
+    /// is not selectable, or whose endpoints are not displayed texts of
+    /// the domain is dropped.
     pub fn set_text_selection(&mut self, next: Option<TextSelection>) {
-        if self.text_selection == next {
+        self.text_selection = next;
+        self.selection_generations = next.map_or([0; 3], |s| {
+            [s.domain, s.anchor.node, s.focus.node]
+                .map(|n| self.host.node(n).map_or(0, |h| h.generation))
+        });
+        self.refresh_selection();
+    }
+
+    /// Revalidates the selection against the tree and redraws the text
+    /// nodes whose highlighted range changed. Runs after every
+    /// transaction and, when the host changed since, before paint (list
+    /// rows appear and disappear natively).
+    pub(crate) fn refresh_selection(&mut self) {
+        if let Some(sel) = self.text_selection
+            && !self.selection_valid(sel)
+        {
+            self.text_selection = None;
+            self.selecting = false;
+        }
+        self.selection_revs = self.host.revs;
+        if self.text_selection.is_none() && self.selection_highlight.is_empty() {
             return;
         }
-        self.text_selection = next;
         let after = self.selection_ranges();
+        if after == self.selection_highlight {
+            return;
+        }
         let before = std::mem::replace(&mut self.selection_highlight, after);
         let after = &self.selection_highlight;
         let range_of = |list: &[(NodeId, Range<u32>)], id: NodeId| {
@@ -177,9 +226,27 @@ impl Ui {
             }
         }
         for id in changed {
-            self.host.dirty.content.push(id.0);
+            if self.host.is_live(id) {
+                self.host.dirty.content.push(id.0);
+            }
         }
         self.force_paint = true;
+    }
+
+    /// The selection's nodes are the ones it was made on (same
+    /// generation), its domain is selectable, and both endpoints are
+    /// displayed texts of the domain.
+    fn selection_valid(&self, sel: TextSelection) -> bool {
+        let nodes = [sel.domain, sel.anchor.node, sel.focus.node];
+        let same = nodes
+            .iter()
+            .zip(self.selection_generations)
+            .all(|(&n, g)| self.host.node(n).is_some_and(|h| h.generation == g));
+        if !same || !self.host.interaction(sel.domain).selectable {
+            return false;
+        }
+        let texts = self.domain_texts(sel.domain);
+        texts.contains(&sel.anchor.node) && texts.contains(&sel.focus.node)
     }
 
     /// A primary press at (x, y) on `hit`: starts (or with shift,
@@ -197,7 +264,7 @@ impl Ui {
             self.set_text_selection(None);
             return false;
         };
-        let Some(at) = self.text_position(domain, x, y) else {
+        let Some(at) = self.text_position(domain, hit, x, y) else {
             self.set_text_selection(None);
             return false;
         };
@@ -218,7 +285,8 @@ impl Ui {
         let Some(sel) = self.text_selection else {
             return;
         };
-        if let Some(focus) = self.text_position(sel.domain, x, y) {
+        let hit = self.hit_test(x, y);
+        if let Some(focus) = self.text_position(sel.domain, hit, x, y) {
             self.set_text_selection(Some(TextSelection { focus, ..sel }));
         }
     }

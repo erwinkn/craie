@@ -269,6 +269,57 @@ pub fn cases() -> Vec<Case> {
     ]
 }
 
+/// Letter spacing that starts inside a ligature (office's ffi) and
+/// covers whole ones (affix). Not in `cases`: Parley's line advance
+/// disagrees with its own glyphs here (its clusters space ligature
+/// continuations, its glyphs do not), so its own test compares the
+/// glyphs exactly and asserts that difference.
+pub fn spaced_ligatures() -> Case {
+    Case {
+        name: "spacing-ligatures",
+        class: "ligature",
+        // Letter spacing that starts inside a ligature (office's ffi)
+        // and covers whole ones (affix): items split where spacing
+        // changes, so each side shapes on its own (as Parley).
+        text: "office fine affix waffle".to_string(),
+        spans: {
+            let t = "office fine affix waffle";
+            let at = |s: &str| t.find(s).unwrap() as u32;
+            let style = |letter_spacing: f32| TextStyle {
+                size: 16.0,
+                letter_spacing,
+                ..TextStyle::default()
+            };
+            vec![
+                SpanStyle {
+                    start: 0,
+                    style: style(0.0),
+                },
+                SpanStyle {
+                    start: at("fice"),
+                    style: style(2.0),
+                },
+                SpanStyle {
+                    start: at(" fine"),
+                    style: style(0.0),
+                },
+                SpanStyle {
+                    start: at("affix"),
+                    style: style(1.5),
+                },
+                SpanStyle {
+                    start: at(" waffle"),
+                    style: style(0.0),
+                },
+            ]
+        },
+        notdef: false,
+        advance_fixups: vec![],
+        grapheme_merges: 0,
+        widths: vec![None, Some(60.0)],
+    }
+}
+
 /// A glyph group in logical order: a text range and its glyph ids
 /// (shaper order), with its advance.
 #[derive(Clone, Debug, PartialEq)]
@@ -334,11 +385,13 @@ fn newline(text: &str, r: &Range<usize>) -> bool {
     })
 }
 
-/// The pinned file `bytes` points into (`usize::MAX`: none).
+/// The pinned file `bytes` holds (`usize::MAX`: none). By content: in
+/// release builds a crate that inlines `pinned_files` can hold its own
+/// copy of the bytes, so addresses differ.
 fn pinned_index(bytes: &[u8]) -> usize {
     fonts::pinned_files()
         .iter()
-        .position(|f| f.as_ptr() == bytes.as_ptr())
+        .position(|f| f.as_ptr() == bytes.as_ptr() || *f == bytes)
         .unwrap_or(usize::MAX)
 }
 

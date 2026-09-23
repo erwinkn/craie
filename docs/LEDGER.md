@@ -97,8 +97,27 @@ Reviewer minors and nitpicks not fixed yet.
 - Resolves in: the accessibility pass over owned text (reads
   `Paragraph::line_clusters` and `Ui::selection_ranges`).
 
+### DF-2: pointer enter and leave on nested Text
+
+- Source: step 3c (`8f2b86e..b6b4dea`), round 1, S3C-10 (Astra).
+- Where: packages/bridge/src/host.ts (`POINTER_HANDLER`),
+  crates/ui/src/dispatch.rs (hover).
+- Claim: `onPointerEnter` and `onPointerLeave` on a nested Text never
+  fire: native tracks hover per node, not per span, and sends no span
+  on enter and leave; the bridge routes those events to the root.
+- Why deferred: minor (reviewer's severity). Press, down, up, and move
+  route per span; the root's own enter and leave handlers are
+  unaffected.
+- Resolves in: a span-boundary hover pass (native tracks the hovered
+  span of the hovered text node and emits enter and leave with it),
+  when a consumer needs it.
+
 ## Closed
 
 - S3A-14 (emoji presentation by the Unicode property, VS15/VS16) and
   S3A-15 (exact GB9c and ligature guards) and S3A-16 (framebench
   records family and face): fixed in step 3a round 2, not deferred.
+- S3C-01..08 (selection refresh and identity, 2D positions, virtual
+  text moves, ligature spacing, span routing revisions, intern keys,
+  selection in the rebuild oracle) and S3C-09, S3C-11, S3C-12 (surrogate
+  offsets, span limit, span flag bits): fixed in step 3c round 1.

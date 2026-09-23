@@ -38,6 +38,7 @@ export function decodeEvents(buf: Uint8Array, at = 0): import("./host.js").UiEve
   const text = new TextDecoder()
   for (let i = 0; i < count; i++) {
     const kind = view.getUint8(pos)
+    const revision = view.getUint8(pos + 1)
     const generation = view.getUint16(pos + 2, true)
     const node = view.getUint32(pos + 4, true)
     const x = view.getFloat32(pos + 8, true)
@@ -49,7 +50,7 @@ export function decodeEvents(buf: Uint8Array, at = 0): import("./host.js").UiEve
     pos += 32
     const s = len ? text.decode(buf.subarray(at + pos, at + pos + len)) : ""
     pos += len
-    out.push({ kind, node, generation, x, y, a, b, key, text: s })
+    out.push({ kind, node, generation, revision, x, y, a, b, key, text: s })
   }
   return out
 }

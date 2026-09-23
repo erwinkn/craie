@@ -81,8 +81,8 @@ pub fn snapshot(ui: &Ui) -> Transaction<'static> {
         if it.role != Role::None {
             t.role(id.0, it.role);
         }
-        if it.listeners != 0 || it.focusable {
-            t.interaction(id.0, it.listeners, it.focusable);
+        if it.listeners != 0 || it.focusable || it.selectable {
+            t.interaction_flags(id.0, it.listeners, it.focusable, it.selectable);
         }
         if let Some(label) = host.label(id) {
             t.label(id.0, label.to_string());
@@ -126,6 +126,8 @@ pub fn rebuild(ui: &Ui, viewport: Size) -> Ui {
     let mut clean = Ui::new(ui.scale);
     clean.clear = ui.clear;
     clean.apply_txn(&snapshot(ui)).expect("snapshot must apply");
+    // The selection is native state: it carries over by node id.
+    clean.set_text_selection(ui.text_selection());
     // Lists remember measured rows that are no longer rendered.
     for i in 0..ui.host.slot_count() {
         if ui.host.lists.get(i as u32).is_some() {
@@ -198,6 +200,22 @@ fn displayed(ui: &Ui) -> Vec<NodeId> {
     out
 }
 
+/// Displayed text nodes under `id` (itself included), in tree order.
+fn displayed_texts(ui: &Ui, id: NodeId) -> Vec<NodeId> {
+    let mut out = Vec::new();
+    let mut stack = vec![id];
+    while let Some(id) = stack.pop() {
+        if ui.host.node(id).is_none() || ui.host.display_none(id) {
+            continue;
+        }
+        if ui.host.kind(id) == Some(NodeKind::Text) {
+            out.push(id);
+        }
+        stack.extend(ui.host.children(id).iter().rev().copied());
+    }
+    out
+}
+
 /// Compares layout, the drawn scene, hit tests, and semantics.
 /// `tol` is in logical units for layout and device px for the scene.
 pub fn compare(a: &Ui, b: &Ui, viewport: Size, tol: f32) -> Result<(), Mismatch> {
@@ -239,6 +257,13 @@ pub fn compare(a: &Ui, b: &Ui, viewport: Size, tol: f32) -> Result<(), Mismatch>
             x += step;
         }
         y += step;
+    }
+    if a.selection_ranges() != b.selection_ranges() || a.selected_text() != b.selected_text() {
+        return Err(Mismatch(format!(
+            "selection {:?} vs {:?}",
+            a.selection_ranges(),
+            b.selection_ranges()
+        )));
     }
     let (ta, tb) = (semantic(a, viewport), semantic(b, viewport));
     if ta.len() != tb.len() {
@@ -375,6 +400,9 @@ impl Model {
 /// Seeded generator of valid mutation sequences.
 pub struct Gen {
     pub rng: Rng,
+    /// Selection choices draw from their own stream, so `step`'s
+    /// sequences stay the same with or without `select`.
+    sel: Rng,
     model: Model,
     seq: u64,
 }
@@ -387,6 +415,7 @@ impl Gen {
     pub fn new(seed: u64) -> Gen {
         Gen {
             rng: Rng::new(seed),
+            sel: Rng::new(seed ^ 0x5E1E_C7ED),
             model: Model::default(),
             seq: 0,
         }
@@ -728,6 +757,55 @@ impl Gen {
             }
         }
         t
+    }
+
+    /// Selection churn: may toggle `selectable` on an attached node (a
+    /// transaction), and may set a selection natively (as a press and
+    /// drag would) in a selectable node's displayed texts.
+    pub fn select(&mut self, ui: &mut Ui) -> Option<Transaction<'static>> {
+        let nodes = self.model.attached();
+        let mut out = None;
+        if self.sel.chance(0.3) {
+            let id = nodes[self.sel.below(nodes.len() as u32) as usize];
+            let it = ui.host.interaction(NodeId(id));
+            self.seq += 1;
+            let mut t = Transaction::new(self.seq);
+            t.interaction_flags(id, it.listeners, it.focusable, !it.selectable);
+            out = Some(t);
+        }
+        if self.sel.chance(0.5) {
+            let domains: Vec<u32> = nodes
+                .into_iter()
+                .filter(|&id| ui.host.interaction(NodeId(id)).selectable)
+                .collect();
+            if domains.is_empty() {
+                return out;
+            }
+            let domain = domains[self.sel.below(domains.len() as u32) as usize];
+            let texts = displayed_texts(ui, NodeId(domain));
+            if texts.is_empty() {
+                return out;
+            }
+            let point = |g: &mut Rng| {
+                let node = texts[g.below(texts.len() as u32) as usize];
+                let text = ui.host.paragraph(node).map_or("", |p| p.text.as_str());
+                let mut i = g.below(text.len() as u32 + 1) as usize;
+                while !text.is_char_boundary(i) {
+                    i -= 1;
+                }
+                craie_ui::selection::TextPoint {
+                    node,
+                    offset: i as u32,
+                }
+            };
+            let (anchor, focus) = (point(&mut self.sel), point(&mut self.sel));
+            ui.set_text_selection(Some(craie_ui::selection::TextSelection {
+                domain: NodeId(domain),
+                anchor,
+                focus,
+            }));
+        }
+        out
     }
 
     /// Picks a scrollable node and an offset to scroll to (applied

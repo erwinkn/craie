@@ -372,6 +372,25 @@ gone with it.
   clearing, clamping after a text change, and highlight rects in exactly
   the selected paragraphs' chunks (`selection_spans_paragraphs_in_tree_order`,
   `selection_survives_a_shrinking_paragraph`).
+- Review round 1 (Astra): the rebuild oracle now carries the selection
+  and compares ranges and copied text; `Gen::select` toggles
+  `selectable` and sets selections from its own random stream (the
+  mutation stream of every seed is unchanged). With the refresh removed
+  (after transactions and before paint), seed 5 fails at step 54. Unit tests cover an
+  inserted and a growing paragraph, removed and reused endpoints, a
+  domain made not selectable, side-by-side texts, and overlapping texts.
+- Letter spacing splits shaping items, as Parley does: a ligature does
+  not straddle a spacing change. `spaced_ligatures_match_parley_glyphs`
+  (office with spacing from its second f, affix and waffle): clusters,
+  glyph ids, and positions equal Parley's. Parley's line advance and
+  width disagree with its own glyphs there (its clusters add spacing to
+  ligature continuations, its glyphs do not: +2.0 and +3.0 pt of run
+  advance, and a line 1.61 pt short at 60 pt): the test asserts that
+  difference, and passes against Parley's glyph sums. The case is not
+  in the general list, so E01 timing tables are unchanged.
+- The E01 font check compared `include_bytes` addresses; release
+  builds hold a second copy of the bytes in the harness, so four E01
+  tests failed in release only. It now compares by content.
 
 ### E14: layout-aware virtualization, list versus a plain column (step 2)
 

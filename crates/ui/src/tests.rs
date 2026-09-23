@@ -2330,6 +2330,114 @@ fn text_pointer_events_carry_the_span() {
         assert_eq!(down((v.left + v.right) * 0.5), want, "cluster {:?}", v.text);
     }
     assert_eq!(down(line.x + line.advance + 5.0), 0, "past the text");
+
+    // Span events carry the paragraph revision (paragraph ops applied,
+    // wrapping), so JS routes a span by the table it came from. Every
+    // paragraph op counts, an unchanged one too.
+    let revision = |ui: &mut Ui| -> u8 {
+        ui.take_events();
+        ui.dispatch(&Event::PointerDown {
+            x: line.x + 1.0,
+            y,
+            button: Button::Primary,
+            mods: Mods::default(),
+        });
+        let e = ui.take_events();
+        let e = e.iter().find(|e| e.kind == out_kind::POINTER_DOWN).unwrap();
+        assert_eq!(e.key >> 16, 1);
+        e.revision
+    };
+    assert_eq!(revision(&mut ui), 1);
+    let mut t = Transaction::new(2);
+    t.paragraph(0, "tap here bold", &spans);
+    ui.apply_txn(&t).unwrap();
+    ui.render(Size::new(400.0, 300.0));
+    assert_eq!(revision(&mut ui), 2);
+    let encoded = crate::events::encode_events(&[crate::events::UiEvent {
+        revision: 7,
+        ..crate::events::UiEvent::new(out_kind::POINTER_DOWN, 0)
+    }]);
+    assert_eq!(encoded[4 + 1], 7, "the record's second byte");
+}
+
+/// Pointer events carry `span + 1` in 16 key bits: a paragraph holds at
+/// most 65,535 spans (S3C-11), and the last one's event is 65,535.
+#[test]
+fn span_count_fits_the_event_key() {
+    let text = "a".repeat(crate::executor::MAX_SPANS + 1);
+    let spans: Vec<TextSpan> = (0..=crate::executor::MAX_SPANS as u32)
+        .map(|start| TextSpan {
+            start,
+            ..TextSpan::default()
+        })
+        .collect();
+    let mut ui = Ui::new(1.0);
+    let mut t = Transaction::new(1);
+    t.create(0, NodeKind::Text)
+        .paragraph(0, text.clone(), &spans)
+        .interaction(0, mask::POINTER_DOWN, false)
+        .place(NIL, 0, NIL);
+    assert!(ui.apply_txn(&t).is_err(), "65,536 spans");
+    let mut t = Transaction::new(1);
+    t.create(0, NodeKind::Text)
+        .paragraph(0, text, &spans[..crate::executor::MAX_SPANS])
+        .interaction(0, mask::POINTER_DOWN, false)
+        .place(NIL, 0, NIL);
+    ui.apply_txn(&t).unwrap();
+    ui.render(Size::new(400.0, 300.0));
+    let p = ui.text_layout(NodeId(0)).unwrap();
+    // The text wraps: the last cluster ends the last line.
+    let n = p.lines.len() - 1;
+    let line = &p.lines[n];
+    let last = p.visual_clusters(n).last().unwrap().clone();
+    assert_eq!(last.text.start as usize, crate::executor::MAX_SPANS);
+    let (x, y) = ((last.left + last.right) * 0.5, line.top + line.height * 0.5);
+    ui.dispatch(&Event::PointerDown {
+        x,
+        y,
+        button: Button::Primary,
+        mods: Mods::default(),
+    });
+    let events = ui.take_events();
+    let e = events
+        .iter()
+        .find(|e| e.kind == out_kind::POINTER_DOWN)
+        .unwrap();
+    assert_eq!(e.key >> 16, 0xFFFF);
+}
+
+/// Unknown span flag bits reject the transaction (S3C-12): only italic,
+/// underline, and line-through exist.
+#[test]
+fn unknown_span_flag_bits_reject() {
+    let mut ui = Ui::new(1.0);
+    let mut t = Transaction::new(1);
+    t.create(0, NodeKind::Text).append(NIL, 0);
+    ui.apply_txn(&t).unwrap();
+    let seq = ui.seq;
+    let mut t = Transaction::new(2);
+    let span = TextSpan {
+        color: 0xDEAD_BEEF,
+        ..TextSpan::default()
+    };
+    t.paragraph(0, "x", &[span]);
+    let buf = wire::encode(&t);
+    // Span row: start u32, size f32, color u32, weight u16, then flags.
+    let at = buf
+        .windows(4)
+        .position(|w| w == 0xDEAD_BEEFu32.to_le_bytes())
+        .unwrap()
+        + 6;
+    assert_eq!(buf[at], 0);
+    let mut ok = buf.clone();
+    ok[at] = wire::span_flag::ITALIC | wire::span_flag::UNDERLINE | wire::span_flag::LINE_THROUGH;
+    for bit in [1u8 << 3, 1 << 7] {
+        let mut bad = buf.clone();
+        bad[at] |= bit;
+        assert!(ui.apply(&bad).is_err(), "bit {bit:#x}");
+        assert_eq!(ui.seq, seq);
+    }
+    ui.apply(&ok).unwrap();
 }
 
 /// Under a plain column (10): a selectable View (0) with "Hello world"
@@ -2454,6 +2562,156 @@ fn selection_spans_paragraphs_in_tree_order() {
     assert_eq!(ui.selected_text(), "");
     ui.render(Size::new(400.0, 300.0));
     assert_eq!((rects(&ui, 1), rects(&ui, 3)), (0, 0), "highlight gone");
+}
+
+/// The highlight follows the tree and the text (S3C-01): a paragraph
+/// inserted between the endpoints is highlighted whole; one that grows
+/// is highlighted to its new end.
+#[test]
+fn selection_highlight_follows_tree_and_text_changes() {
+    let mut ui = selection_ui();
+    let (a, b) = (text_point(&ui, 1, 6), text_point(&ui, 3, 6));
+    drag(&mut ui, a, b);
+    ui.render(Size::new(400.0, 300.0));
+    let rects = |ui: &Ui, id: u32| ui.scene().chunk(id).map_or(0, |c| c.rects.len());
+    let mut t = Transaction::new(2);
+    t.create(4, NodeKind::Text)
+        .text(4, "Middle", 16.0, 0xFFFF_FFFF)
+        .place(0, 4, 2);
+    ui.apply_txn(&t).unwrap();
+    ui.render(Size::new(400.0, 300.0));
+    assert_eq!(
+        ui.selection_ranges(),
+        [(NodeId(1), 6..11), (NodeId(4), 0..6), (NodeId(3), 0..6)]
+    );
+    assert_eq!(rects(&ui, 4), 1, "the inserted paragraph is highlighted");
+    // Growth to two lines: the highlight grows with it.
+    let long = "Middle grown past the width of its box, onto a second line";
+    let mut t = Transaction::new(3);
+    t.text(4, long, 16.0, 0xFFFF_FFFF);
+    ui.apply_txn(&t).unwrap();
+    ui.render(Size::new(400.0, 300.0));
+    assert_eq!(ui.selection_ranges()[1], (NodeId(4), 0..long.len() as u32));
+    assert_eq!(rects(&ui, 4), 2, "one highlight rect per line");
+    // The focus text hidden: the selection is dropped.
+    let hidden = taffy::Style {
+        display: taffy::Display::None,
+        ..taffy::Style::default()
+    };
+    let mut t = Transaction::new(4);
+    t.layout(2, &hidden);
+    ui.apply_txn(&t).unwrap();
+    assert_eq!(ui.text_selection(), None);
+    ui.render(Size::new(400.0, 300.0));
+    assert_eq!((rects(&ui, 1), rects(&ui, 4)), (0, 0), "highlight gone");
+}
+
+/// A selection belongs to the nodes it was made on (S3C-02): removing an
+/// endpoint, reusing its id, or making the domain not selectable drops
+/// it and its highlight.
+#[test]
+fn selection_drops_with_its_nodes() {
+    let size = Size::new(400.0, 300.0);
+    let rects = |ui: &Ui, id: u32| ui.scene().chunk(id).map_or(0, |c| c.rects.len());
+    // Remove the focus text and reuse its id in one transaction.
+    let mut ui = selection_ui();
+    let (a, b) = (text_point(&ui, 1, 6), text_point(&ui, 3, 6));
+    drag(&mut ui, a, b);
+    ui.render(size);
+    let mut t = Transaction::new(2);
+    t.remove(3)
+        .create(3, NodeKind::Text)
+        .text(3, "Second line", 16.0, 0xFFFF_FFFF)
+        .place(2, 3, NIL);
+    ui.apply_txn(&t).unwrap();
+    assert_eq!(ui.text_selection(), None);
+    assert_eq!(ui.selected_text(), "");
+    ui.render(size);
+    assert_eq!((rects(&ui, 1), rects(&ui, 3)), (0, 0), "highlight gone");
+    // The domain stops being selectable.
+    let mut ui = selection_ui();
+    drag(&mut ui, a, b);
+    ui.render(size);
+    let mut t = Transaction::new(2);
+    t.interaction_flags(0, 0, false, false);
+    ui.apply_txn(&t).unwrap();
+    assert_eq!(ui.text_selection(), None);
+    ui.render(size);
+    assert_eq!((rects(&ui, 1), rects(&ui, 3)), (0, 0), "highlight gone");
+    // An endpoint moves out of the domain.
+    let mut ui = selection_ui();
+    drag(&mut ui, a, b);
+    let mut t = Transaction::new(2);
+    t.place(10, 3, NIL);
+    ui.apply_txn(&t).unwrap();
+    assert_eq!(ui.text_selection(), None);
+}
+
+/// The selection position uses the hit text, else the nearest text in
+/// both axes (S3C-03): side-by-side texts share their y range.
+#[test]
+fn selection_position_uses_both_axes() {
+    let mut ui = Ui::new(1.0);
+    let mut t = Transaction::new(1);
+    let row = taffy::Style {
+        flex_direction: taffy::FlexDirection::Row,
+        size: taffy::Size {
+            width: taffy::Dimension::length(300.0),
+            height: taffy::Dimension::auto(),
+        },
+        gap: taffy::Size {
+            width: taffy::LengthPercentage::length(40.0),
+            height: taffy::LengthPercentage::length(0.0),
+        },
+        ..taffy::Style::default()
+    };
+    t.create(0, NodeKind::View)
+        .layout(0, &row)
+        .interaction_flags(0, 0, false, true)
+        .place(NIL, 0, NIL);
+    t.create(1, NodeKind::Text)
+        .text(1, "Left", 16.0, 0xFFFF_FFFF)
+        .place(0, 1, NIL);
+    t.create(2, NodeKind::Text)
+        .text(2, "Right", 16.0, 0xFFFF_FFFF)
+        .place(0, 2, NIL);
+    ui.apply_txn(&t).unwrap();
+    ui.render(Size::new(400.0, 300.0));
+    let (a, b) = (text_point(&ui, 1, 0), text_point(&ui, 2, 2));
+    drag(&mut ui, a, b);
+    assert_eq!(ui.selected_text(), "Left\nRi");
+    // Past the right text's end, in the row's empty space: the nearest
+    // text is the right one.
+    let end = text_point(&ui, 2, 5);
+    drag(&mut ui, a, (end.0 + 30.0, end.1));
+    assert_eq!(ui.selected_text(), "Left\nRight");
+    // In the gap, nearer the left text's end.
+    let gap = text_point(&ui, 1, 4);
+    let from = text_point(&ui, 2, 5);
+    drag(&mut ui, from, (gap.0 + 5.0, gap.1));
+    assert_eq!(ui.selection_ranges(), [(NodeId(2), 0..5)]);
+    // Over another text's box, the hit (topmost) text wins.
+    let over = taffy::Style {
+        position: taffy::Position::Absolute,
+        inset: taffy::Rect {
+            left: taffy::LengthPercentageAuto::length(0.0),
+            top: taffy::LengthPercentageAuto::length(0.0),
+            right: taffy::LengthPercentageAuto::auto(),
+            bottom: taffy::LengthPercentageAuto::auto(),
+        },
+        ..taffy::Style::default()
+    };
+    let mut t = Transaction::new(2);
+    t.create(3, NodeKind::Text)
+        .text(3, "Over", 16.0, 0xFFFF_FFFF)
+        .layout(3, &over)
+        .place(0, 3, NIL);
+    ui.apply_txn(&t).unwrap();
+    ui.render(Size::new(400.0, 300.0));
+    let (from, to) = (text_point(&ui, 2, 0), text_point(&ui, 3, 2));
+    assert_eq!(ui.hit_test(to.0, to.1), Some(NodeId(3)));
+    drag(&mut ui, from, to);
+    assert_eq!(ui.selected_text(), "Right\nOv");
 }
 
 /// A selected paragraph that shrinks keeps a valid selection (clamped

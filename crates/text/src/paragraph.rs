@@ -1154,7 +1154,8 @@ impl Shaper {
             }
         }
 
-        // Items: graphemes grouped by level, script, font, and size.
+        // Items: graphemes grouped by level, script, font, size, and
+        // letter spacing (a ligature cannot straddle a spacing change).
         // Common and inherited graphemes take the script before them (the
         // first real script for leading ones).
         let script_of = |g: &str| {
@@ -1199,7 +1200,8 @@ impl Shaper {
                         && it.level == level
                         && it.script == script
                         && it.font == font
-                        && spans[it.span].style.size == style.size =>
+                        && spans[it.span].style.size == style.size
+                        && spans[it.span].style.letter_spacing == style.letter_spacing =>
                 {
                     it.text.end = at + g.len();
                 }
@@ -1263,7 +1265,8 @@ impl Shaper {
                 .entry((font, rtl, it.script.0))
                 .or_insert_with(|| harfrust::ShapePlan::new(&shaper, direction, script, None, &[]));
             // No pre/post context, as Parley: items split only where
-            // shaping cannot join anyway (script, font, level, size).
+            // shaping cannot join anyway (script, font, level, size,
+            // letter spacing).
             let range = it.text.clone();
             buffer.push_str(&text[range.clone()]);
             buffer.set_direction(direction);

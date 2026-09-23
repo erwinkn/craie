@@ -581,11 +581,12 @@ export class Encoder {
    * UTF-8 byte offsets; span zero starts at 0. */
   paragraph(id: number, text: string, spans: readonly TextSpanIn[]) {
     const s = this.strRef(text)
-    let key = ""
-    for (const sp of spans) {
-      key += `${sp.start},${sp.fontSize},${sp.color >>> 0},${sp.weight ?? 400},${sp.italic ? 1 : 0},` +
-        `${sp.decoration ?? 0},${sp.letterSpacing ?? 0},${sp.lineHeight ?? 0},${sp.fontFamily ?? ""};`
-    }
+    // JSON: family names are escaped and the list keeps its row
+    // boundaries, so different span lists never share a key.
+    const key = JSON.stringify(spans.map(sp => [
+      sp.start, sp.fontSize, sp.color >>> 0, sp.weight ?? 400, sp.italic ? 1 : 0,
+      sp.decoration ?? 0, sp.letterSpacing ?? 0, sp.lineHeight ?? 0, sp.fontFamily || null,
+    ]))
     let start = this.spanIx.get(key)
     if (start === undefined) {
       start = this.spanCount

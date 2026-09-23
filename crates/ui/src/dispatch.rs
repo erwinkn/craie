@@ -444,6 +444,9 @@ impl Ui {
             e.a = local.x;
             e.b = local.y;
             e.key = key | span << 16;
+            if span != 0 {
+                e.revision = self.host.paragraph(id).map_or(0, |p| p.revision);
+            }
             self.pending_events.push(e);
         }
     }

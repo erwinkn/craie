@@ -153,6 +153,9 @@ pub struct UiEvent {
     /// The node's generation when the event fired. JS drops events whose
     /// generation no longer matches the id's current occupant.
     pub generation: u16,
+    /// A text node's paragraph revision (`host::Paragraph::revision`)
+    /// on pointer events that carry a span; 0 otherwise.
+    pub revision: u8,
     pub x: f32,
     pub y: f32,
     pub a: f32,
@@ -167,6 +170,7 @@ impl UiEvent {
             kind,
             node,
             generation: 0,
+            revision: 0,
             x: 0.0,
             y: 0.0,
             a: 0.0,
@@ -215,7 +219,7 @@ pub fn encode_events(events: &[UiEvent]) -> Vec<u8> {
     let mut out = Vec::with_capacity(events.len() * 28);
     out.extend_from_slice(&(events.len() as u32).to_le_bytes());
     for e in events {
-        out.extend_from_slice(&[e.kind, 0]);
+        out.extend_from_slice(&[e.kind, e.revision]);
         out.extend_from_slice(&e.generation.to_le_bytes());
         out.extend_from_slice(&e.node.to_le_bytes());
         for f in [e.x, e.y, e.a, e.b] {

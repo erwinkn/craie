@@ -35,6 +35,9 @@ export interface UiEvent {
   node: number
   /** The node's generation when the event fired. */
   generation: number
+  /** A text node's paragraph revision on pointer events that carry a
+   * span (key bits 16+); 0 otherwise. */
+  revision: number
   /** Pointer position in logical points, when applicable. */
   x: number
   y: number
@@ -84,6 +87,10 @@ export interface HostNode {
   spanOwners?: HostNode[]
   sentParagraph?: string
   sentInteraction?: string
+  /** Paragraph ops sent for this node, wrapping at 256 (mirrors native
+   * `Paragraph::revision`): a span event from another revision was
+   * hit-tested against an older span table. */
+  paragraphRev?: number
   focus(): void
   blur(): void
   scrollTo(x: number, y: number): void
@@ -132,14 +139,19 @@ const POINTER_HANDLER: Record<number, string> = {
   [EVENT_KIND.pointerUp]: "onPointerUp",
 }
 
-/** UTF-8 byte length of `s` (span starts are byte offsets natively). */
+const isHigh = (c: number) => c >= 0xd800 && c < 0xdc00
+const isLow = (c: number) => c >= 0xdc00 && c < 0xe000
+
+/** UTF-8 byte length of `s` as the encoder writes it (span starts are
+ * byte offsets natively): a surrogate pair is 4 bytes, a lone surrogate
+ * becomes U+FFFD, 3 bytes. */
 function utf8Length(s: string): number {
   let n = 0
   for (let i = 0; i < s.length; i++) {
     const c = s.charCodeAt(i)
     if (c < 0x80) n += 1
     else if (c < 0x800) n += 2
-    else if (c >= 0xd800 && c < 0xdc00 && i + 1 < s.length) { n += 4; i++ }
+    else if (isHigh(c) && i + 1 < s.length && isLow(s.charCodeAt(i + 1))) { n += 4; i++ }
     else n += 3
   }
   return n
@@ -344,13 +356,24 @@ export class CraieHost {
       if (n.suspended || n.props.hidden) return
       const own = textOf(n.props)
       if (own) {
+        // A piece that opens with the low half of a pair the text before
+        // ends with: the pair is one 4-byte character (3 bytes were
+        // counted for the lone high half), and belongs to the span
+        // before, so this span starts after it.
+        const joins = isHigh(text.charCodeAt(text.length - 1)) && isLow(own.charCodeAt(0))
+        const start = bytes + (joins ? 1 : 0)
         const last = spans.at(-1)
         if (!(last && owners.at(-1) === n && sameSpan(last, style))) {
-          spans.push({ ...style, start: bytes })
+          if (last && last.start === start) {
+            // The span before is empty (all of it joined its pair).
+            spans.pop()
+            owners.pop()
+          }
+          spans.push({ ...style, start })
           owners.push(n)
         }
         text += own
-        bytes += utf8Length(own)
+        bytes += utf8Length(own) - (joins ? 2 : 0)
       }
       for (const k of n.textKids ?? []) walk(k, inheritSpan(style, k.props))
     }
@@ -360,10 +383,17 @@ export class CraieHost {
       spans.unshift({ ...base, start: 0 })
       owners.unshift(r)
     }
+    // New owners resend the paragraph even when it is unchanged: the
+    // revision moves, so native events hit-tested against the old span
+    // table do not reach the new owners.
+    const prev = r.spanOwners
+    const ownersChanged = !prev || prev.length !== owners.length ||
+      owners.some((o, i) => o !== prev[i])
     r.spanOwners = owners
     const key = JSON.stringify([text, spans])
-    if (key !== r.sentParagraph) {
+    if (key !== r.sentParagraph || ownersChanged) {
       r.sentParagraph = key
+      r.paragraphRev = ((r.paragraphRev ?? 0) + 1) & 0xff
       this.encoder.paragraph(r.id, text, spans)
     }
     const interaction = `${mask},${!!r.props.focusable},${!!r.props.selectable}`
@@ -460,6 +490,8 @@ export class CraieHost {
     const span = ev.key >>> 16
     const handler = POINTER_HANDLER[ev.kind]
     if (!root.spanOwners || span === 0 || !handler) return root
+    // Hit-tested against another span table: the span index is stale.
+    if (ev.revision !== (root.paragraphRev ?? 0)) return root
     for (let n: HostNode | undefined = root.spanOwners[span - 1]; n; n = n.textParent) {
       if (typeof n.props[handler] === "function") return n
       if (n === root) break
@@ -474,6 +506,12 @@ export class CraieHost {
     n.id = this.alloc()
     n.gen = this.gens[n.id]!
     n.mounted = true
+    // A fresh native node holds nothing yet: forget what an earlier
+    // native node of this text sent (it may have been nested since).
+    n.sentParagraph = undefined
+    n.sentInteraction = undefined
+    n.spanOwners = undefined
+    n.paragraphRev = 0
     this.nodes.set(n.id, n)
     if (!this.ready()) return
     const enc = this.encoder
@@ -489,6 +527,9 @@ export class CraieHost {
       this.placeVirtual(parent, child, before)
       return
     }
+    // A nested text moving out of text becomes a native root: leave the
+    // old parent's paragraph first.
+    if (child.textParent) this.unlinkVirtual(child)
     if (!child.mounted) {
       this.materialize(child, parent, before)
       return
