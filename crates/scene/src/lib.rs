@@ -11,6 +11,10 @@
 
 use bytemuck::{Pod, Zeroable};
 
+mod atlas;
+
+pub use atlas::{ATLAS_PAGE_SIZE, AtlasSlot, AtlasStats, GlyphAtlas};
+
 /// sRGB color packed as 0xRRGGBBAA. Used as the Parley brush so the value
 /// flowing through layout is already the GPU-ready pixel format. The
 /// shader decodes to linear for premultiplied compositing; sRGB render

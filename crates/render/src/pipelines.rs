@@ -2,8 +2,8 @@
 //! drawable: rounded/bordered solid rects and atlas-sampled glyphs share
 //! the 76-byte instance format, so a frame is a single ordered draw call.
 
-use crate::gpu::Gpu;
-use crate::scene::Instance;
+use crate::Gpu;
+use craie_scene::Instance;
 
 fn shader(device: &wgpu::Device, src: &str, label: &str) -> wgpu::ShaderModule {
     device.create_shader_module(wgpu::ShaderModuleDescriptor {

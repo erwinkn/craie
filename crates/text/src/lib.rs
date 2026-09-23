@@ -4,11 +4,10 @@
 //! Coarse resources (`FontContext`, `LayoutContext`, `ScaleContext`) are
 //! created once and reused; nothing here is per-paragraph.
 
-mod atlas;
 mod cache;
 mod raster;
 
-pub use atlas::{ATLAS_PAGE_SIZE, AtlasStats, GlyphAtlas};
+pub use craie_scene::{ATLAS_PAGE_SIZE, AtlasStats, GlyphAtlas};
 pub use cache::{CacheStats, GlyphCache, GlyphKey};
 pub use raster::Rasterizer;
 
@@ -19,8 +18,8 @@ use parley::style::StyleProperty;
 use parley::{Alignment, AlignmentOptions, FontContext, LayoutContext};
 use swash::zeno::Vector;
 
-use crate::geom::Point;
-use crate::scene::{Color, Instance};
+use craie_core::Point;
+use craie_scene::{Color, Instance};
 
 pub use parley;
 pub use swash;

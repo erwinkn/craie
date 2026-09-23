@@ -8,12 +8,12 @@
 //! The window path is deliberately idle: a frame is produced only when the
 //! OS asks (expose) or the app requests one after a resize/scale change.
 
-use craie::geom::{Point, Size};
-use craie::gpu::{Gpu, Renderer, WindowSurface};
-use craie::platform::{self, Window};
-use craie::scene::{Color, Instance, Scene};
-use craie::text::parley::style::{FontStyle, FontWeight, GenericFamily, LineHeight, StyleProperty};
-use craie::text::{ParagraphSpec, TextEngine, TextSpan};
+use craie_core::geom::{Point, Size};
+use craie_render::{Gpu, Renderer, WindowSurface};
+use craie_platform_winit::{self as platform, Window};
+use craie_scene::{Color, Instance, Scene};
+use craie_text::parley::style::{FontStyle, FontWeight, GenericFamily, LineHeight, StyleProperty};
+use craie_text::{ParagraphSpec, TextEngine, TextSpan};
 
 const MARGIN: f32 = 48.0;
 const GAP: f32 = 20.0;

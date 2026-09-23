@@ -10,10 +10,10 @@
 use std::cell::Cell;
 use std::sync::{Arc, Mutex, OnceLock};
 
-use craie::app::HostApp;
-use craie::bridge::{Session, Sessions};
-use craie::custom::{CustomData, Painter, Quad};
-use craie::geom::{Rect, Size};
+use craie_platform_winit::app::HostApp;
+use craie_ui::bridge::{Session, Sessions};
+use craie_ui::custom::{CustomData, Painter, Quad};
+use craie_core::geom::{Rect, Size};
 use napi::bindgen_prelude::{FunctionRef, Uint8Array};
 use napi::threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode};
 use napi::{Env, Error, Result, Status};
@@ -204,7 +204,7 @@ impl NativeHost {
         for (tag, env, fref) in self.painters.lock().unwrap().drain(..) {
             app.register_painter(tag, js_painter(env, fref));
         }
-        craie::platform::run(
+        craie_platform_winit::run(
             &self.title,
             Size::new(self.width as f32, self.height as f32),
             app,

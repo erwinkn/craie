@@ -14,9 +14,10 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{Key as WKey, NamedKey};
 use winit::window::{WindowAttributes, WindowId};
 
-use crate::events::{Button, Event, Key, KeyInput, Mods};
-use crate::geom::Size;
-use crate::platform::{App, Wake, Window};
+use craie_core::Size;
+use craie_ui::events::{Button, Event, Key, KeyInput, Mods};
+
+use crate::{App, Wake, Window};
 
 pub fn run<A: App>(title: &str, logical_size: Size, app: A) {
     let event_loop = EventLoop::new().expect("failed to create event loop");
@@ -109,14 +110,14 @@ impl<A: App> ApplicationHandler for Driver<A> {
             accesskit_winit::Adapter::with_direct_handlers(
                 event_loop,
                 &*window,
-                crate::a11y::Activation {
+                craie_ui::a11y::Activation {
                     shared: shared.clone(),
                 },
                 crate::a11y::ActionSink {
                     shared,
                     wake: self.wake.clone(),
                 },
-                crate::a11y::Deactivation,
+                craie_ui::a11y::Deactivation,
             )
         });
         let window = Window::new(window, a11y);

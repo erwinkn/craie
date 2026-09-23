@@ -1,3 +1,6 @@
+//! Desktop platform adapter: winit window and event loop, input
+//! normalization, system clipboard, IME, and the AccessKit adapter.
+//!
 //! Platform boundary.
 //!
 //! Everything above this module (host, text, scene, gpu) consumes
@@ -5,13 +8,16 @@
 //! trait surface is intentionally minimal — a window that can report its
 //! size/scale, ask for a redraw, and receive input-method requests.
 
+pub mod a11y;
+pub mod app;
+pub mod clipboard;
 mod winit;
 
 use std::sync::{Arc, Mutex};
 
-use crate::a11y::A11yShared;
-use crate::events::Event;
-use crate::geom::{Rect, Size};
+use craie_core::{Rect, Size};
+use craie_ui::a11y::A11yShared;
+use craie_ui::events::Event;
 
 /// Cross-thread wake handle for the event loop. Clone it freely; `wake`
 /// pokes a `Wait`-state loop so the main thread can drain work queues

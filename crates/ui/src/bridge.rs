@@ -15,7 +15,10 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Condvar, Mutex, Weak};
 
-use crate::platform::Wake;
+
+/// Pokes the UI thread's event loop from any thread. The platform
+/// adapter installs it once its loop exists.
+pub type WakeFn = Arc<dyn Fn() + Send + Sync>;
 
 const MAX_TRANSACTIONS: usize = 256;
 const MAX_BYTES: usize = 4 * 1024 * 1024;
@@ -43,7 +46,7 @@ struct Inner {
     /// Encoded UI -> JS event frames awaiting pickup.
     events: VecDeque<Vec<u8>>,
     /// Platform-loop poke, installed when the window starts.
-    wake: Option<Wake>,
+    wake: Option<WakeFn>,
     /// UI -> JS poke: installed by the N-API client (`subscribe`). Called
     /// on whichever thread posted, outside the lock; it drains
     /// `take_out` and calls a threadsafe function.
@@ -87,7 +90,7 @@ impl Session {
             inner.wake.clone()
         };
         if let Some(wake) = wake {
-            wake.wake();
+            wake();
         }
         Ok(())
     }
@@ -100,7 +103,7 @@ impl Session {
     }
 
     /// Installed by the platform glue once the event loop exists.
-    pub fn install_wake(&self, wake: Wake) {
+    pub fn install_wake(&self, wake: WakeFn) {
         self.inner.lock().unwrap().wake = Some(wake);
     }
 
@@ -197,7 +200,7 @@ impl Session {
             inner.wake.clone()
         };
         if let Some(wake) = wake {
-            wake.wake();
+            wake();
         }
         self.changed.notify_all();
     }

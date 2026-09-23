@@ -1,7 +1,24 @@
 [workspace]
 resolver = "3"
-members = ["crates/craie", "crates/node"]
-default-members = ["crates/craie"]
+members = [
+    "crates/core",
+    "crates/scene",
+    "crates/render",
+    "crates/text",
+    "crates/ui",
+    "crates/platform-winit",
+    "crates/node",
+]
+# craie-node is an N-API cdylib: it links only inside Node, so plain
+# `cargo test` leaves it out.
+default-members = [
+    "crates/core",
+    "crates/scene",
+    "crates/render",
+    "crates/text",
+    "crates/ui",
+    "crates/platform-winit",
+]
 
 [workspace.package]
 version = "0.0.0"
@@ -10,6 +27,15 @@ license = "MIT OR Apache-2.0"
 repository = "https://github.com/erwinkn/craie"
 
 [workspace.dependencies]
+craie-core = { path = "crates/core" }
+craie-scene = { path = "crates/scene" }
+craie-render = { path = "crates/render" }
+craie-text = { path = "crates/text" }
+craie-ui = { path = "crates/ui" }
+craie-platform-winit = { path = "crates/platform-winit" }
+taffy = { version = "=0.14.0", default-features = false, features = ["std", "flexbox", "content_size"] }
+arboard = "3.6.1"
+png = "=0.18.1"
 winit = "=0.31.0-beta.3"
 wgpu = "=30.0.1"
 parley = "=0.11.1"
@@ -19,7 +45,7 @@ accesskit = "=0.25.0"
 # Vendored AccessKit winit adapter for winit 0.31 betas (upstream
 # accesskit_winit tracks stable winit only).
 accesskit_winit = { package = "martensite-accesskit-winit", version = "=0.18.0", default-features = false }
-bytemuck = "=1.25.2"
+bytemuck = { version = "=1.25.2", features = ["derive"] }
 pollster = "=1.0.1"
 tracing = "=0.1.44"
 

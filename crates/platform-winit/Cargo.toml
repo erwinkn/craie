@@ -1,30 +1,27 @@
 [package]
-name = "craie"
-description = "Experimental native desktop renderer/runtime for React, in Rust"
+name = "craie-platform-winit"
+description = "Desktop platform: winit window, events, clipboard, IME, AccessKit adapter"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
-[lib]
-path = "src/lib.rs"
-
 [dependencies]
+craie-core.workspace = true
+craie-scene.workspace = true
+craie-render.workspace = true
+craie-text.workspace = true
+craie-ui.workspace = true
 winit.workspace = true
 wgpu.workspace = true
-parley.workspace = true
-swash.workspace = true
-etagere.workspace = true
 accesskit.workspace = true
 accesskit_winit.workspace = true
-bytemuck.workspace = true
-pollster.workspace = true
-tracing.workspace = true
-taffy = { version = "=0.14.0", default-features = false, features = ["std", "flexbox", "content_size"] }
-arboard = "3.6.1"
+arboard.workspace = true
+
 
 [dev-dependencies]
-png = "=0.18.1"
+taffy.workspace = true
+png.workspace = true
 
 # Rust examples live at the repository root (see ../../examples/).
 [[example]]

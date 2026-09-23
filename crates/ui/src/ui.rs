@@ -15,8 +15,8 @@
 use std::collections::HashMap;
 use std::time::Instant;
 
-use parley::Layout as ParleyLayout;
-use parley::style::StyleProperty;
+use crate::text::parley::Layout as ParleyLayout;
+use crate::text::parley::style::StyleProperty;
 
 use crate::custom::{CustomData, Painter, Quad};
 use crate::events::{self, Event, Key, KeyInput, Mods, UiEvent, mask, out_kind};

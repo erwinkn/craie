@@ -9,7 +9,7 @@ use std::collections::HashMap;
 
 use etagere::AllocId;
 
-use crate::text::atlas::{AtlasSlot, GlyphAtlas};
+use craie_scene::{AtlasSlot, GlyphAtlas};
 
 /// Quarter-pixel subpixel quantization. Each axis uses 2 bits.
 pub const SUBPIXEL_BITS: u32 = 2;
@@ -205,4 +205,87 @@ pub fn quantize_subpixel(v: f32) -> (i32, u8) {
 /// Inverse of the bucket: the fractional offset passed to Swash, in pixels.
 pub fn subpixel_offset(bucket: u8) -> f32 {
     bucket as f32 / SUBPIXEL_STEPS as f32
+}
+
+#[cfg(test)]
+mod atlas_tests {
+    use super::*;
+
+    fn key(g: u16) -> GlyphKey {
+        GlyphKey {
+            font: 0,
+            coords: 0,
+            glyph: g,
+            size_bits: 0,
+            subpixel: 0,
+            _pad: 0,
+        }
+    }
+
+    /// A capped, full page set returns None; evicting the oldest cache
+    /// entry frees a slot and the next write lands.
+    #[test]
+    fn eviction_frees_atlas_space() {
+        let mut atlas = GlyphAtlas::for_test(64, 1, 1);
+        let mut cache = GlyphCache::new();
+        let px = [7u8; 16 * 16];
+
+        // Fill the single 64x64 alpha page (16x16 glyphs + 2px gutter).
+        let mut n = 0u16;
+        while let Some(slot) = atlas.write_alpha(16, 16, &px) {
+            cache.insert(
+                key(n),
+                CachedGlyph {
+                    alloc: Some(slot.alloc),
+                    page: slot.page,
+                    color: false,
+                    x: slot.x,
+                    y: slot.y,
+                    w: 16,
+                    h: 16,
+                    left: 0,
+                    top: 0,
+                },
+            );
+            n += 1;
+            cache.begin_frame();
+        }
+        assert!(n > 0, "test atlas must hold at least one glyph");
+        assert_eq!(atlas.alpha_pages(), 1);
+
+        // Full and capped: the next write must fail.
+        assert!(atlas.write_alpha(16, 16, &px).is_none());
+
+        // Evict the oldest (everything was stamped before this frame):
+        // the freed slot accepts the write again.
+        assert!(cache.evict_oldest(&mut atlas, false));
+        assert!(atlas.write_alpha(16, 16, &px).is_some());
+        assert_eq!(atlas.stats.evictions, 1);
+    }
+
+    /// Entries stamped on the current frame are never evicted — a glyph
+    /// can't be freed while this pass is still drawing it.
+    #[test]
+    fn current_frame_entries_are_safe() {
+        let mut atlas = GlyphAtlas::for_test(64, 1, 1);
+        let mut cache = GlyphCache::new();
+        let slot = atlas.write_alpha(16, 16, &[1u8; 256]).unwrap();
+        cache.insert(
+            key(0),
+            CachedGlyph {
+                alloc: Some(slot.alloc),
+                page: slot.page,
+                color: false,
+                x: slot.x,
+                y: slot.y,
+                w: 16,
+                h: 16,
+                left: 0,
+                top: 0,
+            },
+        );
+        // No begin_frame: the entry sits on the current tick.
+        assert!(!cache.evict_oldest(&mut atlas, false));
+        assert_eq!(atlas.stats.evictions, 0);
+    }
 }

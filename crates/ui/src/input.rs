@@ -9,9 +9,10 @@
 
 use std::collections::HashMap;
 
-use parley::{Generation, PlainEditor};
-use parley::style::StyleProperty;
+use crate::text::parley::{Generation, PlainEditor};
+use crate::text::parley::style::StyleProperty;
 
+use crate::clipboard::{Clipboard, MemoryClipboard};
 use crate::geom::Size;
 use crate::scene::Color;
 use crate::text::TextEngine;
@@ -128,12 +129,23 @@ fn record_undo(
 }
 
 /// All live text inputs, keyed by node id.
-#[derive(Default)]
 pub struct Inputs {
     map: HashMap<u32, InputState>,
     /// Buffer generation last reported to JS — `onChangeText` fires only
     /// when this differs.
     notified: HashMap<u32, Generation>,
+    /// Copy/cut/paste target. The platform installs the system clipboard.
+    pub clipboard: Box<dyn Clipboard>,
+}
+
+impl Default for Inputs {
+    fn default() -> Inputs {
+        Inputs {
+            map: HashMap::new(),
+            notified: HashMap::new(),
+            clipboard: Box::new(MemoryClipboard::default()),
+        }
+    }
 }
 
 /// A resolved editing/pointer action for the focused input. `dispatch`
@@ -355,18 +367,18 @@ impl Inputs {
             KeyAction::SelectWordAt(x, y) => drv.select_word_at_point(*x, *y),
             KeyAction::Copy => {
                 if let Some(sel) = drv.editor.selected_text() {
-                    crate::clipboard::set(sel);
+                    self.clipboard.set(sel);
                 }
             }
             KeyAction::Cut => {
                 if let Some(sel) = drv.editor.selected_text() {
-                    crate::clipboard::set(sel);
+                    self.clipboard.set(sel);
                     record_undo(undo, redo, coalescing_insert, drv.editor, false);
                     drv.delete_selection();
                 }
             }
             KeyAction::Paste => {
-                if let Some(s) = crate::clipboard::get()
+                if let Some(s) = self.clipboard.get()
                     && !s.is_empty()
                 {
                     record_undo(undo, redo, coalescing_insert, drv.editor, false);

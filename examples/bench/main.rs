@@ -17,9 +17,9 @@ use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
-use craie::geom::Size;
-use craie::ui::Ui;
-use craie::wire::Encoder;
+use craie_core::geom::Size;
+use craie_ui::ui::Ui;
+use craie_ui::wire::Encoder;
 use taffy::{Dimension, FlexDirection, LengthPercentage, Rect, Style};
 
 const KIND_VIEW: u8 = 0;
@@ -218,7 +218,7 @@ fn bench_rows() {
     ui.paint(VIEW);
     report(&t.stop("paint (500 dirty)"));
 
-    let header = std::mem::size_of::<craie::host::NodeHeader>();
+    let header = std::mem::size_of::<craie_ui::host::NodeHeader>();
     eprintln!(
         "  {:>26}: {} nodes x {header} B = {} KiB headers; live heap {} KiB",
         "retained state",
@@ -230,7 +230,7 @@ fn bench_rows() {
     // --- production overheads ------------------------------------------
     // Session commit copy: the napi boundary does Vec::from(&[u8]) — one
     // memcpy per commit — then the UI thread drains under one lock.
-    let session = craie::bridge::Session::new();
+    let session = craie_ui::bridge::Session::new();
     let txn = build_rows_txn();
     let t = Timer::start();
     session.submit(Vec::from(&txn[..])).unwrap();
@@ -249,7 +249,7 @@ fn bench_rows() {
 /// wgpu overhead on the built scene: atlas upload, instance-buffer write,
 /// one draw call, GPU completion. Headless adapter.
 fn bench_gpu(ui: &mut Ui) {
-    use craie::gpu::{Gpu, Renderer};
+    use craie_render::{Gpu, Renderer};
     let gpu = Gpu::headless();
     let format = wgpu::TextureFormat::Rgba8UnormSrgb;
     let mut renderer = Renderer::new(&gpu, format);

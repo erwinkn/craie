@@ -388,33 +388,81 @@ dependencies = [
 ]
 
 [[package]]
-name = "craie"
+name = "craie-core"
 version = "0.0.0"
-dependencies = [
- "accesskit",
- "arboard",
- "bytemuck",
- "etagere",
- "martensite-accesskit-winit",
- "parley",
- "png",
- "pollster",
- "swash",
- "taffy",
- "tracing",
- "wgpu",
- "winit",
-]
 
 [[package]]
 name = "craie-node"
 version = "0.0.0"
 dependencies = [
- "craie",
+ "craie-core",
+ "craie-platform-winit",
+ "craie-ui",
  "libc",
  "napi",
  "napi-build",
  "napi-derive",
+]
+
+[[package]]
+name = "craie-platform-winit"
+version = "0.0.0"
+dependencies = [
+ "accesskit",
+ "arboard",
+ "craie-core",
+ "craie-render",
+ "craie-scene",
+ "craie-text",
+ "craie-ui",
+ "martensite-accesskit-winit",
+ "png",
+ "taffy",
+ "wgpu",
+ "winit",
+]
+
+[[package]]
+name = "craie-render"
+version = "0.0.0"
+dependencies = [
+ "bytemuck",
+ "craie-core",
+ "craie-scene",
+ "pollster",
+ "wgpu",
+]
+
+[[package]]
+name = "craie-scene"
+version = "0.0.0"
+dependencies = [
+ "bytemuck",
+ "craie-core",
+ "etagere",
+]
+
+[[package]]
+name = "craie-text"
+version = "0.0.0"
+dependencies = [
+ "craie-core",
+ "craie-scene",
+ "etagere",
+ "parley",
+ "swash",
+]
+
+[[package]]
+name = "craie-ui"
+version = "0.0.0"
+dependencies = [
+ "accesskit",
+ "craie-core",
+ "craie-scene",
+ "craie-text",
+ "taffy",
+ "tracing",
 ]
 
 [[package]]

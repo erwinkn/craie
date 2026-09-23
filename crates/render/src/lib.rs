@@ -14,9 +14,8 @@ pub use context::{Gpu, WindowSurface};
 use bytemuck::Pod;
 use wgpu::{Buffer, BufferUsages, Device, Queue, TextureView};
 
-use crate::geom::RectPx;
-use crate::scene::Scene;
-use crate::text::GlyphAtlas;
+use craie_core::RectPx;
+use craie_scene::{GlyphAtlas, Scene};
 
 /// Uniform for the scene pipeline: surface size in physical pixels.
 #[repr(C)]
@@ -179,14 +178,14 @@ impl Renderer {
             };
             let (alpha, alpha_view) = atlas_gpu::array_texture(
                 &gpu.device,
-                crate::text::ATLAS_PAGE_SIZE,
+                craie_scene::ATLAS_PAGE_SIZE,
                 new_alpha_cap,
                 wgpu::TextureFormat::R8Unorm,
                 "alpha",
             );
             let (color, color_view) = atlas_gpu::array_texture(
                 &gpu.device,
-                crate::text::ATLAS_PAGE_SIZE,
+                craie_scene::ATLAS_PAGE_SIZE,
                 new_color_cap,
                 wgpu::TextureFormat::Rgba8Unorm,
                 "color",
@@ -261,7 +260,7 @@ impl Renderer {
         page_data: &[u8],
         bpp: u32,
     ) -> u64 {
-        let page_size = crate::text::ATLAS_PAGE_SIZE;
+        let page_size = craie_scene::ATLAS_PAGE_SIZE;
         let w = rect.max_x - rect.min_x;
         let h = rect.max_y - rect.min_y;
         if w == 0 || h == 0 {
@@ -314,7 +313,7 @@ impl Renderer {
                 label: Some("craie frame"),
             });
         {
-            let clear = scene.clear.unwrap_or(crate::scene::Color::BLACK);
+            let clear = scene.clear.unwrap_or(craie_scene::Color::BLACK);
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("craie"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {

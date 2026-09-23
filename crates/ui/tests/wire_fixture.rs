@@ -2,9 +2,9 @@
 //! is produced by the TypeScript encoder (scripts/gen-fixture.ts) and must
 //! decode + apply cleanly here.
 
-use craie::host::{Host, NodeId, NodeKind};
-use craie::layout::Layouts;
-use craie::wire::{self, Op};
+use craie_ui::host::{Host, NodeId, NodeKind};
+use craie_ui::layout::Layouts;
+use craie_ui::wire::{self, Op};
 use taffy::{AlignContent, AlignItems, Dimension, FlexDirection, LengthPercentage, Position};
 
 const FIXTURE: &str = concat!(
@@ -41,7 +41,7 @@ fn js_fixture_decodes() {
     assert!(props.focusable);
 
     // Style id 0 was defined by the txn and applied to the root.
-    let style = layouts.style(craie::host::StyleId(root.style));
+    let style = layouts.style(craie_ui::host::StyleId(root.style));
     assert_eq!(style.display, taffy::Display::Flex);
     assert_eq!(style.flex_direction, FlexDirection::Column);
     assert_eq!(style.gap.width, LengthPercentage::length(12.0));

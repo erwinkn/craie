@@ -9,13 +9,13 @@
 //! The ticker submits the demo transaction, then one update per second —
 //! exercising submit → wake → apply → ack → repaint without a JS runtime.
 
-use craie::app::HostApp;
-use craie::bridge;
-use craie::geom::Size;
-use craie::gpu::{Gpu, Renderer};
-use craie::platform;
-use craie::ui::Ui;
-use craie::wire::Encoder;
+use craie_platform_winit::app::HostApp;
+use craie_ui::bridge;
+use craie_core::geom::Size;
+use craie_render::{Gpu, Renderer};
+use craie_platform_winit as platform;
+use craie_ui::ui::Ui;
+use craie_ui::wire::Encoder;
 use taffy::{AlignContent, AlignItems, Dimension, FlexDirection, LengthPercentage, Rect, Style};
 
 const KIND_VIEW: u8 = 0;
@@ -132,7 +132,7 @@ fn demo_txn() -> Vec<u8> {
 fn dump_scene(
     gpu: &Gpu,
     renderer: &mut Renderer,
-    scene: &craie::scene::Scene,
+    scene: &craie_scene::Scene,
     w: u32,
     h: u32,
     format: wgpu::TextureFormat,

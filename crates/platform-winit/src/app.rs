@@ -7,20 +7,22 @@
 
 use std::sync::Arc;
 
-use crate::a11y::A11yShared;
-use crate::bridge::Session;
-use crate::events::{self, Event};
-use crate::geom::Size;
-use crate::gpu::{Gpu, Renderer, WindowSurface};
-use crate::platform::{App, Wake, Window};
-use crate::ui::Ui;
+use craie_core::Size;
+use craie_render::{Gpu, Renderer, WindowSurface};
+use craie_ui::a11y::A11yShared;
+use craie_ui::bridge::Session;
+use craie_ui::events::{self, Event};
+use craie_ui::ui::Ui;
+
+use crate::clipboard::SystemClipboard;
+use crate::{App, Wake, Window};
 
 /// A `platform::App` that renders a `Session`-fed `Ui` into one window.
 pub struct HostApp {
     session: Arc<Session>,
     /// Custom painters registered before `ready` — moved into the `Ui`
     /// when it exists.
-    painters: Vec<(u32, crate::custom::Painter)>,
+    painters: Vec<(u32, craie_ui::custom::Painter)>,
     /// Accessibility handoff shared with the platform adapter.
     a11y: Arc<A11yShared>,
     inner: Option<Inner>,
@@ -53,7 +55,7 @@ impl HostApp {
     }
 
     /// Registers a custom-element painter. Safe before or after `ready`.
-    pub fn register_painter(&mut self, tag: u32, painter: crate::custom::Painter) {
+    pub fn register_painter(&mut self, tag: u32, painter: craie_ui::custom::Painter) {
         match &mut self.inner {
             Some(inner) => inner.ui.register_painter(tag, painter),
             None => self.painters.push((tag, painter)),
@@ -130,7 +132,9 @@ impl App for HostApp {
         for (tag, painter) in self.painters.drain(..) {
             ui.register_painter(tag, painter);
         }
-        self.session.install_wake(wake.clone());
+        ui.inputs.clipboard = Box::new(SystemClipboard);
+        let poke = wake.clone();
+        self.session.install_wake(Arc::new(move || poke.wake()));
         let mut inner = Inner {
             gpu,
             surface,

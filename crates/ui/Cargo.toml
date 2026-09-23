@@ -1,0 +1,19 @@
+[package]
+name = "craie-ui"
+description = "Host tree, mutation executor, layout, interaction, accessibility projection"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+craie-core.workspace = true
+craie-scene.workspace = true
+craie-text.workspace = true
+taffy.workspace = true
+accesskit.workspace = true
+tracing.workspace = true
+
+
+[dev-dependencies]
+taffy.workspace = true

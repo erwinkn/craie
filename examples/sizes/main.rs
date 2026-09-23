@@ -8,12 +8,12 @@
 
 use std::mem::{align_of, size_of};
 
-use craie::host::{Host, NodeFlags, NodeHeader, NodeId, StyleId, TextRow, ViewRow};
-use craie::layout::{EmittedText, LayoutData, MeasuredText};
-use craie::scene::{Color, Instance};
-use craie::text::GlyphKey;
-use craie::text::parley::Layout as ParleyLayout;
-use craie::wire;
+use craie_ui::host::{Host, NodeFlags, NodeHeader, NodeId, StyleId, TextRow, ViewRow};
+use craie_ui::layout::{EmittedText, LayoutData, MeasuredText};
+use craie_scene::{Color, Instance};
+use craie_text::GlyphKey;
+use craie_text::parley::Layout as ParleyLayout;
+use craie_ui::wire;
 
 fn row(name: &str, bytes: usize, align: usize, note: &str) {
     println!("{name:<24} {bytes:>3} B  align {align:<2} {note}");

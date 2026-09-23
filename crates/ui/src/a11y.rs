@@ -13,7 +13,7 @@
 use std::sync::{Arc, Mutex};
 
 use accesskit::{
-    Action, ActionHandler, ActionRequest, ActivationHandler, DeactivationHandler, Node,
+    Action, ActionRequest, ActivationHandler, DeactivationHandler, Node,
     NodeId as A11yId, Rect as A11yRect, Role, TreeId, TreeInfo, TreeUpdate,
 };
 
@@ -71,19 +71,6 @@ pub struct Activation {
 impl ActivationHandler for Activation {
     fn request_initial_tree(&mut self) -> Option<TreeUpdate> {
         self.shared.latest.lock().unwrap().clone()
-    }
-}
-
-/// Queues action requests for the UI thread and pokes the event loop.
-pub struct ActionSink {
-    pub shared: Arc<A11yShared>,
-    pub wake: crate::platform::Wake,
-}
-
-impl ActionHandler for ActionSink {
-    fn do_action(&mut self, request: ActionRequest) {
-        self.shared.actions.lock().unwrap().push(request);
-        self.wake.wake();
     }
 }
 

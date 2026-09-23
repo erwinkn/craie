@@ -30,9 +30,9 @@ use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
-use craie::geom::Size;
-use craie::gpu::{Gpu, Renderer};
-use craie::ui::Ui;
+use craie_core::geom::Size;
+use craie_render::{Gpu, Renderer};
+use craie_ui::ui::Ui;
 
 const SCALE: f32 = 2.0;
 const VIEW: Size = Size {

@@ -18,10 +18,15 @@ fn with<R>(f: impl FnOnce(&mut arboard::Clipboard) -> Option<R>) -> Option<R> {
     })
 }
 
-pub fn set(text: &str) {
-    with(|c| c.set_text(text).ok());
-}
+/// The system clipboard behind the `craie_ui` clipboard seam.
+pub struct SystemClipboard;
 
-pub fn get() -> Option<String> {
-    with(|c| c.get_text().ok())
+impl craie_ui::clipboard::Clipboard for SystemClipboard {
+    fn get(&mut self) -> Option<String> {
+        with(|c| c.get_text().ok())
+    }
+
+    fn set(&mut self, text: &str) {
+        with(|c| c.set_text(text).ok());
+    }
 }
