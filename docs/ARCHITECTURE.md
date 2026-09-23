@@ -771,9 +771,9 @@ unchanged frame uploads zero bytes. One pipeline draws rects and
 glyphs (instance-index bit 31 selects the pool) with one draw per
 merged run; a path pipeline pulls mesh triangles through the index
 pool (vertex index -> index -> vertex) from the same tables. A frame
-whose draw list has meshes renders at 4x MSAA (the window and its layer
-targets, resolved at the end of each pass); other frames stay
-single-sampled. Opacity layers render into pooled
+run of consecutive mesh draws renders into a 4x multisampled layer of
+its own, resolved and composited in painter order; the window and
+opacity layers stay single-sampled. Opacity layers render into pooled
 offscreen targets and composite with their opacity. Clips test in
 their own space in the fragment stage. Colors decode from sRGB to
 linear in the shader; blending happens in linear.
@@ -792,24 +792,24 @@ and render target so a host can embed it.
 **Decisions.**
 - wgpu is the production backend. No Metal/Vulkan/D3D rewrite without a
   concrete limitation.
-- Paths anti-alias by 4x MSAA, only in frames that draw them (2026-09-23,
-  step 5a). Tessellated triangles have hard edges; rects and glyphs
-  already anti-alias analytically and render the same either way: a
-  rect's quad reaches at least 1 device px past its edges along each
-  local axis, and a glyph's one texel into the atlas gutter (cleared on
-  every insert), so their own coverage alone decides their edge pixels
-  at any sample count; zero-area rects emit no quad; culling and layer
-  bounds use the snapped origin plus 2 device px per local axis. Paths
-  shade per sample, testing their clip at each sample's position (the
-  standard 4-sample pattern), so path and clip coverage never
-  multiply.
-  Frames without paths keep their cost (no multisampled target exists
-  until a path draws). The multisampled attachment is stored, not
-  transient: a layer's composite reopens its parent's pass, which must
-  load the samples. Cost: a window-sized target at four samples (about
-  33 MB at 1920x1080 in RGBA8) while paths are on screen. Alternatives
-  measured in E07 (coverage/strip preparation) can replace it behind
-  `PathRecord`.
+- Paths anti-alias by 4x MSAA in layers of their own (2026-09-23, step
+  5a; revised after review rounds 1 to 3). Every maximal run of
+  consecutive mesh draws becomes a multisampled layer (opacity 1, bounds
+  of the run's chunks), resolved and composited in painter order;
+  compositing a run "over" its parent equals drawing it in place, since
+  "over" is associative. The window and opacity layers stay
+  single-sampled, so rects and glyphs keep their exact quads and their
+  own analytic coverage. The first design (the whole frame at 4x when it
+  drew any mesh) failed three review rounds: analytic coverage and
+  sample coverage multiplied at every edge (rects, glyphs, clips), each
+  padding fix brought new edge cases (zero-area rects, anisotropic
+  transforms, enlarged and reduced glyphs, layer bounds), and the first
+  multisampled frame after single-sampled ones sometimes came out
+  unwritten (about 1 in 20 runs; none in 160 since). Inside a path
+  layer, fragments shade per sample and test each clip of the chain at
+  the sample's position (the standard 4-sample pattern), so path and
+  clip coverage never multiply. Cost: one offscreen pass and one
+  composite per run (`LEDGER.md` AR-5).
 
 ## 12. Animation
 

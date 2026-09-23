@@ -77,6 +77,25 @@ target shape.
   `FAMILY=sans-serif`; `cargo run --release --example fontcost --
   system-ui` and `-- sans-serif` (raster counts).
 
+### AR-5: a pass and a composite per run of path meshes
+
+- What: every maximal run of consecutive mesh draws renders into a
+  multisampled offscreen layer and composites back (two passes, a
+  resolve, and a layer target per run). A UI that interleaves icons with
+  text and boxes pays per icon.
+- Baseline vs now: before step 5a nothing drew meshes; a frame without
+  meshes pays nothing (no layer, no multisampled target). Not yet
+  measured on an icon-heavy workload.
+- Why accepted: the single-pass alternative (the whole frame at 4x)
+  broke analytic anti-aliasing of rects, glyphs, and clips (step 5a
+  review rounds 1 to 3); correct painter order wins over pass count
+  (section 8).
+- Resolves in: merging runs whose bounds do not overlap the content
+  between them (reordering is then invisible), and E07 (coverage/strip
+  preparation needs no multisampling at all).
+- Re-test: `crates/render/tests/paths.rs` (`stats.layers`), and a
+  framebench scene with icons once 5b lands.
+
 ## Deferred findings
 
 Reviewer minors and nitpicks not fixed yet.
@@ -168,3 +187,9 @@ Reviewer minors and nitpicks not fixed yet.
   zero-area rects, transform-aware quad margins and layer bounds, paint
   runs and gradient space in the rebuild oracle): fixed in step 5a
   round 2.
+- S5A-13..18 (glyph filtering past the gutter, nested clips on paths,
+  anisotropic rects, enlarged and reduced glyphs, gradient tolerance in
+  the oracle): resolved by the path-layer redesign after step 5a round
+  3 (rects and glyphs never render multisampled; per-clip sample tests;
+  a dimensionless gradient parameter in the oracle), with regression
+  tests; reviewed in round 4.

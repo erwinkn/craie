@@ -103,9 +103,6 @@ fn vs_main(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> 
     let kind = ii >> 31u;
     let idx = ii & 0x7fffffffu;
     var out: VsOut;
-    // A primitive that covers nothing emits a degenerate quad (every
-    // corner at one point: no fragments).
-    let nothing = vec4<f32>(-2.0, -2.0, 0.0, 1.0);
     if (kind == 0u) {
         let r = rects[idx];
         let p = placements[r.chunk];
@@ -113,12 +110,6 @@ fn vs_main(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> 
         let origin = chunk_origin(w, p);
         let aligned = (w.flags & 1u) != 0u;
         let s = sqrt(abs(w.a * w.d - w.b * w.c));
-        // Column lengths: device px per local unit along each local axis.
-        let col = vec2<f32>(length(vec2<f32>(w.a, w.b)), length(vec2<f32>(w.c, w.d)));
-        if (!(r.w > 0.0 && r.h > 0.0) || col.x < 1e-6 || col.y < 1e-6) {
-            out.pos = nothing;
-            return out;
-        }
         var dev: vec2<f32>;
         if (aligned) {
             var p0 = origin + linear(w, vec2<f32>(r.x, r.y));
@@ -130,26 +121,13 @@ fn vs_main(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> 
             }
             let lo = min(p0, p1);
             let hi = max(p0, p1);
-            if (hi.x <= lo.x || hi.y <= lo.y) {
-                // Snapped to no area.
-                out.pos = nothing;
-                return out;
-            }
-            // The quad reaches 1 px past the rect: every pixel its edge
-            // touches runs the fragment with full sample coverage, so the
-            // analytic coverage alone decides, single-sampled or not.
-            dev = mix(lo - vec2<f32>(1.0), hi + vec2<f32>(1.0), corner);
+            dev = mix(lo, hi, corner);
             out.half = (hi - lo) * 0.5;
             out.local = dev - (lo + hi) * 0.5;
         } else {
-            // At least 1 device px of margin along each local axis, as
-            // above (the scene's culling bounds allow 2).
-            let m = vec2<f32>(1.0) / col;
-            let size = vec2<f32>(r.w, r.h) + 2.0 * m;
-            let lp = vec2<f32>(r.x, r.y) - m + corner * size;
-            dev = origin + linear(w, lp);
+            dev = origin + linear(w, vec2<f32>(r.x, r.y) + corner * vec2<f32>(r.w, r.h));
             out.half = vec2<f32>(r.w, r.h) * 0.5 * s;
-            out.local = (lp - vec2<f32>(r.x + r.w * 0.5, r.y + r.h * 0.5)) * s;
+            out.local = (corner - vec2<f32>(0.5, 0.5)) * vec2<f32>(r.w, r.h) * s;
         }
         out.pos = to_ndc(dev);
         out.params = vec2<f32>(r.radius * s, r.border_width * s);
@@ -171,14 +149,10 @@ fn vs_main(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> 
         let origin = chunk_origin(w, p);
         // Bitmaps are rasterized at the display scale: at an unscaled
         // world a quad pixel is a device pixel. A bitmap made smaller to
-        // fit a page draws scaled up to its quad. The quad reaches one
-        // bitmap pixel into the atlas gutter (transparent) on each side:
-        // edge pixels run with full sample coverage, so the bitmap alone
-        // decides their coverage at any sample count.
-        let texel = quad / max(size, vec2<f32>(1.0)) / vp.scale;
-        let dev = origin + linear(w, vec2<f32>(g.x, g.y) - texel + corner * (quad / vp.scale + 2.0 * texel));
+        // fit a page draws scaled up to its quad.
+        let dev = origin + linear(w, vec2<f32>(g.x, g.y) + corner * quad / vp.scale);
         out.pos = to_ndc(dev);
-        out.local = (xy - vec2<f32>(1.0) + corner * (size + vec2<f32>(2.0))) / vp.page;
+        out.local = (xy + corner * size) / vp.page;
         out.color = unpack(paints[g.paint]);
         out.info = vec4<u32>(1u, p.clip, ras.page & 0xffffu, ras.page >> 16u);
     }
@@ -267,8 +241,33 @@ fn gradient_color(at: u32, local: vec2<f32>) -> vec4<f32> {
     return vec4<f32>(srgb_decode(rgb.r), srgb_decode(rgb.g), srgb_decode(rgb.b), out.a);
 }
 
-// Coverage of the clip chain at a device-px position: each clip tests in
-// its own space, so rotated and scaled clips stay exact.
+// Signed distance, in device px, from `dev` to clip `c`'s edge
+// (negative inside). Each clip tests in its own space, so rotated and
+// scaled clips stay exact.
+fn clip_distance(c: ClipI, dev: vec2<f32>) -> f32 {
+    let lp = vec2<f32>(c.ia * dev.x + c.ic * dev.y + c.ie, c.ib * dev.x + c.id * dev.y + c.if_);
+    let lo = vec2<f32>(c.x0, c.y0);
+    let hi = vec2<f32>(c.x1, c.y1);
+    let center = (lo + hi) * 0.5;
+    let half = (hi - lo) * 0.5;
+    // An open axis (overflow visible) bounds nothing.
+    // Distance in local units -> device px: a local axis changes by
+    // the length of its inverse-matrix row per device pixel.
+    let per_px_x = max(length(vec2<f32>(c.ia, c.ic)), 1e-6);
+    let per_px_y = max(length(vec2<f32>(c.ib, c.id)), 1e-6);
+    switch (c.flags & 3u) {
+        case 1u: { return (abs(lp.y - center.y) - half.y) / per_px_y; }
+        case 2u: { return (abs(lp.x - center.x) - half.x) / per_px_x; }
+        case 3u: { return -1.0e9; }
+        default: {
+            let px = 1.0 / sqrt(max(abs(c.ia * c.id - c.ib * c.ic), 1e-12));
+            return sd_rect(lp - center, half, c.radius) * px;
+        }
+    }
+}
+
+// Coverage of the clip chain at a device-px position (rects and
+// glyphs: analytic, one pixel).
 fn clip_coverage(dev: vec2<f32>, first: u32) -> f32 {
     var cov = 1.0;
     var id = first;
@@ -276,38 +275,31 @@ fn clip_coverage(dev: vec2<f32>, first: u32) -> f32 {
     // bound only guards against corrupt data.
     for (var i = 0u; i < 65536u && id != NONE; i = i + 1u) {
         let c = clips[id];
-        let lp = vec2<f32>(c.ia * dev.x + c.ic * dev.y + c.ie, c.ib * dev.x + c.id * dev.y + c.if_);
-        let lo = vec2<f32>(c.x0, c.y0);
-        let hi = vec2<f32>(c.x1, c.y1);
-        let center = (lo + hi) * 0.5;
-        let half = (hi - lo) * 0.5;
-        // An open axis (overflow visible) bounds nothing.
-        // Distance in local units -> device px: a local axis changes by
-        // the length of its inverse-matrix row per device pixel.
-        let per_px_x = max(length(vec2<f32>(c.ia, c.ic)), 1e-6);
-        let per_px_y = max(length(vec2<f32>(c.ib, c.id)), 1e-6);
-        var d_px: f32;
-        switch (c.flags & 3u) {
-            case 1u: { d_px = (abs(lp.y - center.y) - half.y) / per_px_y; }
-            case 2u: { d_px = (abs(lp.x - center.x) - half.x) / per_px_x; }
-            case 3u: { d_px = -1.0e9; }
-            default: {
-                let px = 1.0 / sqrt(max(abs(c.ia * c.id - c.ib * c.ic), 1e-12));
-                d_px = sd_rect(lp - center, half, c.radius) * px;
-            }
-        }
-        cov = cov * clamp(0.5 - d_px, 0.0, 1.0);
+        cov = cov * clamp(0.5 - clip_distance(c, dev), 0.0, 1.0);
         id = c.parent;
     }
     return cov;
 }
 
+// Whether a point (a path sample) is inside every clip of the chain.
+fn clip_inside(dev: vec2<f32>, first: u32) -> bool {
+    var id = first;
+    for (var i = 0u; i < 65536u && id != NONE; i = i + 1u) {
+        let c = clips[id];
+        if (clip_distance(c, dev) > 0.0) {
+            return false;
+        }
+        id = c.parent;
+    }
+    return true;
+}
 
-// Paths shade per sample (reading `sample_index` asks for it): the
-// clip is a hard inside test at each sample's position, so
-// multisampling alone gives the edge coverage of a path and of its
-// clip, never their product. (`position` may be the pixel center here,
-// so the sample position comes from the pattern.)
+// Paths draw in multisampled layers of their own and shade per sample
+// (reading `sample_index` asks for it): each clip is a hard inside test
+// at the sample's position, so multisampling alone gives the edge
+// coverage of a path and of its clips, never a product. (`position`
+// may be the pixel center here, so the sample position comes from the
+// pattern.)
 @fragment
 fn fs_path(in: VsOut, @builtin(sample_index) sample: u32) -> @location(0) vec4<f32> {
     if (in.info.y != NONE) {
@@ -320,7 +312,7 @@ fn fs_path(in: VsOut, @builtin(sample_index) sample: u32) -> @location(0) vec4<f
             vec2<f32>(0.625, 0.875),
         );
         let at = floor(in.pos.xy) + samples[sample & 3u] + vp.origin;
-        if (clip_coverage(at, in.info.y) < 0.5) {
+        if (!clip_inside(at, in.info.y)) {
             discard;
         }
     }

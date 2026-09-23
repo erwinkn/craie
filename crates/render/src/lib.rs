@@ -150,7 +150,7 @@ pub struct RenderStats {
     pub draw_calls: u32,
     pub passes: u32,
     pub layers: u32,
-    /// The last frame rendered multisampled (it drew paths).
+    /// The last frame drew path meshes (in multisampled layers).
     pub msaa: bool,
     /// Bytes uploaded by the last `prepare`.
     pub upload_bytes: u64,
@@ -178,11 +178,6 @@ pub struct Renderer {
     rasters: Mirror,
     path_vertices: Mirror,
     path_indices: Mirror,
-    /// The window-sized multisampled attachment (w, h, view), made on
-    /// the first frame that draws paths at that size.
-    msaa_target: Option<(u32, u32, TextureView)>,
-    /// The planned frame: its size and whether it is multisampled.
-    frame: (u32, u32, bool),
     scene_bg: Option<wgpu::BindGroup>,
     atlas: Option<AtlasGpu>,
     layer_pool: Vec<LayerTarget>,
@@ -242,8 +237,6 @@ impl Renderer {
             rasters: Mirror::new("rasters"),
             path_vertices: Mirror::new("path vertices"),
             path_indices: Mirror::new("path indices"),
-            msaa_target: None,
-            frame: (0, 0, false),
             scene_bg: None,
             atlas: None,
             layer_pool: Vec::new(),
@@ -441,8 +434,8 @@ impl Renderer {
         self.layer_pool.len() - 1
     }
 
-    /// A multisampled color attachment of `w` x `h` (resolved at the end
-    /// of each pass; stored, since a layer's composite reopens the pass).
+    /// A multisampled color attachment of `w` x `h` for a path layer
+    /// (resolved at the end of its pass).
     fn msaa_view(&self, gpu: &Gpu, w: u32, h: u32) -> TextureView {
         gpu.device
             .create_texture(&wgpu::TextureDescriptor {
@@ -508,8 +501,6 @@ impl Renderer {
     pub fn plan_frame(&mut self, gpu: &Gpu, width: u32, height: u32, scene: &mut Scene) {
         let mut uniform_bytes = 0u64;
         let cmds = &scene.draw_list().cmds;
-        let msaa = scene.draw_list().paths;
-        self.frame = (width, height, msaa);
         let page = scene.atlas.page_size() as f32;
         let base = Viewport {
             size: [width as f32, height as f32],
@@ -539,7 +530,11 @@ impl Renderer {
         parents.push(0);
         for cmd in cmds {
             match *cmd {
-                DrawCmd::BeginLayer { opacity, bounds } => {
+                DrawCmd::BeginLayer {
+                    opacity,
+                    bounds,
+                    msaa,
+                } => {
                     let w = (bounds[2] - bounds[0]).max(1) as u32;
                     let h = (bounds[3] - bounds[1]).max(1) as u32;
                     // A target is busy while an enclosing layer draws to it.
@@ -606,10 +601,6 @@ impl Renderer {
             uniform_bytes += bytes.len() as u64;
             std::mem::swap(bytes, &mut self.viewport_bytes);
         }
-        if msaa && !matches!(self.msaa_target, Some((w, h, _)) if w == width && h == height) {
-            let view = self.msaa_view(gpu, width.max(1), height.max(1));
-            self.msaa_target = Some((width, height, view));
-        }
         self.scratch = sc;
         scene.counters.upload_bytes += uniform_bytes;
     }
@@ -621,13 +612,7 @@ impl Renderer {
         self.stats.draw_calls = 0;
         self.stats.passes = 0;
         self.stats.layers = 0;
-        let msaa = self.frame.2;
-        self.stats.msaa = msaa;
-        let window_msaa = if msaa {
-            self.msaa_target.as_ref().map(|t| t.2.clone())
-        } else {
-            None
-        };
+        self.stats.msaa = scene.draw_list().paths;
         let sc = std::mem::take(&mut self.scratch);
         let cmds = &scene.draw_list().cmds;
         let mut encoder = gpu
@@ -647,7 +632,7 @@ impl Renderer {
             &mut encoder,
             cmds,
             &mut 0,
-            (view, window_msaa.as_ref()),
+            (view, None),
             0,
             wgpu::LoadOp::Clear(clear),
             &sc.plan,

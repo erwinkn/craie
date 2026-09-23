@@ -36,8 +36,14 @@ pub enum DrawCmd {
     /// Path mesh indices `start..start + count` (whole triangles).
     Paths { start: u32, count: u32 },
     /// Redirect drawing into a transparent offscreen target covering
-    /// `bounds` (device px: x0, y0, x1, y1).
-    BeginLayer { opacity: f32, bounds: [i32; 4] },
+    /// `bounds` (device px: x0, y0, x1, y1). `msaa`: a run of path
+    /// meshes, rendered multisampled and resolved (opacity 1); opacity
+    /// layers and the window stay single-sampled.
+    BeginLayer {
+        opacity: f32,
+        bounds: [i32; 4],
+        msaa: bool,
+    },
     /// Composite the innermost layer into its parent target.
     EndLayer,
 }
@@ -48,8 +54,9 @@ pub struct DrawList {
     /// Chunks with at least one drawn segment, in draw order.
     pub visible: Vec<u32>,
     pub viewport: Size,
-    /// The list draws path meshes: the frame renders multisampled (edges
-    /// of tessellated triangles need it; rects and glyphs do not).
+    /// The list draws path meshes (in multisampled layers of their own:
+    /// tessellated triangles need multisampling; rects and glyphs
+    /// anti-alias analytically and never render multisampled).
     pub paths: bool,
 }
 
@@ -273,9 +280,7 @@ impl Scene {
 
     /// World-space bounds of a chunk in device pixels, as drawn: from
     /// the origin the shader uses (snapped to the pixel grid in a space
-    /// that snaps), with 2 device px of margin along each local axis
-    /// (rect and glyph quads reach 1 px past their shapes for
-    /// anti-aliasing; snapped rect edges move up to half a pixel).
+    /// that snaps).
     pub fn chunk_world_bounds(&self, id: u32) -> Rect {
         let c = &self.chunks[id as usize];
         let p = self.placements[id as usize];
@@ -289,20 +294,7 @@ impl Scene {
         }
         w.0[4] = origin.x;
         w.0[5] = origin.y;
-        // Local units per 2 device px along each local axis (from the
-        // matrix's column lengths); a collapsed axis draws nothing wider.
-        let margin = |a: f32, b: f32| {
-            let len = a.hypot(b);
-            if len > 1e-6 { 2.0 / len } else { 0.0 }
-        };
-        let (mx, my) = (margin(w.0[0], w.0[1]), margin(w.0[2], w.0[3]));
-        let b = c.bounds;
-        w.map_rect(&Rect::new(
-            b.origin.x - mx,
-            b.origin.y - my,
-            b.size.width + 2.0 * mx,
-            b.size.height + 2.0 * my,
-        ))
+        w.map_rect(&c.bounds)
     }
 
     /// Derives world matrices and clip rows, then (re)builds the draw
@@ -356,6 +348,8 @@ impl Scene {
         let mut layers = std::mem::take(&mut self.open_layers);
         layers.clear();
         let mut skip_depth = 0usize;
+        // The open run of meshes: (its BeginLayer's index, its bounds).
+        let mut run: Option<(usize, Rect)> = None;
         for item in &self.order {
             match *item {
                 OrderItem::BeginLayer(l) => {
@@ -363,10 +357,12 @@ impl Scene {
                         skip_depth += 1;
                         continue;
                     }
+                    close_run(&mut cmds, &mut run, screen);
                     layers.push((cmds.len(), None));
                     cmds.push(DrawCmd::BeginLayer {
                         opacity: self.layers[l as usize],
                         bounds: [0; 4],
+                        msaa: false,
                     });
                 }
                 OrderItem::EndLayer => {
@@ -374,6 +370,7 @@ impl Scene {
                         skip_depth -= 1;
                         continue;
                     }
+                    close_run(&mut cmds, &mut run, screen);
                     let (at, bounds) = layers.pop().expect("unbalanced layer order");
                     match bounds
                         .map(|b| b.intersect(&screen))
@@ -429,6 +426,23 @@ impl Scene {
                             SegKind::Paths => c.path_indices.start(),
                         } as u32;
                         let start = base + s.start;
+                        // A run of meshes draws in a multisampled layer of
+                        // its own; anything else ends the run.
+                        if s.kind == SegKind::Paths {
+                            match &mut run {
+                                Some((_, rb)) => *rb = rb.union(&b),
+                                None => {
+                                    run = Some((cmds.len(), b));
+                                    cmds.push(DrawCmd::BeginLayer {
+                                        opacity: 1.0,
+                                        bounds: [0; 4],
+                                        msaa: true,
+                                    });
+                                }
+                            }
+                        } else {
+                            close_run(&mut cmds, &mut run, screen);
+                        }
                         // Merge with the previous draw when contiguous.
                         match (s.kind, cmds.last_mut()) {
                             (SegKind::Rects, Some(DrawCmd::Rects { start: s0, count }))
@@ -458,6 +472,7 @@ impl Scene {
                 }
             }
         }
+        close_run(&mut cmds, &mut run, screen);
         debug_assert!(layers.is_empty(), "unbalanced layer order");
         self.clip_bounds = clip_bounds;
         self.open_layers = layers;
@@ -597,12 +612,12 @@ impl Scene {
                             }
                             SegKind::Paths => {
                                 // One entry per segment: its device-space
-                                // bounds; in `geometry`, every indexed
-                                // vertex in device space (index order),
-                                // then each paint's float words (gradient
-                                // geometry and mapping); in `aux`, its
-                                // integer paint words (kinds, colors,
-                                // stop offsets) and index count.
+                                // bounds; in `geometry`, per indexed vertex
+                                // its device position and gradient
+                                // parameter; in `aux`, every vertex's paint
+                                // kind or color, each gradient's stops
+                                // (offsets and colors), and the index
+                                // count.
                                 let is = &self.path_indices.get(c.path_indices)
                                     [s.start as usize..(s.start + s.len) as usize];
                                 let vs = self.path_vertices.backing();
@@ -626,26 +641,35 @@ impl Scene {
                                         mix(words[at] as u64);
                                         continue;
                                     }
-                                    // Where the vertex falls in gradient
-                                    // space: what the fragment evaluates.
+                                    // The vertex's gradient parameter, as the
+                                    // fragment evaluates it: t along a linear
+                                    // gradient; offset from a radial one's
+                                    // center over its radius. Dimensionless,
+                                    // so the tolerance means the same color
+                                    // error at any gradient scale.
+                                    let f = |k: usize| f32::from_bits(words[at + 1 + k]);
                                     let m = |k: usize| f32::from_bits(words[at + 5 + k]);
-                                    geometry.extend([
+                                    let g = [
                                         m(0) * v.pos[0] + m(2) * v.pos[1] + m(4),
                                         m(1) * v.pos[0] + m(3) * v.pos[1] + m(5),
-                                    ]);
-                                    mix(words[at] as u64 | 1 << 40);
+                                    ];
+                                    let head = words[at];
+                                    if head & 0xFFFF == crate::prim::gradient::LINEAR {
+                                        let d = [f(2) - f(0), f(3) - f(1)];
+                                        let len2 = (d[0] * d[0] + d[1] * d[1]).max(1e-12);
+                                        geometry.push(
+                                            ((g[0] - f(0)) * d[0] + (g[1] - f(1)) * d[1]) / len2,
+                                        );
+                                    } else {
+                                        let r = f(2).max(1e-12);
+                                        geometry.extend([(g[0] - f(0)) / r, (g[1] - f(1)) / r]);
+                                    }
+                                    mix(head as u64 | 1 << 40);
                                     if last_paint == Some(v.paint) {
                                         continue;
                                     }
                                     last_paint = Some(v.paint);
-                                    let head = words[at];
-                                    mix(head as u64 | 1 << 40);
                                     let n = (head >> 16) as usize;
-                                    geometry.extend(
-                                        words[at + 1..at + crate::prim::gradient::HEADER_WORDS]
-                                            .iter()
-                                            .map(|&b| f32::from_bits(b)),
-                                    );
                                     let stops = at + crate::prim::gradient::HEADER_WORDS;
                                     for k in 0..n {
                                         mix(words[stops + 2 * k] as u64);
@@ -697,6 +721,26 @@ impl Scene {
     }
 }
 
+/// Ends the open run of meshes: its layer covers the run's bounds (on
+/// screen, in whole pixels), or goes when nothing of it is on screen.
+fn close_run(cmds: &mut Vec<DrawCmd>, run: &mut Option<(usize, Rect)>, screen: Rect) {
+    let Some((at, b)) = run.take() else { return };
+    match Some(b.intersect(&screen)).filter(|b| b.size.width > 0.0 && b.size.height > 0.0) {
+        Some(b) => {
+            if let DrawCmd::BeginLayer { bounds, .. } = &mut cmds[at] {
+                *bounds = [
+                    b.origin.x.floor() as i32,
+                    b.origin.y.floor() as i32,
+                    b.max_x().ceil() as i32,
+                    b.max_y().ceil() as i32,
+                ];
+            }
+            cmds.push(DrawCmd::EndLayer);
+        }
+        None => cmds.truncate(at),
+    }
+}
+
 /// One primitive in world space (device px), for equivalence checks.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Resolved {
@@ -711,8 +755,9 @@ pub struct Resolved {
     pub clip: Option<Rect>,
     /// Corner radius of the innermost clip.
     pub clip_radius: f32,
-    /// Path mesh segments: device-space vertices (index order), then
-    /// gradient float words; empty for rects and glyphs.
+    /// Path mesh segments: per indexed vertex, its device-space position
+    /// and, for a gradient, its dimensionless gradient parameter; empty
+    /// for rects and glyphs.
     pub geometry: Vec<f32>,
 }
 
@@ -815,9 +860,7 @@ mod tests {
             .clone();
         assert_eq!(cmds.len(), 5);
         assert!(
-            // The chunk's rect plus 2 px of anti-aliasing margin,
-            // clipped to the screen.
-            matches!(cmds[1], DrawCmd::BeginLayer { opacity, bounds: [0, 18, 12, 32] } if opacity == 0.5)
+            matches!(cmds[1], DrawCmd::BeginLayer { opacity, bounds: [0, 20, 10, 30], msaa: false } if opacity == 0.5)
         );
         assert_eq!(cmds[3], DrawCmd::EndLayer);
         // Zero opacity skips the subtree entirely.
@@ -891,10 +934,15 @@ mod tests {
         assert_eq!(paints.len(), 1 + crate::prim::gradient::HEADER_WORDS + 4);
         let mut missing = Vec::new();
         let list = s.prepare(Size::new(100.0, 100.0), &mut missing);
-        // Index spans are contiguous only when the pool packed them so:
-        // either one merged draw or one per chunk, 12 indices in all.
-        let counted: u32 = list
-            .cmds
+        // One multisampled layer around the run of meshes; index spans
+        // are contiguous only when the pool packed them so: one merged
+        // draw or one per chunk, 12 indices in all.
+        assert!(matches!(
+            list.cmds.first(),
+            Some(DrawCmd::BeginLayer { opacity, msaa: true, .. }) if *opacity == 1.0
+        ));
+        assert_eq!(list.cmds.last(), Some(&DrawCmd::EndLayer));
+        let counted: u32 = list.cmds[1..list.cmds.len() - 1]
             .iter()
             .map(|c| match c {
                 DrawCmd::Paths { count, .. } => *count,
@@ -958,11 +1006,10 @@ mod tests {
             s.prepare(Size::new(100.0, 100.0), &mut missing).visible,
             [0]
         );
-        // The bounds start at the snapped origin (0), less the 2 px
-        // anti-aliasing margin.
+        // The bounds start at the snapped origin (0).
         let b = s.chunk_world_bounds(0);
-        assert_eq!((b.origin.x, b.origin.y), (-2.0, 6.0));
-        assert!((b.size.width - 4.4).abs() < 1e-6);
+        assert_eq!((b.origin.x, b.origin.y), (0.0, 8.0));
+        assert!((b.size.width - 0.4).abs() < 1e-6);
         // Far off screen: culled.
         let mut s = one_mesh(None, Affine::IDENTITY, -5.0);
         assert!(
@@ -1075,6 +1122,37 @@ mod tests {
             s
         };
         assert!(same(&square(64.0, 1.0), &square(64.0, 1.0)));
+        // S5A-18: a gradient mapped to a tiny space (1e-5 per unit)
+        // whose end moves from 0.001 to 0.002 paints other colors: the
+        // view compares the dimensionless parameter, not raw values.
+        let tiny = |end: f32| {
+            let mut s = Scene::new();
+            let root = s.transforms.alloc(Affine::IDENTITY, NONE);
+            s.transforms.set_order(vec![root]);
+            let mut w = ChunkWriter::new();
+            let slot = w.gradient(&crate::chunk::GradientPaint {
+                kind: crate::prim::gradient::LINEAR,
+                geometry: [0.0, 0.0, end, 0.0],
+                to_gradient: [1e-5, 0.0, 0.0, 1e-5, 0.0, 0.0],
+                stops: vec![(0.0, r), (1.0, b)],
+            });
+            let v = [[0.0, 0.0], [64.0, 0.0], [64.0, 64.0], [0.0, 64.0]];
+            assert!(w.mesh(&v, &[0, 1, 2, 0, 2, 3], slot, true));
+            s.commit_chunk(0, &mut w);
+            s.set_placement(
+                0,
+                Placement {
+                    offset: [0.0, 0.0],
+                    transform: root,
+                    clip: NONE,
+                },
+            );
+            s.set_order(vec![OrderItem::Chunk(0)], vec![]);
+            s.transforms.derive();
+            s
+        };
+        assert!(same(&tiny(0.001), &tiny(0.001)));
+        assert!(!same(&tiny(0.001), &tiny(0.002)), "tiny gradient space");
         let (a, b2) = (square(64.0, 1.0), square(32.0, 2.0));
         assert!(a.resolve(&|_| 0)[0].bounds == b2.resolve(&|_| 0)[0].bounds);
         assert!(!same(&a, &b2), "gradient space");

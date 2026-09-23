@@ -219,8 +219,8 @@ fn gradients_interpolate_their_stops() {
     assert!(g[0] == 0 && g[1] > 235 && g[1] < 250, "{g:?}");
 }
 
-/// A path in an opacity layer composites at the layer's opacity (the
-/// layer target is multisampled and resolved like the window).
+/// A path in an opacity layer composites at the layer's opacity (its
+/// run renders in a multisampled layer nested in the opacity layer).
 #[test]
 fn paths_in_layers_composite() {
     let Some((gpu, mut r)) = gpu() else {
@@ -243,7 +243,8 @@ fn paths_in_layers_composite() {
         vec![0.5],
     );
     let img = render(&gpu, &mut r, &mut s);
-    assert!(r.stats.msaa && r.stats.layers == 1);
+    // The opacity layer, and the path run's multisampled layer in it.
+    assert!(r.stats.msaa && r.stats.layers == 2);
     // White at half coverage over black, in sRGB: 188.
     let c = px(&img, 32, 32);
     assert!((c[0] as i32 - 188).abs() <= 2, "{c:?}");
@@ -521,4 +522,182 @@ fn clips_matching_a_path_change_nothing() {
     assert_same(&plain, &clipped, (4, 4, 30, 30));
     let edge = px(&plain, 8, 16)[0];
     assert!(edge > 200 && edge < 250, "{edge}");
+}
+
+/// S5A-15, S5A-17: rects and glyphs never render multisampled (paths
+/// draw in layers of their own), so a path elsewhere changes none of
+/// their pixels, under any transform: anisotropic rects, reduced and
+/// enlarged glyphs.
+#[test]
+fn transformed_rects_and_glyphs_ignore_paths_elsewhere() {
+    let Some((gpu, mut r)) = gpu() else {
+        eprintln!("no GPU adapter: skipped");
+        return;
+    };
+    let (a, b) = with_and_without_path(&gpu, &mut r, &|s, w| {
+        s.transforms
+            .set_local(0, Affine([8.0, 0.01, 0.0, 0.125, 8.25, 20.25]));
+        s.transforms.set_snap(0, false);
+        let white = w.paint(0xFFFF_FFFF);
+        w.rect(Rect::new(0.0, 0.0, 6.0, 16.0), 0.0, white);
+        s.commit_chunk(0, w);
+        place(s, 0);
+        vec![OrderItem::Chunk(0)]
+    });
+    // Everything above the added dot (rows 55..61).
+    assert_same(&a, &b, (0, 0, W, 52));
+    for scale in [0.25, 6.0] {
+        let (a, b) = with_and_without_path(&gpu, &mut r, &|s, w| {
+            s.transforms
+                .set_local(0, Affine([scale, 0.0, 0.0, scale, 8.49, 8.49]));
+            s.transforms.set_snap(0, false);
+            let id = s.atlas.new_id(8, 8, false);
+            s.atlas.insert(id, &[255u8; 64]);
+            let white = w.paint(0xFFFF_FFFF);
+            w.glyph(0.0, 0.0, 8.0, 8.0, id, white);
+            s.commit_chunk(0, w);
+            place(s, 0);
+            vec![OrderItem::Chunk(0)]
+        });
+        // Everything above the added dot (rows 55..61).
+        assert_same(&a, &b, (0, 0, W, 52));
+    }
+}
+
+/// S5A-16: an enlarged glyph draws the same inside an opacity-1 layer
+/// as outside it (its layer holds its whole footprint).
+#[test]
+fn enlarged_glyphs_fit_their_layer() {
+    let Some((gpu, mut r)) = gpu() else {
+        eprintln!("no GPU adapter: skipped");
+        return;
+    };
+    let draw = |r: &mut Renderer, layered: bool| {
+        let mut s = scene();
+        s.transforms
+            .set_local(0, Affine([6.0, 0.0, 0.0, 6.0, 8.0, 8.0]));
+        s.transforms.set_snap(0, false);
+        let id = s.atlas.new_id(8, 8, false);
+        s.atlas.insert(id, &[255u8; 64]);
+        let mut w = ChunkWriter::new();
+        let white = w.paint(0xFFFF_FFFF);
+        w.glyph(0.0, 0.0, 8.0, 8.0, id, white);
+        s.commit_chunk(0, &mut w);
+        place(&mut s, 0);
+        let order = if layered {
+            vec![
+                OrderItem::BeginLayer(0),
+                OrderItem::Chunk(0),
+                OrderItem::EndLayer,
+            ]
+        } else {
+            vec![OrderItem::Chunk(0)]
+        };
+        s.set_order(order, vec![1.0]);
+        render(&gpu, r, &mut s)
+    };
+    let (direct, layered) = (draw(&mut r, false), draw(&mut r, true));
+    assert_same(&direct, &layered, (0, 0, W, W));
+    assert!(px(&direct, 30, 30)[0] > 200);
+}
+
+/// S5A-13: a glyph in a slot an evicted bitmap used draws nothing of
+/// that bitmap beside itself.
+#[test]
+fn glyphs_in_reused_slots_stay_clean() {
+    let Some((gpu, mut r)) = gpu() else {
+        eprintln!("no GPU adapter: skipped");
+        return;
+    };
+    let mut s = scene();
+    s.atlas = craie_scene::RasterAtlas::with_budget(64, 1, 0);
+    s.transforms.set_snap(0, false);
+    let big = s.atlas.new_id(62, 62, false);
+    s.atlas.insert(big, &[255u8; 62 * 62]);
+    s.atlas.begin_epoch();
+    let small = s.atlas.new_id(8, 8, false);
+    s.atlas.insert(small, &[255u8; 64]);
+    assert_eq!(s.atlas.stats.evictions, 1);
+    let mut w = ChunkWriter::new();
+    let white = w.paint(0xFFFF_FFFF);
+    w.glyph(8.75, 8.75, 8.0, 8.0, small, white);
+    s.commit_chunk(0, &mut w);
+    place(&mut s, 0);
+    s.set_order(vec![OrderItem::Chunk(0)], vec![]);
+    let img = render(&gpu, &mut r, &mut s);
+    for (x, y) in [(17, 12), (12, 17), (18, 12), (7, 12)] {
+        assert_eq!(px(&img, x, y), [0, 0, 0, 255], "({x}, {y})");
+    }
+}
+
+/// S5A-14: nested clips that match a path's edges change nothing: each
+/// clip is its own inside test per sample.
+#[test]
+fn nested_clips_matching_a_path_change_nothing() {
+    let Some((gpu, mut r)) = gpu() else {
+        eprintln!("no GPU adapter: skipped");
+        return;
+    };
+    let draw = |r: &mut Renderer, clips: usize| {
+        let mut s = scene();
+        s.transforms.set_snap(0, false);
+        let mut w = ChunkWriter::new();
+        let square = fill(&Path::rect(8.25, 8.25, 16.0, 16.0), FillRule::NonZero, 0.1).unwrap();
+        mesh(&mut w, &square, 0xFFFF_FFFF);
+        s.commit_chunk(0, &mut w);
+        let records = (0..clips)
+            .map(|k| craie_scene::ClipRecord {
+                rect: Rect::new(8.25, 8.25, 16.0, 16.0),
+                radius: 0.0,
+                transform: 0,
+                parent: if k == 0 { NONE } else { k as u32 - 1 },
+                open: [false, false],
+            })
+            .collect();
+        s.clips.set_all(records);
+        s.set_placement(
+            0,
+            Placement {
+                offset: [0.0, 0.0],
+                transform: 0,
+                clip: if clips == 0 { NONE } else { clips as u32 - 1 },
+            },
+        );
+        s.set_order(vec![OrderItem::Chunk(0)], vec![]);
+        render(&gpu, r, &mut s)
+    };
+    let plain = draw(&mut r, 0);
+    assert_same(&plain, &draw(&mut r, 1), (4, 4, 30, 30));
+    assert_same(&plain, &draw(&mut r, 2), (4, 4, 30, 30));
+}
+
+/// A run of meshes composites in painter order between the content
+/// before and after it: red rect, blue mesh, green rect, overlapping.
+#[test]
+fn path_layers_keep_painter_order() {
+    let Some((gpu, mut r)) = gpu() else {
+        eprintln!("no GPU adapter: skipped");
+        return;
+    };
+    let mut s = scene();
+    let mut w = ChunkWriter::new();
+    let red = w.paint(0xFF00_00FF);
+    w.rect(Rect::new(8.0, 8.0, 24.0, 24.0), 0.0, red);
+    s.commit_chunk(0, &mut w);
+    let blue = fill(&Path::rect(16.0, 16.0, 24.0, 24.0), FillRule::NonZero, 0.1).unwrap();
+    mesh(&mut w, &blue, 0x0000_FFFF);
+    s.commit_chunk(1, &mut w);
+    let green = w.paint(0x00FF_00FF);
+    w.rect(Rect::new(24.0, 24.0, 24.0, 24.0), 0.0, green);
+    s.commit_chunk(2, &mut w);
+    for id in 0..3 {
+        place(&mut s, id);
+    }
+    s.set_order((0..3).map(OrderItem::Chunk).collect(), vec![]);
+    let img = render(&gpu, &mut r, &mut s);
+    assert_eq!(px(&img, 10, 10), [255, 0, 0, 255]);
+    assert_eq!(px(&img, 20, 20), [0, 0, 255, 255]);
+    assert_eq!(px(&img, 30, 30), [0, 255, 0, 255]);
+    assert_eq!(px(&img, 38, 18), [0, 0, 255, 255]);
+    assert_eq!(r.stats.layers, 1);
 }

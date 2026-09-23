@@ -451,9 +451,18 @@ gone with it.
   at tolerance 0.05 is within 0.5% of pi r^2; a 10-long stroke 2 wide
   covers 20 (butt), 24 (square caps), and a round-capped one loses less
   than perimeter x tolerance against 20 + pi.
-- GPU (headless, `crates/render/tests/paths.rs`): a filled circle is
-  solid inside, clear outside, and blends along its edge (partial
-  coverage from 4x MSAA; with multisampling forced off the test fails);
+- Review rounds 1 to 3 found that multisampling a whole frame breaks
+  analytic anti-aliasing (rects, glyphs, clips); paths now render in
+  multisampled layers of their own (ARCHITECTURE.md section 11). The
+  rendered-empty first multisampled frame (1 in 20 runs, 5 in 60
+  single-threaded) did not recur in 160 runs after the change.
+- GPU (headless, `crates/render/tests/paths.rs`, 15 tests): a filled
+  circle is solid inside, clear outside, and blends along its edge
+  (partial coverage from 4x MSAA; with the path layer single-sampled
+  the test fails); rects and glyphs (unsnapped, anisotropic, reduced,
+  enlarged) draw the same with and without a path elsewhere; nested
+  clips matching a path change none of its pixels; a mesh run
+  composites between the content around it in painter order;
   its edges are symmetric; a frame of rects only stays single-sampled;
   linear and radial gradients pad past their ends and interpolate
   premultiplied in sRGB (the midpoint of red to blue at t = 0.49 is
