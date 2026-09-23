@@ -2,6 +2,7 @@
 //! not to repeat is counted and asserted.
 //!
 //! - A color change does zero shapes and zero layouts.
+//! - A width change rewraps shaped runs: zero shapes.
 //! - A translation does zero layouts and rebuilds no chunk.
 //! - An unchanged frame rebuilds zero chunks and uploads zero bytes.
 //! - An atlas relocation does zero paragraph layouts.
@@ -78,6 +79,26 @@ fn color_change_does_no_shapes_and_no_layouts() {
     // Only paint records went up.
     let bytes = drain_uploads(ui.scene_mut());
     assert!(bytes > 0 && bytes <= 64, "uploaded {bytes} bytes");
+}
+
+/// A width change lays the paragraphs out again from their shaped runs
+/// (line breaking only), and the rewrapped paragraph really wraps.
+#[test]
+fn width_change_does_no_shapes() {
+    let mut ui = ui();
+    let one = ui.text_layout(NodeId(2)).unwrap().lines.len();
+    for width in [90.0, 60.0, 400.0] {
+        let before = ui.counters();
+        ui.render(Size {
+            width,
+            height: VIEW.height,
+        });
+        let c = ui.counters().since(&before);
+        assert_eq!(c.shapes, 0, "width {width}: {c:?}");
+        assert!(c.layout_passes >= 1, "width {width}: {c:?}");
+        let lines = ui.text_layout(NodeId(2)).unwrap().lines.len();
+        assert_eq!(lines > one, width < 400.0, "width {width}: {lines} lines");
+    }
 }
 
 #[test]

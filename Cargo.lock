@@ -660,6 +660,7 @@ dependencies = [
  "craie-scene",
  "craie-text",
  "craie-ui",
+ "parley",
  "taffy",
  "wgpu",
 ]

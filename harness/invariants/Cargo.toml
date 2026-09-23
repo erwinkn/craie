@@ -19,3 +19,5 @@ wgpu.workspace = true
 craie-ui.workspace = true
 taffy.workspace = true
 accesskit.workspace = true
+# E01 oracle: Parley over the pinned fonts.
+parley.workspace = true

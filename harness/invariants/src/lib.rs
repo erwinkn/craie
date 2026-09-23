@@ -8,6 +8,8 @@
 //! emits. `drain_uploads` takes the scene's pending GPU uploads the way
 //! the renderer does, without a GPU, so cost tests can count bytes.
 
+pub mod e01;
+
 use std::collections::BTreeMap;
 
 use craie_core::geom::{Affine, Rect, Size};
