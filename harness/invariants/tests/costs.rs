@@ -298,6 +298,64 @@ fn typing_counts_shapes() {
         }));
         ui.render(VIEW);
         let c = ui.counters().since(&before);
-        assert!(c.shapes >= 1, "keystroke {i}: {c:?}");
+        assert_eq!(c.shapes, 1, "keystroke {i}: {c:?}");
+    }
+
+    // Each case: (event, expected reshapes). Composition-only changes
+    // keep the committed text but still reshape.
+    let key = |key: Key| {
+        Event::KeyDown(KeyInput {
+            key,
+            text: None,
+            char: None,
+            mods: Mods::default(),
+        })
+    };
+    let preedit = |cursor: usize| Event::ImePreedit {
+        text: "かな".into(),
+        cursor: Some((cursor, cursor)),
+    };
+    let cases = [
+        ("clean navigation", key(Key::Left), 0),
+        ("preedit", preedit(0), 1),
+        ("same preedit, caret moved", preedit(3), 1),
+        ("same preedit again", preedit(6), 1),
+        ("finish composition", Event::ImeDone, 1),
+        ("finish with nothing composing", Event::ImeDone, 0),
+        ("preedit", preedit(6), 1),
+        (
+            "empty preedit clears",
+            Event::ImePreedit {
+                text: String::new(),
+                cursor: None,
+            },
+            1,
+        ),
+        ("commit", Event::ImeCommit("x".into()), 1),
+        ("backspace", key(Key::Backspace), 1),
+        ("navigation to start", key(Key::Home), 0),
+        ("backspace at start", key(Key::Backspace), 0),
+    ];
+    // Oracle, independent of the counter: a reshape builds a new layout
+    // (shaped data, including its font table) while the old one lives,
+    // so that data moves exactly when the editor reshaped (0 versus at
+    // least 1). The buffer is never empty here.
+    let line_ptr = |ui: &Ui| {
+        use craie_ui::text::parley::PositionedLayoutItem;
+        let layout = ui.inputs.get(0).unwrap().editor.try_layout().unwrap();
+        let line = layout.lines().next().unwrap();
+        let Some(PositionedLayoutItem::GlyphRun(run)) = line.items().next() else {
+            panic!("no glyph run");
+        };
+        run.run().font() as *const _ as usize
+    };
+    for (what, event, want) in cases {
+        let before = ui.counters();
+        let ptr = line_ptr(&ui);
+        ui.dispatch(&event);
+        ui.render(VIEW);
+        let c = ui.counters().since(&before);
+        assert_eq!(c.shapes, want, "{what}: {c:?}");
+        assert_eq!(line_ptr(&ui) != ptr, want > 0, "{what}: oracle");
     }
 }

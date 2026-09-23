@@ -122,6 +122,9 @@ impl InputState {
     fn restore(&mut self, text: &mut TextEngine, snap: Snapshot) {
         self.editor.set_text(&snap.text);
         let len = snap.text.len();
+        // Reshape through the counted path; selecting then finds the
+        // layout clean.
+        self.layout(text);
         let mut drv = self.editor.driver(&mut text.font_cx, &mut text.layout_cx);
         drv.select_byte_range(snap.anchor.min(len), snap.focus.min(len));
     }
@@ -322,8 +325,18 @@ impl Inputs {
         Some(state.editor.text().to_string())
     }
 
-    /// `act` without reshape accounting.
-    fn act_raw(&mut self, text: &mut TextEngine, id: u32, action: &KeyAction) -> bool {
+    /// Applies an editing/pointer action to an input. Returns true when
+    /// the buffer or selection changed enough to repaint; the caller
+    /// separately asks `take_change` whether JS needs `onChangeText`.
+    ///
+    /// Reshapes count in `TextEngine::shapes` where they happen. Parley
+    /// (pinned to 0.11.1) shapes in two places: `refresh_layout`, which
+    /// navigation and deletion run when the layout is dirty, and
+    /// `update_layout`, which every edit runs once when it changes the
+    /// buffer (an insertion always does). Operations that read the
+    /// layout get it clean through `InputState::layout` first (counted),
+    /// so their own refresh does nothing; each edit then counts one.
+    pub fn act(&mut self, text: &mut TextEngine, id: u32, action: &KeyAction) -> bool {
         // Undo/redo replace the buffer wholesale; they need the driver
         // after `set_text`, so handle them outside the driver scope.
         if matches!(action, KeyAction::Undo | KeyAction::Redo) {
@@ -332,6 +345,21 @@ impl Inputs {
         let Some(state) = self.map.get_mut(&id) else {
             return false;
         };
+        // Insertions and cuts only replace the selection: they read no
+        // layout, and their reshape makes it clean.
+        let reads_layout = !matches!(
+            action,
+            KeyAction::Insert(_)
+                | KeyAction::Newline
+                | KeyAction::Paste
+                | KeyAction::Cut
+                | KeyAction::Copy
+                | KeyAction::Submit
+        );
+        if reads_layout {
+            state.layout(text);
+        }
+        let len_before = state.editor.raw_text().len();
         // Destructure so `record_undo` can touch the undo fields while
         // the driver holds `editor`.
         let InputState {
@@ -344,10 +372,13 @@ impl Inputs {
         } = state;
         let mut drv = editor.driver(&mut text.font_cx, &mut text.layout_cx);
         let mut coalescing = false;
+        // Edits that ran `update_layout`.
+        let mut shaped = false;
         match action {
             KeyAction::Insert(s) => {
                 record_undo(undo, redo, coalescing_insert, drv.editor, true);
                 coalescing = true;
+                shaped = true;
                 if *multiline {
                     drv.insert_or_replace_selection(s);
                 } else {
@@ -358,6 +389,7 @@ impl Inputs {
                 if *multiline {
                     record_undo(undo, redo, coalescing_insert, drv.editor, false);
                     drv.insert_or_replace_selection("\n");
+                    shaped = true;
                 }
             }
             KeyAction::Backspace => {
@@ -410,6 +442,7 @@ impl Inputs {
                     self.clipboard.set(sel);
                     record_undo(undo, redo, coalescing_insert, drv.editor, false);
                     drv.delete_selection();
+                    shaped = true;
                 }
             }
             KeyAction::Paste => {
@@ -422,6 +455,7 @@ impl Inputs {
                     } else {
                         drv.insert_or_replace_selection(&s.replace(['\n', '\r'], " "));
                     }
+                    shaped = true;
                 }
             }
             KeyAction::Submit => {}
@@ -431,6 +465,20 @@ impl Inputs {
             *coalescing_insert = false;
         }
         drop(drv);
+        // Deletions only remove bytes, and reshape exactly when they do.
+        let deleted = state.editor.raw_text().len() < len_before;
+        if matches!(
+            action,
+            KeyAction::Backspace
+                | KeyAction::Delete
+                | KeyAction::BackspaceWord
+                | KeyAction::DeleteWord
+        ) {
+            shaped = deleted;
+        }
+        if shaped {
+            text.shapes += 1;
+        }
         true
     }
 
@@ -456,6 +504,9 @@ impl Inputs {
     }
 
     /// IME composing text; `cursor` is a byte range within `text`.
+    /// Replaces the preedit (or the selection) and reshapes once. An
+    /// empty preedit (platforms send one before a commit) removes the
+    /// composing text, reshaping once when there was some.
     pub fn set_compose(
         &mut self,
         text: &mut TextEngine,
@@ -463,80 +514,46 @@ impl Inputs {
         preedit: &str,
         cursor: Option<(usize, usize)>,
     ) {
-        self.tracked(text, id, |state, text| {
-            let mut drv = state.editor.driver(&mut text.font_cx, &mut text.layout_cx);
-            drv.set_compose(preedit, cursor);
-        });
-    }
-
-    /// IME commit: inserts `text` as committed input.
-    pub fn commit(&mut self, text: &mut TextEngine, id: u32, s: &str) {
-        self.tracked(text, id, |state, text| {
-            state.record_undo(false);
-            let mut drv = state.editor.driver(&mut text.font_cx, &mut text.layout_cx);
-            drv.insert_or_replace_selection(s);
-        });
-    }
-
-    /// IME disabled / focus lost: drop any composing region.
-    pub fn finish_compose(&mut self, text: &mut TextEngine, id: u32) {
-        self.tracked(text, id, |state, text| {
-            let mut drv = state.editor.driver(&mut text.font_cx, &mut text.layout_cx);
-            drv.finish_compose();
-        });
-    }
-
-    /// Applies an editing/pointer action to an input. Returns true when
-    /// the buffer or selection changed enough to repaint; the caller
-    /// separately asks `take_change` whether JS needs `onChangeText`.
-    pub fn act(&mut self, text: &mut TextEngine, id: u32, action: &KeyAction) -> bool {
-        let before = self.shape_state(id);
-        let r = self.act_raw(text, id, action);
-        self.count_reshape(text, id, before);
-        r
-    }
-
-    /// Runs one editor operation, counting a reshape if it shaped.
-    fn tracked(
-        &mut self,
-        text: &mut TextEngine,
-        id: u32,
-        f: impl FnOnce(&mut InputState, &mut TextEngine),
-    ) {
-        let before = self.shape_state(id);
-        if let Some(state) = self.map.get_mut(&id) {
-            f(state, text);
-        }
-        self.count_reshape(text, id, before);
-    }
-
-    /// (layout dirty, buffer signature) of an input, before an operation.
-    fn shape_state(&self, id: u32) -> Option<(bool, u64)> {
-        let state = self.map.get(&id)?;
-        Some((
-            state.editor.try_layout().is_none(),
-            text_signature(state.editor.raw_text()),
-        ))
-    }
-
-    /// Parley's driver reshapes inside edit operations (and refreshes a
-    /// dirty layout inside navigation), where `InputState::layout` cannot
-    /// see it. An operation shaped when its buffer changed or its dirty
-    /// layout came back clean. Counts in `TextEngine::shapes`.
-    fn count_reshape(&self, text: &mut TextEngine, id: u32, before: Option<(bool, u64)>) {
-        let (Some((dirty, sig)), Some(state)) = (before, self.map.get(&id)) else {
+        let Some(state) = self.map.get_mut(&id) else {
             return;
         };
-        let clean = state.editor.try_layout().is_some();
-        if clean && (dirty || text_signature(state.editor.raw_text()) != sig) {
-            text.shapes += 1;
+        let composing = state.editor.is_composing();
+        let mut drv = state.editor.driver(&mut text.font_cx, &mut text.layout_cx);
+        if preedit.is_empty() {
+            if composing {
+                drv.clear_compose();
+                text.shapes += 1;
+            }
+            return;
         }
+        let cursor = cursor.map(|(a, b)| (a.min(preedit.len()), b.min(preedit.len())));
+        drv.set_compose(preedit, cursor);
+        text.shapes += 1;
     }
-}
 
-/// FNV-1a over a buffer: detects edits without copying the text.
-fn text_signature(s: &str) -> u64 {
-    s.bytes().fold(0xcbf2_9ce4_8422_2325, |h, b| {
-        (h ^ b as u64).wrapping_mul(0x0100_0000_01b3)
-    })
+    /// IME commit: inserts `text` as committed input (one reshape).
+    pub fn commit(&mut self, text: &mut TextEngine, id: u32, s: &str) {
+        let Some(state) = self.map.get_mut(&id) else {
+            return;
+        };
+        state.record_undo(false);
+        let mut drv = state.editor.driver(&mut text.font_cx, &mut text.layout_cx);
+        drv.insert_or_replace_selection(s);
+        text.shapes += 1;
+    }
+
+    /// IME disabled / focus lost: keeps the composing text as committed
+    /// text. Reshapes once when there was a composing region (its
+    /// underline goes away).
+    pub fn finish_compose(&mut self, text: &mut TextEngine, id: u32) {
+        let Some(state) = self.map.get_mut(&id) else {
+            return;
+        };
+        if !state.editor.is_composing() {
+            return;
+        }
+        let mut drv = state.editor.driver(&mut text.font_cx, &mut text.layout_cx);
+        drv.finish_compose();
+        text.shapes += 1;
+    }
 }
