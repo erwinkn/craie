@@ -16,12 +16,16 @@ import {
   transformMatrix,
   type AccessibilityRole,
   type Affine,
+  type ItemDesc,
+  type ListTemplate,
+  type ScrollAnchor,
   type StyleProps,
   type TextSpanIn,
 } from "./wire.js"
 
-export type Kind = 0 | 1 | 2 | 3 // 0 view, 1 text, 2 input, 3 surface — mirror NodeKind
-export const KIND: Record<string, Kind> = { view: 0, text: 1, input: 2, surface: 3 }
+// 0 view, 1 text, 2 input, 3 surface, 4 list — mirror NodeKind
+export type Kind = 0 | 1 | 2 | 3 | 4
+export const KIND: Record<string, Kind> = { view: 0, text: 1, input: 2, surface: 3, list: 4 }
 
 /** One decoded UI -> JS event record (see events.rs `UiEvent`). */
 export interface UiEvent {
@@ -293,6 +297,9 @@ export class CraieHost {
       case EVENT_KIND.change: p.onChangeText?.(ev.text); break
       case EVENT_KIND.submit: p.onSubmit?.(ev.text); break
       case EVENT_KIND.scroll: p.onScroll?.({ target: n, x: ev.a, y: ev.b }); break
+      case EVENT_KIND.listRange:
+        p.onRange?.({ first: ev.a, end: ev.b, keep: ev.x })
+        break
     }
   }
 
@@ -427,6 +434,46 @@ export class CraieHost {
         enc.payload(id, props.payload)
       }
     }
+
+    if (n.kind === 4) {
+      // List: configuration, then the item diff as one splice (common
+      // prefix and suffix by identity, as React compares props).
+      const templates: readonly ListTemplate[] = props.templates ?? []
+      const overscan = props.overscan ?? 400
+      const fallback = props.estimatedItemSize ?? 44
+      if (
+        !mounted ||
+        overscan !== (oldProps.overscan ?? 400) ||
+        fallback !== (oldProps.estimatedItemSize ?? 44) ||
+        JSON.stringify(templates) !== JSON.stringify(oldProps.templates ?? [])
+      ) {
+        enc.listConfig(id, overscan, fallback, templates)
+      }
+      const before: readonly unknown[] = mounted ? oldProps.items ?? [] : []
+      const items: readonly unknown[] = props.items ?? []
+      if (before !== items) {
+        let pre = 0
+        while (pre < before.length && pre < items.length && before[pre] === items[pre]) pre++
+        let suf = 0
+        while (
+          suf < before.length - pre && suf < items.length - pre &&
+          before[before.length - 1 - suf] === items[items.length - 1 - suf]
+        ) suf++
+        const remove = before.length - pre - suf
+        const describe: (item: any) => ItemDesc = props.describe ?? (() => ({}))
+        const added = items.slice(pre, items.length - suf).map(describe)
+        if (remove > 0 || added.length > 0) enc.listSplice(id, pre, remove, added)
+      }
+    }
+
+    // A list row's item index.
+    if ((oldProps.listIndex ?? NIL) !== (props.listIndex ?? NIL)) {
+      enc.listIndex(id, props.listIndex ?? NIL)
+    }
+    // A scroll container's anchoring policy.
+    const oldAnchor: ScrollAnchor = mounted ? oldProps.anchor ?? "keep-visible" : "keep-visible"
+    const newAnchor: ScrollAnchor = props.anchor ?? "keep-visible"
+    if (oldAnchor !== newAnchor) enc.scrollAnchor(id, newAnchor)
 
     if (n.kind === 2) {
       // INPUT config. The input is uncontrolled (ARCHITECTURE.md §5):

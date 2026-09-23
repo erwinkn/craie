@@ -27,7 +27,9 @@ use taffy::{
 
 use craie_core::geom::Affine;
 
-use crate::mutation::{Command, Mutation, NIL, NodeKind, Role, TextSpan, Transaction};
+use crate::mutation::{
+    Anchor, Command, ItemDesc, ItemTemplate, Mutation, NIL, NodeKind, Role, TextSpan, Transaction,
+};
 
 pub const MAGIC: u32 = 0x3257_5243; // "CRW2"
 pub const VERSION: u16 = 2;
@@ -57,6 +59,11 @@ pub mod op {
     pub const PAYLOAD: u8 = 0x71;
     // command
     pub const COMMAND: u8 = 0x80;
+    // lists
+    pub const LIST_CONFIG: u8 = 0x90;
+    pub const LIST_SPLICE: u8 = 0x91;
+    pub const LIST_INDEX: u8 = 0x92;
+    pub const SCROLL_ANCHOR: u8 = 0x93;
 }
 
 /// SPATIAL op field mask bits.
@@ -477,6 +484,46 @@ pub fn encode(txn: &Transaction<'_>) -> Vec<u8> {
                     }
                 }
             }
+            Mutation::ListConfig {
+                id,
+                overscan,
+                fallback,
+                templates,
+            } => {
+                ops.push(op::LIST_CONFIG);
+                u32le(&mut ops, *id);
+                f32le(&mut ops, *overscan);
+                f32le(&mut ops, *fallback);
+                ops.extend_from_slice(&(templates.len() as u16).to_le_bytes());
+                for t in templates.iter() {
+                    f32le(&mut ops, t.base);
+                    f32le(&mut ops, t.inset);
+                    f32le(&mut ops, t.font_size);
+                }
+            }
+            Mutation::ListSplice {
+                id,
+                at,
+                remove,
+                items,
+            } => {
+                ops.push(op::LIST_SPLICE);
+                u32le(&mut ops, *id);
+                u32le(&mut ops, *at);
+                u32le(&mut ops, *remove);
+                u32le(&mut ops, (items.len() / ItemDesc::BYTES) as u32);
+                ops.extend_from_slice(items);
+            }
+            Mutation::ListIndex { id, index } => {
+                ops.push(op::LIST_INDEX);
+                u32le(&mut ops, *id);
+                u32le(&mut ops, *index);
+            }
+            Mutation::ScrollAnchor { id, anchor } => {
+                ops.push(op::SCROLL_ANCHOR);
+                u32le(&mut ops, *id);
+                ops.push(*anchor as u8);
+            }
         }
     }
     let mut out = Vec::with_capacity(28 + ops.len());
@@ -817,6 +864,50 @@ pub fn decode(buf: &[u8]) -> Result<Transaction<'_>, WireError> {
                 };
                 Mutation::Command { id, cmd }
             }
+            op::LIST_CONFIG => {
+                let id = r.u32()?;
+                let overscan = r.f32()?;
+                let fallback = r.f32()?;
+                let n = r.u16()? as usize;
+                let mut templates = Vec::with_capacity(n.min(r.remaining() / 12));
+                for _ in 0..n {
+                    templates.push(ItemTemplate {
+                        base: r.f32()?,
+                        inset: r.f32()?,
+                        font_size: r.f32()?,
+                    });
+                }
+                Mutation::ListConfig {
+                    id,
+                    overscan,
+                    fallback,
+                    templates: templates.into(),
+                }
+            }
+            op::LIST_SPLICE => {
+                let id = r.u32()?;
+                let at = r.u32()?;
+                let remove = r.u32()?;
+                let count = r.u32()? as usize;
+                let len = count
+                    .checked_mul(ItemDesc::BYTES)
+                    .ok_or(WireError::Truncated)?;
+                Mutation::ListSplice {
+                    id,
+                    at,
+                    remove,
+                    items: r.take(len)?.into(),
+                }
+            }
+            op::LIST_INDEX => Mutation::ListIndex {
+                id: r.u32()?,
+                index: r.u32()?,
+            },
+            op::SCROLL_ANCHOR => {
+                let id = r.u32()?;
+                let anchor = Anchor::from_u8(r.u8()?).ok_or(WireError::BadRef("anchor"))?;
+                Mutation::ScrollAnchor { id, anchor }
+            }
             _ => return Err(WireError::BadOp(tag)),
         };
         txn.mutations.push(m);
@@ -830,8 +921,11 @@ struct Reader<'a> {
 }
 
 impl<'a> Reader<'a> {
+    fn remaining(&self) -> usize {
+        self.buf.len() - self.pos
+    }
     fn take(&mut self, n: usize) -> Result<&'a [u8], WireError> {
-        if self.pos + n > self.buf.len() {
+        if n > self.remaining() {
             return Err(WireError::Truncated);
         }
         let s = &self.buf[self.pos..self.pos + n];

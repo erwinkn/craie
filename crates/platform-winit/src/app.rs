@@ -136,6 +136,8 @@ impl Inner {
         if prepare_frame(&mut self.ui, &mut self.renderer, &self.gpu, (w, h), scale) {
             window.request_redraw();
         }
+        // A frame can raise events (list ranges, anchoring scrolls).
+        Inner::flush_out(&mut self.ui, session);
     }
 
     /// Publishes a fresh semantic tree when a11y-observable state
@@ -307,7 +309,9 @@ impl App for HostApp {
             (w, h),
             scale,
         );
-        // Layout is current now: bounds and the caret area are too.
+        // Layout is current now: bounds and the caret area are too; the
+        // frame's events (list ranges, anchoring scrolls) go out.
+        Inner::flush_out(&mut inner.ui, &self.session);
         Inner::publish_frame_state(&mut inner.ui, window, &self.a11y);
         let frame = match inner.surface.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(frame)

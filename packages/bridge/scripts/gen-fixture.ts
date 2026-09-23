@@ -54,6 +54,15 @@ enc.cmdBlur(2)
 enc.detach(1)
 enc.place(0, 1, NIL)
 enc.remove(1)
+enc.create(4, 4)                                    // list
+enc.listConfig(4, 250, 36, [{ base: 12, inset: 16, fontSize: 14 }, { base: 48 }])
+enc.listSplice(4, 0, 0, [{ template: 0, textLength: 42 }, { template: 1 }, { textLength: 70000 }])
+enc.listSplice(4, 1, 1, [])
+enc.place(0, 4, NIL)
+enc.create(5, 0)                                    // a row
+enc.listIndex(5, 1)
+enc.place(4, 5, NIL)
+enc.scrollAnchor(0, "stick-to-end")
 
 await Bun.write(new URL("../test/fixture.bin", import.meta.url).pathname, enc.finish(99n))
 console.log("wrote fixture.bin")

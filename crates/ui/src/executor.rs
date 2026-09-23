@@ -10,7 +10,8 @@
 use std::collections::HashMap;
 
 use crate::host::{Host, MAX_NODES, NodeId};
-use crate::mutation::{Command, Mutation, NIL, NodeKind, TextSpan, Transaction};
+use crate::list::MAX_ITEMS;
+use crate::mutation::{Command, ItemDesc, Mutation, NIL, NodeKind, TextSpan, Transaction};
 use crate::ui::Ui;
 use crate::wire::WireError;
 
@@ -24,6 +25,14 @@ pub const MAX_FONT_SIZE: f32 = 2048.0;
 
 fn font_size_ok(v: f32) -> bool {
     finite(v) && v > 0.0 && v <= MAX_FONT_SIZE
+}
+
+/// Largest accepted list distance (overscan, fallback, template parts),
+/// logical points.
+const MAX_LIST_LENGTH: f32 = 1.0e6;
+
+fn length_ok(v: f32) -> bool {
+    finite(v) && (0.0..=MAX_LIST_LENGTH).contains(&v)
 }
 
 fn invalid(why: &'static str) -> WireError {
@@ -110,6 +119,8 @@ pub fn validate(host: &Host, txn: &Transaction<'_>) -> Result<(), WireError> {
         removed: HashMap::new(),
         created: 0,
     };
+    // Item counts of lists the batch splices, as the batch leaves them.
+    let mut counts: HashMap<u32, u32> = HashMap::new();
     let need_live = |o: &Overlay, id: u32, why: &'static str| {
         if o.live(id) {
             Ok(())
@@ -246,6 +257,58 @@ pub fn validate(host: &Host, txn: &Transaction<'_>) -> Result<(), WireError> {
                     }
                     _ => {}
                 }
+            }
+            Mutation::ListConfig {
+                id,
+                overscan,
+                fallback,
+                templates,
+            } => {
+                if o.kind(*id) != Some(NodeKind::List) {
+                    return Err(invalid("list config on a non-list node"));
+                }
+                if !length_ok(*overscan) || !length_ok(*fallback) {
+                    return Err(invalid("list overscan or fallback out of range"));
+                }
+                for t in templates.iter() {
+                    if !length_ok(t.base)
+                        || !length_ok(t.inset)
+                        || !(t.font_size == 0.0 || font_size_ok(t.font_size))
+                    {
+                        return Err(invalid("list template out of range"));
+                    }
+                }
+            }
+            Mutation::ListSplice {
+                id,
+                at,
+                remove,
+                items,
+            } => {
+                if o.kind(*id) != Some(NodeKind::List) {
+                    return Err(invalid("list splice on a non-list node"));
+                }
+                // A list created (or re-created) in this batch starts empty.
+                let cur = match counts.get(id) {
+                    Some(&c) => c,
+                    None if o.kinds.contains_key(id) => 0,
+                    None => host.lists.get(*id).map_or(0, |l| l.len()),
+                };
+                let inserted = (items.len() / ItemDesc::BYTES) as u64;
+                if *at > cur || *remove > cur - at {
+                    return Err(invalid("list splice out of range"));
+                }
+                let next = cur as u64 - *remove as u64 + inserted;
+                if next > MAX_ITEMS as u64 {
+                    return Err(invalid("list longer than the item limit"));
+                }
+                counts.insert(*id, next as u32);
+            }
+            Mutation::ListIndex { id, .. } => {
+                need_live(&o, *id, "list index on an absent node")?;
+            }
+            Mutation::ScrollAnchor { id, .. } => {
+                need_live(&o, *id, "scroll anchor on an absent node")?;
             }
         }
     }
@@ -503,6 +566,48 @@ impl Ui {
                 }
             }
             Mutation::Command { id, cmd } => self.command(NodeId(*id), cmd),
+            Mutation::ListConfig {
+                id,
+                overscan,
+                fallback,
+                templates,
+            } => {
+                self.host
+                    .lists
+                    .configure(*id, *overscan, *fallback, templates);
+                self.host.revs.layout_input.bump();
+                self.host.mark_layout(NodeId(*id));
+            }
+            Mutation::ListSplice {
+                id,
+                at,
+                remove,
+                items,
+            } => {
+                self.host.copied_bytes += items.len() as u64;
+                self.host
+                    .lists
+                    .splice(&mut self.text, *id, *at, *remove, items);
+                self.host.revs.layout_input.bump();
+                self.host.mark_layout(NodeId(*id));
+            }
+            Mutation::ListIndex { id, index } => {
+                let node = NodeId(*id);
+                if self.host.list_index[node.index()] != *index {
+                    self.host.list_index[node.index()] = *index;
+                    self.host.revs.layout_input.bump();
+                    // Invalidation walks up to the list, which places it.
+                    self.host.mark_layout(node);
+                    self.host.dirty.semantic.push(*id);
+                }
+            }
+            Mutation::ScrollAnchor { id, anchor } => {
+                if *anchor == crate::mutation::Anchor::default() {
+                    self.host.lists.policies.remove(id);
+                } else {
+                    self.host.lists.policies.insert(*id, *anchor);
+                }
+            }
         }
     }
 

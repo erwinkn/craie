@@ -243,3 +243,52 @@ fn whole_frame_budgets() {
         );
     }
 }
+
+/// A virtualized list: unchanged frames and scrolls inside the rendered
+/// range allocate nothing (list sync, anchors, and range checks run on
+/// kept buffers).
+#[test]
+fn list_frames_do_not_allocate() {
+    use craie_harness::ListDriver;
+    use craie_ui::host::NodeId;
+    use craie_ui::mutation::ItemDesc;
+    let text = |i: u32| format!("item {i} with some words in it");
+    let mut ui = Ui::new(2.0);
+    let mut d = ListDriver::new(1, 100, 14.0);
+    let mut s = craie_ui::host::default_style();
+    s.size = taffy::Size {
+        width: taffy::Dimension::percent(1.0),
+        height: taffy::Dimension::percent(1.0),
+    };
+    s.overflow.y = taffy::Overflow::Scroll;
+    let mut t = Transaction::new(1);
+    t.create(0, NodeKind::View).layout(0, &s).append(NIL, 0);
+    let items: Vec<ItemDesc> = (0..10_000)
+        .map(|i| ItemDesc {
+            template: 0,
+            text_len: text(i).len() as u32,
+        })
+        .collect();
+    t.create(1, NodeKind::List)
+        .list_config(1, 300.0, 20.0, &[d.template()])
+        .list_splice(1, 0, 0, &items)
+        .append(0, 1);
+    ui.apply_txn(&t).unwrap();
+    d.settle(&mut ui, VIEW, &text, 8);
+    ui.render(VIEW);
+    let n = allocs(|| {
+        ui.render(VIEW);
+    });
+    assert_eq!(n, 0, "unchanged frame with a list");
+    // Warm the scroll path once, then scroll inside the overscan.
+    ui.scroll_to(NodeId(0), 0.0, 10.0);
+    ui.render(VIEW);
+    for k in 2..6 {
+        let n = allocs(|| {
+            ui.scroll_to(NodeId(0), 0.0, 10.0 * k as f32);
+            ui.render(VIEW);
+        });
+        assert_eq!(n, 0, "scroll {k} inside the rendered range");
+    }
+    assert!(ui.take_events().is_empty(), "no range change");
+}

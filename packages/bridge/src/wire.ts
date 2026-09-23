@@ -41,6 +41,29 @@ const enum Op {
   Payload = 0x71,
   // command
   Command = 0x80,
+  // lists
+  ListConfig = 0x90,
+  ListSplice = 0x91,
+  ListIndex = 0x92,
+  ScrollAnchor = 0x93,
+}
+
+/** Scroll anchoring policies — mirror mutation.rs `Anchor`. */
+export const ANCHOR = { "keep-visible": 0, "stick-to-end": 1, none: 2 } as const
+export type ScrollAnchor = keyof typeof ANCHOR
+
+/** A row template for native estimates — mirror mutation.rs
+ * `ItemTemplate`: fixed extent, horizontal insets, wrapping font size. */
+export interface ListTemplate {
+  base?: number
+  inset?: number
+  fontSize?: number
+}
+/** An item's description for native estimates: its template and text
+ * length in characters. */
+export interface ItemDesc {
+  template?: number
+  textLength?: number
 }
 
 // Field mask bits — mirror wire.rs `spatial_field` / `paint_field`.
@@ -93,6 +116,8 @@ export const EVENT_KIND = {
   change: 11,
   submit: 12,
   scroll: 13,
+  /** A list's rendered range: a = first, b = end, x = kept item (-1). */
+  listRange: 14,
 } as const
 
 export const EVENT_MASK = {
@@ -340,7 +365,8 @@ function putStyle(w: Writer, s: StyleProps) {
     putLPA(w, s.maxHeight ?? "auto")
   }
   if (s.padding !== undefined) for (const e of edge4(s.padding, 0)) putLP(w, e)
-  if (s.margin !== undefined) for (const e of edge4(s.margin, "auto" as const)) putLPA(w, e)
+  // Unset margin sides are 0 (CSS and React Native), not auto.
+  if (s.margin !== undefined) for (const e of edge4<LengthPctAuto>(s.margin, 0)) putLPA(w, e)
   if (s.borderWidth !== undefined) for (const e of edge4(s.borderWidth, 0)) putLP(w, e)
   if (hasInset) {
     const base = edge4(s.inset, "auto" as const)
@@ -629,6 +655,45 @@ export class Encoder {
     this.ops.u8(Cmd.ScrollTo)
     this.ops.f32(x)
     this.ops.f32(y)
+  }
+
+  listConfig(id: number, overscan: number, fallback: number, templates: readonly ListTemplate[]) {
+    const b = this.ops
+    b.u8(Op.ListConfig)
+    b.u32(id)
+    b.f32(overscan)
+    b.f32(fallback)
+    b.u16(templates.length)
+    for (const t of templates) {
+      b.f32(t.base ?? 0)
+      b.f32(t.inset ?? 0)
+      b.f32(t.fontSize ?? 0)
+    }
+  }
+  /** Replaces items `at..at + remove` with `items` (6 bytes each). */
+  listSplice(id: number, at: number, remove: number, items: readonly ItemDesc[]) {
+    const b = this.ops
+    b.u8(Op.ListSplice)
+    b.u32(id)
+    b.u32(at)
+    b.u32(remove)
+    b.u32(items.length)
+    b.reserve(items.length * 6)
+    for (const d of items) {
+      b.u16(d.template ?? 0)
+      b.u32(d.textLength ?? 0)
+    }
+  }
+  /** Tags a list row with its item index (NIL clears). */
+  listIndex(id: number, index: number) {
+    this.ops.u8(Op.ListIndex)
+    this.ops.u32(id)
+    this.ops.u32(index)
+  }
+  scrollAnchor(id: number, anchor: ScrollAnchor) {
+    this.ops.u8(Op.ScrollAnchor)
+    this.ops.u32(id)
+    this.ops.u8(ANCHOR[anchor])
   }
 
   /** Seals the transaction and resets every table for the next one. */

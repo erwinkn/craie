@@ -71,6 +71,17 @@ pub fn snapshot(ui: &Ui) -> Transaction<'static> {
                 t.payload(id.0, sd.payload.clone());
             }
         }
+        if let Some(l) = host.lists.get(id.0) {
+            t.list_config(id.0, l.overscan, l.fallback, &l.templates);
+            t.list_splice(id.0, 0, 0, &l.descs);
+        }
+        if host.list_index[id.index()] != NIL {
+            t.list_index(id.0, host.list_index[id.index()]);
+        }
+        let anchor = host.lists.policy(id.0);
+        if anchor != Default::default() {
+            t.scroll_anchor(id.0, anchor);
+        }
     }
     for &root in host.children(ROOT) {
         t.append(NIL, root.0);
@@ -93,6 +104,13 @@ pub fn rebuild(ui: &Ui, viewport: Size) -> Ui {
     let mut clean = Ui::new(ui.scale);
     clean.clear = ui.clear;
     clean.apply_txn(&snapshot(ui)).expect("snapshot must apply");
+    // Lists remember measured rows that are no longer rendered.
+    for i in 0..ui.host.slot_count() {
+        if ui.host.lists.get(i as u32).is_some() {
+            let (width, m) = ui.host.lists.measurements(i as u32);
+            clean.host.lists.restore_measurements(i as u32, width, &m);
+        }
+    }
     clean.render(viewport);
     let mut scrolled = false;
     for i in 0..ui.host.slot_count() {
@@ -685,5 +703,121 @@ impl Gen {
         }
         let id = self.pick(&scrollers);
         Some((NodeId(id), 0.0, self.rng.below(200) as f32))
+    }
+}
+
+/// Plays the React side of a virtualized list: renders a row (a text
+/// node) for every item in the range the list reports, and removes rows
+/// that left it. `text(i)` is item `i`'s text.
+pub struct ListDriver {
+    pub list: u32,
+    /// Rendered rows: item index -> node id.
+    pub rows: BTreeMap<u32, u32>,
+    next_id: u32,
+    free: Vec<u32>,
+    pub font_size: f32,
+    seq: u64,
+}
+
+impl ListDriver {
+    /// A driver for `list`; new row ids start at `first_id`.
+    pub fn new(list: u32, first_id: u32, font_size: f32) -> ListDriver {
+        ListDriver {
+            list,
+            rows: BTreeMap::new(),
+            next_id: first_id,
+            free: Vec::new(),
+            font_size,
+            seq: 1000,
+        }
+    }
+
+    /// The item template matching the rows this driver renders.
+    pub fn template(&self) -> craie_ui::mutation::ItemTemplate {
+        craie_ui::mutation::ItemTemplate {
+            base: 0.0,
+            inset: 0.0,
+            font_size: self.font_size,
+        }
+    }
+
+    /// Renders until the list's range is stable (at most `max` commits).
+    /// Returns the number of commits made.
+    pub fn settle(
+        &mut self,
+        ui: &mut Ui,
+        view: Size,
+        text: &dyn Fn(u32) -> String,
+        max: usize,
+    ) -> usize {
+        ui.render(view);
+        for n in 0..max {
+            if !self.pump(ui, text) {
+                return n;
+            }
+            ui.render(view);
+        }
+        max
+    }
+
+    /// Applies the list's latest range event, if any, as one commit.
+    /// Returns whether it committed.
+    pub fn pump(&mut self, ui: &mut Ui, text: &dyn Fn(u32) -> String) -> bool {
+        let mut want: Option<(u32, u32, i64)> = None;
+        for e in ui.take_events() {
+            if e.kind == craie_ui::events::out_kind::LIST_RANGE && e.node == self.list {
+                want = Some((e.a as u32, e.b as u32, e.x as i64));
+            }
+        }
+        let Some((first, end, keep)) = want else {
+            return false;
+        };
+        let wanted = |i: u32| (first..end).contains(&i) || keep == i as i64;
+        self.seq += 1;
+        let mut t = Transaction::new(self.seq);
+        let gone: Vec<u32> = self.rows.keys().copied().filter(|&i| !wanted(i)).collect();
+        for i in gone {
+            let id = self.rows.remove(&i).unwrap();
+            t.remove(id);
+            self.free.push(id);
+        }
+        let mut items: Vec<u32> = (first..end).collect();
+        if keep >= 0 && !(first..end).contains(&(keep as u32)) {
+            items.push(keep as u32);
+        }
+        for i in items {
+            if self.rows.contains_key(&i) {
+                continue;
+            }
+            let id = self.free.pop().unwrap_or_else(|| {
+                self.next_id += 1;
+                self.next_id - 1
+            });
+            t.create(id, NodeKind::Text)
+                .text(id, text(i), self.font_size, 0xFFFF_FFFF)
+                .list_index(id, i)
+                .append(self.list, id);
+            self.rows.insert(i, id);
+        }
+        ui.apply_txn(&t).expect("list rows apply");
+        true
+    }
+
+    /// Renumbers rendered rows after a splice (as keyed React rows do):
+    /// rows of removed items go; later rows shift by `inserted - removed`.
+    pub fn spliced(&mut self, t: &mut Transaction<'_>, at: u32, removed: u32, inserted: u32) {
+        let old = std::mem::take(&mut self.rows);
+        for (i, id) in old {
+            if i < at {
+                self.rows.insert(i, id);
+            } else if i < at + removed {
+                t.remove(id);
+                self.free.push(id);
+            } else {
+                let j = i + inserted - removed;
+                t.list_index(id, j);
+                self.rows.insert(j, id);
+            }
+        }
     }
 }

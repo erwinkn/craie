@@ -19,7 +19,7 @@ use accesskit::{
 
 use crate::geom::Size;
 use crate::host::{NodeId, ROOT};
-use crate::mutation::{NodeKind, Role as UiRole};
+use crate::mutation::{NIL, NodeKind, Role as UiRole};
 use crate::ui::Ui;
 
 /// The AccessKit role for a Craie role.
@@ -195,8 +195,23 @@ impl Ui {
         {
             an.set_clips_children();
         }
+        // A list row reports its place among all items, rendered or not.
+        let parent = self.host.parent(id);
+        let index = self.host.list_index[id.index()];
+        if index != NIL
+            && let Some(l) = self.host.lists.get(parent.0)
+            && index < l.len()
+        {
+            an.set_position_in_set(index as usize + 1);
+            an.set_size_of_set(l.len() as usize);
+        }
         let mut kids: Vec<A11yId> = Vec::new();
-        for &child in self.host.children(id) {
+        let mut children: Vec<NodeId> = self.host.children(id).to_vec();
+        if kind == NodeKind::List {
+            // Rows in item order, whatever order they were placed in.
+            children.sort_by_key(|c| self.host.list_index[c.index()]);
+        }
+        for child in children {
             if let Some(c) = self.a11y_node(child, out) {
                 kids.push(c);
             }

@@ -1,6 +1,6 @@
 import { test, expect } from "bun:test"
 import { createElement } from "react"
-import { createRoot, View, Text, ScrollView, Pressable, Bars, ROLE } from "../src/index.js"
+import { createRoot, View, Text, ScrollView, Pressable, Bars, List, ROLE } from "../src/index.js"
 import type { Transport, UiEvent } from "../src/host.js"
 import { readFrame } from "./crw2.js"
 
@@ -187,4 +187,67 @@ test("TextInput is uncontrolled: value is initial only", async () => {
   await tick()
   const later = t.frames.flatMap(f => readFrame(f).ops).filter(o => o.tag === 0x80)
   expect(later).toEqual([])
+})
+
+test("List sends config and items, renders the reported range, diffs splices", async () => {
+  const t = new FakeTransport()
+  const root = createRoot(t)
+  type Item = { id: number; text: string }
+  const make = (n: number, from = 0) =>
+    Array.from({ length: n }, (_, i) => ({ id: from + i, text: `item ${from + i}` }))
+  let items: Item[] = make(1000)
+  const App = ({ items }: { items: Item[] }) =>
+    createElement(ScrollView, { anchor: "stick-to-end" },
+      createElement(List<Item>, {
+        items,
+        keyOf: (it) => it.id,
+        describe: (it) => ({ template: 0, textLength: it.text.length }),
+        templates: [{ base: 8, fontSize: 14 }],
+        overscan: 300,
+        initialCount: 5,
+        renderItem: (it) => createElement(Text, null, it.text),
+      }))
+  root.renderSync(createElement(App, { items }))
+  await tick()
+  const ops = t.ops(0)
+  const listId = ops.find(o => o.tag === 0x01 && o.f[0] === 4)!.id
+  const config = ops.find(o => o.tag === 0x90)!
+  expect(config.id).toBe(listId)
+  expect(config.f).toEqual([300, 44, 8, 0, 14])
+  const splice = ops.find(o => o.tag === 0x91)!
+  expect(splice.f.slice(0, 3)).toEqual([0, 0, 1000])
+  expect(splice.f.slice(3, 5)).toEqual([0, "item 0".length])
+  expect(ops.find(o => o.tag === 0x93)!.f).toEqual([1]) // stick-to-end
+  // Initial rows 0..5, each tagged with its item index.
+  expect(ops.filter(o => o.tag === 0x92).map(o => o.f[0])).toEqual([0, 1, 2, 3, 4])
+
+  // Native reports a range: React renders exactly those rows (and the
+  // kept focused item).
+  t.frames.length = 0
+  t.eventCb!({ kind: 14, node: listId, generation: 0, x: 900, y: 0, a: 500, b: 503, key: 0, text: "" })
+  // The commit and React's deletion pass may seal separately: collect
+  // every frame after both ran.
+  for (let i = 0; i < 5; i++) await tick()
+  const all = t.frames.flatMap(f => readFrame(f).ops)
+  const indices = all.filter(o => o.tag === 0x92).map(o => o.f[0])
+  expect(indices).toEqual([500, 501, 502, 900])
+  expect(all.filter(o => o.tag === 0x04).length).toBe(5 * 2) // row views + texts
+
+  // Append two items: one splice at the end, nothing else re-sent.
+  t.frames.length = 0
+  items = [...items, ...make(2, 1000)]
+  root.renderSync(createElement(App, { items }))
+  await tick()
+  const appended = t.ops().filter(o => o.tag === 0x91)
+  expect(appended.length).toBe(1)
+  expect(appended[0]!.f.slice(0, 3)).toEqual([1000, 0, 2])
+  expect(t.ops().filter(o => o.tag === 0x90).length).toBe(0)
+
+  // Prepend three: one splice at 0; rendered rows move to new indices.
+  t.frames.length = 0
+  items = [...make(3, -3), ...items]
+  root.renderSync(createElement(App, { items }))
+  await tick()
+  const pre = t.ops().filter(o => o.tag === 0x91)
+  expect(pre.map(o => o.f.slice(0, 3))).toEqual([[0, 0, 3]])
 })

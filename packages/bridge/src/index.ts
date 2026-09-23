@@ -3,21 +3,32 @@
 //   host.ts:   runApp(bindings, new URL("./app.tsx", import.meta.url))
 //   app.tsx:   const root = attachApp(bindings); root.render(<View ...>...</View>)
 
-import React, { createContext, createElement, type ReactNode } from "react"
+import React, { createContext, createElement, useState, type ReactNode } from "react"
 import ReactReconciler from "react-reconciler"
 import { ConcurrentRoot, DefaultEventPriority } from "react-reconciler/constants.js"
 import { CraieHost, type HostNode, type SurfaceParam, type Transport } from "./host.js"
-import { SURFACE, type AccessibilityRole, type StyleProps } from "./wire.js"
+import {
+  SURFACE,
+  type AccessibilityRole,
+  type ItemDesc,
+  type ListTemplate,
+  type ScrollAnchor,
+  type StyleProps,
+} from "./wire.js"
 
 export { attachApp, decodeEvents, loadBindings, runApp, NativeTransport } from "./native.js"
 export type { Bindings, NativeClientHandle, NativeHostHandle } from "./native.js"
 export {
+  ANCHOR,
   Encoder,
   NIL,
   ROLE,
   SURFACE,
   transformMatrix,
   type AccessibilityRole,
+  type ItemDesc,
+  type ListTemplate,
+  type ScrollAnchor,
   type StyleProps,
   type Transform,
   type TransformStep,
@@ -203,12 +214,77 @@ export function Bars({ values, color, maxColor, gap, ...props }: BarsProps) {
   })
 }
 
-export function ScrollView(props: ViewProps) {
+export interface ScrollViewProps extends ViewProps {
+  /** Scroll anchoring (default "keep-visible"): the top visible list
+   * item keeps its place when extents above it change. "stick-to-end"
+   * also holds the end when the view is already there. */
+  anchor?: ScrollAnchor
+}
+
+export function ScrollView(props: ScrollViewProps) {
   return createElement("view", {
     accessibilityRole: "scrollView",
     ...props,
     style: { overflow: "scroll", ...props.style },
   })
+}
+
+export interface ListProps<T> {
+  /** The items. Treated as immutable: a changed item is a new object. */
+  items: readonly T[]
+  /** Stable key of an item's row. */
+  keyOf: (item: T, index: number) => string | number
+  /** Renders one item's row content. */
+  renderItem: (item: T, index: number) => ReactNode
+  /** An item's description for native estimates: its row template
+   * (index into `templates`) and its text length in characters. Native
+   * computes the estimate; rendered rows replace it with their height. */
+  describe?: (item: T) => ItemDesc
+  /** Row templates: fixed extent, horizontal insets, wrapping font size. */
+  templates?: readonly ListTemplate[]
+  /** Extent of an item without a template (default 44). */
+  estimatedItemSize?: number
+  /** Distance rendered beyond the viewport, each side (default 400). */
+  overscan?: number
+  /** Rows rendered before native reports the first range (default 12). */
+  initialCount?: number
+  style?: StyleProps
+  accessibilityLabel?: string
+}
+
+interface Range {
+  first: number
+  end: number
+  keep: number
+}
+
+/** A virtualized list. Put it inside a ScrollView: native lays out only
+ * the rows in the range it reports (plus a focused row), places them at
+ * their item offsets, and anchors the scroll position. */
+export function List<T>(props: ListProps<T>) {
+  const { items, keyOf, renderItem, initialCount = 12, ...rest } = props
+  const [range, setRange] = useState<Range>(() => ({
+    first: 0,
+    end: Math.min(items.length, initialCount),
+    keep: -1,
+  }))
+  const row = (i: number) =>
+    createElement(
+      "view",
+      { key: keyOf(items[i]!, i), listIndex: i, accessibilityRole: "listItem" },
+      renderItem(items[i]!, i),
+    )
+  const rows: ReactNode[] = []
+  const end = Math.min(range.end, items.length)
+  for (let i = range.first; i < end; i++) rows.push(row(i))
+  if (range.keep >= 0 && range.keep < items.length && (range.keep < range.first || range.keep >= end)) {
+    rows.push(row(range.keep))
+  }
+  return createElement(
+    "list",
+    { accessibilityRole: "list", ...rest, items, onRange: setRange },
+    rows,
+  )
 }
 
 export function TextInput(props: TextInputProps) {

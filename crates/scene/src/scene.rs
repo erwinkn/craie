@@ -65,6 +65,9 @@ pub struct Scene {
     pub scale: f32,
     list: DrawList,
     list_valid: bool,
+    /// Draw-list build scratch (kept: a rebuild allocates nothing).
+    clip_bounds: Vec<Option<Rect>>,
+    open_layers: Vec<(usize, Option<Rect>)>,
     /// (world, clip) revisions the draw list was culled against.
     list_revs: (u64, u64),
     /// Bumped whenever a placement changes (visibility input).
@@ -96,6 +99,8 @@ impl Scene {
             scale: 1.0,
             list: DrawList::default(),
             list_valid: false,
+            clip_bounds: Vec::new(),
+            open_layers: Vec::new(),
             list_revs: (u64::MAX, u64::MAX),
             placement_rev: 0,
             counters: Counters::default(),
@@ -297,14 +302,16 @@ impl Scene {
         let mut visible = std::mem::take(&mut self.list.visible);
         cmds.clear();
         visible.clear();
-        // Clip world bounds, once per clip.
         // Clip world bounds, once per clip. `None` bounds nothing (a clip
         // chain with only open-axis records).
-        let clip_bounds: Vec<Option<Rect>> = (0..self.clips.len() as u32)
-            .map(|i| self.clips.world_bounds(&self.transforms, i))
-            .collect();
+        let mut clip_bounds = std::mem::take(&mut self.clip_bounds);
+        clip_bounds.clear();
+        clip_bounds.extend(
+            (0..self.clips.len() as u32).map(|i| self.clips.world_bounds(&self.transforms, i)),
+        );
         // Open layers: (cmd index of BeginLayer, accumulated bounds).
-        let mut layers: Vec<(usize, Option<Rect>)> = Vec::new();
+        let mut layers = std::mem::take(&mut self.open_layers);
+        layers.clear();
         let mut skip_depth = 0usize;
         for item in &self.order {
             match *item {
@@ -404,6 +411,8 @@ impl Scene {
             }
         }
         debug_assert!(layers.is_empty(), "unbalanced layer order");
+        self.clip_bounds = clip_bounds;
+        self.open_layers = layers;
         self.list.cmds = cmds;
         self.list.visible = visible;
         self.list.viewport = viewport;

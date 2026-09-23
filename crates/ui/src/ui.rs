@@ -61,7 +61,7 @@ pub struct Ui {
     /// Revisions at the last completed paint.
     painted: Option<Revs>,
     /// Viewport of the last layout pass; a change relayouts.
-    laid_out: Option<Size>,
+    pub(crate) laid_out: Option<Size>,
     /// A layout pass ran since the last paint: geometry must resync.
     relayout: bool,
     /// Scene-side bookkeeping (spaces, records, scratch).
@@ -417,6 +417,7 @@ impl Ui {
     /// still gate on `needs_paint`.
     pub fn render(&mut self, size: Size) -> &Scene {
         self.layout(size);
+        self.sync_lists(size);
         self.paint(size);
         &self.scene
     }
@@ -463,6 +464,8 @@ impl Ui {
             total.0 += c;
             total.1 += r;
         }
+        // Anchored scrollers first; explicit scroll commands win.
+        self.restore_anchors();
         self.apply_pending_scrolls();
         // Content that shrank below a scroll offset pulls the offset back
         // into range, as browsers do.

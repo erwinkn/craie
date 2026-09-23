@@ -29,8 +29,8 @@ fn js_fixture_decodes_and_executes() {
     assert_eq!(ui.apply(&buf).unwrap(), 99);
     let host = &ui.host;
 
-    // The fixture ends with remove(1): view + input + surface remain.
-    assert_eq!(host.len(), 3);
+    // remove(1): view + input + surface + list + row remain.
+    assert_eq!(host.len(), 5);
     assert_eq!(host.kind(NodeId(0)), Some(NodeKind::View));
     let paint = host.paint[0];
     assert_eq!(paint.fill, 0x1122_33ff);
@@ -94,5 +94,17 @@ fn js_fixture_decodes_and_executes() {
     // Labels: set, then cleared.
     assert_eq!(host.label(NodeId(0)), Some("root container"));
     assert_eq!(host.label(NodeId(3)), None);
-    assert_eq!(host.children(NodeId(0)), [NodeId(3), NodeId(2)]);
+    assert_eq!(host.children(NodeId(0)), [NodeId(3), NodeId(2), NodeId(4)]);
+
+    // List: templates, items after two splices, a row, an anchor.
+    let l = host.lists.get(4).unwrap();
+    assert_eq!((l.overscan, l.fallback), (250.0, 36.0));
+    assert_eq!(l.templates[0].inset, 16.0);
+    assert_eq!(l.templates[1].base, 48.0);
+    assert_eq!(l.templates[1].font_size, 0.0);
+    assert_eq!(l.len(), 2);
+    assert_eq!(l.descs[0].text_len, 42);
+    assert_eq!(l.descs[1].text_len, 70_000);
+    assert_eq!(host.list_index[5], 1);
+    assert_eq!(host.lists.policy(0), craie_ui::mutation::Anchor::StickToEnd);
 }

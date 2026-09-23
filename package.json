@@ -7,6 +7,7 @@
     "dev:demo": "pnpm build:native && pnpm --dir examples/js build && node examples/js/dist/host.mjs",
     "dev:todo": "pnpm build:native && pnpm --dir examples/todo build && node examples/todo/dist/host.mjs",
     "dev:widgets": "pnpm build:native && pnpm --dir examples/widgets build && node examples/widgets/dist/host.mjs",
+    "dev:list": "pnpm build:native && pnpm --dir examples/list build && node examples/list/dist/host.mjs",
     "smoke": "pnpm build:native && pnpm --dir examples/js build && node examples/js/dist/smoke.mjs"
   }
 }

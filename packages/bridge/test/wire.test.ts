@@ -73,6 +73,26 @@ test("style op carries a presence mask and positional fields", () => {
   expect(dv.getFloat32(at, true)).toBe(2)
 })
 
+test("unset margin sides are zero; unset inset sides are auto", () => {
+  const enc = new Encoder()
+  enc.layout(0, { margin: { left: 48 }, inset: { top: 4 } })
+  const buf = enc.finish(1n)
+  const dv = new DataView(buf.buffer, buf.byteOffset, buf.byteLength)
+  let at = 28
+  const mask = dv.getBigUint64(at, true); at += 8
+  expect(mask).toBe((1n << 13n) | (1n << 15n))
+  // margin [left, right, top, bottom]: length 48, then three zeros.
+  expect(buf[at++]).toBe(0); expect(dv.getFloat32(at, true)).toBe(48); at += 4
+  for (let i = 0; i < 3; i++) {
+    expect(buf[at++]).toBe(0); expect(dv.getFloat32(at, true)).toBe(0); at += 4
+  }
+  // inset: left auto, right auto, top 4, bottom auto.
+  expect(buf[at++]).toBe(2)
+  expect(buf[at++]).toBe(2)
+  expect(buf[at++]).toBe(0); expect(dv.getFloat32(at, true)).toBe(4); at += 4
+  expect(buf[at++]).toBe(2)
+})
+
 test("transform lists fold like CSS", () => {
   const m = transformMatrix([{ translateX: 10 }, { scale: 2 }])
   // Scale applies first, then the translation.

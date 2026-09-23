@@ -80,6 +80,20 @@ export function readFrame(buf: Uint8Array): Frame {
         else if (c === 3) op.f.push(f32(), f32())
         break
       }
+      case 0x90: { // list config: overscan, fallback, templates
+        op.f.push(f32(), f32())
+        const n = u16()
+        for (let i = 0; i < n; i++) op.f.push(f32(), f32(), f32())
+        break
+      }
+      case 0x91: { // list splice: at, remove, count, descs
+        op.f.push(u32(), u32())
+        const n = u32(); op.f.push(n)
+        for (let i = 0; i < n; i++) op.f.push(u16(), u32())
+        break
+      }
+      case 0x92: op.f.push(u32()); break // list index
+      case 0x93: op.f.push(u8()); break // scroll anchor
       default: throw Error(`unknown op 0x${tag.toString(16)}`)
     }
     ops.push(op)

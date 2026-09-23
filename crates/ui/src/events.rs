@@ -137,6 +137,10 @@ pub mod out_kind {
     pub const SUBMIT: u8 = 12;
     /// A scrollable node's offset changed natively; x/y = offset.
     pub const SCROLL: u8 = 13;
+    /// A list's rendered range changed (always sent): a = first item,
+    /// b = end (exclusive), x = the item kept rendered for focus (-1:
+    /// none).
+    pub const LIST_RANGE: u8 = 14;
 }
 
 /// One event bound for JS: which node, what, pointer position (logical),

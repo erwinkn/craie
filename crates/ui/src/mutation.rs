@@ -9,7 +9,8 @@
 //! layout inputs), spatial (transform, opacity), paint (fill, border,
 //! radius), text (paragraph spans, input configuration), semantics
 //! (role, label), interaction (listener mask, focusable), payload
-//! (surface kind and bytes), command (focus, blur, set text, scroll).
+//! (surface kind and bytes), command (focus, blur, set text, scroll),
+//! list (templates, item splices, row indices, scroll anchoring).
 //!
 //! Layout styles and text spans travel in per-transaction tables:
 //! mutations refer to them by index, and the tables die with the
@@ -38,6 +39,9 @@ pub enum NodeKind {
     Input = 2,
     /// A native drawing surface fed by payload bytes.
     Surface = 3,
+    /// A virtualized list inside a scroll container: it owns its item
+    /// count and extents and lays out only its rendered rows.
+    List = 4,
 }
 
 impl NodeKind {
@@ -47,6 +51,7 @@ impl NodeKind {
             1 => NodeKind::Text,
             2 => NodeKind::Input,
             3 => NodeKind::Surface,
+            4 => NodeKind::List,
             _ => return None,
         })
     }
@@ -135,6 +140,73 @@ impl TextSpan {
             && self.font_size == other.font_size
             && self.weight == other.weight
             && self.italic == other.italic
+    }
+}
+
+/// A row template: what an item's native estimate is made of besides
+/// its text (ARCHITECTURE.md §7).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ItemTemplate {
+    /// Fixed extent: padding, headers, gaps (logical points).
+    pub base: f32,
+    /// Horizontal insets subtracted from the list width before wrapping.
+    pub inset: f32,
+    /// Font size of the item's wrapping text; 0 = no text.
+    pub font_size: f32,
+}
+
+/// One item description: its template and its text length in chars.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ItemDesc {
+    pub template: u16,
+    pub text_len: u32,
+}
+
+impl ItemDesc {
+    /// Wire size of one description (template u16, text length u32).
+    pub const BYTES: usize = 6;
+
+    /// Decodes packed descriptions (`BYTES` each, little endian).
+    pub fn iter(bytes: &[u8]) -> impl Iterator<Item = ItemDesc> + '_ {
+        bytes.chunks_exact(Self::BYTES).map(|c| ItemDesc {
+            template: u16::from_le_bytes([c[0], c[1]]),
+            text_len: u32::from_le_bytes([c[2], c[3], c[4], c[5]]),
+        })
+    }
+
+    /// Packs descriptions for a splice.
+    pub fn pack(items: &[ItemDesc]) -> Vec<u8> {
+        let mut out = Vec::with_capacity(items.len() * Self::BYTES);
+        for d in items {
+            out.extend_from_slice(&d.template.to_le_bytes());
+            out.extend_from_slice(&d.text_len.to_le_bytes());
+        }
+        out
+    }
+}
+
+/// Scroll anchoring policy of a scroll container (§7).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[repr(u8)]
+pub enum Anchor {
+    /// The top visible list item keeps its place when extents above it
+    /// change.
+    #[default]
+    KeepVisible = 0,
+    /// A scroller at its end stays at its end.
+    StickToEnd = 1,
+    /// No anchoring.
+    None = 2,
+}
+
+impl Anchor {
+    pub fn from_u8(v: u8) -> Option<Anchor> {
+        Some(match v {
+            0 => Anchor::KeepVisible,
+            1 => Anchor::StickToEnd,
+            2 => Anchor::None,
+            _ => return None,
+        })
     }
 }
 
@@ -234,6 +306,32 @@ pub enum Mutation<'a> {
         id: u32,
         cmd: Command<'a>,
     },
+    // lists
+    /// Overscan and fallback extent (logical points) and row templates.
+    ListConfig {
+        id: u32,
+        overscan: f32,
+        fallback: f32,
+        templates: Cow<'a, [ItemTemplate]>,
+    },
+    /// Replaces items `at..at + remove` with packed descriptions
+    /// (`ItemDesc::BYTES` each).
+    ListSplice {
+        id: u32,
+        at: u32,
+        remove: u32,
+        items: Cow<'a, [u8]>,
+    },
+    /// Tags row `id` (a child of a list) with its item index; NIL clears.
+    ListIndex {
+        id: u32,
+        index: u32,
+    },
+    /// Anchoring policy of scroll container `id`.
+    ScrollAnchor {
+        id: u32,
+        anchor: Anchor,
+    },
 }
 
 impl Mutation<'_> {
@@ -253,7 +351,11 @@ impl Mutation<'_> {
             | Mutation::Interaction { id, .. }
             | Mutation::Surface { id, .. }
             | Mutation::Payload { id, .. }
-            | Mutation::Command { id, .. } => id,
+            | Mutation::Command { id, .. }
+            | Mutation::ListConfig { id, .. }
+            | Mutation::ListSplice { id, .. }
+            | Mutation::ListIndex { id, .. }
+            | Mutation::ScrollAnchor { id, .. } => id,
             Mutation::Place { child, .. } => child,
         }
     }
@@ -465,5 +567,37 @@ impl<'a> Transaction<'a> {
 
     pub fn command(&mut self, id: u32, cmd: Command<'a>) -> &mut Self {
         self.push(Mutation::Command { id, cmd })
+    }
+
+    pub fn list_config(
+        &mut self,
+        id: u32,
+        overscan: f32,
+        fallback: f32,
+        templates: &[ItemTemplate],
+    ) -> &mut Self {
+        self.push(Mutation::ListConfig {
+            id,
+            overscan,
+            fallback,
+            templates: templates.to_vec().into(),
+        })
+    }
+
+    pub fn list_splice(&mut self, id: u32, at: u32, remove: u32, items: &[ItemDesc]) -> &mut Self {
+        self.push(Mutation::ListSplice {
+            id,
+            at,
+            remove,
+            items: ItemDesc::pack(items).into(),
+        })
+    }
+
+    pub fn list_index(&mut self, id: u32, index: u32) -> &mut Self {
+        self.push(Mutation::ListIndex { id, index })
+    }
+
+    pub fn scroll_anchor(&mut self, id: u32, anchor: Anchor) -> &mut Self {
+        self.push(Mutation::ScrollAnchor { id, anchor })
     }
 }

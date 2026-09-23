@@ -19,6 +19,7 @@ export {
   Text,
   TextInput,
   ScrollView,
+  List,
   Surface,
   Bars,
   createRoot,
@@ -29,8 +30,14 @@ export {
   NIL,
   ROLE,
   SURFACE,
+  ANCHOR,
 } from "@craie/bridge"
 export type {
+  ListProps,
+  ScrollViewProps,
+  ListTemplate,
+  ItemDesc,
+  ScrollAnchor,
   ViewProps,
   PressableProps,
   TextProps,

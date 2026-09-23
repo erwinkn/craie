@@ -14,11 +14,12 @@
 //! Taffy features are restricted to `flexbox`; block/grid/float/calc are
 //! compiled out until Craie needs them.
 
+use taffy::util::ResolveOrZero;
 use taffy::{
     AvailableSpace, Cache, CacheTree, Layout, LayoutFlexboxContainer, LayoutInput, LayoutOutput,
-    LayoutPartialTree, NodeId as TaffyId, RoundTree, RunMode, Size as TSize, Style,
-    TraversePartialTree, TraverseTree, compute_cached_layout, compute_flexbox_layout,
-    compute_hidden_layout, compute_leaf_layout, compute_root_layout,
+    LayoutPartialTree, Line, NodeId as TaffyId, Point, RequestedAxis, RoundTree, RunMode,
+    Size as TSize, SizingMode, Style, TraversePartialTree, TraverseTree, compute_cached_layout,
+    compute_flexbox_layout, compute_hidden_layout, compute_leaf_layout, compute_root_layout,
 };
 
 use crate::geom::{Rect, Size};
@@ -321,6 +322,160 @@ impl TreeView<'_> {
     }
 }
 
+/// Resolves nothing through `calc` (the feature is compiled out).
+fn no_calc(_: *const (), _: f32) -> f32 {
+    0.0
+}
+
+/// Virtualized lists (§7): a list is a leaf to its parent whose content
+/// is its rendered rows, each laid out at the list's content width and
+/// placed at its item's offset. Only rendered rows are visited.
+impl TreeView<'_> {
+    fn list_layout(
+        &mut self,
+        node_id: TaffyId,
+        inputs: LayoutInput,
+        style: &Style,
+    ) -> LayoutOutput {
+        let id = from_taffy(node_id);
+        let commit = inputs.run_mode == RunMode::PerformLayout;
+        let parent_w = inputs.parent_size.width;
+        let inset = style.padding.resolve_or_zero(parent_w, no_calc)
+            + style.border.resolve_or_zero(parent_w, no_calc);
+        compute_leaf_layout(inputs, style, no_calc, |known, available| {
+            let width = known.width.or(match available.width {
+                AvailableSpace::Definite(w) => Some(w),
+                _ => None,
+            });
+            match width {
+                Some(w) => TSize {
+                    width: w,
+                    height: self.list_rows(id, w, commit, [inset.left, inset.top]),
+                },
+                // An intrinsic-size probe: no width to wrap rows at.
+                None => TSize {
+                    width: 0.0,
+                    height: self.host.lists.get(id.0).map_or(0.0, |l| l.extents.total()),
+                },
+            }
+        })
+    }
+
+    /// Lays out list `id`'s rendered rows at content width `w` and
+    /// returns the list's content height. With `commit` (final layout)
+    /// the rows' heights become measurements and each row is placed at
+    /// `origin` + its item offset; otherwise nothing is recorded.
+    fn list_rows(&mut self, id: NodeId, w: f32, commit: bool, origin: [f32; 2]) -> f32 {
+        let count = self.host.lists.get(id.0).map_or(0, |l| l.len());
+        if commit {
+            self.host.lists.estimate(self.text, id.0, w);
+        }
+        // (row, index, extent, margin, overflow); a row with no index,
+        // one past the end, or a duplicate index is hidden.
+        type Row = (NodeId, u32, f32, taffy::Rect<f32>, taffy::Rect<f32>);
+        let mut rows: Vec<Row> = Vec::new();
+        let mut hidden: Vec<NodeId> = Vec::new();
+        let children: Vec<NodeId> = self.host.children(id).to_vec();
+        for row in children {
+            let index = self.host.list_index[row.index()];
+            let hidden_style = self.style_of(row).display == taffy::Display::None;
+            if index >= count || hidden_style || rows.iter().any(|r| r.1 == index) {
+                hidden.push(row);
+                continue;
+            }
+            let margin = self.style_of(row).margin.resolve_or_zero(Some(w), no_calc);
+            let rw = (w - margin.left - margin.right).max(0.0);
+            // A row at the row width, its height from its content.
+            let out = self.compute_child_layout(
+                to_taffy(row),
+                LayoutInput {
+                    run_mode: if commit {
+                        RunMode::PerformLayout
+                    } else {
+                        RunMode::ComputeSize
+                    },
+                    sizing_mode: SizingMode::InherentSize,
+                    axis: if commit {
+                        RequestedAxis::Both
+                    } else {
+                        RequestedAxis::Vertical
+                    },
+                    known_dimensions: TSize {
+                        width: Some(rw),
+                        height: None,
+                    },
+                    known_dimensions_are_definite: TSize {
+                        width: true,
+                        height: true,
+                    },
+                    parent_size: TSize {
+                        width: Some(w),
+                        height: None,
+                    },
+                    available_space: TSize {
+                        width: AvailableSpace::Definite(rw),
+                        height: AvailableSpace::MaxContent,
+                    },
+                    vertical_margins_are_collapsible: Line::FALSE,
+                },
+            );
+            let (height, overflow) = (out.size.height, out.scrollable_overflow_rect);
+            rows.push((
+                row,
+                index,
+                height + margin.top + margin.bottom,
+                margin,
+                overflow,
+            ));
+        }
+        if !commit {
+            let measured: Vec<(u32, f32)> = rows.iter().map(|r| (r.1, r.2)).collect();
+            return self.host.lists.total_at(self.text, id.0, w, &measured);
+        }
+        let Some(list) = self.host.lists.map.get_mut(&id.0) else {
+            return 0.0;
+        };
+        for r in &rows {
+            list.extents.measure(r.1 as usize, r.2);
+        }
+        let offsets: Vec<f32> = rows
+            .iter()
+            .map(|r| list.extents.offset(r.1 as usize))
+            .collect();
+        let total = list.extents.total();
+        for (k, (r, y)) in rows.iter().zip(offsets).enumerate() {
+            let (row, _, extent, margin, overflow) = *r;
+            let st = self.style_of(row);
+            let padding = st.padding.resolve_or_zero(Some(w), no_calc);
+            let border = st.border.resolve_or_zero(Some(w), no_calc);
+            let size = TSize {
+                width: (w - margin.left - margin.right).max(0.0),
+                height: extent - margin.top - margin.bottom,
+            };
+            self.set_unrounded_layout(
+                to_taffy(row),
+                &Layout {
+                    order: k as u32,
+                    location: Point {
+                        x: origin[0] + margin.left,
+                        y: origin[1] + y + margin.top,
+                    },
+                    size,
+                    scrollable_overflow_rect: overflow,
+                    scrollbar_size: TSize::ZERO,
+                    border,
+                    padding,
+                    margin,
+                },
+            );
+        }
+        for row in hidden {
+            compute_hidden_layout(self, to_taffy(row));
+        }
+        total
+    }
+}
+
 impl TraversePartialTree for TreeView<'_> {
     type ChildIter<'a>
         = std::iter::Map<std::iter::Copied<std::slice::Iter<'a, NodeId>>, fn(NodeId) -> TaffyId>
@@ -378,6 +533,9 @@ impl LayoutPartialTree for TreeView<'_> {
             let style = tree.style_of(id).clone();
             if hidden || style.display == taffy::Display::None {
                 return compute_hidden_layout(tree, node_id);
+            }
+            if tree.host.kind(id) == Some(NodeKind::List) {
+                return tree.list_layout(node_id, inputs, &style);
             }
             if tree.host.child_count(id) > 0 {
                 // Every container is flex for now.

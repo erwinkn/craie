@@ -12,11 +12,12 @@
 //! paint[]        fill, border, radius
 //! paragraphs[]   UTF-8 text + style span list (text nodes)
 //! interaction[]  listener mask, focusable, role
+//! list_index[]   item index of a list row
 //! ```
 //!
 //! Children are a `Span` into one capacity-classed pool, so a leaf pays
-//! nothing for children. Truly sparse facts (labels, surface payloads)
-//! live in id-keyed maps.
+//! nothing for children. Truly sparse facts (labels, surface payloads,
+//! list states) live in id-keyed maps.
 //!
 //! Every mutation advances the revisions it can invalidate and queues the
 //! dirty work it creates. Queues schedule work; revisions prove validity.
@@ -29,7 +30,7 @@ use craie_core::rev::Rev;
 use craie_core::span::{Span, SpanPool};
 use taffy::Style;
 
-use crate::mutation::{NodeKind, Role, TextSpan};
+use crate::mutation::{NIL, NodeKind, Role, TextSpan};
 
 /// Stable node identity, assigned by the React side of the bridge and
 /// recycled there immediately after removal. Natively a `NodeId` is a
@@ -256,6 +257,10 @@ pub struct Host {
     pub interaction: Vec<Interaction>,
     pub labels: HashMap<u32, Box<str>>,
     pub surfaces: HashMap<u32, SurfaceData>,
+    /// Item index of a list row (a child of a List node); NIL otherwise.
+    pub list_index: Vec<u32>,
+    /// List states and scroll anchors (§7).
+    pub lists: crate::list::Lists,
     pub revs: Revs,
     pub dirty: DirtyQueues,
     /// Bytes copied from transactions into host stores: paragraph text
@@ -283,6 +288,8 @@ impl Host {
             interaction: Vec::new(),
             labels: HashMap::new(),
             surfaces: HashMap::new(),
+            list_index: Vec::new(),
+            lists: crate::list::Lists::default(),
             revs: Revs::default(),
             dirty: DirtyQueues::default(),
             copied_bytes: 0,
@@ -368,6 +375,7 @@ impl Host {
             self.paint.resize(n, BoxPaint::default());
             self.paragraphs.resize_with(n, Paragraph::default);
             self.interaction.resize(n, Interaction::default());
+            self.list_index.resize(n, NIL);
         }
     }
 
@@ -400,6 +408,8 @@ impl Host {
         self.interaction[i] = Interaction::default();
         self.labels.remove(&id.0);
         self.surfaces.remove(&id.0);
+        self.list_index[i] = NIL;
+        self.lists.forget(id.0);
         if kind == NodeKind::Surface {
             self.surfaces.insert(id.0, SurfaceData::default());
         }
@@ -492,6 +502,8 @@ impl Host {
         p.spans = Vec::new();
         self.labels.remove(&id.0);
         self.surfaces.remove(&id.0);
+        self.list_index[i] = NIL;
+        self.lists.forget(id.0);
         let generation = self.nodes[i].generation.wrapping_add(1);
         self.nodes[i] = NodeHeader {
             generation,

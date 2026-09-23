@@ -723,6 +723,34 @@ fn wire_roundtrip_is_exact() {
         .command(0, Command::ScrollTo(1.0, 2.0))
         .command(2, Command::Focus)
         .command(2, Command::Blur)
+        .create(4, NodeKind::List)
+        .list_config(
+            4,
+            120.0,
+            32.0,
+            &[crate::mutation::ItemTemplate {
+                base: 12.0,
+                inset: 16.0,
+                font_size: 14.0,
+            }],
+        )
+        .list_splice(
+            4,
+            0,
+            0,
+            &[
+                crate::mutation::ItemDesc {
+                    template: 0,
+                    text_len: 42,
+                },
+                crate::mutation::ItemDesc {
+                    template: 3,
+                    text_len: 70_000,
+                },
+            ],
+        )
+        .list_index(1, 1)
+        .scroll_anchor(0, crate::mutation::Anchor::StickToEnd)
         .detach(2)
         .remove(3);
     let buf = wire::encode(&t);
@@ -1639,4 +1667,71 @@ fn oversized_glyph_renders() {
     let mut t = Transaction::new(4);
     t.text(1, "W", crate::executor::MAX_FONT_SIZE * 2.0, 0xFFFF_FFFF);
     assert!(ui.apply_txn(&t).is_err(), "font size past the bound");
+}
+
+/// List ops validate against the list's item count as the batch leaves
+/// it; any failure rejects the whole transaction.
+#[test]
+fn list_ops_validate_atomically() {
+    use crate::mutation::{Anchor, ItemDesc};
+    let item = ItemDesc {
+        template: 0,
+        text_len: 5,
+    };
+    let mut ui = Ui::new(1.0);
+    let mut t = Transaction::new(1);
+    t.create(0, NodeKind::View).append(NIL, 0);
+    t.create(1, NodeKind::List)
+        .list_splice(1, 0, 0, &[item; 3])
+        // Within the batch: 3 items, so removing 3 at 0 is valid.
+        .list_splice(1, 0, 3, &[item; 2])
+        .append(0, 1);
+    ui.apply_txn(&t).unwrap();
+    assert_eq!(ui.host.lists.get(1).unwrap().len(), 2);
+    let seq = ui.seq;
+    let bad: [(&str, fn(&mut Transaction)); 6] = [
+        // The valid first op leaves 3 items.
+        ("splice past the end", |t| {
+            t.list_splice(1, 4, 0, &[]);
+        }),
+        ("remove past the end", |t| {
+            t.list_splice(1, 1, 3, &[]);
+        }),
+        ("splice on a view", |t| {
+            t.list_splice(0, 0, 0, &[]);
+        }),
+        ("config on a view", |t| {
+            t.list_config(0, 0.0, 0.0, &[]);
+        }),
+        ("negative overscan", |t| {
+            t.list_config(1, -1.0, 0.0, &[]);
+        }),
+        ("huge template font", |t| {
+            t.list_config(
+                1,
+                0.0,
+                0.0,
+                &[crate::mutation::ItemTemplate {
+                    base: 0.0,
+                    inset: 0.0,
+                    font_size: 1.0e9,
+                }],
+            );
+        }),
+    ];
+    for (what, f) in bad {
+        let mut t = Transaction::new(seq + 1);
+        // A valid op first: it must not apply either.
+        t.list_splice(1, 2, 0, &[item]);
+        f(&mut t);
+        assert!(ui.apply_txn(&t).is_err(), "{what}");
+        assert_eq!(ui.host.lists.get(1).unwrap().len(), 2, "{what}: atomic");
+        assert_eq!(ui.seq, seq, "{what}");
+    }
+    // An unknown anchor policy byte rejects in the decoder.
+    let mut t = Transaction::new(9);
+    t.scroll_anchor(0, Anchor::None);
+    let mut buf = wire::encode(&t);
+    *buf.last_mut().unwrap() = 7;
+    assert!(wire::decode(&buf).is_err());
 }
