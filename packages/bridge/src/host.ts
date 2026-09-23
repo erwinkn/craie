@@ -6,6 +6,7 @@
 // generation, so an event for a previous occupant of an id is dropped.
 
 import {
+  DECORATION,
   Encoder,
   EVENT_KIND,
   EVENT_MASK,
@@ -114,7 +115,14 @@ function textOf(props: Record<string, any>): string {
 }
 
 /** Span zero of a text node: the base style. */
-function baseSpan(props: Record<string, any>): TextSpanIn {
+function decorationOf(line: unknown): number {
+  if (typeof line !== "string") return 0
+  return (line.includes("underline") ? DECORATION.underline : 0) |
+    (line.includes("line-through") ? DECORATION.lineThrough : 0)
+}
+
+/** The span a Text's own props describe (its base style). */
+export function spanStyle(props: Record<string, any>): TextSpanIn {
   return {
     start: 0,
     fontSize: props.fontSize ?? 14,
@@ -123,12 +131,22 @@ function baseSpan(props: Record<string, any>): TextSpanIn {
       ? props.fontWeight
       : props.fontWeight === "bold" ? 700 : 400,
     italic: props.fontStyle === "italic",
+    fontFamily: props.fontFamily,
+    decoration: decorationOf(props.textDecorationLine),
+    letterSpacing: props.letterSpacing ?? 0,
+    lineHeight: props.lineHeight ?? 0,
   }
+}
+
+function baseSpan(props: Record<string, any>): TextSpanIn {
+  return spanStyle(props)
 }
 
 function sameSpan(a: TextSpanIn, b: TextSpanIn): boolean {
   return a.fontSize === b.fontSize && a.color === b.color &&
-    a.weight === b.weight && !!a.italic === !!b.italic
+    a.weight === b.weight && !!a.italic === !!b.italic &&
+    a.fontFamily === b.fontFamily && (a.decoration ?? 0) === (b.decoration ?? 0) &&
+    (a.letterSpacing ?? 0) === (b.letterSpacing ?? 0) && (a.lineHeight ?? 0) === (b.lineHeight ?? 0)
 }
 
 // Listener prop name -> mask bit; emit INTERACTION when the mask changes.

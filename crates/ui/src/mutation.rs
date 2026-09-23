@@ -119,6 +119,17 @@ pub struct TextSpan {
     /// CSS weight, 100..=900.
     pub weight: u16,
     pub italic: bool,
+    /// Decoration flags (`craie_text::decoration`): underline,
+    /// line-through. Paint, not metrics.
+    pub decoration: u8,
+    /// Added to each cluster's advance, logical points.
+    pub letter_spacing: f32,
+    /// Absolute line height, logical points; 0: the font's. Span zero's
+    /// applies to the whole paragraph.
+    pub line_height: f32,
+    /// Font family: an index into the transaction's `families` (in the
+    /// host, into its family table); `NIL`: the default family.
+    pub family: u32,
 }
 
 impl Default for TextSpan {
@@ -129,6 +140,10 @@ impl Default for TextSpan {
             color: 0xFFFF_FFFF,
             weight: 400,
             italic: false,
+            decoration: 0,
+            letter_spacing: 0.0,
+            line_height: 0.0,
+            family: NIL,
         }
     }
 }
@@ -140,6 +155,9 @@ impl TextSpan {
             && self.font_size == other.font_size
             && self.weight == other.weight
             && self.italic == other.italic
+            && self.family == other.family
+            && self.letter_spacing.to_bits() == other.letter_spacing.to_bits()
+            && self.line_height.to_bits() == other.line_height.to_bits()
     }
 }
 
@@ -384,11 +402,15 @@ pub struct Transaction<'a> {
     pub seq: u64,
     pub styles: Vec<Style>,
     pub spans: Vec<TextSpan>,
+    /// Font family names spans refer to (`TextSpan::family`).
+    pub families: Vec<Cow<'a, str>>,
     pub mutations: Vec<Mutation<'a>>,
     /// Style interning by encoded bytes (builder only).
     style_ix: HashMap<Vec<u8>, u32>,
     /// Span-list interning by content (builder only).
     span_ix: HashMap<Vec<u32>, Range<u32>>,
+    /// Family interning by name (builder only).
+    family_ix: HashMap<String, u32>,
 }
 
 /// Direct-API builder methods. They produce exactly what the decoder
@@ -494,8 +516,16 @@ impl<'a> Transaction<'a> {
         let key: Vec<u32> = spans
             .iter()
             .flat_map(|s| {
-                let style = s.weight as u32 | (s.italic as u32) << 16;
-                [s.start, s.font_size.to_bits(), s.color, style]
+                let style = s.weight as u32 | (s.italic as u32) << 16 | (s.decoration as u32) << 24;
+                [
+                    s.start,
+                    s.font_size.to_bits(),
+                    s.color,
+                    style,
+                    s.letter_spacing.to_bits(),
+                    s.line_height.to_bits(),
+                    s.family,
+                ]
             })
             .collect();
         let range = match self.span_ix.get(&key) {
@@ -513,6 +543,18 @@ impl<'a> Transaction<'a> {
             text: text.into(),
             spans: range,
         })
+    }
+
+    /// Interns a font family name for `TextSpan::family`.
+    pub fn family(&mut self, name: impl Into<Cow<'a, str>>) -> u32 {
+        let name = name.into();
+        if let Some(&i) = self.family_ix.get(name.as_ref()) {
+            return i;
+        }
+        let i = self.families.len() as u32;
+        self.family_ix.insert(name.to_string(), i);
+        self.families.push(name);
+        i
     }
 
     /// A single-style paragraph.

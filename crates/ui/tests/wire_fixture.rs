@@ -24,6 +24,13 @@ fn js_fixture_decodes_and_executes() {
     // the paragraph's two spans.
     assert_eq!(txn.styles.len(), 1);
     assert_eq!(txn.spans.len(), 2);
+    // Span fields: span zero's line height; span one's family (through
+    // the string table), both decorations, letter spacing, weight, italic.
+    let (s0, s1) = (txn.spans[0], txn.spans[1]);
+    assert_eq!((s0.line_height, s0.family), (24.0, craie_ui::mutation::NIL));
+    assert_eq!(txn.families[s1.family as usize], "monospace");
+    assert_eq!((s1.decoration, s1.letter_spacing), (3, 0.5));
+    assert_eq!((s1.weight, s1.italic), (700, true));
 
     let mut ui = Ui::new(1.0);
     assert_eq!(ui.apply(&buf).unwrap(), 99);

@@ -107,6 +107,15 @@ export interface TextProps {
   color?: string | number
   fontWeight?: number | "normal" | "bold"
   fontStyle?: "normal" | "italic"
+  /** Family name or generic (`"monospace"`, `"serif"`); the default is
+   * `system-ui`. */
+  fontFamily?: string
+  textDecorationLine?: "none" | "underline" | "line-through" | "underline line-through"
+  /** Added to each character's advance, logical points. */
+  letterSpacing?: number
+  /** Absolute line height, logical points (per paragraph: the outermost
+   * Text's). */
+  lineHeight?: number
   /** Accessibility name; defaults to the text content. */
   accessibilityLabel?: string
   accessibilityRole?: AccessibilityRole

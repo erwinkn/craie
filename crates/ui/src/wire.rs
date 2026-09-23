@@ -7,8 +7,9 @@
 //! string_count u32 | style_count u32 | span_count u32
 //! strings: string_count × (u32 byte_len + utf8 bytes)
 //! styles:  style_count × (u64 presence mask + fields in schema order)
-//! spans:   span_count × 16 bytes (start u32, font_size f32, color u32,
-//!          weight u16, flags u8, reserved u8)
+//! spans:   span_count × 28 bytes (start u32, font_size f32, color u32,
+//!          weight u16, flags u8, reserved u8, family u32 string ref or
+//!          NIL, letter_spacing f32, line_height f32)
 //! ops:     u8-tagged records to the end of the buffer
 //! ```
 //!
@@ -32,7 +33,7 @@ use crate::mutation::{
 };
 
 pub const MAGIC: u32 = 0x3257_5243; // "CRW2"
-pub const VERSION: u16 = 2;
+pub const VERSION: u16 = 3;
 
 pub mod op {
     // structure
@@ -95,7 +96,12 @@ pub mod cmd {
 /// Text span flag bits.
 pub mod span_flag {
     pub const ITALIC: u8 = 1 << 0;
+    pub const UNDERLINE: u8 = 1 << 1;
+    pub const LINE_THROUGH: u8 = 1 << 2;
 }
+
+/// Bytes per span row.
+const SPAN_BYTES: usize = 28;
 
 // Style schema, in mask order. Every field is written as a fixed tag byte
 // plus payload where the encoding has a payload.
@@ -526,6 +532,8 @@ pub fn encode(txn: &Transaction<'_>) -> Vec<u8> {
             }
         }
     }
+    // Span families go through the string table too.
+    let family_refs: Vec<u32> = txn.families.iter().map(|f| strings.get(f)).collect();
     let mut out = Vec::with_capacity(28 + ops.len());
     out.extend_from_slice(&MAGIC.to_le_bytes());
     out.extend_from_slice(&VERSION.to_le_bytes());
@@ -546,8 +554,19 @@ pub fn encode(txn: &Transaction<'_>) -> Vec<u8> {
         out.extend_from_slice(&sp.font_size.to_le_bytes());
         out.extend_from_slice(&sp.color.to_le_bytes());
         out.extend_from_slice(&sp.weight.to_le_bytes());
-        out.push(if sp.italic { span_flag::ITALIC } else { 0 });
+        let mut flags = if sp.italic { span_flag::ITALIC } else { 0 };
+        if sp.decoration & 1 != 0 {
+            flags |= span_flag::UNDERLINE;
+        }
+        if sp.decoration & 2 != 0 {
+            flags |= span_flag::LINE_THROUGH;
+        }
+        out.push(flags);
         out.push(0);
+        let family = family_refs.get(sp.family as usize).copied().unwrap_or(NIL);
+        out.extend_from_slice(&family.to_le_bytes());
+        out.extend_from_slice(&sp.letter_spacing.to_le_bytes());
+        out.extend_from_slice(&sp.line_height.to_le_bytes());
     }
     out.extend_from_slice(&ops);
     out
@@ -704,7 +723,9 @@ pub fn decode(buf: &[u8]) -> Result<Transaction<'_>, WireError> {
         let mask = r.u64()?;
         txn.styles.push(r.style(mask)?);
     }
-    txn.spans.reserve(span_count.min(buf.len() / 16));
+    txn.spans.reserve(span_count.min(buf.len() / SPAN_BYTES));
+    // String ref -> index in `txn.families`.
+    let mut family_ix: std::collections::HashMap<u32, u32> = std::collections::HashMap::new();
     for _ in 0..span_count {
         let start = r.u32()?;
         let font_size = r.f32()?;
@@ -712,12 +733,31 @@ pub fn decode(buf: &[u8]) -> Result<Transaction<'_>, WireError> {
         let weight = r.u16()?;
         let flags = r.u8()?;
         let _reserved = r.u8()?;
+        let family_ref = r.u32()?;
+        let letter_spacing = r.f32()?;
+        let line_height = r.f32()?;
+        let family = if family_ref == NIL {
+            NIL
+        } else {
+            let name = *strings
+                .get(family_ref as usize)
+                .ok_or(WireError::BadRef("span family"))?;
+            *family_ix.entry(family_ref).or_insert_with(|| {
+                txn.families.push(std::borrow::Cow::Borrowed(name));
+                txn.families.len() as u32 - 1
+            })
+        };
         txn.spans.push(TextSpan {
             start,
             font_size,
             color,
             weight,
             italic: flags & span_flag::ITALIC != 0,
+            decoration: (flags & span_flag::UNDERLINE != 0) as u8
+                | ((flags & span_flag::LINE_THROUGH != 0) as u8) << 1,
+            letter_spacing,
+            line_height,
+            family,
         });
     }
     let string = |i: u32| -> Result<&str, WireError> {

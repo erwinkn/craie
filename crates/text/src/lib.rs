@@ -36,6 +36,61 @@ pub use swash;
 /// Fallback candidates per cluster text.
 type ClusterCandidates = HashMap<Box<str>, Vec<FontInstanceId>>;
 
+/// Span decoration flags (`TextEngine::emit_paragraph`).
+pub mod decoration {
+    pub const UNDERLINE: u8 = 1;
+    pub const LINE_THROUGH: u8 = 2;
+}
+
+/// Underline and line-through rects for `emit_paragraph`: per segment,
+/// each stretch of glyphs of one decorated span, from its placements.
+fn emit_decorations(
+    p: &Paragraph,
+    origin: Point,
+    brush: Option<PaintSlot>,
+    decorations: &[u8],
+    out: &mut ChunkWriter,
+) {
+    for line in &p.lines {
+        for seg in &p.segs[line.segs.start as usize..line.segs.end as usize] {
+            let m = &p.runs[seg.run as usize].metrics;
+            let g = &p.glyphs[seg.glyphs.start as usize..seg.glyphs.end as usize];
+            let mut i = 0;
+            while i < g.len() {
+                let style = g[i].style;
+                let mut j = i;
+                let (mut x0, mut x1) = (f32::MAX, f32::MIN);
+                while j < g.len() && g[j].style == style {
+                    if g[j].id != HIDDEN {
+                        x0 = x0.min(g[j].x);
+                        x1 = x1.max(g[j].x + g[j].advance);
+                    }
+                    j += 1;
+                }
+                let d = decorations.get(style as usize).copied().unwrap_or(0);
+                if d != 0 && x1 > x0 {
+                    let slot = brush.unwrap_or(PaintSlot(style as u32));
+                    let mut bar = |offset: f32, size: f32| {
+                        let top = origin.y + line.baseline - offset;
+                        out.rect(
+                            craie_core::geom::Rect::new(origin.x + x0, top, x1 - x0, size),
+                            0.0,
+                            slot,
+                        );
+                    };
+                    if d & decoration::UNDERLINE != 0 {
+                        bar(m.underline_offset, m.underline_size);
+                    }
+                    if d & decoration::LINE_THROUGH != 0 {
+                        bar(m.strike_offset, m.strike_size);
+                    }
+                }
+                i = j;
+            }
+        }
+    }
+}
+
 /// Font resolution over the platform's `FontSource`: the primary face per
 /// (family, style) and fallback faces per cluster, cached.
 pub struct Fonts {
@@ -49,6 +104,9 @@ pub struct Fonts {
     /// covering all of it, so the answer depends on the cluster alone,
     /// never on text laid out before.
     candidates: HashMap<(ScriptTag, FontAttrs, bool), ClusterCandidates>,
+    /// The family an empty family name means: `system-ui`, React Native's
+    /// default (ARCHITECTURE.md §5, Decisions).
+    default_family: String,
 }
 
 impl Fonts {
@@ -58,7 +116,19 @@ impl Fonts {
             source,
             primary: Vec::new(),
             candidates: HashMap::new(),
+            default_family: "system-ui".to_string(),
         }
+    }
+
+    pub fn default_family(&self) -> &str {
+        &self.default_family
+    }
+
+    /// Sets what an empty family means. Resolved defaults are forgotten;
+    /// spans applied before keep the instance they resolved to.
+    pub fn set_default_family(&mut self, family: &str) {
+        family.clone_into(&mut self.default_family);
+        self.primary.retain(|(f, _, _)| !f.is_empty());
     }
 
     /// Replaces the source; faces already interned stay.
@@ -70,6 +140,8 @@ impl Fonts {
 }
 
 impl Resolve for Fonts {
+    /// The primary instance of `family` ("" is the default family) in
+    /// `attrs`, cached per (family, attrs).
     fn primary(&mut self, family: &str, attrs: FontAttrs) -> Option<FontInstanceId> {
         if let Some((_, _, f)) = self
             .primary
@@ -78,9 +150,14 @@ impl Resolve for Fonts {
         {
             return *f;
         }
+        let name = if family.is_empty() {
+            self.default_family.as_str()
+        } else {
+            family
+        };
         let blob = self
             .source
-            .select(family, attrs)
+            .select(name, attrs)
             .or_else(|| self.source.select("sans-serif", attrs));
         let font = blob.and_then(|b| self.store.instance_of(&b));
         self.primary.push((family.to_string(), attrs, font));
@@ -125,9 +202,6 @@ pub struct TextEngine {
     wrap: WrapScratch,
     raster: Rasterizer,
     pub cache: GlyphCache,
-    /// The family of a `TextSpec` with an empty family: `system-ui`, React
-    /// Native's default (ARCHITECTURE.md §5, Decisions).
-    pub default_family: String,
     /// Paragraphs shaped (cost counter): text nodes, inputs, and
     /// placeholders alike. Rewrapping at another width is not shaping.
     pub shapes: u64,
@@ -148,7 +222,6 @@ impl TextEngine {
 
     pub fn with_source(source: Box<dyn FontSource>) -> TextEngine {
         TextEngine {
-            default_family: "system-ui".to_string(),
             fonts: Fonts::new(source),
             shaper: Shaper::default(),
             wrap: WrapScratch::default(),
@@ -163,17 +236,20 @@ impl TextEngine {
     /// never reshapes.
     pub fn layout_text(&mut self, spec: &TextSpec<'_>, max_width: Option<f32>) -> Paragraph {
         self.shapes += 1;
-        let spec = TextSpec {
-            family: if spec.family.is_empty() {
-                &self.default_family
-            } else {
-                spec.family
-            },
-            ..*spec
-        };
-        let mut p = self.shaper.shape(&spec, &mut self.fonts);
+        let mut p = self.shaper.shape(spec, &mut self.fonts);
         p.rewrap_with(max_width, &mut self.wrap);
         p
+    }
+
+    /// The primary font of `family` ("" is the default family) in
+    /// `weight` and `italic`: what a span resolves to once, when applied.
+    pub fn font(&mut self, family: &str, weight: u16, italic: bool) -> Option<FontInstanceId> {
+        self.fonts.primary(family, FontAttrs { weight, italic })
+    }
+
+    /// Sets what an empty family means (default `system-ui`).
+    pub fn set_default_family(&mut self, family: &str) {
+        self.fonts.set_default_family(family);
     }
 
     /// Lays out an already shaped paragraph at another width.
@@ -194,12 +270,19 @@ impl TextEngine {
     /// Glyph positions are quantized on the physical-pixel grid relative
     /// to the chunk origin, which the renderer snaps to a whole device
     /// pixel at rest, so a moved chunk reuses every raster.
+    ///
+    /// `decorations` holds each span's `decoration` flags (missing: none):
+    /// underline and line-through rects over the span's placed glyphs on
+    /// each segment, at the run font's decoration metrics, in the span's
+    /// paint slot.
+    #[allow(clippy::too_many_arguments)]
     pub fn emit_paragraph(
         &mut self,
         p: &Paragraph,
         origin: Point,
         scale: f32,
         brush: Option<PaintSlot>,
+        decorations: &[u8],
         atlas: &mut RasterAtlas,
         out: &mut ChunkWriter,
     ) -> EmitStats {
@@ -235,6 +318,9 @@ impl TextEngine {
                 out,
                 &mut stats,
             );
+        }
+        if decorations.iter().any(|&d| d != 0) {
+            emit_decorations(p, origin, brush, decorations, out);
         }
         stats
     }

@@ -280,7 +280,7 @@ fn main() {
     for rep in 0..reps {
         let mut ui = Ui::new(SCALE);
         if let Some(f) = &family {
-            ui.text.default_family = f.clone();
+            ui.text.set_default_family(f);
         }
         let mut gpu = gpu_enabled.then(GpuSide::new);
         let baseline = live();
@@ -365,7 +365,7 @@ fn main() {
         };
         // The requested family and the face it resolved to (the row text
         // resolved it before the first draw).
-        let requested = ui.text.default_family.clone();
+        let requested = ui.text.fonts.default_family().to_string();
         let face = resolved_face(&mut ui, &requested);
         if rep == 0 {
             eprintln!("  family {requested:?} -> face {face:?}");

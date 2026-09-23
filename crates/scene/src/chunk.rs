@@ -85,6 +85,11 @@ impl ChunkWriter {
         self.bounds = None;
     }
 
+    /// The rect instances written so far (chunk-local).
+    pub fn rects(&self) -> &[RectInstance] {
+        &self.rects
+    }
+
     pub fn is_empty(&self) -> bool {
         self.rects.is_empty() && self.glyphs.is_empty()
     }

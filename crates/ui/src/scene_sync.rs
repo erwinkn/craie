@@ -756,12 +756,19 @@ impl Ui {
                 n.flags.clear(crate::host::NodeFlags::TEXT);
             }
         }
+        // Span decorations draw with the glyphs (rects in the chunk).
+        let decorations: Vec<u8> = self
+            .host
+            .paragraph(id)
+            .map(|p| p.spans.iter().map(|s| s.decoration).collect())
+            .unwrap_or_default();
         let m = self.texts[slot].as_ref().unwrap();
         self.text.emit_paragraph(
             &m.layout,
             Point::new(data.content[0], data.content[1]),
             self.scale,
             None,
+            &decorations,
             &mut self.scene.atlas,
             w,
         );
@@ -814,7 +821,6 @@ impl Ui {
                     }];
                     let spec = TextSpec {
                         text: &state.placeholder,
-                        family: "",
                         spans: &spans,
                     };
                     let p = self.text.layout_text(&spec, Some(content_w));
@@ -822,12 +828,26 @@ impl Ui {
                 }
             }
             let p = &state.placeholder_layout.as_ref().unwrap().1;
-            self.text
-                .emit_paragraph(p, origin, scale, Some(ph_slot), &mut self.scene.atlas, w);
+            self.text.emit_paragraph(
+                p,
+                origin,
+                scale,
+                Some(ph_slot),
+                &[],
+                &mut self.scene.atlas,
+                w,
+            );
         } else {
             let p = state.editor.layout();
-            self.text
-                .emit_paragraph(p, origin, scale, Some(text_slot), &mut self.scene.atlas, w);
+            self.text.emit_paragraph(
+                p,
+                origin,
+                scale,
+                Some(text_slot),
+                &[],
+                &mut self.scene.atlas,
+                w,
+            );
         }
         if focused && let Some((x, y, _, h)) = state.editor.caret_rect(1.5) {
             w.rect(Rect::new(cx + x, cy + y, 1.5, h.max(0.0)), 0.0, caret_slot);

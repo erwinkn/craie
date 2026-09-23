@@ -26,13 +26,15 @@ const DIM: Color = Color::rgb(0x9a, 0xa0, 0xae);
 const ACCENT: Color = Color::rgb(0x6d, 0xc7, 0xff);
 const CODE_BG: Color = Color::rgb(0x22, 0x24, 0x2b);
 
-/// One paragraph of demo content: text, family, and spans with their
-/// colors (span i paints with paint slot i).
+/// One paragraph of demo content: text, spans with their family (""
+/// is the default), color (span i paints with paint slot i), and
+/// decorations. Families resolve to fonts when the scene is built.
 struct Para {
     text: String,
-    family: &'static str,
     spans: Vec<SpanStyle>,
+    families: Vec<&'static str>,
     colors: Vec<Color>,
+    decorations: Vec<u8>,
     /// Give this paragraph a background quad (exercises the quad pipeline).
     backing: bool,
 }
@@ -42,7 +44,9 @@ struct Mark {
     needle: &'static str,
     weight: u16,
     italic: bool,
+    family: &'static str,
     color: Color,
+    decoration: u8,
 }
 
 fn mark(needle: &'static str, weight: u16, italic: bool, color: Color) -> Mark {
@@ -50,60 +54,73 @@ fn mark(needle: &'static str, weight: u16, italic: bool, color: Color) -> Mark {
         needle,
         weight,
         italic,
+        family: "",
         color,
+        decoration: 0,
     }
 }
 
-/// A paragraph in `FG` at `size`, with `marks` (not overlapping) as
-/// spans; the text between them keeps the default style.
+/// A paragraph in `FG` at `size` in `family`, with `marks` (not
+/// overlapping) as spans; the text between them keeps the base style.
 fn para(text: &str, size: f32, family: &'static str, marks: &[Mark]) -> Para {
     let base = TextStyle {
         size,
-        weight: 400,
-        italic: false,
+        ..TextStyle::default()
     };
     let mut ranges: Vec<(usize, &Mark)> = marks
         .iter()
         .map(|m| (text.find(m.needle).expect("mark needle not in text"), m))
         .collect();
     ranges.sort_by_key(|r| r.0);
-    let (mut spans, mut colors) = (Vec::new(), Vec::new());
-    let mut push = |start: usize, style: TextStyle, color: Color| {
-        spans.push(SpanStyle {
-            start: start as u32,
-            style,
-        });
-        colors.push(color);
+    let mut p = Para {
+        text: text.to_string(),
+        spans: Vec::new(),
+        families: Vec::new(),
+        colors: Vec::new(),
+        decorations: Vec::new(),
+        backing: false,
     };
-    push(0, base, FG);
+    let mut push =
+        |start: usize, style: TextStyle, family: &'static str, color: Color, deco: u8| {
+            p.spans.push(SpanStyle {
+                start: start as u32,
+                style,
+            });
+            p.families.push(family);
+            p.colors.push(color);
+            p.decorations.push(deco);
+        };
+    push(0, base, family, FG, 0);
     for (start, m) in ranges {
         let style = TextStyle {
-            size,
             weight: m.weight,
             italic: m.italic,
+            ..base
         };
-        push(start, style, m.color);
+        let fam = if m.family.is_empty() {
+            family
+        } else {
+            m.family
+        };
+        push(start, style, fam, m.color, m.decoration);
         let end = start + m.needle.len();
         if end < text.len() {
-            push(end, base, FG);
+            push(end, base, family, FG, 0);
         }
     }
-    // A mark at 0 replaces the default span.
-    if spans.len() > 1 && spans[1].start == 0 {
-        spans.remove(0);
-        colors.remove(0);
+    // A mark at 0 replaces the base span.
+    if p.spans.len() > 1 && p.spans[1].start == 0 {
+        p.spans.remove(0);
+        p.families.remove(0);
+        p.colors.remove(0);
+        p.decorations.remove(0);
     }
-    Para {
-        text: text.to_string(),
-        family,
-        spans,
-        colors,
-        backing: false,
-    }
+    p
 }
 
 /// The demo content: the milestone-required strings, mixed styling in one
-/// paragraph, a monospace paragraph, and an emoji probe.
+/// paragraph (with an inline monospace span), a monospace paragraph, and
+/// an emoji probe.
 fn paragraphs() -> Vec<Para> {
     let mut code = para(
         "let inst = Instance::quad(x, y, w, h, color); // monospace",
@@ -118,7 +135,10 @@ fn paragraphs() -> Vec<Para> {
             "React → retained native state → native pixels",
             17.0,
             "",
-            &[mark("retained native state", 400, false, ACCENT)],
+            &[Mark {
+                decoration: craie_text::decoration::UNDERLINE,
+                ..mark("retained native state", 400, false, ACCENT)
+            }],
         ),
         para(
             "The quick brown fox jumps over the lazy dog.  ffi AV To",
@@ -133,7 +153,10 @@ fn paragraphs() -> Vec<Para> {
             &[
                 mark("a bold run", 700, false, FG),
                 mark("an italic run", 400, true, FG),
-                mark("code → atlas", 400, false, ACCENT),
+                Mark {
+                    family: "monospace",
+                    ..mark("`code → atlas`", 400, false, ACCENT)
+                },
             ],
         ),
         para("English — 日本語 — مرحبا بالعالم", 20.0, "", &[]),
@@ -176,11 +199,24 @@ fn build_scene(
     let mut order = Vec::new();
     let mut y = MARGIN;
     for (i, para) in paras.iter().enumerate() {
+        // Each span's family resolves to a font once (cached per family
+        // and style in the engine).
+        let spans: Vec<SpanStyle> = para
+            .spans
+            .iter()
+            .zip(&para.families)
+            .map(|(sp, fam)| SpanStyle {
+                style: TextStyle {
+                    font: text.font(fam, sp.style.weight, sp.style.italic),
+                    ..sp.style
+                },
+                ..*sp
+            })
+            .collect();
         let layout = text.layout_text(
             &TextSpec {
                 text: &para.text,
-                family: para.family,
-                spans: &para.spans,
+                spans: &spans,
             },
             Some(wrap),
         );
@@ -196,8 +232,15 @@ fn build_scene(
                 slot,
             );
         }
-        let emitted =
-            text.emit_paragraph(&layout, Point::ZERO, scale, None, &mut scene.atlas, &mut w);
+        let emitted = text.emit_paragraph(
+            &layout,
+            Point::ZERO,
+            scale,
+            None,
+            &para.decorations,
+            &mut scene.atlas,
+            &mut w,
+        );
         runs += emitted.glyph_runs;
         glyphs += emitted.glyphs;
         let id = i as u32;

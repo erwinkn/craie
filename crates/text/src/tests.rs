@@ -19,7 +19,6 @@ fn layout(e: &mut TextEngine, text: &str, width: Option<f32>) -> Paragraph {
     e.layout_text(
         &TextSpec {
             text,
-            family: "sans-serif",
             spans: &spans,
         },
         width,
@@ -787,5 +786,109 @@ fn editing_never_leaves_char_boundaries() {
                 ed.ime_area(),
             );
         }
+    }
+}
+
+/// Decorations draw one rect per decorated span stretch, from the
+/// placements: the underline below the baseline, the line-through above
+/// it, each over exactly its span's glyphs, in its span's paint slot.
+#[test]
+fn decorations_draw_over_their_spans() {
+    use craie_core::Point;
+    use craie_scene::{ChunkWriter, RasterAtlas};
+    let mut e = engine();
+    let text = "under strike plain";
+    let style = TextStyle {
+        size: 16.0,
+        ..TextStyle::default()
+    };
+    let spans = [
+        SpanStyle { start: 0, style },
+        SpanStyle { start: 6, style },
+        SpanStyle { start: 13, style },
+    ];
+    let p = e.layout_text(
+        &TextSpec {
+            text,
+            spans: &spans,
+        },
+        None,
+    );
+    let mut w = ChunkWriter::new();
+    let mut atlas = RasterAtlas::new();
+    let d = crate::decoration::UNDERLINE;
+    let s = crate::decoration::LINE_THROUGH;
+    e.emit_paragraph(
+        &p,
+        Point::new(0.0, 0.0),
+        1.0,
+        None,
+        &[d, s, 0],
+        &mut atlas,
+        &mut w,
+    );
+    let rects = w.rects();
+    assert_eq!(rects.len(), 2, "one per decorated span");
+    let baseline = p.lines[0].baseline;
+    let extent = |range: std::ops::Range<u32>| {
+        let g = p.glyphs.iter().filter(|g| range.contains(&g.cluster));
+        let x0 = g.clone().map(|g| g.x).fold(f32::MAX, f32::min);
+        let x1 = g.map(|g| g.x + g.advance).fold(f32::MIN, f32::max);
+        (x0, x1 - x0)
+    };
+    let (u, t) = (rects[0].rect, rects[1].rect);
+    assert!(
+        u[1] > baseline && t[1] < baseline,
+        "{u:?} {t:?} baseline {baseline}"
+    );
+    assert_eq!((u[0], u[2]), extent(0..6));
+    assert_eq!((t[0], t[2]), extent(6..13));
+    assert_eq!((rects[0].fill, rects[1].fill), (0, 1), "span paint slots");
+}
+
+/// Letter spacing adds its value to each cluster's advance (the last
+/// glyph's), and an absolute line height from span zero sets every
+/// line's height, the leading split around the font's ascent and
+/// descent.
+#[test]
+fn letter_spacing_and_line_height() {
+    let mut e = engine();
+    let text = "abc def";
+    let plain = e.layout_text(
+        &TextSpec {
+            text,
+            spans: &[SpanStyle {
+                start: 0,
+                style: TextStyle {
+                    size: 16.0,
+                    ..TextStyle::default()
+                },
+            }],
+        },
+        Some(30.0),
+    );
+    let spaced = e.layout_text(
+        &TextSpec {
+            text,
+            spans: &[SpanStyle {
+                start: 0,
+                style: TextStyle {
+                    size: 16.0,
+                    letter_spacing: 2.0,
+                    line_height: 40.0,
+                    ..TextStyle::default()
+                },
+            }],
+        },
+        Some(30.0),
+    );
+    for (a, b) in plain.glyphs.iter().zip(&spaced.glyphs) {
+        assert_eq!(b.advance, a.advance + 2.0);
+    }
+    assert!(spaced.lines.len() > 1);
+    for l in &spaced.lines {
+        assert_eq!(l.height, 40.0);
+        let leading = 40.0 - (l.ascent + l.descent);
+        assert_eq!(l.baseline, l.top + l.ascent + leading * 0.5);
     }
 }

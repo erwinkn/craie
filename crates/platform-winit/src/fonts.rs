@@ -289,13 +289,13 @@ mod tests {
             start: 0,
             style: TextStyle {
                 size: 16.0,
+                font: e.font("Noto Sans", 400, false),
                 ..TextStyle::default()
             },
         }];
         let p: Paragraph = e.layout_text(
             &TextSpec {
                 text,
-                family: "Noto Sans",
                 spans: &spans,
             },
             None,

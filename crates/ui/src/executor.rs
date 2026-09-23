@@ -44,7 +44,7 @@ fn finite(v: f32) -> bool {
 }
 
 /// Checks `spans` as a paragraph style list over `text`.
-fn valid_spans(text: &str, spans: &[TextSpan]) -> Result<(), WireError> {
+fn valid_spans(text: &str, spans: &[TextSpan], families: usize) -> Result<(), WireError> {
     let Some(first) = spans.first() else {
         return Err(invalid("paragraph without spans"));
     };
@@ -60,6 +60,16 @@ fn valid_spans(text: &str, spans: &[TextSpan]) -> Result<(), WireError> {
             return Err(invalid("paragraph span off a char boundary"));
         }
         if !font_size_ok(s.font_size) || !(1..=1000).contains(&s.weight) {
+            return Err(invalid("paragraph span style out of range"));
+        }
+        // Spacing and line height within a font size's range; only the
+        // two decoration bits; a family the transaction holds.
+        let bound = MAX_FONT_SIZE;
+        if !(s.letter_spacing.is_finite() && s.letter_spacing.abs() <= bound)
+            || !(s.line_height.is_finite() && (0.0..=4.0 * bound).contains(&s.line_height))
+            || s.decoration & !3 != 0
+            || (s.family != NIL && s.family as usize >= families)
+        {
             return Err(invalid("paragraph span style out of range"));
         }
         prev = Some(s.start);
@@ -322,7 +332,7 @@ pub fn validate(host: &Host, txn: &Transaction<'_>) -> Result<(), WireError> {
                 let Some(spans) = txn.spans.get(spans.start as usize..spans.end as usize) else {
                     return Err(invalid("paragraph spans out of range"));
                 };
-                valid_spans(text, spans)?;
+                valid_spans(text, spans, txn.families.len())?;
             }
             Mutation::InputConfig { id, font_size, .. } => {
                 if o.kind(*id) != Some(NodeKind::Input) {
@@ -566,23 +576,52 @@ impl Ui {
             }
             Mutation::Paragraph { id, text, spans } => {
                 let node = NodeId(*id);
-                let spans = &txn.spans[spans.start as usize..spans.end as usize];
+                // Families in host indices.
+                let mut next = std::mem::take(&mut self.span_scratch);
+                next.clear();
+                for s in &txn.spans[spans.start as usize..spans.end as usize] {
+                    let family = match s.family {
+                        NIL => NIL,
+                        f => self.host.family(&txn.families[f as usize]),
+                    };
+                    next.push(TextSpan { family, ..*s });
+                }
+                let spans = &next[..];
                 let p = &mut self.host.paragraphs[node.index()];
                 let text_changed = p.text != *text;
                 let metrics_changed = text_changed
                     || p.spans.len() != spans.len()
                     || p.spans.iter().zip(spans).any(|(a, b)| !a.same_metrics(b));
                 let colors_changed = p.spans.iter().zip(spans).any(|(a, b)| a.color != b.color);
+                let decorations_changed = p
+                    .spans
+                    .iter()
+                    .zip(spans)
+                    .any(|(a, b)| a.decoration != b.decoration);
                 if text_changed {
                     p.text.clear();
                     p.text.push_str(text);
                     self.host.copied_bytes += text.len() as u64;
                 }
-                if metrics_changed || colors_changed {
+                if metrics_changed || colors_changed || decorations_changed {
                     p.spans.clear();
                     p.spans.extend_from_slice(spans);
                     self.host.copied_bytes += std::mem::size_of_val(spans) as u64;
                 }
+                if metrics_changed {
+                    // Each span's family resolves to a font once, here.
+                    let p = &mut self.host.paragraphs[node.index()];
+                    p.fonts.clear();
+                    for s in spans {
+                        let name = self
+                            .host
+                            .families
+                            .get(s.family as usize)
+                            .map_or("", String::as_str);
+                        p.fonts.push(self.text.font(name, s.weight, s.italic));
+                    }
+                }
+                self.span_scratch = next;
                 if text_changed {
                     self.host.revs.text_content.bump();
                     self.host.dirty.semantic.push(*id);
@@ -590,6 +629,11 @@ impl Ui {
                 if metrics_changed {
                     self.host.revs.text_metrics.bump();
                     self.host.mark_text(node);
+                } else if decorations_changed {
+                    // Decorations are drawn rects: a chunk rebuild, no
+                    // reshape.
+                    self.host.revs.paint.bump();
+                    self.host.dirty.content.push(*id);
                 } else if colors_changed {
                     // Color lives in the paint records: no reshape.
                     self.host.revs.paint.bump();

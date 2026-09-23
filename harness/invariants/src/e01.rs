@@ -51,6 +51,7 @@ fn span(start: usize, size: f32, weight: u16, italic: bool) -> SpanStyle {
             size,
             weight,
             italic,
+            ..TextStyle::default()
         },
     }
 }
@@ -214,6 +215,46 @@ pub fn cases() -> Vec<Case> {
             advance_fixups: vec![],
             grapheme_merges: 0,
             widths: vec![None],
+        },
+        Case {
+            name: "spacing",
+            class: "styled",
+            // Letter spacing on one span, an absolute line height for the
+            // paragraph (no ligatures: spacing splits them differently).
+            text: "The quick brown dog jumps over the lazy cat, then walks home.".to_string(),
+            spans: {
+                let t = "The quick brown dog jumps over the lazy cat, then walks home.";
+                let (b, d) = (t.find("brown").unwrap(), t.find(" dog").unwrap());
+                vec![
+                    SpanStyle {
+                        start: 0,
+                        style: TextStyle {
+                            size: 15.0,
+                            line_height: 26.0,
+                            ..TextStyle::default()
+                        },
+                    },
+                    SpanStyle {
+                        start: b as u32,
+                        style: TextStyle {
+                            size: 15.0,
+                            letter_spacing: 2.5,
+                            ..TextStyle::default()
+                        },
+                    },
+                    SpanStyle {
+                        start: d as u32,
+                        style: TextStyle {
+                            size: 15.0,
+                            ..TextStyle::default()
+                        },
+                    },
+                ]
+            },
+            notdef: false,
+            advance_fixups: vec![],
+            grapheme_merges: 0,
+            widths: vec![None, Some(120.0), Some(200.0)],
         },
         Case {
             name: "hebrew-lines",
@@ -782,6 +823,14 @@ impl Oracle {
         b.push_default(StyleProperty::FontFamily(FontFamily::Source(
             Cow::Borrowed(STACK),
         )));
+        // Span zero's line height is the paragraph's.
+        if let Some(lh) = spans
+            .first()
+            .map(|s| s.style.line_height)
+            .filter(|&h| h > 0.0)
+        {
+            b.push_default(StyleProperty::LineHeight(parley::LineHeight::Absolute(lh)));
+        }
         for (k, s) in spans.iter().enumerate() {
             let end = spans.get(k + 1).map_or(text.len(), |n| n.start as usize);
             let r = s.start as usize..end;
@@ -796,6 +845,12 @@ impl Oracle {
                 FontStyle::Normal
             };
             b.push(StyleProperty::FontStyle(style), r.clone());
+            if s.style.letter_spacing != 0.0 {
+                b.push(
+                    StyleProperty::LetterSpacing(s.style.letter_spacing),
+                    r.clone(),
+                );
+            }
             b.push(StyleProperty::Brush(k as u16), r);
         }
         let mut layout = b.build(text);
@@ -829,11 +884,7 @@ pub fn layout(
     spans: &[SpanStyle],
     width: Option<f32>,
 ) -> Paragraph {
-    let spec = TextSpec {
-        text,
-        family: "Noto Sans",
-        spans,
-    };
+    let spec = TextSpec { text, spans };
     engine.layout_text(&spec, width)
 }
 

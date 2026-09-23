@@ -242,7 +242,6 @@ impl Editor {
             }];
             let spec = TextSpec {
                 text: &self.buffer,
-                family: "",
                 spans: &spans,
             };
             self.layout = engine.layout_text(&spec, self.width);

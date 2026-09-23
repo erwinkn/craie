@@ -34,8 +34,10 @@ pub struct Ui {
     pub host: Host,
     pub layouts: Layouts,
     pub text: TextEngine,
-    /// Retained Parley layouts for TEXT nodes, indexed by node id.
+    /// Retained owned paragraphs for TEXT nodes, indexed by node id.
     pub(crate) texts: Vec<Option<MeasuredText>>,
+    /// Scratch for a paragraph's spans in host family indices.
+    pub(crate) span_scratch: Vec<crate::mutation::TextSpan>,
     /// Editing state for INPUT-kind nodes, keyed by node id.
     pub inputs: Inputs,
     /// Surface painters, keyed by surface kind.
@@ -94,6 +96,7 @@ impl Ui {
             host: Host::new(),
             layouts: Layouts::new(),
             text: TextEngine::new(),
+            span_scratch: Vec::new(),
             texts: Vec::new(),
             inputs: Inputs::default(),
             surface_painters,

@@ -14,7 +14,10 @@ export interface Frame {
   seq: bigint
   strings: string[]
   styleCount: number
-  spans: { start: number; fontSize: number; color: number; weight: number; italic: boolean }[]
+  spans: {
+    start: number; fontSize: number; color: number; weight: number; italic: boolean
+    decoration: number; family: string | undefined; letterSpacing: number; lineHeight: number
+  }[]
   ops: Op[]
 }
 
@@ -26,7 +29,7 @@ export function readFrame(buf: Uint8Array): Frame {
   const u32 = () => { const v = dv.getUint32(at, true); at += 4; return v }
   const f32 = () => { const v = dv.getFloat32(at, true); at += 4; return v }
   if (u32() !== 0x3257_5243) throw Error("bad magic")
-  if (u16() !== 2) throw Error("bad version")
+  if (u16() !== 3) throw Error("bad version")
   u16()
   const seq = dv.getBigUint64(at, true); at += 8
   const nStrings = u32(), nStyles = u32(), nSpans = u32()
@@ -42,7 +45,13 @@ export function readFrame(buf: Uint8Array): Frame {
   for (let i = 0; i < nSpans; i++) {
     const start = u32(), fontSize = f32(), color = u32(), weight = u16(), flags = u8()
     u8()
-    spans.push({ start, fontSize, color, weight, italic: !!(flags & 1) })
+    const familyRef = u32(), letterSpacing = f32(), lineHeight = f32()
+    spans.push({
+      start, fontSize, color, weight, italic: !!(flags & 1),
+      decoration: (flags >> 1) & 3,
+      family: familyRef === 0xffff_ffff ? undefined : strings[familyRef],
+      letterSpacing, lineHeight,
+    })
   }
   const ops: Op[] = []
   while (at < buf.byteLength) {

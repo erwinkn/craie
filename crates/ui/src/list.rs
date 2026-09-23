@@ -381,7 +381,6 @@ impl Lists {
             let p = text.layout_text(
                 &TextSpec {
                     text: SAMPLE,
-                    family: "",
                     spans: &spans,
                 },
                 None,

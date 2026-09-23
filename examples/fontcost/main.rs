@@ -85,6 +85,7 @@ fn ours(family: &str) {
         start: 0,
         style: TextStyle {
             size: 14.0,
+            font: Some(font),
             ..TextStyle::default()
         },
     }];
@@ -92,12 +93,10 @@ fn ours(family: &str) {
     let (sa, sb) = (
         TextSpec {
             text: &a,
-            family,
             spans: &spans,
         },
         TextSpec {
             text: &b,
-            family,
             spans: &spans,
         },
     );
@@ -114,6 +113,7 @@ fn ours(family: &str) {
         Point::ZERO,
         SCALE,
         None,
+        &[],
         &mut atlas,
         &mut ChunkWriter::new(),
     );
@@ -124,6 +124,7 @@ fn ours(family: &str) {
         Point::ZERO,
         SCALE,
         None,
+        &[],
         &mut atlas,
         &mut ChunkWriter::new(),
     );
@@ -138,7 +139,6 @@ fn ours(family: &str) {
             e.layout_text(
                 &TextSpec {
                     text,
-                    family,
                     spans: &spans,
                 },
                 Some(WIDTH),
@@ -149,7 +149,15 @@ fn ours(family: &str) {
     let t = Instant::now();
     for (i, p) in ps.iter().enumerate() {
         let origin = Point::new(0.0, i as f32 * 20.0);
-        e.emit_paragraph(p, origin, SCALE, None, &mut atlas, &mut ChunkWriter::new());
+        e.emit_paragraph(
+            p,
+            origin,
+            SCALE,
+            None,
+            &[],
+            &mut atlas,
+            &mut ChunkWriter::new(),
+        );
     }
     let emit_1k = ms(t);
     let rasters = e.cache.stats.rasters;

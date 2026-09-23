@@ -742,25 +742,30 @@ impl RoundTree for TreeView<'_> {
 }
 
 /// Shapes a text node's paragraph at wrap width `wrap`: its spans become
-/// span styles (font size, weight, italic); a span's index is its paint
-/// slot, so a color change patches a paint record and never reshapes.
+/// span styles (the font each span resolved to when applied, size,
+/// weight, italic, letter spacing, and span zero's line height); a span's
+/// index is its paint slot, so a color change patches a paint record and
+/// never reshapes.
 pub fn shape_paragraph(text: &mut TextEngine, p: &Paragraph, wrap: Option<f32>) -> TextParagraph {
     let spans: Vec<SpanStyle> = p
         .spans
         .iter()
-        .map(|s| SpanStyle {
+        .enumerate()
+        .map(|(i, s)| SpanStyle {
             start: s.start,
             style: TextStyle {
                 size: s.font_size,
                 weight: s.weight,
                 italic: s.italic,
+                font: p.fonts.get(i).copied().flatten(),
+                letter_spacing: s.letter_spacing,
+                line_height: s.line_height,
             },
         })
         .collect();
     text.layout_text(
         &TextSpec {
             text: &p.text,
-            family: "",
             spans: &spans,
         },
         wrap,

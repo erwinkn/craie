@@ -184,6 +184,7 @@ fn hard_breaks_follow_uax14_where_parley_differs() {
             size: 15.0,
             weight: 400,
             italic: false,
+            ..craie_text::paragraph::TextStyle::default()
         },
     }];
     let mut engine = e01::engine();
@@ -218,6 +219,7 @@ fn grapheme_keeps_one_font_where_parley_splits() {
             size: 16.0,
             weight: 400,
             italic: false,
+            ..craie_text::paragraph::TextStyle::default()
         },
     }];
     let mut engine = e01::engine();
@@ -252,6 +254,7 @@ fn no_break_spaces_follow_uax14_where_parley_differs() {
             size: 15.0,
             weight: 400,
             italic: false,
+            ..craie_text::paragraph::TextStyle::default()
         },
     }];
     let allowed: Vec<usize> = linebreaks(text).map(|(i, _)| i).collect();
@@ -308,8 +311,7 @@ fn one_span(size: f32) -> [craie_text::paragraph::SpanStyle; 1] {
         start: 0,
         style: craie_text::paragraph::TextStyle {
             size,
-            weight: 400,
-            italic: false,
+            ..craie_text::paragraph::TextStyle::default()
         },
     }]
 }

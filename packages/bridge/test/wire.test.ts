@@ -13,7 +13,7 @@ test("encoder emits the documented byte layout", () => {
   const dv = new DataView(buf.buffer, buf.byteOffset, buf.byteLength)
   let at = 0
   expect(dv.getUint32(at, true)).toBe(0x3257_5243); at += 4 // "CRW2"
-  expect(dv.getUint16(at, true)).toBe(2); at += 2            // version
+  expect(dv.getUint16(at, true)).toBe(3); at += 2            // version
   expect(dv.getUint16(at, true)).toBe(0); at += 2            // flags
   expect(dv.getBigUint64(at, true)).toBe(7n); at += 8        // seq
   expect(dv.getUint32(at, true)).toBe(1); at += 4            // 1 string
@@ -21,13 +21,17 @@ test("encoder emits the documented byte layout", () => {
   expect(dv.getUint32(at, true)).toBe(1); at += 4            // 1 span
   expect(dv.getUint32(at, true)).toBe(2); at += 4            // len 2
   expect(String.fromCharCode(buf[at]!, buf[at + 1]!)).toBe("hi"); at += 2
-  // span: start 0, size 14, color, weight 400, flags 0, reserved
+  // span (28 bytes): start 0, size 14, color, weight 400, flags 0,
+  // reserved, family NIL, letter spacing 0, line height 0
   expect(dv.getUint32(at, true)).toBe(0); at += 4
   expect(dv.getFloat32(at, true)).toBe(14); at += 4
   expect(dv.getUint32(at, true)).toBe(0xffffffff); at += 4
   expect(dv.getUint16(at, true)).toBe(400); at += 2
   expect(buf[at++]).toBe(0)
   expect(buf[at++]).toBe(0)
+  expect(dv.getUint32(at, true)).toBe(NIL); at += 4
+  expect(dv.getFloat32(at, true)).toBe(0); at += 4
+  expect(dv.getFloat32(at, true)).toBe(0); at += 4
   // create(0, kind 1)
   expect(buf[at++]).toBe(0x01)
   expect(dv.getUint32(at, true)).toBe(0); at += 4

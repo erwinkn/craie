@@ -43,12 +43,22 @@ use unicode_segmentation::UnicodeSegmentation;
 
 use crate::fonts::{FontAttrs, FontInstanceId, FontStore, ScriptTag, ignorable};
 
-/// Style of a span: what font resolution, shaping, and metrics read.
+/// Style of a span: what shaping and metrics read. Color and
+/// decorations are not here: they are paint (`TextEngine::emit_paragraph`).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct TextStyle {
     pub size: f32,
     pub weight: u16,
     pub italic: bool,
+    /// The span's primary font, resolved from its family once when the
+    /// span is applied (`TextEngine::font`). None: the engine's default
+    /// family (resolved at layout through the same cache).
+    pub font: Option<FontInstanceId>,
+    /// Added to each cluster's advance, logical points.
+    pub letter_spacing: f32,
+    /// Absolute line height, logical points; 0: the font's. Read from
+    /// span zero only (per paragraph).
+    pub line_height: f32,
 }
 
 impl Default for TextStyle {
@@ -57,6 +67,9 @@ impl Default for TextStyle {
             size: 14.0,
             weight: 400,
             italic: false,
+            font: None,
+            letter_spacing: 0.0,
+            line_height: 0.0,
         }
     }
 }
@@ -69,28 +82,29 @@ pub struct SpanStyle {
     pub style: TextStyle,
 }
 
-/// What to lay out.
+/// What to lay out. Span zero is the base style; there is no paragraph
+/// family.
 #[derive(Clone, Copy)]
 pub struct TextSpec<'a> {
     pub text: &'a str,
-    /// Family (a name or a generic name) for every span; empty: the
-    /// engine's `default_family`.
-    pub family: &'a str,
     pub spans: &'a [SpanStyle],
 }
 
-/// Vertical metrics of a run, logical points (descent positive).
+/// Vertical metrics of a run, logical points (descent positive), with
+/// its decoration geometry (offsets are distances above the baseline to
+/// the decoration's top; negative below).
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct RunMetrics {
     pub ascent: f32,
     pub descent: f32,
     pub leading: f32,
-}
-
-impl RunMetrics {
-    pub fn line_height(&self) -> f32 {
-        self.ascent + self.descent + self.leading
-    }
+    /// The run's line height: the absolute value of span zero, else
+    /// ascent + descent + leading.
+    pub line_height: f32,
+    pub underline_offset: f32,
+    pub underline_size: f32,
+    pub strike_offset: f32,
+    pub strike_size: f32,
 }
 
 /// A shaped run: one font instance, size, bidi level, and script over a
@@ -633,7 +647,7 @@ impl Paragraph {
         let (mut ascent, mut descent) = (0.0f32, 0.0f32);
         for (k, c) in cl.iter().enumerate() {
             let m = self.runs[c.run as usize].metrics;
-            height = height.max(m.line_height());
+            height = height.max(m.line_height);
             if content.is_none_or(|last| k <= last) {
                 ascent = ascent.max(m.ascent);
                 descent = descent.max(m.descent);
@@ -641,7 +655,7 @@ impl Paragraph {
         }
         if cl.is_empty() {
             let m = self.empty_metrics;
-            height = m.line_height();
+            height = m.line_height;
             ascent = m.ascent;
             descent = m.descent;
         }
@@ -795,7 +809,7 @@ impl Paragraph {
             return Caret {
                 x: 0.0,
                 top: 0.0,
-                height: m.line_height(),
+                height: m.line_height,
                 line: 0,
             };
         };
@@ -979,7 +993,7 @@ pub struct Shaper {
     plans: HashMap<(FontInstanceId, bool, [u8; 4]), harfrust::ShapePlan>,
     /// Variation instances per font instance with coordinates.
     instances: HashMap<FontInstanceId, harfrust::ShaperInstance>,
-    metrics: HashMap<(FontInstanceId, u32), RunMetrics>,
+    metrics: HashMap<(FontInstanceId, u32, u32), RunMetrics>,
     /// Scratch: the primary instance per span, and the shaping items.
     primaries: Vec<Option<FontInstanceId>>,
     items: Vec<Item>,
@@ -1010,18 +1024,42 @@ pub trait Resolve {
     fn store(&mut self) -> &mut FontStore;
 }
 
-/// Run metrics of `font` at `size`.
-pub fn run_metrics(store: &FontStore, font: FontInstanceId, size: f32) -> RunMetrics {
+/// Run metrics of `font` at `size`; `line_height` > 0 overrides the
+/// font's line height. Missing decorations take HarfBuzz's defaults (as
+/// Parley): underline one eighteenth of the em below the baseline, the
+/// strikeout at half the ascent.
+pub fn run_metrics(
+    store: &FontStore,
+    font: FontInstanceId,
+    size: f32,
+    line_height: f32,
+) -> RunMetrics {
     let inst = store.instance_data(font);
     let Some(f) = store.face_data(inst.face).font() else {
         return RunMetrics::default();
     };
     let coords: Vec<F2Dot14> = inst.coords.iter().map(|&c| F2Dot14::from_bits(c)).collect();
     let m = f.metrics(Size::new(size), LocationRef::new(&coords));
+    let default = size / 18.0;
+    let (underline_offset, underline_size) = m
+        .underline
+        .map_or((-default, default), |d| (d.offset, d.thickness));
+    let (strike_offset, strike_size) = m
+        .strikeout
+        .map_or((m.ascent / 2.0, default), |d| (d.offset, d.thickness));
     RunMetrics {
         ascent: m.ascent,
         descent: -m.descent,
         leading: m.leading,
+        line_height: if line_height > 0.0 {
+            line_height
+        } else {
+            m.ascent - m.descent + m.leading
+        },
+        underline_offset,
+        underline_size,
+        strike_offset,
+        strike_size,
     }
 }
 
@@ -1062,13 +1100,16 @@ impl Shaper {
             weight: s.weight,
             italic: s.italic,
         };
+        // Each span's primary font was resolved when it was applied; a span
+        // without one takes the default family through the same cache.
         self.primaries.clear();
         for s in spans {
-            let f = fonts.primary(spec.family, attrs(&s.style));
+            let f = s.style.font.or_else(|| fonts.primary("", attrs(&s.style)));
             self.primaries.push(f);
         }
+        let line_height = spans[0].style.line_height;
         if let Some(f) = self.primaries[0] {
-            p.empty_metrics = self.run_metrics(fonts.store(), f, spans[0].style.size);
+            p.empty_metrics = self.run_metrics(fonts.store(), f, spans[0].style.size, line_height);
         }
         if text.is_empty() {
             return p;
@@ -1261,7 +1302,24 @@ impl Shaper {
                 });
             }
             buffer = out.clear();
-            let metrics = self.run_metrics(store, font, size);
+            // Letter spacing: each cluster's last glyph (stored order)
+            // advances by its span's spacing (Parley's rule).
+            let run_glyphs = &mut p.glyphs[glyph_start as usize..];
+            let mut g = 0;
+            while g < run_glyphs.len() {
+                let c = run_glyphs[g].cluster;
+                let mut e = g + 1;
+                while e < run_glyphs.len() && run_glyphs[e].cluster == c {
+                    e += 1;
+                }
+                let last = &mut run_glyphs[e - 1];
+                let spacing = spans[last.style as usize].style.letter_spacing;
+                if spacing != 0.0 && last.id != HIDDEN {
+                    last.advance += spacing;
+                }
+                g = e;
+            }
+            let metrics = self.run_metrics(store, font, size, line_height);
             p.runs.push(Run {
                 text: range.start as u32..range.end as u32,
                 font,
@@ -1277,11 +1335,17 @@ impl Shaper {
         p
     }
 
-    /// `run_metrics`, cached per (instance, size).
-    fn run_metrics(&mut self, store: &FontStore, font: FontInstanceId, size: f32) -> RunMetrics {
+    /// `run_metrics`, cached per (instance, size, line height).
+    fn run_metrics(
+        &mut self,
+        store: &FontStore,
+        font: FontInstanceId,
+        size: f32,
+        line_height: f32,
+    ) -> RunMetrics {
         *self
             .metrics
-            .entry((font, size.to_bits()))
-            .or_insert_with(|| run_metrics(store, font, size))
+            .entry((font, size.to_bits(), line_height.to_bits()))
+            .or_insert_with(|| run_metrics(store, font, size, line_height))
     }
 }

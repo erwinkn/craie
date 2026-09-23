@@ -189,7 +189,11 @@ pub struct BoxPaint {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Paragraph {
     pub text: String,
+    /// Span zero is the base style. `family` indexes `Host::families`.
     pub spans: Vec<TextSpan>,
+    /// Each span's primary font, resolved from its family and style once,
+    /// when the span was applied.
+    pub fonts: Vec<Option<crate::text::fonts::FontInstanceId>>,
 }
 
 /// Which events a node subscribes to, whether it takes focus, and what
@@ -254,6 +258,8 @@ pub struct Host {
     pub spatial: Vec<Spatial>,
     pub paint: Vec<BoxPaint>,
     pub paragraphs: Vec<Paragraph>,
+    /// Font family names spans refer to (interned, grow-only).
+    pub families: Vec<String>,
     pub interaction: Vec<Interaction>,
     pub labels: HashMap<u32, Box<str>>,
     pub surfaces: HashMap<u32, SurfaceData>,
@@ -275,6 +281,24 @@ impl Default for Host {
 }
 
 impl Host {
+    /// The host index of family `name` (interned).
+    pub fn family(&mut self, name: &str) -> u32 {
+        match self.families.iter().position(|f| f == name) {
+            Some(i) => i as u32,
+            None => {
+                self.families.push(name.to_string());
+                self.families.len() as u32 - 1
+            }
+        }
+    }
+
+    /// The family name of a span (`""`: the default family).
+    pub fn family_name(&self, family: u32) -> &str {
+        self.families
+            .get(family as usize)
+            .map_or("", String::as_str)
+    }
+
     pub fn new() -> Host {
         Host {
             nodes: Vec::new(),
@@ -285,6 +309,7 @@ impl Host {
             spatial: Vec::new(),
             paint: Vec::new(),
             paragraphs: Vec::new(),
+            families: Vec::new(),
             interaction: Vec::new(),
             labels: HashMap::new(),
             surfaces: HashMap::new(),

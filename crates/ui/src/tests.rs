@@ -710,6 +710,7 @@ fn wire_roundtrip_is_exact() {
                     color: 0xFF,
                     weight: 700,
                     italic: true,
+                    ..TextSpan::default()
                 },
             ],
         )
@@ -2196,4 +2197,77 @@ fn finishing_a_composition_emits_one_change() {
     });
     assert_eq!(ui.focused(), None);
     assert_eq!(changes(&mut ui), ["x"]);
+}
+
+/// A span's family resolves to a font once, when the paragraph is
+/// applied (tests run on the pinned fonts, so named families): the
+/// Hebrew-family span gets that face, a color change
+/// keeps the resolution and does not reshape, and a family change
+/// resolves again and reshapes.
+#[test]
+fn span_family_resolves_when_applied() {
+    let mut ui = Ui::new(1.0);
+    let mut t = Transaction::new(1);
+    let mono = t.family("Noto Sans Hebrew");
+    let spans = [
+        TextSpan::default(),
+        TextSpan {
+            start: 5,
+            family: mono,
+            ..TextSpan::default()
+        },
+    ];
+    t.create(0, NodeKind::Text)
+        .paragraph(0, "plain code", &spans)
+        .place(NIL, 0, NIL);
+    ui.apply_txn(&t).unwrap();
+    ui.render(Size::new(400.0, 300.0));
+    let p = ui.host.paragraph(NodeId(0)).unwrap().clone();
+    let want = ui.text.font("Noto Sans Hebrew", 400, false);
+    assert_eq!(p.fonts.len(), 2);
+    assert_eq!(p.fonts[1], want);
+    assert_ne!(
+        p.fonts[0], p.fonts[1],
+        "the base span keeps the default family"
+    );
+    assert_eq!(ui.host.family_name(p.spans[1].family), "Noto Sans Hebrew");
+
+    // Color only: same fonts, no reshape.
+    let shapes = ui.text.shapes;
+    let mut t = Transaction::new(2);
+    let mono = t.family("Noto Sans Hebrew");
+    let recolored = [
+        TextSpan {
+            color: 0xFF00_00FF,
+            ..TextSpan::default()
+        },
+        TextSpan {
+            start: 5,
+            family: mono,
+            ..TextSpan::default()
+        },
+    ];
+    t.paragraph(0, "plain code", &recolored);
+    ui.apply_txn(&t).unwrap();
+    ui.render(Size::new(400.0, 300.0));
+    assert_eq!(ui.text.shapes, shapes);
+    assert_eq!(ui.host.paragraph(NodeId(0)).unwrap().fonts, p.fonts);
+
+    // Family change: resolves again, reshapes.
+    let mut t = Transaction::new(3);
+    let serif = t.family("Noto Sans Arabic");
+    let refamily = [
+        TextSpan::default(),
+        TextSpan {
+            start: 5,
+            family: serif,
+            ..TextSpan::default()
+        },
+    ];
+    t.paragraph(0, "plain code", &refamily);
+    ui.apply_txn(&t).unwrap();
+    ui.render(Size::new(400.0, 300.0));
+    assert!(ui.text.shapes > shapes);
+    let fonts = &ui.host.paragraph(NodeId(0)).unwrap().fonts;
+    assert_eq!(fonts[1], ui.text.font("Noto Sans Arabic", 400, false));
 }

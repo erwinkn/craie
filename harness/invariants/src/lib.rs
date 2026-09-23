@@ -19,6 +19,25 @@ use craie_ui::host::{NodeId, ROOT};
 use craie_ui::mutation::{Mutation, NIL, NodeKind, Role, TextSpan, Transaction};
 use craie_ui::ui::Ui;
 
+/// Host spans as transaction spans: family indices move from the host's
+/// family table to the transaction's.
+pub fn txn_spans(
+    t: &mut Transaction<'static>,
+    host: &craie_ui::host::Host,
+    spans: &[TextSpan],
+) -> Vec<TextSpan> {
+    spans
+        .iter()
+        .map(|s| TextSpan {
+            family: match s.family {
+                NIL => NIL,
+                f => t.family(host.family_name(f).to_string()),
+            },
+            ..*s
+        })
+        .collect()
+}
+
 /// Serializes `ui`'s live nodes into one mount transaction with the same
 /// ids: the "clean rebuild" input. Scroll offsets need layout extents and
 /// are applied by `rebuild` after the first frame.
@@ -55,7 +74,8 @@ pub fn snapshot(ui: &Ui) -> Transaction<'static> {
             }
         }
         if let Some(p) = host.paragraph(id) {
-            t.paragraph(id.0, p.text.clone(), &p.spans);
+            let spans = txn_spans(&mut t, host, &p.spans);
+            t.paragraph(id.0, p.text.clone(), &spans);
         }
         let it = host.interaction(id);
         if it.role != Role::None {
@@ -448,11 +468,28 @@ impl Gen {
             .join(" ")
     }
 
-    fn spans(&mut self, text: &str) -> Vec<TextSpan> {
+    /// A family for a span: mostly the default, sometimes a named or
+    /// generic family (interned in `t`).
+    fn family(&mut self, t: &mut Transaction<'static>) -> u32 {
+        match self.rng.below(6) {
+            0 => t.family("monospace"),
+            1 => t.family("Noto Sans"),
+            _ => NIL,
+        }
+    }
+
+    fn spans(&mut self, t: &mut Transaction<'static>, text: &str) -> Vec<TextSpan> {
         let size = self.pick(&[12.0, 14.0, 17.0, 22.0]);
         let mut spans = vec![TextSpan {
             font_size: size,
             color: self.color() | 0xFF,
+            family: self.family(t),
+            line_height: if self.rng.chance(0.2) {
+                size * 1.6
+            } else {
+                0.0
+            },
+            letter_spacing: if self.rng.chance(0.2) { 1.5 } else { 0.0 },
             ..TextSpan::default()
         }];
         if self.rng.chance(0.3)
@@ -465,6 +502,9 @@ impl Gen {
                 color: self.color() | 0xFF,
                 weight: 700,
                 italic: self.rng.chance(0.5),
+                decoration: self.rng.below(4) as u8,
+                family: self.family(t),
+                ..TextSpan::default()
             });
         }
         spans
@@ -507,7 +547,7 @@ impl Gen {
         match kind {
             NodeKind::Text => {
                 let text = self.text();
-                let spans = self.spans(&text);
+                let spans = self.spans(t, &text);
                 t.paragraph(id, text, &spans);
             }
             NodeKind::Surface => {
@@ -633,7 +673,7 @@ impl Gen {
                 }
                 7 if kind == NodeKind::Text => {
                     let text = self.text();
-                    let spans = self.spans(&text);
+                    let spans = self.spans(&mut t, &text);
                     t.paragraph(id, text, &spans);
                 }
                 8 => {
@@ -673,10 +713,9 @@ impl Gen {
                         // this transaction).
                         Some(p) if kind == NodeKind::Text && !p.spans.is_empty() => {
                             let text = p.text.clone();
-                            let spans: Vec<TextSpan> = p
-                                .spans
-                                .iter()
-                                .map(|s| TextSpan { color: c, ..*s })
+                            let spans: Vec<TextSpan> = txn_spans(&mut t, &ui.host, &p.spans)
+                                .into_iter()
+                                .map(|s| TextSpan { color: c, ..s })
                                 .collect();
                             t.paragraph(id, text, &spans);
                         }

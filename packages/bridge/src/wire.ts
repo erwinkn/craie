@@ -13,7 +13,7 @@
 // across transactions.
 
 const MAGIC = 0x3257_5243 // "CRW2" little-endian
-const VERSION = 2
+const VERSION = 3
 export const NIL = 0xffff_ffff // no node / append / default style
 
 const enum Op {
@@ -74,6 +74,10 @@ export interface ItemDesc {
 const SPATIAL_FIELD = { TRANSFORM: 1 << 0, OPACITY: 1 << 1 } as const
 const PAINT_FIELD = { FILL: 1 << 0, RADIUS: 1 << 1, BORDER: 1 << 2 } as const
 const SPAN_ITALIC = 1 << 0
+const SPAN_UNDERLINE = 1 << 1
+const SPAN_LINE_THROUGH = 1 << 2
+/** Span decoration bits (`TextSpanIn.decoration`). */
+export const DECORATION = { underline: 1, lineThrough: 2 } as const
 
 // COMMAND op sub-tags — mirror wire.rs `mod cmd`.
 const enum Cmd {
@@ -398,6 +402,15 @@ export interface TextSpanIn {
   color: number
   weight?: number
   italic?: boolean
+  /** Family name or generic ("monospace"); absent: the default family. */
+  fontFamily?: string
+  /** `DECORATION` bits. */
+  decoration?: number
+  /** Added to each character's advance, logical points. */
+  letterSpacing?: number
+  /** Absolute line height, logical points; span zero's applies to the
+   * paragraph. */
+  lineHeight?: number
 }
 
 export type Affine = [number, number, number, number, number, number]
@@ -570,7 +583,8 @@ export class Encoder {
     const s = this.strRef(text)
     let key = ""
     for (const sp of spans) {
-      key += `${sp.start},${sp.fontSize},${sp.color >>> 0},${sp.weight ?? 400},${sp.italic ? 1 : 0};`
+      key += `${sp.start},${sp.fontSize},${sp.color >>> 0},${sp.weight ?? 400},${sp.italic ? 1 : 0},` +
+        `${sp.decoration ?? 0},${sp.letterSpacing ?? 0},${sp.lineHeight ?? 0},${sp.fontFamily ?? ""};`
     }
     let start = this.spanIx.get(key)
     if (start === undefined) {
@@ -582,8 +596,16 @@ export class Encoder {
         w.f32(sp.fontSize)
         w.u32(sp.color >>> 0)
         w.u16(sp.weight ?? 400)
-        w.u8(sp.italic ? SPAN_ITALIC : 0)
+        const d = sp.decoration ?? 0
+        w.u8(
+          (sp.italic ? SPAN_ITALIC : 0) |
+          (d & DECORATION.underline ? SPAN_UNDERLINE : 0) |
+          (d & DECORATION.lineThrough ? SPAN_LINE_THROUGH : 0),
+        )
         w.u8(0)
+        w.u32(sp.fontFamily ? this.strRef(sp.fontFamily) : NIL)
+        w.f32(sp.letterSpacing ?? 0)
+        w.f32(sp.lineHeight ?? 0)
         this.spanCount++
       }
     }
