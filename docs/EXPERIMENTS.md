@@ -681,22 +681,29 @@ callbacks are not in its. Same machine, same session, display locked
 (GPUI still drew; Craie headless), storm on, release builds, 14
 reports of half a second after the first seven seconds.
 
-| tiles | Craie fps | Craie CPU/frame (worst) | GPUI elements fps | GPUI elements frame (worst) | GPUI canvas fps | GPUI canvas frame (worst) |
+| tiles | Craie fps | Craie frame loop CPU (worst) | this port, 2 elements/tile, fps | its render-to-paint (worst) | this port, canvas, fps | its render-to-paint (worst) |
 |------:|----------:|------------------------:|------------------:|----------------------------:|----------------:|--------------------------:|
 | 2,500  | 117-120 | 1.2-1.5 ms (7.4)  | 66-76 | 11.7-13.5 ms (23.8) | 105-120 | 5.1-5.6 ms (11.2)   |
 | 5,000  | 118-120 | 1.5-2.2 ms (9.8)  | 31-39 | 22.7-28.7 ms (46.0) | 69-106  | 7.9-13.2 ms (50.9)  |
 | 10,000 | 115-120 | 2.1-3.9 ms (10.1) | 18-20 | 44.8-49.8 ms (67.3) | 13-60   | 16.0-69.2 ms (174.4) |
 
-With one element per tile, as the React version has one view per
-tile, GPUI's frame costs 9 to 16 times Craie's and holds 18 to 76 fps
-where Craie holds 120. Painting the wall as raw quads narrows it to 4
-to 6 times at 2,500 and 5,000 tiles, and does not keep 10,000 tiles
-fluid. The cause is the model: GPUI rebuilds and lays out the frame's
-element tree each animation frame; Craie's retained scene advances the
-tweens natively and uploads what changed. Caveats: the GPUI port is
-mine (a GPUI expert might split the wall into cached views), the two
-cost boundaries are close but not identical, and neither frame rate
-was presented to a display.
+What this shows, and what it does not (review round 4 of the demo,
+SPD-11 to SPD-16):
+- It compares the frame-production cost of this port against Craie's
+  frame loop, not total application CPU. GPUI's number includes the
+  view's `render` (element construction, formatting, copies) and
+  excludes scene finalization after paint; Craie's excludes React and
+  applying transactions (on the worker and between frames).
+- The port rebuilds every panel on each animation frame (one view; no
+  `AnyView::cached`), uses two elements per tile (a cell and a square),
+  keeps easing finished tweens, and lays its log out as a uniform list;
+  a GPUI developer would avoid the first three. The gap is a cost of
+  this port; it does not yet show a cost of GPUI's model.
+- GPUI's timers run on its UI thread and slow down under load, so the
+  two runs did not do the same number of updates.
+The comparison is to be measured again with cached views, one element
+per tile, finished tweens dropped, matched log layout, per-second
+update counts, and total process CPU (the JS worker included).
 
 ### E14: layout-aware virtualization, list versus a plain column (step 2)
 
