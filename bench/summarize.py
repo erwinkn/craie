@@ -2,12 +2,16 @@
 
     python3 bench/summarize.py <log> <label>
 
-Reads the per-half-second lines both apps print with PULSE_LOG=1, skips
-the first seven seconds, and prints ranges and medians: frames per
-second, the frame cost each app measures, process CPU (the whole app:
-for Craie the native threads and the JS worker; minus the headless
-loop's spinning when `CRAIE_HEADLESS_LOG` lines are present), and the
-work done per second, which must match between the apps.
+Reads the per-half-second lines both apps print with PULSE_LOG=1 and
+skips the first seven seconds. Prints ranges of frames per second and of
+the frame cost each app measures, the work done per second (which must
+match between the apps), and process CPU over the steady interval: the
+difference of the cumulative process CPU totals between the first and
+the last steady report, over the wall time between them (both from the
+lines' epoch stamps). For Craie that is the whole process (native
+threads and the JS worker). A headless Craie run spins between frames;
+with `CRAIE_HEADLESS_LOG` its spin CPU (thread CPU clock, cumulative,
+epoch-stamped) is interpolated at the same two instants and taken out.
 """
 
 import re
@@ -16,10 +20,22 @@ import sys
 
 LINE = re.compile(
     r"\] (\d+) ms: (\d+) fps, (?:cpu|frame) ([\d.]+) ms \(max ([\d.]+)\)"
-    r".*?(?:prepare ([\d.]+) ms.*?)?(?:process )?cpu (\d+)%"
+    r".*?(?:prepare ([\d.]+) ms.*?)?cpu (\d+)% \(total ([\d.]+) ms at epoch (\d+)\)"
     r".*?heat ([\d.]+), entries ([\d.]+), sparks ([\d.]+), ripples ([\d.]+)"
 )
-SPIN = re.compile(r"spun (\d+) ms of (\d+) ms")
+SPIN = re.compile(r"epoch (\d+): spin cpu ([\d.]+) ms in total")
+
+
+def interpolate(points, t):
+    """The cumulative value at epoch `t` from (epoch, total) points."""
+    if not points:
+        return 0.0
+    if t <= points[0][0]:
+        return points[0][1] * t / points[0][0] if points[0][0] else 0.0
+    for (t0, v0), (t1, v1) in zip(points, points[1:]):
+        if t0 <= t <= t1:
+            return v0 + (v1 - v0) * (t - t0) / (t1 - t0)
+    return points[-1][1]
 
 
 def main(path, label):
@@ -30,9 +46,9 @@ def main(path, label):
             rows.append(m.groups())
         s = SPIN.search(line)
         if s:
-            spins.append(int(s.group(1)) / int(s.group(2)) * 100)
-    if not rows:
-        print(f"{label}: no reports after 7 s (was the window in front?)")
+            spins.append((int(s.group(1)), float(s.group(2))))
+    if len(rows) < 2:
+        print(f"{label}: too few reports after 7 s (was the window in front?)")
         return
 
     def col(i):
@@ -42,15 +58,18 @@ def main(path, label):
         v = col(i)
         return f"{fmt.format(min(v))}-{fmt.format(max(v))}" if v else "-"
 
-    spin = st.median(spins[3:]) if len(spins) > 3 else 0.0
-    cpu = st.median(col(5))
+    (cpu0, t0), (cpu1, t1) = (float(rows[0][6]), int(rows[0][7])), (float(rows[-1][6]), int(rows[-1][7]))
+    wall = t1 - t0
+    spin = interpolate(spins, t1) - interpolate(spins, t0) if spins else 0.0
+    cpu = (cpu1 - cpu0 - spin) / wall * 100
     prepare = f", layout+scene {span(4, '{:.2f}')} ms" if col(4) else ""
+    spun = f" (after {spin / wall * 100:.0f}% spin)" if spins else ""
     print(
         f"{label}: {span(1, '{:.0f}')} fps, frame {span(2, '{:.2f}')} ms "
-        f"(worst {max(col(3)):.1f}){prepare}, process CPU {cpu - spin:.0f}%"
-        f"{f' (after {spin:.0f}% spin)' if spin else ''}; per s: heat "
-        f"{st.median(col(6)):.1f}, entries {st.median(col(7)):.1f}, sparks "
-        f"{st.median(col(8)):.1f}, ripples {st.mean(col(9)):.2f} ({len(rows)} reports)"
+        f"(worst {max(col(3)):.1f}){prepare}, process CPU {cpu:.0f}%{spun} over "
+        f"{wall / 1000:.1f} s; per s: heat {st.median(col(8)):.1f}, entries "
+        f"{st.median(col(9)):.1f}, sparks {st.median(col(10)):.1f}, ripples "
+        f"{st.mean(col(11)):.2f} ({len(rows)} reports)"
     )
 
 

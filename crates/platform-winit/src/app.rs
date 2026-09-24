@@ -298,6 +298,11 @@ impl Inner {
             window.request_redraw();
             return;
         }
+        Inner::publish_prepared(ui, window, shared);
+    }
+
+    /// Publishes the geometry-dependent state of a prepared frame.
+    fn publish_prepared(ui: &mut Ui, window: &Window, shared: &A11yShared) {
         Inner::publish_a11y(ui, window, shared);
         window.set_ime(ui.ime_wanted(), ui.ime_area());
     }
@@ -447,9 +452,13 @@ impl App for HostApp {
         // next presented frame shows this work.
         inner.stats.prepared(t.elapsed().as_secs_f64() * 1e3);
         // Layout is current now: bounds and the caret area are too; the
-        // frame's events (list ranges, anchoring scrolls) go out.
+        // frame's events (list ranges, anchoring scrolls) go out, and the
+        // geometry-dependent state is published (not through the stale
+        // guard of `publish_frame_state`: `needs_paint` holds while an
+        // animation runs, so the guard would hold accessibility and the
+        // caret area back for the whole animation).
         Inner::flush_out(&mut inner.ui, &self.session);
-        Inner::publish_frame_state(&mut inner.ui, window, &self.a11y);
+        Inner::publish_prepared(&mut inner.ui, window, &self.a11y);
         let frame = match inner.surface.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(frame)
             | wgpu::CurrentSurfaceTexture::Suboptimal(frame) => frame,

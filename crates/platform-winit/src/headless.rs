@@ -136,11 +136,11 @@ fn run_counted(session: Arc<Session>, logical: Size, scale: f32, frames: &Atomic
                 // which would pace frames by the timer, not the work.
                 Some(at) if at.saturating_duration_since(Instant::now()) < SPIN => {
                     drop(flag);
-                    let spun = Instant::now();
+                    let spun = thread_cpu();
                     while Instant::now() < at && !*lock.lock().unwrap() {
                         std::thread::yield_now();
                     }
-                    spin.spun(spun.elapsed());
+                    spin.spun(thread_cpu().saturating_sub(spun));
                     flag = lock.lock().unwrap();
                     break;
                 }
@@ -160,11 +160,13 @@ fn run_counted(session: Arc<Session>, logical: Size, scale: f32, frames: &Atomic
         .unwrap_or_else(|| "headless session closed".into())
 }
 
-/// `CRAIE_HEADLESS_LOG`: the time spent spinning between frames, each
-/// second on stderr, so a measurement can take it out of process CPU.
+/// `CRAIE_HEADLESS_LOG`: the CPU time this thread spends spinning
+/// between frames (its thread CPU clock, not elapsed time), as running
+/// totals on stderr each second, so a measurement can take it out of
+/// process CPU over the same interval.
 struct SpinLog {
     on: bool,
-    since: Instant,
+    last: Instant,
     spun: Duration,
 }
 
@@ -172,24 +174,36 @@ impl SpinLog {
     fn new() -> SpinLog {
         SpinLog {
             on: std::env::var_os("CRAIE_HEADLESS_LOG").is_some(),
-            since: Instant::now(),
+            last: Instant::now(),
             spun: Duration::ZERO,
         }
     }
 
-    fn spun(&mut self, d: Duration) {
-        self.spun += d;
-        let elapsed = self.since.elapsed();
-        if self.on && elapsed >= Duration::from_secs(1) {
+    fn spun(&mut self, cpu: Duration) {
+        self.spun += cpu;
+        if self.on && self.last.elapsed() >= Duration::from_secs(1) {
+            self.last = Instant::now();
+            let epoch = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default();
             eprintln!(
-                "[headless] spun {:.0} ms of {:.0} ms",
-                self.spun.as_secs_f64() * 1e3,
-                elapsed.as_secs_f64() * 1e3
+                "[headless] epoch {}: spin cpu {:.1} ms in total",
+                epoch.as_millis(),
+                self.spun.as_secs_f64() * 1e3
             );
-            self.since = Instant::now();
-            self.spun = Duration::ZERO;
         }
     }
+}
+
+/// This thread's CPU time.
+fn thread_cpu() -> Duration {
+    let mut t = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    // SAFETY: clock_gettime writes the timespec it is given.
+    unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut t) };
+    Duration::new(t.tv_sec as u64, t.tv_nsec as u32)
 }
 
 /// Sends the UI's queued events to JS.

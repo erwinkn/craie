@@ -711,6 +711,7 @@ dependencies = [
  "craie-ui",
  "craie-vector",
  "fontique",
+ "libc",
  "png",
  "taffy",
  "wgpu",

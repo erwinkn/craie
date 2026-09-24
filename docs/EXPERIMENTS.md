@@ -706,26 +706,29 @@ late in both apps; both print the work done per second and process CPU
 summarizes (`bench/summarize.py`).
 
 Measured so far, storm on, the same work per second in both (heat
-about 13.8, log entries about 40, sparkline ticks about 19.6, ripples
-0.73):
+13.7, log entries about 40, sparkline ticks 19.6, ripples about 0.7).
+Process CPU is the whole app over the steady interval, from cumulative
+totals (review round 5: the first table here subtracted elapsed spin
+time and understated Craie's CPU; the headless spin is now its thread
+CPU clock, subtracted over the same interval):
 
 | | frames/s | process CPU (whole app) |
 |---|---:|---:|
-| Craie 2,500 (headless, spin removed) | 117-120 | 29% |
-| Craie 5,000 (headless, spin removed) | 119-121 | 33% |
-| Craie 10,000 (headless, spin removed) | 116-120 | 61% |
+| Craie 2,500 (headless, spin removed) | 118-121 | 42% |
+| Craie 5,000 (headless, spin removed) | 117-120 | 47% |
+| Craie 10,000 (headless, spin removed) | 117-121 | 66% |
 | GPUI 5,000, elements (window, 9 s) | 67-73 | 97-100% |
 
-GPUI at 5,000 tiles saturates its UI thread and draws about 70 frames a
-second; Craie draws 120 with a third of a core, React included. The
-GPUI row is one run of nine seconds; its other rows could not be
-measured here: a GPUI window stops drawing about 1.5 s after launch
-when it opens behind other windows (macOS reports it covered), and
-this machine's desktop was in use. The full table needs
-`bench/compare.sh` on a display with each window in front. Craie's
-headless loop spins between frames (timed waits wake late on a covered
-or locked desktop); `CRAIE_HEADLESS_LOG` reports the spin, and the CPU
-above excludes it.
+At 5,000 tiles GPUI saturates its UI thread and draws about 70 wall
+frames a second; Craie draws 120 with about half a core, React
+included. Limits: the GPUI row is one nine-second run of the port
+before review round 5 (its HUD and sparklines were then cached views
+without sizes, SPD-19); its other rows could not be measured here (a
+GPUI window stops drawing about 1.5 s after launch when it opens behind
+other windows, and this desktop was in use). Craie's rows are headless
+(its window path presents on a display). The full table needs
+`bench/compare.sh` on a display with each window in front; there
+neither app spins.
 
 ### E14: layout-aware virtualization, list versus a plain column (step 2)
 

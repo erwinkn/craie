@@ -13,17 +13,20 @@
 //!   the end, streaming 1 to 4 entries every 60 ms. (No filter field:
 //!   GPUI has no text input element of its own.)
 //! - 24 sparklines of 64 bars at 20 Hz (canvas quads).
-//! - Every panel is its own view, cached: an animation frame re-renders
-//!   the wall only.
+//! - The wall and the log are cached views: an animation frame
+//!   re-renders the wall only. The HUD and the sparklines size
+//!   themselves from their content, so they are not cached.
 //! - The same work as the React version: the same seeded random
 //!   sequences, and periodic tasks that catch up when late (up to eight
 //!   runs), both counted.
 //!
 //! `PULSE_CANVAS=1` paints the wall as quads in one canvas instead.
-//! `PULSE_LOG=1` prints, twice a second: frames per second, the frame's
-//! render-to-paint time (every view's render, layout, prepaint, paint;
-//! scene finalization and Metal encoding after paint not included),
-//! process CPU, and the work done per second.
+//! `PULSE_LOG=1` prints, twice a second (from a timer): wall frames per
+//! second (frames that re-rendered the wall: every animation frame), the
+//! wall's render-to-paint time (its render, layout, prepaint, paint; the
+//! root's and other panels' work, scene finalization, and Metal encoding
+//! not included), process CPU (per window and in total), and the work
+//! done per second.
 //!
 //!   cargo run --release            (PULSE_TILES=10000 PULSE_STORM=1)
 
@@ -275,6 +278,7 @@ impl Wall {
                 cx.notify();
             }
         });
+        every(cx, Duration::from_millis(500), |this, cx| this.report(cx));
         every(cx, Duration::from_millis(1400), |this, cx| {
             if this.storm {
                 let c = this.storm_rng.unit() * this.grid.cols as f32;
@@ -483,8 +487,8 @@ impl Wall {
 }
 
 impl Wall {
-    /// Records the last frame's cost; reports twice a second.
-    fn account(&mut self, cx: &mut Context<Self>) {
+    /// Records the last wall frame's cost (render start to paint end).
+    fn account(&mut self) {
         let m = &mut self.meter;
         if let (Some(start), Some(end)) = (m.start, m.end.get())
             && end > start
@@ -495,13 +499,18 @@ impl Wall {
             m.cost_max = m.cost_max.max(ms);
         }
         m.end.set(None);
+    }
+
+    /// Reports twice a second, from a timer: process CPU and the work
+    /// done do not depend on the wall rendering.
+    fn report(&mut self, cx: &mut Context<Self>) {
+        let m = &mut self.meter;
         let elapsed = m.since.elapsed().as_secs_f64();
-        if elapsed < 0.5 {
-            return;
-        }
         let cpu_now = process_cpu();
         let cpu = (cpu_now - m.cpu_at) / elapsed * 100.0;
         let n = m.frames.max(1) as f64;
+        // Wall frames: frames that re-rendered the wall (every animation
+        // frame does; a frame that changes only the log does not).
         let fps = (m.frames as f64 / elapsed) as f32;
         let (frame_ms, worst_ms) = (m.cost_sum / n, m.cost_max);
         let (tweens, tiles) = (self.tweens, self.grid.count);
@@ -521,9 +530,14 @@ impl Wall {
         if m.log {
             let per = |c: &Cell<u64>| c.replace(0) as f64 / elapsed;
             // Unbuffered: a killed measurement run keeps every line.
+            let epoch = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis();
             eprintln!(
-                "[gpui] {:.0} ms: {fps:.0} fps, frame {frame_ms:.2} ms (max {worst_ms:.2}), cpu {cpu:.0}%, {tiles} tiles{}, {tweens} tweens; per s: heat {:.1}, entries {:.1}, sparks {:.1}, ripples {:.2}",
+                "[gpui] {:.0} ms: {fps:.0} fps, frame {frame_ms:.2} ms (max {worst_ms:.2}) [wall], cpu {cpu:.0}% (total {:.0} ms at epoch {epoch}), {tiles} tiles{}, {tweens} tweens; per s: heat {:.1}, entries {:.1}, sparks {:.1}, ripples {:.2}",
                 m.epoch.elapsed().as_secs_f64() * 1e3,
+                cpu_now * 1e3,
                 if self.canvas_mode { " (canvas)" } else { "" },
                 per(&self.counts.heat),
                 per(&self.counts.entries),
@@ -542,7 +556,7 @@ impl Wall {
 
 impl Render for Wall {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        self.account(cx);
+        self.account();
         self.meter.start = Some(Instant::now());
         let end_cell = self.meter.end.clone();
         // Last in the wall's paint order: closes the frame.
@@ -946,8 +960,8 @@ impl Render for Hud {
         div()
             .flex()
             .gap(px(8.0))
-            .child(stat("FRAMES / S", format!("{:.0}", self.fps), LIME))
-            .child(stat("RENDER→PAINT", format!("{:.2} ms", self.frame_ms), CYAN))
+            .child(stat("WALL FRAMES / S", format!("{:.0}", self.fps), LIME))
+            .child(stat("WALL RENDER→PAINT", format!("{:.2} ms", self.frame_ms), CYAN))
             .child(stat("WORST FRAME", format!("{:.2} ms", self.worst_ms), AMBER))
             .child(stat("PROCESS CPU", format!("{:.0}%", self.cpu), VIOLET))
             .child(stat("TILES", format!("{}", self.tiles), FG))
@@ -1221,7 +1235,9 @@ impl Render for Pulse {
                             ),
                     )
                     .child(div().flex_grow())
-                    .child(cached(self.hud.clone(), StyleRefinement::default())),
+                    // Uncached: a cached view is laid out from its style
+                    // alone, and the HUD sizes itself from its content.
+                    .child(self.hud.clone()),
             )
             .child(
                 div()
@@ -1237,7 +1253,8 @@ impl Render for Pulse {
                             .min_h(px(0.0))
                             .gap(px(14.0))
                             .child(wall_panel)
-                            .child(cached(self.sparks.clone(), StyleRefinement::default())),
+                            // Uncached, as the HUD: sized by its content.
+                            .child(self.sparks.clone()),
                     )
                     .child(log_panel),
             )

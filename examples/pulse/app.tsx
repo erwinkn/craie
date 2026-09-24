@@ -446,7 +446,9 @@ const SPARK_COLORS = [CYAN, VIOLET, PINK, LIME, AMBER]
 const SPARK_NAMES = ["p50", "p99", "rps", "err", "cpu", "mem", "io", "gc"]
 
 function Sparklines({ on }: { on: boolean }) {
-  const series = useRef(
+  // Lazy: built once (a `useRef(value)` argument runs on every render and
+  // would draw from the seeded sequence each time).
+  const [initial] = useState(() =>
     Array.from({ length: SPARKS }, (_, s) => {
       const v = new Float32Array(SPARK_LEN)
       let x = 0.5
@@ -457,6 +459,7 @@ function Sparklines({ on }: { on: boolean }) {
       return { values: v, phase: s }
     }),
   )
+  const series = useRef(initial)
   const [, setTick] = useState(0)
   useEffect(() => {
     if (!on) return
@@ -701,13 +704,15 @@ if (process.env.PULSE_LOG) {
     const secs = (now - at) / 1000
     const used = process.cpuUsage(cpu)
     const pct = ((used.user + used.system) / 1e6 / secs) * 100
+    const total = process.cpuUsage()
+    const totalMs = (total.user + total.system) / 1000
     const per = (k: keyof typeof counts) => {
       const v = counts[k] / secs
       counts[k] = 0
       return v
     }
     console.log(
-      `[pulse] ${(now - t0).toFixed(0)} ms: ${s.fps.toFixed(0)} fps, cpu ${s.cpuMs.toFixed(2)} ms (max ${s.maxCpuMs.toFixed(2)}), prepare ${s.prepareMs.toFixed(2)} ms, ${s.nodes} nodes, ${s.tweens} tweens; process cpu ${pct.toFixed(0)}%; per s: heat ${per("heat").toFixed(1)}, entries ${per("entries").toFixed(1)}, sparks ${per("sparks").toFixed(1)}, ripples ${per("ripples").toFixed(2)}`,
+      `[pulse] ${(now - t0).toFixed(0)} ms: ${s.fps.toFixed(0)} fps, cpu ${s.cpuMs.toFixed(2)} ms (max ${s.maxCpuMs.toFixed(2)}), prepare ${s.prepareMs.toFixed(2)} ms, ${s.nodes} nodes, ${s.tweens} tweens; process cpu ${pct.toFixed(0)}% (total ${totalMs.toFixed(0)} ms at epoch ${Date.now()}); per s: heat ${per("heat").toFixed(1)}, entries ${per("entries").toFixed(1)}, sparks ${per("sparks").toFixed(1)}, ripples ${per("ripples").toFixed(2)}`,
     )
     at = now
     cpu = process.cpuUsage()
