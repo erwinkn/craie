@@ -278,7 +278,19 @@ impl Wall {
                 cx.notify();
             }
         });
-        every(cx, Duration::from_millis(500), |this, cx| this.report(cx));
+        // Once per wake, never caught up: a report covers the time since
+        // the last one.
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(Duration::from_millis(500))
+                    .await;
+                if this.update(cx, |this, cx| this.report(cx)).is_err() {
+                    break;
+                }
+            }
+        })
+        .detach();
         every(cx, Duration::from_millis(1400), |this, cx| {
             if this.storm {
                 let c = this.storm_rng.unit() * this.grid.cols as f32;

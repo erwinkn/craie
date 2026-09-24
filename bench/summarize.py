@@ -8,7 +8,8 @@ the frame cost each app measures, the work done per second (which must
 match between the apps), and process CPU over the steady interval: the
 difference of the cumulative process CPU totals between the first and
 the last steady report, over the wall time between them (both from the
-lines' epoch stamps). For Craie that is the whole process (native
+lines' epoch stamps; with spin samples, the first and last reports the
+spin samples bracket). For Craie that is the whole process (native
 threads and the JS worker). A headless Craie run spins between frames;
 with `CRAIE_HEADLESS_LOG` its spin CPU (thread CPU clock, cumulative,
 epoch-stamped) is interpolated at the same two instants and taken out.
@@ -58,7 +59,15 @@ def main(path, label):
         v = col(i)
         return f"{fmt.format(min(v))}-{fmt.format(max(v))}" if v else "-"
 
-    (cpu0, t0), (cpu1, t1) = (float(rows[0][6]), int(rows[0][7])), (float(rows[-1][6]), int(rows[-1][7]))
+    # Endpoints both cumulative series cover: with spin samples, only
+    # reports between the first and the last spin sample.
+    ends = rows
+    if spins:
+        ends = [r for r in rows if spins[0][0] <= int(r[7]) <= spins[-1][0]]
+        if len(ends) < 2:
+            print(f"{label}: too few reports inside the spin samples")
+            return
+    (cpu0, t0), (cpu1, t1) = (float(ends[0][6]), int(ends[0][7])), (float(ends[-1][6]), int(ends[-1][7]))
     wall = t1 - t0
     spin = interpolate(spins, t1) - interpolate(spins, t0) if spins else 0.0
     cpu = (cpu1 - cpu0 - spin) / wall * 100

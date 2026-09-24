@@ -449,6 +449,15 @@ impl Ui {
         self.run_animations(size);
         self.layout(size);
         self.sync_lists(size);
+        // Geometry that assistive technology reports moved in this frame
+        // (a layout pass, an animation sample): the tree is stale even
+        // with no commit.
+        if !self.layouts.moved.is_empty()
+            || !self.layouts.resized.is_empty()
+            || !self.host.dirty.spatial.is_empty()
+        {
+            self.a11y_stale = true;
+        }
         self.paint(size);
         &self.scene
     }

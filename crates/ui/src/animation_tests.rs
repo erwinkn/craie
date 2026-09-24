@@ -1004,3 +1004,38 @@ fn animation_index_stays_exact() {
     }
     assert!(peak > 100, "tweens overlapped: peak {peak}");
 }
+
+/// SPD-22: an animation with no commits keeps assistive technology's
+/// bounds current: each frame that moves geometry marks the tree stale,
+/// and the published bounds follow the samples to the end.
+#[test]
+fn animation_frames_keep_accessibility_bounds_current() {
+    let mut ui = row_ui();
+    apply(&mut ui, |t| {
+        t.role(1, crate::mutation::Role::Button).animate(
+            1,
+            Prop::Width,
+            Value::Size(taffy::Dimension::length(200.0)),
+            linear(1.0),
+        );
+    });
+    at(&mut ui, 0.0);
+    assert!(ui.take_a11y_stale());
+    let width = |ui: &Ui| {
+        let tree = ui.a11y_tree(VIEW);
+        let (_, node) = tree
+            .nodes
+            .iter()
+            .find(|(n, _)| *n == crate::a11y::aid(NodeId(1)))
+            .expect("the button");
+        let b = node.bounds().expect("bounds");
+        (b.x1 - b.x0) as f32
+    };
+    for (t, want) in [(0.25, 125.0), (0.5, 150.0), (1.0, 200.0)] {
+        at(&mut ui, t);
+        assert!(ui.take_a11y_stale(), "stale after the sample at {t}");
+        assert!(near(width(&ui), want), "at {t}: {}", width(&ui));
+    }
+    at(&mut ui, 1.5);
+    assert!(!ui.take_a11y_stale(), "an idle frame changes nothing");
+}

@@ -195,7 +195,15 @@ impl SpinLog {
     }
 }
 
+/// This thread's CPU time (zero where no thread CPU clock is wired:
+/// the spin log then reports zero).
+#[cfg(not(unix))]
+fn thread_cpu() -> Duration {
+    Duration::ZERO
+}
+
 /// This thread's CPU time.
+#[cfg(unix)]
 fn thread_cpu() -> Duration {
     let mut t = libc::timespec {
         tv_sec: 0,

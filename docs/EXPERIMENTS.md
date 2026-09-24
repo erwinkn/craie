@@ -710,13 +710,14 @@ Measured so far, storm on, the same work per second in both (heat
 Process CPU is the whole app over the steady interval, from cumulative
 totals (review round 5: the first table here subtracted elapsed spin
 time and understated Craie's CPU; the headless spin is now its thread
-CPU clock, subtracted over the same interval):
+CPU clock, subtracted between the first and last reports that the spin
+samples bracket, 7.7 s per run):
 
 | | frames/s | process CPU (whole app) |
 |---|---:|---:|
-| Craie 2,500 (headless, spin removed) | 118-121 | 42% |
-| Craie 5,000 (headless, spin removed) | 117-120 | 47% |
-| Craie 10,000 (headless, spin removed) | 117-121 | 66% |
+| Craie 2,500 (headless, spin removed) | 118-121 | 39% |
+| Craie 5,000 (headless, spin removed) | 117-120 | 46% |
+| Craie 10,000 (headless, spin removed) | 117-121 | 64% |
 | GPUI 5,000, elements (window, 9 s) | 67-73 | 97-100% |
 
 At 5,000 tiles GPUI saturates its UI thread and draws about 70 wall

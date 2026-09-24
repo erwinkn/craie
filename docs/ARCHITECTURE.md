@@ -1036,8 +1036,9 @@ its own internal copy because the platform requires it.
 unit user event. A commit is applied and asks for a frame; the frame
 is prepared only in the redraw, once per presented frame (preparing
 after every commit starved the redraws under a stream of commits).
-The redraw publishes accessibility and the caret area right after it
-prepares the frame (a guard on `needs_paint`, which holds while any
+A frame that moves geometry (a layout pass, an animation sample) marks
+the accessibility tree stale. The redraw publishes accessibility and
+the caret area right after it prepares the frame (a guard on `needs_paint`, which holds while any
 animation runs, had held them back for whole animations since step 4).
 Running animations request the next frame only after
 a frame presented: an occluded window gets no drawable, and asking

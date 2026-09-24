@@ -7,7 +7,6 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
-libc = "0.2"
 craie-core.workspace = true
 craie-scene.workspace = true
 craie-render.workspace = true
@@ -59,3 +58,7 @@ path = "../../examples/fontcost/main.rs"
 [[example]]
 name = "vector"
 path = "../../examples/vector/main.rs"
+
+[target.'cfg(unix)'.dependencies]
+# The headless loop's thread CPU clock.
+libc = "0.2"
