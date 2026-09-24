@@ -324,6 +324,8 @@ export interface FrameStats {
   prepareMs: number
   /** Live native nodes. */
   nodes: number
+  /** Running native tweens (declared transitions and `animate` calls). */
+  tweens: number
 }
 
 const frameStatsListeners = new Set<(s: FrameStats) => void>()
@@ -524,7 +526,14 @@ export class CraieHost {
    * Events for a previous occupant of the id are dropped. */
   private dispatchEvent(ev: UiEvent) {
     if (ev.kind === EVENT_KIND.frameStats) {
-      const stats = { fps: ev.x, cpuMs: ev.y, maxCpuMs: ev.a, prepareMs: ev.b, nodes: ev.key }
+      const stats = {
+        fps: ev.x,
+        cpuMs: ev.y,
+        maxCpuMs: ev.a,
+        prepareMs: ev.b,
+        nodes: ev.key,
+        tweens: ev.revision,
+      }
       for (const listener of frameStatsListeners) listener(stats)
       return
     }

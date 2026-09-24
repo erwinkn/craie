@@ -85,6 +85,9 @@ pub fn run(session: Arc<Session>, logical: Size, scale: f32) -> String {
         {
             ui.settle();
         }
+        // Commits raise events with no paint (an animate that ends at
+        // once): they go out now, not with the next frame.
+        flush_events(&mut ui, &session);
         let owes = ui.needs_paint() || ui.animating();
         if owes && Instant::now() >= next_frame {
             next_frame = Instant::now() + FRAME;
@@ -92,13 +95,7 @@ pub fn run(session: Arc<Session>, logical: Size, scale: f32) -> String {
             let t = Instant::now();
             prepare_frame(&mut ui, &mut renderer, &gpu, (w, h), scale);
             let prepare_ms = t.elapsed().as_secs_f64() * 1e3;
-            let out = ui.take_events();
-            if !out.is_empty() {
-                let reliable = out
-                    .iter()
-                    .any(|e| e.kind == events::out_kind::ANIMATION_END);
-                session.post_events(events::encode_events(&out), reliable);
-            }
+            flush_events(&mut ui, &session);
             let t = Instant::now();
             renderer.draw(&gpu, &view, w, h, ui.scene_mut());
             let cpu_ms = prepare_ms + t.elapsed().as_secs_f64() * 1e3;
@@ -106,7 +103,8 @@ pub fn run(session: Arc<Session>, logical: Size, scale: f32) -> String {
                 submission_index: None,
                 timeout: None,
             });
-            if let Some(e) = stats.frame(cpu_ms, prepare_ms, ui.host.len()) {
+            let tweens = ui.animation_count();
+            if let Some(e) = stats.frame(cpu_ms, prepare_ms, ui.host.len(), tweens) {
                 session.post_events(events::encode_events(&[e]), false);
             }
         }
@@ -135,7 +133,9 @@ pub fn run(session: Arc<Session>, logical: Size, scale: f32) -> String {
                     break;
                 }
                 Some(at) => {
-                    let wait = at.saturating_duration_since(Instant::now()) - SPIN;
+                    let wait = at
+                        .saturating_duration_since(Instant::now())
+                        .saturating_sub(SPIN);
                     flag = cv.wait_timeout(flag, wait).unwrap().0;
                 }
                 None => flag = cv.wait(flag).unwrap(),
@@ -146,6 +146,18 @@ pub fn run(session: Arc<Session>, logical: Size, scale: f32) -> String {
     session
         .closed_reason()
         .unwrap_or_else(|| "headless session closed".into())
+}
+
+/// Sends the UI's queued events to JS.
+fn flush_events(ui: &mut Ui, session: &Session) {
+    let out = ui.take_events();
+    if !out.is_empty() {
+        // Animation ends resolve JS promises: those frames never drop.
+        let reliable = out
+            .iter()
+            .any(|e| e.kind == events::out_kind::ANIMATION_END);
+        session.post_events(events::encode_events(&out), reliable);
+    }
 }
 
 /// Asks macOS for user-interactive timer precision on this thread: a
@@ -165,3 +177,59 @@ fn interactive_thread() {
 
 #[cfg(not(target_os = "macos"))]
 fn interactive_thread() {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use craie_ui::animation::{Prop, Timing, Value};
+    use craie_ui::bridge::Delivery;
+    use craie_ui::mutation::{NIL, NodeKind, Transaction};
+
+    /// SPD-01: an event a commit raises with no paint (an `animate` that
+    /// ends at once, to the value the node holds) reaches JS without
+    /// waiting for a frame.
+    #[test]
+    fn commit_events_go_out_without_a_frame() {
+        if Gpu::try_headless().is_none() {
+            eprintln!("no GPU adapter: skipped");
+            return;
+        }
+        let session = Session::new();
+        let host = session.clone();
+        let thread = std::thread::spawn(move || run(host, Size::new(100.0, 100.0), 1.0));
+        let submit = |t: &Transaction<'_>| session.submit(craie_ui::wire::encode(t)).unwrap();
+        let mut t = Transaction::new(1);
+        t.create(1, NodeKind::View)
+            .fill(1, 0x3040_50FF)
+            .place(NIL, 1, NIL);
+        submit(&t);
+        // Let the first frame (and its paint) pass.
+        std::thread::sleep(Duration::from_millis(300));
+        let mut t = Transaction::new(2);
+        t.animate(
+            1,
+            Prop::Opacity,
+            Value::Opacity(1.0),
+            Timing::curve(0.0, [0.0, 0.0, 1.0, 1.0]),
+        );
+        submit(&t);
+        let deadline = Instant::now() + Duration::from_secs(3);
+        let mut ended = false;
+        while !ended && Instant::now() < deadline {
+            session.pump(|frame| {
+                // An events frame: tag 1, a u32 count, records with the
+                // kind first.
+                if frame.first() == Some(&1)
+                    && frame.get(5) == Some(&events::out_kind::ANIMATION_END)
+                {
+                    ended = true;
+                }
+                Delivery::Sent
+            });
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        session.close("test done");
+        thread.join().unwrap();
+        assert!(ended, "the end event came without a frame");
+    }
+}

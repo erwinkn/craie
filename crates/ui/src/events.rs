@@ -147,7 +147,8 @@ pub mod out_kind {
     /// Frame statistics from the platform frame loop, about twice a
     /// second while frames are drawn (node NIL, droppable): x = frames
     /// per second, y = mean CPU time per frame (ms), a = the largest
-    /// (ms), b = mean layout and scene time (ms), key = live nodes.
+    /// (ms), b = mean layout and scene time (ms), key = live nodes,
+    /// revision = running tweens.
     pub const FRAME_STATS: u8 = 16;
 }
 

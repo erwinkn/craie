@@ -584,6 +584,11 @@ impl Ui {
         !self.animations.is_empty()
     }
 
+    /// Running tweens (declared transitions and `animate` calls).
+    pub fn animation_count(&self) -> usize {
+        self.animations.len()
+    }
+
     /// The clock time at which every running animation is at rest.
     pub fn animations_end(&self) -> Option<f64> {
         self.animations

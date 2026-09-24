@@ -620,11 +620,18 @@ PULSE_STORM=1 PULSE_TILES=n`, release addon, frame statistics from the
 frame loop (CPU: layout, scene, upload, draw encoding; the GPU wait is
 not in it, about 1.6 ms a frame at 5,000 tiles).
 
-| tiles | frames/s | CPU per frame, mean | worst frame (per 0.5 s) | tweens in flight |
-|------:|---------:|--------------------:|------------------------:|-----------------:|
-| 2,500  | 120 | 1.1 to 1.4 ms | 2.7 to 4.2 ms | up to 4,400  |
-| 5,000  | 120 | 1.4 to 1.8 ms | 3.0 to 3.9 ms | up to 10,000 |
-| 10,000 | 120 | 2.4 to 3.2 ms | 4.4 to 6.7 ms | up to 20,000 |
+| tiles | frames/s | CPU per frame, mean | worst frame (per 0.5 s) | native tweens running |
+|------:|---------:|--------------------:|------------------------:|----------------------:|
+| 2,500  | 117 to 120 | 1.2 to 1.5 ms | 3.6 to 7.4 ms  | 2,500 to 4,200  |
+| 5,000  | 118 to 120 | 1.5 to 2.2 ms | 4.2 to 9.8 ms  | 4,900 to 7,900  |
+| 10,000 | 115 to 120 | 2.1 to 3.9 ms | 4.9 to 10.1 ms | 6,800 to 16,600 |
+
+Fourteen reports of half a second per row, after the first seven
+seconds. Worst frames over the 8.3 ms budget of 120 Hz occur a few
+times at 5,000 and 10,000 tiles (ripple starts); the means stay under
+4 ms. Tweens are the native count (review round 1 of the demo: the
+first table counted each pop's two sequential tweens as both running,
+and no color transitions).
 
 Three runtime faults the demo found, fixed:
 - The driver found a running tween by scanning every running tween.
@@ -634,7 +641,9 @@ Three runtime faults the demo found, fixed:
 - An occluded window with running animations asked for the next frame
   before it knew it could draw one: about 1,700 empty redraws a
   second. It asks after a presented frame now.
-- No frame statistics reached JS. `FRAME_STATS` does now.
+- No frame statistics reached JS. `FRAME_STATS` does now (review round
+  1 of the demo: commit-time preparation counts in the next frame, a
+  window counts one burst, so the HUD's own paints report nothing).
 
 One app fault: the log panel's automatic minimum height was its
 content (200,000 rows, about 4.8 million px), so the list rendered

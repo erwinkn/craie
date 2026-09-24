@@ -1039,13 +1039,18 @@ again at once spun the loop (about 1,700 empty redraws a second). The
 frame loop measures each frame's CPU time (the frame path plus draw
 encoding and submission) and, about twice a second while frames are
 drawn, sends a `FRAME_STATS` event (frames per second, mean and worst
-CPU ms, layout and scene ms, live nodes; droppable, never while idle)
-that JS reads with `useFrameStats` or `onFrameStats`.
+CPU ms, layout and scene ms, live nodes, running tweens; droppable)
+that JS reads with `useFrameStats` or `onFrameStats`. CPU time counts
+preparation that ran after a commit, before the redraw, in the frame
+that shows it. A report covers one burst of frames: a gap of more than
+250 ms starts a new window, so sparse frames (a HUD painting a report)
+never report on their own.
 `CRAIE_HEADLESS=1` runs the session with no window: the same `Ui`,
 frame path, renderer (into an offscreen target), and statistics,
 paced at 120 Hz by spinning, because a process with no visible window
 gets coalesced timers on macOS (4 ms waits woke up to 30 ms late). It
-is for measuring where no display is on. `craie_ui::platform` holds the contract: `WindowId`
+is for measuring where no display is on. It sends the events a commit
+raises at once, not with the next frame. `craie_ui::platform` holds the contract: `WindowId`
 and `PlatformWindow` (surface size, scale, frame request, text input);
 the clipboard seam is `craie_ui::clipboard::Clipboard`. One window.
 

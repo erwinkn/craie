@@ -121,9 +121,8 @@ function useHeat(i: number): number {
 }
 
 const tileNodes: (HostNode | null)[] = new Array(MAX_TILES).fill(null)
-/** Tiles with a pop running (native tweens in flight: two per pop). */
+/** Tiles with a pop running (a scale tween, then a spring back). */
 const popping = new Uint8Array(MAX_TILES)
-let tweensInFlight = 0
 
 const TILE_TRANSITION = { backgroundColor: { duration: 520, easing: "ease-out" } } as const
 
@@ -148,16 +147,13 @@ function pop(i: number, scale: number, delay: number) {
   const n = tileNodes[i]
   if (!n || popping[i]) return
   popping[i] = 1
-  tweensInFlight += 1
   n.animate("transform", [{ scale }], { duration: 110, delay, easing: "ease-out" }).then((end) => {
     if (end.reason === "removed") {
       popping[i] = 0
-      tweensInFlight -= 1
       return
     }
     n.animate("transform", [{ scale: 1 }], { spring: { stiffness: 320, damping: 13 } }).then(() => {
       popping[i] = 0
-      tweensInFlight -= 1
     })
   })
 }
@@ -586,7 +582,7 @@ function Hud() {
       <Stat label="WORST FRAME" value={live ? `${stats.maxCpuMs.toFixed(2)} ms` : "—"} color={AMBER} />
       <Stat label="LAYOUT + SCENE" value={live ? `${stats.prepareMs.toFixed(2)} ms` : "—"} color={VIOLET} />
       <Stat label="NATIVE NODES" value={stats ? stats.nodes.toLocaleString("en-US") : "—"} color={FG} />
-      <Stat label="TWEENS IN FLIGHT" value={(tweensInFlight * 2).toLocaleString("en-US")} color={PINK} />
+      <Stat label="NATIVE TWEENS" value={live ? stats.tweens.toLocaleString("en-US") : "0"} color={PINK} />
     </View>
   )
 }
@@ -660,7 +656,7 @@ console.log("[pulse] attached")
 if (process.env.PULSE_LOG) {
   onFrameStats((s) =>
     console.log(
-      `[pulse] ${(performance.now() - t0).toFixed(0)} ms: ${s.fps.toFixed(0)} fps, cpu ${s.cpuMs.toFixed(2)} ms (max ${s.maxCpuMs.toFixed(2)}), prepare ${s.prepareMs.toFixed(2)} ms, ${s.nodes} nodes, ${tweensInFlight * 2} tweens`,
+      `[pulse] ${(performance.now() - t0).toFixed(0)} ms: ${s.fps.toFixed(0)} fps, cpu ${s.cpuMs.toFixed(2)} ms (max ${s.maxCpuMs.toFixed(2)}), prepare ${s.prepareMs.toFixed(2)} ms, ${s.nodes} nodes, ${s.tweens} tweens`,
     ),
   )
 }

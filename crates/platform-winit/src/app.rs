@@ -45,59 +45,93 @@ struct Inner {
 }
 
 /// Frame costs over a window of about half a second, for
-/// `out_kind::FRAME_STATS`. CPU time is the frame path (layout, scene,
-/// upload) plus encoding and submitting the draw; the wait for a
-/// drawable is not in it.
+/// `out_kind::FRAME_STATS`. CPU time is all preparation the frame shows
+/// (layout, scene, upload; also when it ran after a commit, before the
+/// redraw) plus encoding and submitting the draw; the wait for a
+/// drawable is not in it. A window counts one burst of frames: a gap of
+/// more than `GAP` starts a new one, so sparse frames (a HUD that paints
+/// its last report, an idle timeout) never make a report of their own.
 pub(crate) struct FrameStats {
     since: Instant,
+    last: Option<Instant>,
     frames: u32,
     cpu_sum: f64,
     cpu_max: f64,
     prepare_sum: f64,
+    /// Preparation done since the last frame, outside one (ms).
+    pending_ms: f64,
 }
 
 impl FrameStats {
     const WINDOW: Duration = Duration::from_millis(500);
+    const GAP: Duration = Duration::from_millis(250);
 
     pub(crate) fn new() -> FrameStats {
         FrameStats {
             since: Instant::now(),
+            last: None,
             frames: 0,
             cpu_sum: 0.0,
             cpu_max: 0.0,
             prepare_sum: 0.0,
+            pending_ms: 0.0,
         }
     }
 
-    /// Records one frame; at the end of a window returns its event. A
-    /// window of one frame sends nothing: the frame that shows the last
-    /// statistics must not cause the next ones.
+    /// Preparation that ran before the frame that will show it.
+    pub(crate) fn prepared(&mut self, ms: f64) {
+        self.pending_ms += ms;
+    }
+
+    /// Records one frame; at the end of a window returns its event.
     pub(crate) fn frame(
         &mut self,
         cpu_ms: f64,
         prepare_ms: f64,
         nodes: usize,
+        tweens: usize,
     ) -> Option<events::UiEvent> {
+        self.frame_at(Instant::now(), cpu_ms, prepare_ms, nodes, tweens)
+    }
+
+    fn frame_at(
+        &mut self,
+        now: Instant,
+        cpu_ms: f64,
+        prepare_ms: f64,
+        nodes: usize,
+        tweens: usize,
+    ) -> Option<events::UiEvent> {
+        let cpu_ms = cpu_ms + self.pending_ms;
+        let prepare_ms = prepare_ms + self.pending_ms;
+        self.pending_ms = 0.0;
+        if self.frames == 0 || self.last.is_some_and(|l| now - l > Self::GAP) {
+            self.since = now;
+            self.frames = 0;
+            self.cpu_sum = 0.0;
+            self.cpu_max = 0.0;
+            self.prepare_sum = 0.0;
+        }
+        self.last = Some(now);
         self.frames += 1;
         self.cpu_sum += cpu_ms;
         self.cpu_max = self.cpu_max.max(cpu_ms);
         self.prepare_sum += prepare_ms;
-        let elapsed = self.since.elapsed();
+        let elapsed = now - self.since;
         if elapsed < Self::WINDOW {
             return None;
         }
-        let out = (self.frames > 1).then(|| {
-            let n = self.frames as f64;
-            let mut e = events::UiEvent::new(events::out_kind::FRAME_STATS, u32::MAX);
-            e.x = (n / elapsed.as_secs_f64()) as f32;
-            e.y = (self.cpu_sum / n) as f32;
-            e.a = self.cpu_max as f32;
-            e.b = (self.prepare_sum / n) as f32;
-            e.key = nodes as u32;
-            e
-        });
-        *self = FrameStats::new();
-        out
+        let n = self.frames as f64;
+        let mut e = events::UiEvent::new(events::out_kind::FRAME_STATS, u32::MAX);
+        // Intervals over time: the window opens at its first frame.
+        e.x = ((n - 1.0) / elapsed.as_secs_f64()) as f32;
+        e.y = (self.cpu_sum / n) as f32;
+        e.a = self.cpu_max as f32;
+        e.b = (self.prepare_sum / n) as f32;
+        e.key = nodes as u32;
+        e.revision = tweens as u32;
+        self.frames = 0;
+        Some(e)
     }
 }
 
@@ -193,9 +227,11 @@ impl Inner {
         }
         let (w, h) = window.size();
         let scale = window.scale_factor() as f32;
+        let t = Instant::now();
         if prepare_frame(&mut self.ui, &mut self.renderer, &self.gpu, (w, h), scale) {
             window.request_redraw();
         }
+        self.stats.prepared(t.elapsed().as_secs_f64() * 1e3);
         // A frame can raise events (list ranges, anchoring scrolls).
         Inner::flush_out(&mut self.ui, session);
     }
@@ -410,7 +446,11 @@ impl App for HostApp {
         if inner.ui.animating() {
             window.request_redraw();
         }
-        if let Some(e) = inner.stats.frame(cpu_ms, prepare_ms, inner.ui.host.len()) {
+        let tweens = inner.ui.animation_count();
+        if let Some(e) = inner
+            .stats
+            .frame(cpu_ms, prepare_ms, inner.ui.host.len(), tweens)
+        {
             self.session.post_events(events::encode_events(&[e]), false);
         }
     }
@@ -419,6 +459,40 @@ impl App for HostApp {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// SPD-03: frames far apart (a HUD painting a report, then its idle
+    /// timeout) never report; a burst does, with its rate, and counts
+    /// preparation that ran before its frames (SPD-02).
+    #[test]
+    fn frame_stats_report_bursts_only() {
+        let t0 = Instant::now();
+        let ms = |v: u64| t0 + Duration::from_millis(v);
+        let mut stats = FrameStats::new();
+        for k in 0..8 {
+            assert!(
+                stats.frame_at(ms(k * 1200), 1.0, 1.0, 10, 0).is_none(),
+                "sparse frame {k}"
+            );
+        }
+        let start = 8 * 1200 + 5000;
+        let mut report = None;
+        for k in 0..=60 {
+            if k == 30 {
+                stats.prepared(3.0);
+            }
+            if let Some(e) = stats.frame_at(ms(start + k * 10), 1.0, 0.5, 10, 7) {
+                report = Some(e);
+                break;
+            }
+        }
+        let e = report.expect("a burst reports");
+        assert!((e.x - 100.0).abs() < 1.0, "fps {}", e.x);
+        assert_eq!(
+            e.a, 4.0,
+            "the frame after a commit's preparation carries it"
+        );
+        assert_eq!(e.revision, 7);
+    }
     use craie_ui::events::Event;
     use craie_ui::host::NodeId;
     use craie_ui::mutation::{NIL, NodeKind, Transaction};
