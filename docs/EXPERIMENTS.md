@@ -650,6 +650,42 @@ content (200,000 rows, about 4.8 million px), so the list rendered
 every row and the worker never idled; `minHeight: 0` on the body row,
 as in CSS.
 
+### Pulse against GPUI (`bench/gpui-pulse`)
+
+The same demo in GPUI 0.2.2 (crates.io; a crate of its own, outside
+Craie's workspace): the same grid, heat drift, pops (110 ms ease-out,
+then the same spring), ripples, storm, 200,000-entry log
+(`uniform_list` of styled text, streaming), and 24 sparklines (canvas
+quads). GPUI divs have no transform, so a tile is a cell with a
+centered square that grows (two elements per tile); `PULSE_CANVAS=1`
+paints the wall as quads in one canvas (no element per tile, GPUI's
+fastest way). GPUI re-renders and lays out the window on every
+animation frame. Its HUD measures render start to paint end
+(layout, prepaint, scene building; Metal encoding after paint is not
+in it). Craie's number is its frame loop's CPU (animation driver,
+layout, scene, upload, draw encoding); React and the demo's JS run on
+the worker thread and are in neither number, as GPUI's timer
+callbacks are not in its. Same machine, same session, display locked
+(GPUI still drew; Craie headless), storm on, release builds, 14
+reports of half a second after the first seven seconds.
+
+| tiles | Craie fps | Craie CPU/frame (worst) | GPUI elements fps | GPUI elements frame (worst) | GPUI canvas fps | GPUI canvas frame (worst) |
+|------:|----------:|------------------------:|------------------:|----------------------------:|----------------:|--------------------------:|
+| 2,500  | 117-120 | 1.2-1.5 ms (7.4)  | 66-76 | 11.7-13.5 ms (23.8) | 105-120 | 5.1-5.6 ms (11.2)   |
+| 5,000  | 118-120 | 1.5-2.2 ms (9.8)  | 31-39 | 22.7-28.7 ms (46.0) | 69-106  | 7.9-13.2 ms (50.9)  |
+| 10,000 | 115-120 | 2.1-3.9 ms (10.1) | 18-20 | 44.8-49.8 ms (67.3) | 13-60   | 16.0-69.2 ms (174.4) |
+
+With one element per tile, as the React version has one view per
+tile, GPUI's frame costs 9 to 16 times Craie's and holds 18 to 76 fps
+where Craie holds 120. Painting the wall as raw quads narrows it to 4
+to 6 times at 2,500 and 5,000 tiles, and does not keep 10,000 tiles
+fluid. The cause is the model: GPUI rebuilds and lays out the frame's
+element tree each animation frame; Craie's retained scene advances the
+tweens natively and uploads what changed. Caveats: the GPUI port is
+mine (a GPUI expert might split the wall into cached views), the two
+cost boundaries are close but not identical, and neither frame rate
+was presented to a display.
+
 ### E14: layout-aware virtualization, list versus a plain column (step 2)
 
 `cargo run --release -p craie-harness --example e14_lists`: a scroller
