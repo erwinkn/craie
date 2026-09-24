@@ -1033,7 +1033,10 @@ its own internal copy because the platform requires it.
 
 **Current.** winit 0.30.13 confined to `craie-platform-winit`,
 `ControlFlow::Wait`, frames only on `RedrawRequested`. The wake is a
-unit user event. Running animations request the next frame only after
+unit user event. A commit is applied and asks for a frame; the frame
+is prepared only in the redraw, once per presented frame (preparing
+after every commit starved the redraws under a stream of commits).
+Running animations request the next frame only after
 a frame presented: an occluded window gets no drawable, and asking
 again at once spun the loop (about 1,700 empty redraws a second). The
 frame loop measures each frame's CPU time (the frame path plus draw

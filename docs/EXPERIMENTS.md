@@ -641,6 +641,18 @@ Three runtime faults the demo found, fixed:
 - An occluded window with running animations asked for the next frame
   before it knew it could draw one: about 1,700 empty redraws a
   second. It asks after a presented frame now.
+- In a window (not headless), a ripple dropped the frame rate from 120
+  to 0 to 5 fps. The host prepared a whole frame after every commit
+  (every tween advanced, layout, scene), outside the paced redraw; JS
+  answers animation ends with commits, so a ripple over 10,000 tiles
+  ran 300 to 440 such preparations a second, 600 to 980 ms of each
+  second of the main thread, and starved the redraws (0 to 80 a
+  second). Commits now only apply and ask for a frame; the redraw
+  prepares once per presented frame. Same storm after the fix: 94 to
+  174 commits and 104 to 119 redraws a second, 220 to 370 ms of
+  preparation a second (`commits_apply_without_a_frame`). The headless
+  loop never had the fault (it prepares only in its paced frame), so
+  the table above did not show it.
 - No frame statistics reached JS. `FRAME_STATS` does now (review round
   1 of the demo: commit-time preparation counts in the next frame, a
   window counts one burst, so the HUD's own paints report nothing).

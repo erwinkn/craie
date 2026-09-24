@@ -230,31 +230,38 @@ pub fn prepare_frame(
     true
 }
 
+/// Applies the session's pending commits to `ui` (no layout, no frame).
+fn apply_commits(ui: &mut Ui, session: &Session, stats: &mut FrameStats) {
+    let t = Instant::now();
+    for buf in session.take_commits() {
+        match ui.apply(&buf) {
+            Ok(seq) => session.ack(seq),
+            Err(e) => {
+                eprintln!("[craie] undecodable transaction: {e:?}");
+                session.close("undecodable transaction");
+            }
+        }
+    }
+    stats.worked(t.elapsed().as_secs_f64() * 1e3);
+}
+
 impl Inner {
-    /// Drains the session into the retained UI, then lays out + repaints
-    /// once if anything can change pixels.
+    /// Drains the session into the retained UI and asks for a frame if
+    /// anything can change pixels. The frame is prepared in `redraw`,
+    /// once per presented frame, not here: preparing after every commit
+    /// advanced every tween and laid out once per commit, so a stream of
+    /// commits (JS answering animation ends: hundreds a second in a
+    /// ripple over 10,000 tiles) kept the thread busy and starved the
+    /// redraws (0 to 5 fps).
     fn sync(&mut self, window: &Window, session: &Session, drain: bool) {
         if drain {
-            let t = Instant::now();
-            for buf in session.take_commits() {
-                match self.ui.apply(&buf) {
-                    Ok(seq) => session.ack(seq),
-                    Err(e) => {
-                        eprintln!("[craie] undecodable transaction: {e:?}");
-                        session.close("undecodable transaction");
-                    }
-                }
-            }
-            self.stats.worked(t.elapsed().as_secs_f64() * 1e3);
+            apply_commits(&mut self.ui, session, &mut self.stats);
         }
-        let (w, h) = window.size();
-        let scale = window.scale_factor() as f32;
-        let t = Instant::now();
-        if prepare_frame(&mut self.ui, &mut self.renderer, &self.gpu, (w, h), scale) {
+        if self.ui.needs_paint() || self.ui.animating() {
             window.request_redraw();
         }
-        self.stats.prepared(t.elapsed().as_secs_f64() * 1e3);
-        // A frame can raise events (list ranges, anchoring scrolls).
+        // Commits raise events with no frame (an animate that ends at
+        // once).
         Inner::flush_out(&mut self.ui, session);
     }
 
@@ -352,6 +359,9 @@ impl App for HostApp {
             {
                 let format = inner.surface.config.format;
                 let size = window.size();
+                // The scene as the next frame would show it.
+                let scale = window.scale_factor() as f32;
+                prepare_frame(&mut inner.ui, &mut inner.renderer, &inner.gpu, size, scale);
                 match crate::capture::capture_png(
                     &inner.gpu,
                     &mut inner.renderer,
@@ -513,6 +523,41 @@ mod tests {
             "the frame after a commit's preparation carries it"
         );
         assert_eq!(e.revision, 7);
+    }
+
+    /// A commit is applied, not drawn: no layout pass, no animation step
+    /// until the paced frame. (Preparing after every commit starved the
+    /// redraws in a ripple over 10,000 tiles: 0 to 5 fps.)
+    #[test]
+    fn commits_apply_without_a_frame() {
+        use craie_ui::animation::{Prop, Timing, Value};
+        use craie_ui::mutation::{NIL, NodeKind, Transaction};
+        let session = craie_ui::bridge::Session::new();
+        let mut ui = Ui::new(1.0);
+        let mut stats = FrameStats::new();
+        let mut t = Transaction::new(1);
+        t.create(1, NodeKind::View)
+            .fill(1, 0x3040_50FF)
+            .place(NIL, 1, NIL);
+        session.submit(craie_ui::wire::encode(&t)).unwrap();
+        apply_commits(&mut ui, &session, &mut stats);
+        let mut t = Transaction::new(2);
+        t.animate(
+            1,
+            Prop::Opacity,
+            Value::Opacity(0.0),
+            Timing::curve(1.0, [0.0, 0.0, 1.0, 1.0]),
+        );
+        session.submit(craie_ui::wire::encode(&t)).unwrap();
+        ui.set_time(0.5);
+        apply_commits(&mut ui, &session, &mut stats);
+        assert_eq!(session.recv_acks(), vec![1, 2]);
+        assert_eq!(ui.layouts.passes, 0, "no layout until the frame");
+        assert!(ui.needs_paint() && ui.animating(), "a frame is owed");
+        assert_eq!(
+            ui.host.spatial[1].opacity, 1.0,
+            "no tween step until the frame"
+        );
     }
 
     /// SPD-06: continuous slow frames (300 ms each) report; they are
