@@ -7,6 +7,7 @@
 //! the pacing must not depend on coalesced timers), and each frame
 //! waits for the GPU. There is no input: the app drives itself.
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
@@ -26,6 +27,11 @@ const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Bgra8UnormSrgb;
 /// Runs `session` headless at `logical` size and display `scale` until
 /// the session closes. Returns the close reason.
 pub fn run(session: Arc<Session>, logical: Size, scale: f32) -> String {
+    run_counted(session, logical, scale, &AtomicU64::new(0))
+}
+
+/// `run`, counting drawn frames in `frames` (tests).
+fn run_counted(session: Arc<Session>, logical: Size, scale: f32, frames: &AtomicU64) -> String {
     interactive_thread();
     crate::fonts::install();
     let Some(gpu) = Gpu::try_headless() else {
@@ -103,8 +109,10 @@ pub fn run(session: Arc<Session>, logical: Size, scale: f32) -> String {
                 submission_index: None,
                 timeout: None,
             });
+            frames.fetch_add(1, Ordering::SeqCst);
             let tweens = ui.animation_count();
-            if let Some(e) = stats.frame(cpu_ms, prepare_ms, ui.host.len(), tweens) {
+            let busy = ui.animating() || ui.needs_paint();
+            if let Some(e) = stats.frame(cpu_ms, prepare_ms, ui.host.len(), tweens, busy) {
                 session.post_events(events::encode_events(&[e]), false);
             }
         }
@@ -195,16 +203,36 @@ mod tests {
             return;
         }
         let session = Session::new();
+        let frames = Arc::new(AtomicU64::new(0));
         let host = session.clone();
-        let thread = std::thread::spawn(move || run(host, Size::new(100.0, 100.0), 1.0));
+        let counter = frames.clone();
+        let thread =
+            std::thread::spawn(move || run_counted(host, Size::new(100.0, 100.0), 1.0, &counter));
         let submit = |t: &Transaction<'_>| session.submit(craie_ui::wire::encode(t)).unwrap();
+        let wait = |what: &str, done: &dyn Fn() -> bool| {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while !done() {
+                assert!(Instant::now() < deadline, "timed out: {what}");
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        };
         let mut t = Transaction::new(1);
         t.create(1, NodeKind::View)
             .fill(1, 0x3040_50FF)
             .place(NIL, 1, NIL);
         submit(&t);
-        // Let the first frame (and its paint) pass.
-        std::thread::sleep(Duration::from_millis(300));
+        // The first frame is drawn, then the loop idles (no frame for a
+        // while: nothing is owed).
+        wait("the first frame", &|| frames.load(Ordering::SeqCst) >= 1);
+        let mut settled = frames.load(Ordering::SeqCst);
+        loop {
+            std::thread::sleep(Duration::from_millis(100));
+            let now = frames.load(Ordering::SeqCst);
+            if now == settled {
+                break;
+            }
+            settled = now;
+        }
         let mut t = Transaction::new(2);
         t.animate(
             1,
@@ -213,23 +241,26 @@ mod tests {
             Timing::curve(0.0, [0.0, 0.0, 1.0, 1.0]),
         );
         submit(&t);
-        let deadline = Instant::now() + Duration::from_secs(3);
-        let mut ended = false;
-        while !ended && Instant::now() < deadline {
+        let ended = std::cell::Cell::new(false);
+        wait("the end event", &|| {
             session.pump(|frame| {
                 // An events frame: tag 1, a u32 count, records with the
                 // kind first.
                 if frame.first() == Some(&1)
                     && frame.get(5) == Some(&events::out_kind::ANIMATION_END)
                 {
-                    ended = true;
+                    ended.set(true);
                 }
                 Delivery::Sent
             });
-            std::thread::sleep(Duration::from_millis(10));
-        }
+            ended.get()
+        });
+        assert_eq!(
+            frames.load(Ordering::SeqCst),
+            settled,
+            "the event came without a frame"
+        );
         session.close("test done");
         thread.join().unwrap();
-        assert!(ended, "the end event came without a frame");
     }
 }

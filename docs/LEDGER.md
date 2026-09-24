@@ -195,26 +195,17 @@ Reviewer minors and nitpicks not fixed yet.
 - Resolves in: keying the cache on the world scale in steps (powers of
   two), or E07 (coverage preparation).
 
-### DF-8: `native_reflow_publishes_after_the_frame` fails on this machine
-
-- What: the platform test types Enter into a multiline input measured
-  with system fonts and expects it to grow. Since a point in the
-  2026-09-24 session (after the display locked), the input's layout
-  gives one line of zero height for "\n" (measure: width 0, height at
-  the one-line floor), so it does not grow. It fails the same way at
-  every commit back to step 3c (db18a47), which passed it before, so
-  it is the environment, not a recent change. Installing the system
-  fonts in the test does not change it; harness tests with the pinned
-  fonts lay out newlines correctly.
-- Why deferred: the cause is outside the code under change (system
-  font resolution in a test process on a locked machine); the demo
-  process renders system-font text correctly.
-- Resolves in: running it again with the display unlocked; if it still
-  fails, find which face the input resolves and why its line metrics
-  are zero, or move the test to the pinned fonts.
-- Re-test: `cargo test --release -p craie-platform-winit native_reflow`.
-
 ## Closed
+
+- DF-8 (2026-09-24, same day): `native_reflow_publishes_after_the_frame`
+  failed; I first recorded it as caused by the machine (the display had
+  locked). Review of the Pulse demo (SPD-08) found the real cause: the
+  test measures text but had no fonts of its own. In whole-workspace
+  runs the harness's `pinned-fonts` feature reached it; alone, or once
+  the new headless test installed the system fonts globally in
+  parallel, it had none or the wrong ones. It uses the pinned fonts
+  explicitly now (`craie-text` dev-dependency with `pinned-fonts`) and
+  passes alone and in the full binary.
 
 - S3A-14 (emoji presentation by the Unicode property, VS15/VS16) and
   S3A-15 (exact GB9c and ligature guards) and S3A-16 (framebench

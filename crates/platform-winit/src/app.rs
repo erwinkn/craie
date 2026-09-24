@@ -49,8 +49,10 @@ struct Inner {
 /// (layout, scene, upload; also when it ran after a commit, before the
 /// redraw) plus encoding and submitting the draw; the wait for a
 /// drawable is not in it. A window counts one burst of frames: a gap of
-/// more than `GAP` starts a new one, so sparse frames (a HUD that paints
-/// its last report, an idle timeout) never make a report of their own.
+/// more than `GAP` after a frame that left nothing owed starts a new
+/// one, so sparse frames (a HUD that paints its last report, an idle
+/// timeout) never make a report of their own, while slow frames of
+/// continuous work still do.
 pub(crate) struct FrameStats {
     since: Instant,
     last: Option<Instant>,
@@ -60,6 +62,9 @@ pub(crate) struct FrameStats {
     prepare_sum: f64,
     /// Preparation done since the last frame, outside one (ms).
     pending_ms: f64,
+    /// The last frame left work owed (animations, a paint): a gap after
+    /// it is slow rendering, not idle time.
+    busy: bool,
 }
 
 impl FrameStats {
@@ -75,6 +80,7 @@ impl FrameStats {
             cpu_max: 0.0,
             prepare_sum: 0.0,
             pending_ms: 0.0,
+            busy: false,
         }
     }
 
@@ -90,8 +96,9 @@ impl FrameStats {
         prepare_ms: f64,
         nodes: usize,
         tweens: usize,
+        busy: bool,
     ) -> Option<events::UiEvent> {
-        self.frame_at(Instant::now(), cpu_ms, prepare_ms, nodes, tweens)
+        self.frame_at(Instant::now(), cpu_ms, prepare_ms, nodes, tweens, busy)
     }
 
     fn frame_at(
@@ -101,11 +108,16 @@ impl FrameStats {
         prepare_ms: f64,
         nodes: usize,
         tweens: usize,
+        busy: bool,
     ) -> Option<events::UiEvent> {
         let cpu_ms = cpu_ms + self.pending_ms;
         let prepare_ms = prepare_ms + self.pending_ms;
         self.pending_ms = 0.0;
-        if self.frames == 0 || self.last.is_some_and(|l| now - l > Self::GAP) {
+        // A gap after an idle frame starts a new burst; after a busy one
+        // it is a slow frame of the same burst.
+        let idle_gap = !self.busy && self.last.is_some_and(|l| now - l > Self::GAP);
+        self.busy = busy;
+        if self.frames == 0 || idle_gap {
             self.since = now;
             self.frames = 0;
             self.cpu_sum = 0.0;
@@ -411,7 +423,9 @@ impl App for HostApp {
             (w, h),
             scale,
         );
-        let prepare_ms = t.elapsed().as_secs_f64() * 1e3;
+        // Recorded now: a failed acquisition below must not lose it; the
+        // next presented frame shows this work.
+        inner.stats.prepared(t.elapsed().as_secs_f64() * 1e3);
         // Layout is current now: bounds and the caret area are too; the
         // frame's events (list ranges, anchoring scrolls) go out.
         Inner::flush_out(&mut inner.ui, &self.session);
@@ -438,7 +452,7 @@ impl App for HostApp {
         inner
             .renderer
             .draw(&inner.gpu, &view, w, h, inner.ui.scene_mut());
-        let cpu_ms = prepare_ms + t.elapsed().as_secs_f64() * 1e3;
+        let cpu_ms = t.elapsed().as_secs_f64() * 1e3;
         window.pre_present_notify();
         inner.gpu.queue.present(frame);
         // Running animations advance every frame: ask for the next one
@@ -447,9 +461,10 @@ impl App for HostApp {
             window.request_redraw();
         }
         let tweens = inner.ui.animation_count();
+        let busy = inner.ui.animating() || inner.ui.needs_paint();
         if let Some(e) = inner
             .stats
-            .frame(cpu_ms, prepare_ms, inner.ui.host.len(), tweens)
+            .frame(cpu_ms, 0.0, inner.ui.host.len(), tweens, busy)
         {
             self.session.post_events(events::encode_events(&[e]), false);
         }
@@ -470,7 +485,9 @@ mod tests {
         let mut stats = FrameStats::new();
         for k in 0..8 {
             assert!(
-                stats.frame_at(ms(k * 1200), 1.0, 1.0, 10, 0).is_none(),
+                stats
+                    .frame_at(ms(k * 1200), 1.0, 1.0, 10, 0, false)
+                    .is_none(),
                 "sparse frame {k}"
             );
         }
@@ -480,7 +497,7 @@ mod tests {
             if k == 30 {
                 stats.prepared(3.0);
             }
-            if let Some(e) = stats.frame_at(ms(start + k * 10), 1.0, 0.5, 10, 7) {
+            if let Some(e) = stats.frame_at(ms(start + k * 10), 1.0, 0.5, 10, 7, true) {
                 report = Some(e);
                 break;
             }
@@ -492,6 +509,27 @@ mod tests {
             "the frame after a commit's preparation carries it"
         );
         assert_eq!(e.revision, 7);
+    }
+
+    /// SPD-06: continuous slow frames (300 ms each, work still owed)
+    /// report; they are not idle gaps.
+    #[test]
+    fn slow_busy_frames_still_report() {
+        let t0 = Instant::now();
+        let mut stats = FrameStats::new();
+        let report = (0..6).find_map(|k| {
+            stats.frame_at(
+                t0 + Duration::from_millis(k * 300),
+                300.0,
+                290.0,
+                10,
+                3,
+                true,
+            )
+        });
+        let e = report.expect("slow frames report");
+        assert!((e.x - 3.33).abs() < 0.1, "fps {}", e.x);
+        assert_eq!(e.y, 300.0);
     }
     use craie_ui::events::Event;
     use craie_ui::host::NodeId;
@@ -583,6 +621,9 @@ mod publish_tests {
         };
         let mut renderer = Renderer::new(&gpu, wgpu::TextureFormat::Rgba8UnormSrgb);
         let mut ui = Ui::new(1.0);
+        // The input measures text: the pinned fonts, whatever the global
+        // default source is (another test may install the system's).
+        ui.text = craie_text::TextEngine::with_source(Box::new(craie_text::fonts::pinned()));
         let mut input = taffy::Style::default();
         input.size.width = taffy::Dimension::length(200.0);
         let mut button = taffy::Style::default();

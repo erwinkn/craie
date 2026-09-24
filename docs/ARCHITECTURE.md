@@ -1042,9 +1042,11 @@ drawn, sends a `FRAME_STATS` event (frames per second, mean and worst
 CPU ms, layout and scene ms, live nodes, running tweens; droppable)
 that JS reads with `useFrameStats` or `onFrameStats`. CPU time counts
 preparation that ran after a commit, before the redraw, in the frame
-that shows it. A report covers one burst of frames: a gap of more than
-250 ms starts a new window, so sparse frames (a HUD painting a report)
-never report on their own.
+that shows it (also when the drawable was not available). A report
+covers one burst of frames: a gap of more than 250 ms after a frame
+that left nothing owed starts a new window, so sparse frames (a HUD
+painting a report) never report on their own, while slow frames of
+continuous work do.
 `CRAIE_HEADLESS=1` runs the session with no window: the same `Ui`,
 frame path, renderer (into an offscreen target), and statistics,
 paced at 120 Hz by spinning, because a process with no visible window

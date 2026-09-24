@@ -23,6 +23,8 @@ fontique.workspace = true
 
 [dev-dependencies]
 taffy.workspace = true
+# Tests that measure text use the pinned fonts, not the machine's.
+craie-text = { workspace = true, features = ["pinned-fonts"] }
 png.workspace = true
 # Build-time SVG import, for the vector example only (never shipped).
 craie-svg-import = { path = "../../tools/svg-import" }
