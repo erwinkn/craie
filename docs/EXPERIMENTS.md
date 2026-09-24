@@ -608,6 +608,39 @@ gone with it.
   37,572 KiB (transcript). Without the 256-item cap the heap grew to
   41,478 KiB: the pool kept the 5,000-row column's item buffer.
 
+### Pulse demo (`examples/pulse`, after step 6)
+
+A React 19 app at 1440x900 @2x: a heat wall of 2,500, 5,000, or 10,000
+tiles (heat drifts through native color transitions on a tenth of the
+tiles every 70 ms; a storm sends a ripple through every tile every 1.4
+s, each pop a scale tween and a spring back), a virtualized log of
+200,000 entries with styled spans streaming 1 to 4 entries every 60 ms,
+and 24 Bars sparklines at 20 Hz. `CRAIE_HEADLESS=1 PULSE_LOG=1
+PULSE_STORM=1 PULSE_TILES=n`, release addon, frame statistics from the
+frame loop (CPU: layout, scene, upload, draw encoding; the GPU wait is
+not in it, about 1.6 ms a frame at 5,000 tiles).
+
+| tiles | frames/s | CPU per frame, mean | worst frame (per 0.5 s) | tweens in flight |
+|------:|---------:|--------------------:|------------------------:|-----------------:|
+| 2,500  | 120 | 1.1 to 1.4 ms | 2.7 to 4.2 ms | up to 4,400  |
+| 5,000  | 120 | 1.4 to 1.8 ms | 3.0 to 3.9 ms | up to 10,000 |
+| 10,000 | 120 | 2.4 to 3.2 ms | 4.4 to 6.7 ms | up to 20,000 |
+
+Three runtime faults the demo found, fixed:
+- The driver found a running tween by scanning every running tween.
+  With 20,000 in flight, each ripple and heat tick cost hundreds of
+  millions of steps and frames stalled for seconds. It keeps a (node,
+  property) index now (`animation_index_stays_exact`).
+- An occluded window with running animations asked for the next frame
+  before it knew it could draw one: about 1,700 empty redraws a
+  second. It asks after a presented frame now.
+- No frame statistics reached JS. `FRAME_STATS` does now.
+
+One app fault: the log panel's automatic minimum height was its
+content (200,000 rows, about 4.8 million px), so the list rendered
+every row and the worker never idled; `minHeight: 0` on the body row,
+as in CSS.
+
 ### E14: layout-aware virtualization, list versus a plain column (step 2)
 
 `cargo run --release -p craie-harness --example e14_lists`: a scroller

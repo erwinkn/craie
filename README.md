@@ -20,6 +20,8 @@ pnpm build:native   # cargo build -p craie-node + codesign -> craie-node.node
 pnpm dev:todo       # todo list: TextInput, ScrollView, persistence
 pnpm dev:widgets    # slider behavior + sparkline custom element
 pnpm dev:list       # 100k-message thread: virtualized List, stick-to-end
+pnpm dev:pulse      # Pulse: 10k-tile heat wall with native tweens, 200k-row
+                    # streaming log, sparklines, live frame-stats HUD (release)
 pnpm --dir examples/js build && node examples/js/dist/host.mjs  # counter demo
 
 # native window fed by a local submitter thread (no JS needed)

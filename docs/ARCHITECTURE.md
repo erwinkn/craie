@@ -896,7 +896,9 @@ and render target so a host can embed it.
 **Current.** The native driver (`animation.rs`, step 4). A node's
 declared transitions live on the host (`Host::transitions`, id-keyed),
 running animations in the driver (`Ui::animations`), at most one per
-node and property. A mutation of a property with a running animation
+node and property, found through a (node, property) index: lookups are
+O(1) however many tweens run (a ripple over 10,000 tiles starts 10,000
+at once). A mutation of a property with a running animation
 compares with its declared target: equal changes nothing, another value
 retargets it from the value on screen (with a transition) or cancels it
 and jumps (without one). Without a running one, a declared transition
@@ -1031,7 +1033,19 @@ its own internal copy because the platform requires it.
 
 **Current.** winit 0.30.13 confined to `craie-platform-winit`,
 `ControlFlow::Wait`, frames only on `RedrawRequested`. The wake is a
-unit user event. `craie_ui::platform` holds the contract: `WindowId`
+unit user event. Running animations request the next frame only after
+a frame presented: an occluded window gets no drawable, and asking
+again at once spun the loop (about 1,700 empty redraws a second). The
+frame loop measures each frame's CPU time (the frame path plus draw
+encoding and submission) and, about twice a second while frames are
+drawn, sends a `FRAME_STATS` event (frames per second, mean and worst
+CPU ms, layout and scene ms, live nodes; droppable, never while idle)
+that JS reads with `useFrameStats` or `onFrameStats`.
+`CRAIE_HEADLESS=1` runs the session with no window: the same `Ui`,
+frame path, renderer (into an offscreen target), and statistics,
+paced at 120 Hz by spinning, because a process with no visible window
+gets coalesced timers on macOS (4 ms waits woke up to 30 ms late). It
+is for measuring where no display is on. `craie_ui::platform` holds the contract: `WindowId`
 and `PlatformWindow` (surface size, scale, frame request, text input);
 the clipboard seam is `craie_ui::clipboard::Clipboard`. One window.
 
