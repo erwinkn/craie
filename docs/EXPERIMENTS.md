@@ -687,23 +687,45 @@ reports of half a second after the first seven seconds.
 | 5,000  | 118-120 | 1.5-2.2 ms (9.8)  | 31-39 | 22.7-28.7 ms (46.0) | 69-106  | 7.9-13.2 ms (50.9)  |
 | 10,000 | 115-120 | 2.1-3.9 ms (10.1) | 18-20 | 44.8-49.8 ms (67.3) | 13-60   | 16.0-69.2 ms (174.4) |
 
-What this shows, and what it does not (review round 4 of the demo,
-SPD-11 to SPD-16):
-- It compares the frame-production cost of this port against Craie's
-  frame loop, not total application CPU. GPUI's number includes the
-  view's `render` (element construction, formatting, copies) and
-  excludes scene finalization after paint; Craie's excludes React and
-  applying transactions (on the worker and between frames).
-- The port rebuilds every panel on each animation frame (one view; no
-  `AnyView::cached`), uses two elements per tile (a cell and a square),
-  keeps easing finished tweens, and lays its log out as a uniform list;
-  a GPUI developer would avoid the first three. The gap is a cost of
-  this port; it does not yet show a cost of GPUI's model.
-- GPUI's timers run on its UI thread and slow down under load, so the
-  two runs did not do the same number of updates.
-The comparison is to be measured again with cached views, one element
-per tile, finished tweens dropped, matched log layout, per-second
-update counts, and total process CPU (the JS worker included).
+What this first table shows, and what it does not (review round 4 of
+the demo, SPD-11 to SPD-16): it compares the frame-production cost of
+a first port that rebuilt every panel on each animation frame (one
+view, no `AnyView::cached`), used two elements per tile, kept easing
+finished tweens, laid its log out as a uniform list, and ran timers
+that fell behind under load. Its gap is a cost of that port, not
+evidence about GPUI's model.
+
+The rematch (after round 4). The GPUI port now has one cached view per
+panel (an animation frame re-renders the wall only), one element per
+tile, finished tweens at rest, a variable-height `list` for the log,
+Craie's spring settle time (1.0736 s), the same seeded xorshift
+sequences as the React version, and periodic tasks that catch up when
+late in both apps; both print the work done per second and process CPU
+(the whole app: for Craie the native threads and the JS worker).
+`bench/compare.sh` runs each app in a window for 15 s per tile count and
+summarizes (`bench/summarize.py`).
+
+Measured so far, storm on, the same work per second in both (heat
+about 13.8, log entries about 40, sparkline ticks about 19.6, ripples
+0.73):
+
+| | frames/s | process CPU (whole app) |
+|---|---:|---:|
+| Craie 2,500 (headless, spin removed) | 117-120 | 29% |
+| Craie 5,000 (headless, spin removed) | 119-121 | 33% |
+| Craie 10,000 (headless, spin removed) | 116-120 | 61% |
+| GPUI 5,000, elements (window, 9 s) | 67-73 | 97-100% |
+
+GPUI at 5,000 tiles saturates its UI thread and draws about 70 frames a
+second; Craie draws 120 with a third of a core, React included. The
+GPUI row is one run of nine seconds; its other rows could not be
+measured here: a GPUI window stops drawing about 1.5 s after launch
+when it opens behind other windows (macOS reports it covered), and
+this machine's desktop was in use. The full table needs
+`bench/compare.sh` on a display with each window in front. Craie's
+headless loop spins between frames (timed waits wake late on a covered
+or locked desktop); `CRAIE_HEADLESS_LOG` reports the spin, and the CPU
+above excludes it.
 
 ### E14: layout-aware virtualization, list versus a plain column (step 2)
 

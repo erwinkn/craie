@@ -70,6 +70,7 @@ fn run_counted(session: Arc<Session>, logical: Size, scale: f32, frames: &Atomic
     }));
 
     let mut stats = FrameStats::new();
+    let mut spin = SpinLog::new();
     let mut next_frame = Instant::now();
     loop {
         if session.is_closed() {
@@ -135,9 +136,11 @@ fn run_counted(session: Arc<Session>, logical: Size, scale: f32, frames: &Atomic
                 // which would pace frames by the timer, not the work.
                 Some(at) if at.saturating_duration_since(Instant::now()) < SPIN => {
                     drop(flag);
+                    let spun = Instant::now();
                     while Instant::now() < at && !*lock.lock().unwrap() {
                         std::thread::yield_now();
                     }
+                    spin.spun(spun.elapsed());
                     flag = lock.lock().unwrap();
                     break;
                 }
@@ -155,6 +158,38 @@ fn run_counted(session: Arc<Session>, logical: Size, scale: f32, frames: &Atomic
     session
         .closed_reason()
         .unwrap_or_else(|| "headless session closed".into())
+}
+
+/// `CRAIE_HEADLESS_LOG`: the time spent spinning between frames, each
+/// second on stderr, so a measurement can take it out of process CPU.
+struct SpinLog {
+    on: bool,
+    since: Instant,
+    spun: Duration,
+}
+
+impl SpinLog {
+    fn new() -> SpinLog {
+        SpinLog {
+            on: std::env::var_os("CRAIE_HEADLESS_LOG").is_some(),
+            since: Instant::now(),
+            spun: Duration::ZERO,
+        }
+    }
+
+    fn spun(&mut self, d: Duration) {
+        self.spun += d;
+        let elapsed = self.since.elapsed();
+        if self.on && elapsed >= Duration::from_secs(1) {
+            eprintln!(
+                "[headless] spun {:.0} ms of {:.0} ms",
+                self.spun.as_secs_f64() * 1e3,
+                elapsed.as_secs_f64() * 1e3
+            );
+            self.since = Instant::now();
+            self.spun = Duration::ZERO;
+        }
+    }
 }
 
 /// Sends the UI's queued events to JS.

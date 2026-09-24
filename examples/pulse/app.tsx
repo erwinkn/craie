@@ -80,6 +80,43 @@ const HEAT: string[] = (() => {
   return out
 })()
 
+// ------------------------------------------------------ shared workload
+
+/** xorshift32 in [0, 1): the same sequences as the GPUI version
+ * (`bench/gpui-pulse`), so both do the same work. */
+function seeded(seed: number): () => number {
+  let x = seed >>> 0
+  return () => {
+    x ^= x << 13
+    x >>>= 0
+    x ^= x >>> 17
+    x ^= x << 5
+    x >>>= 0
+    return x / 4294967296
+  }
+}
+const heatRng = seeded(1)
+const stormRng = seeded(2)
+const streamRng = seeded(3)
+const sparkRng = seeded(4)
+
+/** Work done, counted for PULSE_LOG. */
+const counts = { heat: 0, entries: 0, sparks: 0, ripples: 0 }
+
+/** Runs `f` every `ms`, catching up (up to eight runs) when late, as the
+ * GPUI version's timers do. Returns the stop function. */
+function every(ms: number, f: () => void): () => void {
+  const start = performance.now()
+  let done = 0
+  const id = setInterval(() => {
+    const due = Math.floor((performance.now() - start) / ms)
+    const n = Math.min(due - done, 8)
+    done = due
+    for (let k = 0; k < n; k++) f()
+  }, ms)
+  return () => clearInterval(id)
+}
+
 // ------------------------------------------------------------ heat wall
 
 const FIELD_W = 956
@@ -159,6 +196,7 @@ function pop(i: number, scale: number, delay: number) {
 }
 
 function ripple(g: Grid, col: number, row: number) {
+  counts.ripples += 1
   for (let i = 0; i < g.count; i++) {
     const d = Math.hypot((i % g.cols) - col, Math.floor(i / g.cols) - row)
     pop(i, 1 + 0.85 * Math.exp(-d / 26), d * 11)
@@ -190,10 +228,10 @@ function HeatWall({ g, storm }: { g: Grid; storm: boolean }) {
   }
   useEffect(() => {
     if (!storm) return
-    const t = setInterval(() => {
-      ripple(g, Math.random() * g.cols, Math.random() * g.rows)
-    }, 1400)
-    return () => clearInterval(t)
+    return every(1400, () => {
+      const col = stormRng() * g.cols
+      ripple(g, col, stormRng() * g.rows)
+    })
   }, [g, storm])
   return (
     <View
@@ -220,10 +258,10 @@ function useHeatDrift(g: Grid, on: boolean) {
   useEffect(() => {
     let t = 0
     const fronts = Array.from({ length: 4 }, (_, k) => ({
-      x: Math.random(),
-      y: Math.random(),
-      vx: (Math.random() - 0.5) * 0.02,
-      vy: (Math.random() - 0.5) * 0.02,
+      x: heatRng(),
+      y: heatRng(),
+      vx: (heatRng() - 0.5) * 0.02,
+      vy: (heatRng() - 0.5) * 0.02,
       r: 0.12 + 0.08 * k,
     }))
     const sample = (i: number) => {
@@ -242,7 +280,8 @@ function useHeatDrift(g: Grid, on: boolean) {
     if (!on) return
     const slice = Math.ceil(g.count / 10)
     let cursor = 0
-    const timer = setInterval(() => {
+    return every(70, () => {
+      counts.heat += 1
       t += 1
       for (const f of fronts) {
         f.x += f.vx
@@ -260,8 +299,7 @@ function useHeatDrift(g: Grid, on: boolean) {
         }
       }
       cursor = (cursor + 1) % 10
-    }, 70)
-    return () => clearInterval(timer)
+    })
   }, [g, on])
 }
 
@@ -332,15 +370,15 @@ function LogPanel({ streaming }: { streaming: boolean }) {
   }, [])
   useEffect(() => {
     if (!streaming) return
-    const t = setInterval(() => {
+    return every(60, () => {
+      const n = 1 + Math.min(3, Math.floor(streamRng() * 4))
+      counts.entries += n
       setEntries((es) => {
-        const n = 1 + Math.floor(Math.random() * 4)
         const next = es.slice()
         for (let k = 0; k < n; k++) next.push(entry(next.length))
         return next
       })
-    }, 60)
-    return () => clearInterval(t)
+    })
   }, [streaming])
   const shown = useMemo(() => {
     const q = query.trim().toLowerCase()
@@ -413,7 +451,7 @@ function Sparklines({ on }: { on: boolean }) {
       const v = new Float32Array(SPARK_LEN)
       let x = 0.5
       for (let i = 0; i < SPARK_LEN; i++) {
-        x = Math.max(0.05, Math.min(1, x + (Math.random() - 0.5) * 0.18))
+        x = Math.max(0.05, Math.min(1, x + (sparkRng() - 0.5) * 0.18))
         v[i] = x
       }
       return { values: v, phase: s }
@@ -422,17 +460,17 @@ function Sparklines({ on }: { on: boolean }) {
   const [, setTick] = useState(0)
   useEffect(() => {
     if (!on) return
-    const t = setInterval(() => {
+    return every(50, () => {
+      counts.sparks += 1
       for (const s of series.current) {
         const next = new Float32Array(SPARK_LEN)
         next.set(s.values.subarray(1))
         const last = s.values[SPARK_LEN - 1]!
-        next[SPARK_LEN - 1] = Math.max(0.05, Math.min(1, last + (Math.random() - 0.5) * 0.2))
+        next[SPARK_LEN - 1] = Math.max(0.05, Math.min(1, last + (sparkRng() - 0.5) * 0.2))
         s.values = next
       }
       setTick((k) => k + 1)
-    }, 50)
-    return () => clearInterval(t)
+    })
   }, [on])
   const card = (i: number) => {
     const s = series.current[i]!
@@ -652,11 +690,26 @@ const root = attachApp()
 const t0 = performance.now()
 root.render(<App />)
 console.log("[pulse] attached")
-// PULSE_LOG: native frame statistics on stdout (measurements).
+// PULSE_LOG: native frame statistics on stdout, with this process's CPU
+// (main thread, JS worker, and every other thread) and the work done per
+// second (measurements).
 if (process.env.PULSE_LOG) {
-  onFrameStats((s) =>
+  let at = performance.now()
+  let cpu = process.cpuUsage()
+  onFrameStats((s) => {
+    const now = performance.now()
+    const secs = (now - at) / 1000
+    const used = process.cpuUsage(cpu)
+    const pct = ((used.user + used.system) / 1e6 / secs) * 100
+    const per = (k: keyof typeof counts) => {
+      const v = counts[k] / secs
+      counts[k] = 0
+      return v
+    }
     console.log(
-      `[pulse] ${(performance.now() - t0).toFixed(0)} ms: ${s.fps.toFixed(0)} fps, cpu ${s.cpuMs.toFixed(2)} ms (max ${s.maxCpuMs.toFixed(2)}), prepare ${s.prepareMs.toFixed(2)} ms, ${s.nodes} nodes, ${s.tweens} tweens`,
-    ),
-  )
+      `[pulse] ${(now - t0).toFixed(0)} ms: ${s.fps.toFixed(0)} fps, cpu ${s.cpuMs.toFixed(2)} ms (max ${s.maxCpuMs.toFixed(2)}), prepare ${s.prepareMs.toFixed(2)} ms, ${s.nodes} nodes, ${s.tweens} tweens; process cpu ${pct.toFixed(0)}%; per s: heat ${per("heat").toFixed(1)}, entries ${per("entries").toFixed(1)}, sparks ${per("sparks").toFixed(1)}, ripples ${per("ripples").toFixed(2)}`,
+    )
+    at = now
+    cpu = process.cpuUsage()
+  })
 }
