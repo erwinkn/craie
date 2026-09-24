@@ -144,6 +144,11 @@ pub mod out_kind {
     /// An `Animate` tween ended (always sent): key = property | reason
     /// << 8 (`animation::end_reason`).
     pub const ANIMATION_END: u8 = 15;
+    /// Frame statistics from the platform frame loop, about twice a
+    /// second while frames are drawn (node NIL, droppable): x = frames
+    /// per second, y = mean CPU time per frame (ms), a = the largest
+    /// (ms), b = mean layout and scene time (ms), key = live nodes.
+    pub const FRAME_STATS: u8 = 16;
 }
 
 /// One event bound for JS: which node, what, pointer position (logical),

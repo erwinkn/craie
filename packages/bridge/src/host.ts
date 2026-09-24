@@ -310,6 +310,33 @@ function surfaceParams(params: readonly SurfaceParam[] | undefined): number[] {
   return out
 }
 
+/** Native frame statistics, about twice a second while frames are drawn
+ * (none while idle). */
+export interface FrameStats {
+  /** Frames drawn per second. */
+  fps: number
+  /** Mean CPU time per frame: layout, scene, upload, and draw encoding
+   * (ms). */
+  cpuMs: number
+  /** The largest CPU time of one frame in the window (ms). */
+  maxCpuMs: number
+  /** Mean layout and scene time per frame (ms). */
+  prepareMs: number
+  /** Live native nodes. */
+  nodes: number
+}
+
+const frameStatsListeners = new Set<(s: FrameStats) => void>()
+
+/** Calls `listener` with each native frame-statistics report; returns
+ * the unsubscribe function. */
+export function onFrameStats(listener: (s: FrameStats) => void): () => void {
+  frameStatsListeners.add(listener)
+  return () => {
+    frameStatsListeners.delete(listener)
+  }
+}
+
 export class CraieHost {
   private nextId = 0
   private freeIds: number[] = []
@@ -496,6 +523,11 @@ export class CraieHost {
   /** Routes a native event record to the target node's listener props.
    * Events for a previous occupant of the id are dropped. */
   private dispatchEvent(ev: UiEvent) {
+    if (ev.kind === EVENT_KIND.frameStats) {
+      const stats = { fps: ev.x, cpuMs: ev.y, maxCpuMs: ev.a, prepareMs: ev.b, nodes: ev.key }
+      for (const listener of frameStatsListeners) listener(stats)
+      return
+    }
     const root = this.nodes.get(ev.node)
     if (!root || root.gen !== ev.generation) return
     // A pointer event on a text root carries the span under the pointer

@@ -41,6 +41,64 @@ struct Inner {
     surface: WindowSurface,
     renderer: Renderer,
     ui: Ui,
+    stats: FrameStats,
+}
+
+/// Frame costs over a window of about half a second, for
+/// `out_kind::FRAME_STATS`. CPU time is the frame path (layout, scene,
+/// upload) plus encoding and submitting the draw; the wait for a
+/// drawable is not in it.
+pub(crate) struct FrameStats {
+    since: Instant,
+    frames: u32,
+    cpu_sum: f64,
+    cpu_max: f64,
+    prepare_sum: f64,
+}
+
+impl FrameStats {
+    const WINDOW: Duration = Duration::from_millis(500);
+
+    pub(crate) fn new() -> FrameStats {
+        FrameStats {
+            since: Instant::now(),
+            frames: 0,
+            cpu_sum: 0.0,
+            cpu_max: 0.0,
+            prepare_sum: 0.0,
+        }
+    }
+
+    /// Records one frame; at the end of a window returns its event. A
+    /// window of one frame sends nothing: the frame that shows the last
+    /// statistics must not cause the next ones.
+    pub(crate) fn frame(
+        &mut self,
+        cpu_ms: f64,
+        prepare_ms: f64,
+        nodes: usize,
+    ) -> Option<events::UiEvent> {
+        self.frames += 1;
+        self.cpu_sum += cpu_ms;
+        self.cpu_max = self.cpu_max.max(cpu_ms);
+        self.prepare_sum += prepare_ms;
+        let elapsed = self.since.elapsed();
+        if elapsed < Self::WINDOW {
+            return None;
+        }
+        let out = (self.frames > 1).then(|| {
+            let n = self.frames as f64;
+            let mut e = events::UiEvent::new(events::out_kind::FRAME_STATS, u32::MAX);
+            e.x = (n / elapsed.as_secs_f64()) as f32;
+            e.y = (self.cpu_sum / n) as f32;
+            e.a = self.cpu_max as f32;
+            e.b = (self.prepare_sum / n) as f32;
+            e.key = nodes as u32;
+            e
+        });
+        *self = FrameStats::new();
+        out
+    }
 }
 
 impl HostApp {
@@ -199,6 +257,7 @@ impl App for HostApp {
             surface,
             renderer,
             ui,
+            stats: FrameStats::new(),
         };
         inner.sync(window, &self.session, true);
         Inner::publish_frame_state(&mut inner.ui, window, &self.a11y);
@@ -308,6 +367,7 @@ impl App for HostApp {
         // changes state without a commit: prepare it here, on the one
         // frame path, before drawing.
         let scale = window.scale_factor() as f32;
+        let t = Instant::now();
         prepare_frame(
             &mut inner.ui,
             &mut inner.renderer,
@@ -315,11 +375,7 @@ impl App for HostApp {
             (w, h),
             scale,
         );
-        // Running animations advance every frame: ask for the next one
-        // (presentation paces it). Idle requests none.
-        if inner.ui.animating() {
-            window.request_redraw();
-        }
+        let prepare_ms = t.elapsed().as_secs_f64() * 1e3;
         // Layout is current now: bounds and the caret area are too; the
         // frame's events (list ranges, anchoring scrolls) go out.
         Inner::flush_out(&mut inner.ui, &self.session);
@@ -332,16 +388,31 @@ impl App for HostApp {
                 window.request_redraw();
                 return;
             }
-            // Occluded/Timeout: skip; the Occluded(false) event repaints
-            // once the window is visible again.
+            wgpu::CurrentSurfaceTexture::Timeout => {
+                window.request_redraw();
+                return;
+            }
+            // Occluded: no frame, and none requested (running animations
+            // would spin the loop with nothing drawn); the Occluded(false)
+            // event repaints once the window is visible again.
             _ => return,
         };
         let view = frame.texture.create_view(&Default::default());
+        let t = Instant::now();
         inner
             .renderer
             .draw(&inner.gpu, &view, w, h, inner.ui.scene_mut());
+        let cpu_ms = prepare_ms + t.elapsed().as_secs_f64() * 1e3;
         window.pre_present_notify();
         inner.gpu.queue.present(frame);
+        // Running animations advance every frame: ask for the next one
+        // (presentation paces it). Idle requests none.
+        if inner.ui.animating() {
+            window.request_redraw();
+        }
+        if let Some(e) = inner.stats.frame(cpu_ms, prepare_ms, inner.ui.host.len()) {
+            self.session.post_events(events::encode_events(&[e]), false);
+        }
     }
 }
 

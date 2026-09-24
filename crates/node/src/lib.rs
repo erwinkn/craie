@@ -122,12 +122,14 @@ impl NativeHost {
     pub fn run(&self) -> Result<String> {
         RUNNING.with(|r| r.set(true));
         let session = self.session.clone();
-        let app = HostApp::new(session.clone());
-        craie_platform_winit::run(
-            &self.title,
-            Size::new(self.width as f32, self.height as f32),
-            app,
-        );
+        let size = Size::new(self.width as f32, self.height as f32);
+        // `CRAIE_HEADLESS`: no window (measurements with no display on).
+        if std::env::var_os("CRAIE_HEADLESS").is_some() {
+            craie_platform_winit::headless::run(session.clone(), size, 2.0);
+        } else {
+            let app = HostApp::new(session.clone());
+            craie_platform_winit::run(&self.title, size, app);
+        }
         RUNNING.with(|r| r.set(false));
         sessions().remove(self.id);
         let reason = session

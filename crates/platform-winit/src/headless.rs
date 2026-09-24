@@ -1,0 +1,167 @@
+//! `CRAIE_HEADLESS=1`: runs a session with no window, for measuring on
+//! a machine whose display is off or locked (macOS throttles the frame
+//! loop of a window it cannot show). The same `Ui`, frame path
+//! (`prepare_frame`), renderer (into an offscreen target, at the window
+//! format), and frame statistics as `HostApp`; frames are paced at 120
+//! Hz while the UI owes a paint or animates (spinning between frames:
+//! the pacing must not depend on coalesced timers), and each frame
+//! waits for the GPU. There is no input: the app drives itself.
+
+use std::sync::{Arc, Condvar, Mutex};
+use std::time::{Duration, Instant};
+
+use craie_core::Size;
+use craie_render::{Gpu, Renderer};
+use craie_ui::bridge::Session;
+use craie_ui::events;
+use craie_ui::ui::Ui;
+
+use crate::app::{FrameStats, prepare_frame};
+
+const FRAME: Duration = Duration::from_nanos(8_333_333);
+/// Waits shorter than this spin (see the wait below).
+const SPIN: Duration = Duration::from_millis(20);
+const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Bgra8UnormSrgb;
+
+/// Runs `session` headless at `logical` size and display `scale` until
+/// the session closes. Returns the close reason.
+pub fn run(session: Arc<Session>, logical: Size, scale: f32) -> String {
+    interactive_thread();
+    crate::fonts::install();
+    let Some(gpu) = Gpu::try_headless() else {
+        session.close("no GPU adapter");
+        return "no GPU adapter".into();
+    };
+    let mut renderer = Renderer::new(&gpu, FORMAT);
+    let (w, h) = (
+        (logical.width * scale).round() as u32,
+        (logical.height * scale).round() as u32,
+    );
+    let target = gpu.device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("headless"),
+        size: wgpu::Extent3d {
+            width: w,
+            height: h,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: FORMAT,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+        view_formats: &[],
+    });
+    let view = target.create_view(&Default::default());
+    let start = Instant::now();
+    let mut ui = Ui::new(scale);
+    ui.set_time(0.0);
+
+    let woken = Arc::new((Mutex::new(false), Condvar::new()));
+    let signal = woken.clone();
+    session.install_wake(Arc::new(move || {
+        *signal.0.lock().unwrap() = true;
+        signal.1.notify_one();
+    }));
+
+    let mut stats = FrameStats::new();
+    let mut next_frame = Instant::now();
+    loop {
+        if session.is_closed() {
+            break;
+        }
+        ui.set_time(start.elapsed().as_secs_f64());
+        for buf in session.take_commits() {
+            match ui.apply(&buf) {
+                Ok(seq) => session.ack(seq),
+                Err(e) => {
+                    eprintln!("[craie] undecodable transaction: {e:?}");
+                    session.close("undecodable transaction");
+                }
+            }
+        }
+        if ui
+            .next_settle()
+            .is_some_and(|at| at <= start.elapsed().as_secs_f64())
+        {
+            ui.settle();
+        }
+        let owes = ui.needs_paint() || ui.animating();
+        if owes && Instant::now() >= next_frame {
+            next_frame = Instant::now() + FRAME;
+            ui.set_time(start.elapsed().as_secs_f64());
+            let t = Instant::now();
+            prepare_frame(&mut ui, &mut renderer, &gpu, (w, h), scale);
+            let prepare_ms = t.elapsed().as_secs_f64() * 1e3;
+            let out = ui.take_events();
+            if !out.is_empty() {
+                let reliable = out
+                    .iter()
+                    .any(|e| e.kind == events::out_kind::ANIMATION_END);
+                session.post_events(events::encode_events(&out), reliable);
+            }
+            let t = Instant::now();
+            renderer.draw(&gpu, &view, w, h, ui.scene_mut());
+            let cpu_ms = prepare_ms + t.elapsed().as_secs_f64() * 1e3;
+            let _ = gpu.device.poll(wgpu::PollType::Wait {
+                submission_index: None,
+                timeout: None,
+            });
+            if let Some(e) = stats.frame(cpu_ms, prepare_ms, ui.host.len()) {
+                session.post_events(events::encode_events(&[e]), false);
+            }
+        }
+        // Sleep until the next frame (owed), the next settle, or a wake.
+        let owes = ui.needs_paint() || ui.animating();
+        let settle = ui
+            .next_settle()
+            .map(|at| start + Duration::from_secs_f64(at.max(0.0)));
+        let until = match (owes.then_some(next_frame), settle) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        };
+        let (lock, cv) = &*woken;
+        let mut flag = lock.lock().unwrap();
+        while !*flag {
+            match until {
+                // Near deadlines spin: this process's timed waits wake
+                // up to 30 ms late (coalesced timers, no visible window),
+                // which would pace frames by the timer, not the work.
+                Some(at) if at.saturating_duration_since(Instant::now()) < SPIN => {
+                    drop(flag);
+                    while Instant::now() < at && !*lock.lock().unwrap() {
+                        std::thread::yield_now();
+                    }
+                    flag = lock.lock().unwrap();
+                    break;
+                }
+                Some(at) => {
+                    let wait = at.saturating_duration_since(Instant::now()) - SPIN;
+                    flag = cv.wait_timeout(flag, wait).unwrap().0;
+                }
+                None => flag = cv.wait(flag).unwrap(),
+            }
+        }
+        *flag = false;
+    }
+    session
+        .closed_reason()
+        .unwrap_or_else(|| "headless session closed".into())
+}
+
+/// Asks macOS for user-interactive timer precision on this thread: a
+/// process with no visible window otherwise gets coalesced timers, and
+/// a 4 ms wait woke up to 31 ms late.
+#[cfg(target_os = "macos")]
+fn interactive_thread() {
+    unsafe extern "C" {
+        fn pthread_set_qos_class_self_np(qos_class: u32, relative_priority: i32) -> i32;
+    }
+    const QOS_CLASS_USER_INTERACTIVE: u32 = 0x21;
+    // SAFETY: sets the calling thread's QoS class; no pointers involved.
+    unsafe {
+        pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn interactive_thread() {}

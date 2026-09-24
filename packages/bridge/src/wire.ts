@@ -166,6 +166,10 @@ export const EVENT_KIND = {
   listRange: 14,
   /** An `animate` tween ended: key = property | reason << 8. */
   animationEnd: 15,
+  /** Native frame statistics (node NIL): x = frames per second, y = mean
+   * CPU ms per frame, a = the largest, b = mean layout and scene ms,
+   * key = live nodes. */
+  frameStats: 16,
 } as const
 
 /** Why a tween ended — mirror animation.rs `end_reason`. */

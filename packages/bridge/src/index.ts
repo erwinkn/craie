@@ -3,10 +3,24 @@
 //   host.ts:   runApp(bindings, new URL("./app.tsx", import.meta.url))
 //   app.tsx:   const root = attachApp(bindings); root.render(<View ...>...</View>)
 
-import React, { createContext, createElement, useState, type ReactNode, type Ref } from "react"
+import React, {
+  createContext,
+  createElement,
+  useEffect,
+  useState,
+  type ReactNode,
+  type Ref,
+} from "react"
 import ReactReconciler from "react-reconciler"
 import { ConcurrentRoot, DefaultEventPriority } from "react-reconciler/constants.js"
-import { CraieHost, type HostNode, type SurfaceParam, type Transport } from "./host.js"
+import {
+  CraieHost,
+  onFrameStats as onFrameStatsInternal,
+  type FrameStats as FrameStatsReport,
+  type HostNode,
+  type SurfaceParam,
+  type Transport,
+} from "./host.js"
 import {
   SURFACE,
   type AccessibilityRole,
@@ -42,7 +56,8 @@ export {
   type TransformStep,
   type Transitions,
 } from "./wire.js"
-export type { HostNode, SurfaceParam, Transport, UiEvent } from "./host.js"
+export type { FrameStats, HostNode, SurfaceParam, Transport, UiEvent } from "./host.js"
+export { onFrameStats } from "./host.js"
 
 /** Pointer position + target passed to pointer/wheel listeners. `x`/`y`
  * are window-absolute logical points; `rx`/`ry` are relative to the
@@ -191,6 +206,14 @@ export interface TextInputProps extends ListenerProps {
   onChangeText?: (text: string) => void
   onSubmit?: (text: string) => void
   hidden?: boolean
+}
+
+/** The latest native frame statistics (`null` until the first report).
+ * Reports come only while frames are drawn. */
+export function useFrameStats(): FrameStatsReport | null {
+  const [stats, setStats] = useState<FrameStatsReport | null>(null)
+  useEffect(() => onFrameStatsInternal(setStats), [])
+  return stats
 }
 
 export function View(props: ViewProps) {
