@@ -938,3 +938,69 @@ fn list_row_tweens_to_auto_height() {
     assert_eq!(h(&ui), 200.0);
     assert_eq!(ui.layouts.data(NodeId(1)).rect.size.height, 200.0);
 }
+
+/// The (node, prop) index stays exact through starts, retargets,
+/// cancels, ends, node removals, and recycled ids, with hundreds of
+/// tweens running (the index replaced a scan of every running tween per
+/// lookup, which made a ripple over 10,000 tiles quadratic).
+#[test]
+fn animation_index_stays_exact() {
+    use craie_core::rng::Rng;
+    const N: u32 = 300;
+    let mut ui = Ui::new(1.0);
+    let mut t = Transaction::new(1);
+    t.create(0, NodeKind::View).place(NIL, 0, NIL);
+    for id in 1..=N {
+        t.create(id, NodeKind::View)
+            .layout(id, &sized(10.0, 10.0))
+            .fill(id, 0x2020_20FF)
+            .place(0, id, NIL);
+        if id % 2 == 0 {
+            t.transition(
+                id,
+                &[Transition {
+                    prop: Prop::Fill,
+                    timing: linear(0.4),
+                }],
+            );
+        }
+    }
+    ui.apply_txn(&t).unwrap();
+    let mut rng = Rng::new(0xa11);
+    let mut clock = 0.0;
+    at(&mut ui, clock);
+    let mut peak = 0;
+    for _ in 0..400 {
+        apply(&mut ui, |t| {
+            for _ in 0..rng.below(80) {
+                let id = 1 + rng.below(N);
+                let timing = linear(0.05 + rng.unit() * 0.6);
+                match rng.below(6) {
+                    0 => {
+                        t.animate(id, Prop::Opacity, Value::Opacity(rng.unit()), timing);
+                    }
+                    1 => {
+                        let m = Affine::scale(1.0 + rng.unit(), 1.0);
+                        t.animate(id, Prop::Transform, Value::Transform(m), timing);
+                    }
+                    2 => {
+                        t.animate(id, Prop::Fill, Value::Color(rng.below(u32::MAX)), timing);
+                    }
+                    // A set: retargets through a transition, else cancels.
+                    3 | 4 => {
+                        t.fill(id, rng.below(u32::MAX) | 0xFF);
+                    }
+                    _ => {
+                        t.remove(id).create(id, NodeKind::View).place(0, id, NIL);
+                    }
+                }
+            }
+        });
+        assert!(ui.animations.index_is_exact(), "after a transaction");
+        peak = peak.max(ui.animations.len());
+        clock += (rng.unit() * 0.15) as f64;
+        at(&mut ui, clock);
+        assert!(ui.animations.index_is_exact(), "after a frame");
+    }
+    assert!(peak > 100, "tweens overlapped: peak {peak}");
+}

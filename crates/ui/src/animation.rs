@@ -11,6 +11,8 @@
 //! length (`auto`, a percent) is found by one probe layout; the final
 //! frame restores the declared value. Idle means no work.
 
+use std::collections::HashMap;
+
 use craie_core::geom::Affine;
 use craie_layout::LayoutRow;
 use taffy::prelude::{Dimension, LengthPercentage};
@@ -37,6 +39,16 @@ pub enum Prop {
 
 impl Prop {
     pub const COUNT: usize = 8;
+    pub const ALL: [Prop; Prop::COUNT] = [
+        Prop::Transform,
+        Prop::Opacity,
+        Prop::Fill,
+        Prop::BorderColor,
+        Prop::Width,
+        Prop::Height,
+        Prop::Padding,
+        Prop::Gap,
+    ];
 
     pub fn from_u8(v: u8) -> Option<Prop> {
         use Prop::*;
@@ -483,22 +495,63 @@ fn clamped(prop: Prop, v: Num) -> Num {
     }
 }
 
-/// Active animations (the driver's state).
+/// Active animations (the driver's state). `index` maps (node, prop)
+/// to the position in `active`, so a lookup is O(1) however many tweens
+/// run: every animate command and every intercepted mutation looks one
+/// up. Only `push`, `remove`, and `retain_live` change `active`.
 #[derive(Default)]
 pub struct Animations {
     pub(crate) active: Vec<Anim>,
+    index: HashMap<(u32, Prop), usize>,
 }
 
 impl Animations {
     pub(crate) fn find(&self, node: NodeId, prop: Prop) -> Option<usize> {
-        self.active
-            .iter()
-            .position(|a| a.node == node && a.prop == prop)
+        self.index.get(&(node.0, prop)).copied()
+    }
+
+    pub(crate) fn push(&mut self, a: Anim) {
+        debug_assert!(self.find(a.node, a.prop).is_none(), "one per (node, prop)");
+        self.index.insert((a.node.0, a.prop), self.active.len());
+        self.active.push(a);
+    }
+
+    /// Removes animation `i` (the last one takes its place).
+    pub(crate) fn remove(&mut self, i: usize) -> Anim {
+        let a = self.active.swap_remove(i);
+        self.index.remove(&(a.node.0, a.prop));
+        if let Some(moved) = self.active.get(i) {
+            self.index.insert((moved.node.0, moved.prop), i);
+        }
+        a
+    }
+
+    /// Keeps the animations `keep` accepts, in order.
+    pub(crate) fn retain_live(&mut self, keep: impl Fn(&Anim) -> bool) {
+        let before = self.active.len();
+        self.active.retain(keep);
+        if self.active.len() != before {
+            self.index.clear();
+            for (i, a) in self.active.iter().enumerate() {
+                self.index.insert((a.node.0, a.prop), i);
+            }
+        }
+    }
+
+    /// The index matches `active` exactly (tests).
+    #[cfg(test)]
+    pub(crate) fn index_is_exact(&self) -> bool {
+        self.index.len() == self.active.len()
+            && self
+                .active
+                .iter()
+                .enumerate()
+                .all(|(i, a)| self.index.get(&(a.node.0, a.prop)) == Some(&i))
     }
 
     /// Drops a node's animations (a recycled slot starts clean).
     pub(crate) fn forget(&mut self, node: NodeId) {
-        self.active.retain(|a| a.node != node);
+        self.retain_live(|a| a.node != node);
     }
 
     pub fn len(&self) -> usize {
@@ -687,7 +740,7 @@ impl Ui {
         if timing.total_secs() <= 0.0 {
             return true;
         }
-        self.animations.active.push(Anim {
+        self.animations.push(Anim {
             node,
             prop,
             from,
@@ -703,7 +756,7 @@ impl Ui {
 
     /// Removes animation `i`, reporting its end when JS started it.
     fn end_animation(&mut self, i: usize, reason: u32) {
-        let a = self.animations.active.swap_remove(i);
+        let a = self.animations.remove(i);
         if a.notify {
             self.report_end(a.node, a.prop, reason);
         }
@@ -718,7 +771,12 @@ impl Ui {
 
     /// Ends every animation of `node` (it is being removed).
     pub(crate) fn end_animations_of(&mut self, node: NodeId, reason: u32) {
-        while let Some(i) = self.animations.active.iter().position(|a| a.node == node) {
+        // The lowest position first, as a scan of `active` finds them.
+        while let Some(i) = Prop::ALL
+            .iter()
+            .filter_map(|p| self.animations.find(node, *p))
+            .min()
+        {
             self.end_animation(i, reason);
         }
     }
@@ -730,7 +788,8 @@ impl Ui {
         if self.animations.is_empty() {
             return;
         }
-        self.animations.active.retain(|a| self.host.is_live(a.node));
+        let host = &self.host;
+        self.animations.retain_live(|a| host.is_live(a.node));
         if self.animations.active.iter().any(|a| a.to.is_none()) {
             self.probe_targets(size);
         }
