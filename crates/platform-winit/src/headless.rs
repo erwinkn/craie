@@ -76,6 +76,7 @@ fn run_counted(session: Arc<Session>, logical: Size, scale: f32, frames: &Atomic
             break;
         }
         ui.set_time(start.elapsed().as_secs_f64());
+        let t = Instant::now();
         for buf in session.take_commits() {
             match ui.apply(&buf) {
                 Ok(seq) => session.ack(seq),
@@ -85,6 +86,7 @@ fn run_counted(session: Arc<Session>, logical: Size, scale: f32, frames: &Atomic
                 }
             }
         }
+        stats.worked(t.elapsed().as_secs_f64() * 1e3);
         if ui
             .next_settle()
             .is_some_and(|at| at <= start.elapsed().as_secs_f64())
@@ -111,8 +113,7 @@ fn run_counted(session: Arc<Session>, logical: Size, scale: f32, frames: &Atomic
             });
             frames.fetch_add(1, Ordering::SeqCst);
             let tweens = ui.animation_count();
-            let busy = ui.animating() || ui.needs_paint();
-            if let Some(e) = stats.frame(cpu_ms, prepare_ms, ui.host.len(), tweens, busy) {
+            if let Some(e) = stats.frame(cpu_ms, prepare_ms, ui.host.len(), tweens) {
                 session.post_events(events::encode_events(&[e]), false);
             }
         }

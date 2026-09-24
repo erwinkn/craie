@@ -62,9 +62,9 @@ pub(crate) struct FrameStats {
     prepare_sum: f64,
     /// Preparation done since the last frame, outside one (ms).
     pending_ms: f64,
-    /// The last frame left work owed (animations, a paint): a gap after
-    /// it is slow rendering, not idle time.
-    busy: bool,
+    /// Host work since the last frame outside it (applying commits,
+    /// ms): a gap filled with work is not idle time.
+    work_ms: f64,
 }
 
 impl FrameStats {
@@ -80,13 +80,19 @@ impl FrameStats {
             cpu_max: 0.0,
             prepare_sum: 0.0,
             pending_ms: 0.0,
-            busy: false,
+            work_ms: 0.0,
         }
     }
 
     /// Preparation that ran before the frame that will show it.
     pub(crate) fn prepared(&mut self, ms: f64) {
         self.pending_ms += ms;
+    }
+
+    /// Host work outside a frame (applying commits): not frame cost, but
+    /// not idle time either.
+    pub(crate) fn worked(&mut self, ms: f64) {
+        self.work_ms += ms;
     }
 
     /// Records one frame; at the end of a window returns its event.
@@ -96,9 +102,8 @@ impl FrameStats {
         prepare_ms: f64,
         nodes: usize,
         tweens: usize,
-        busy: bool,
     ) -> Option<events::UiEvent> {
-        self.frame_at(Instant::now(), cpu_ms, prepare_ms, nodes, tweens, busy)
+        self.frame_at(Instant::now(), cpu_ms, prepare_ms, nodes, tweens)
     }
 
     fn frame_at(
@@ -108,15 +113,18 @@ impl FrameStats {
         prepare_ms: f64,
         nodes: usize,
         tweens: usize,
-        busy: bool,
     ) -> Option<events::UiEvent> {
         let cpu_ms = cpu_ms + self.pending_ms;
         let prepare_ms = prepare_ms + self.pending_ms;
         self.pending_ms = 0.0;
-        // A gap after an idle frame starts a new burst; after a busy one
-        // it is a slow frame of the same burst.
-        let idle_gap = !self.busy && self.last.is_some_and(|l| now - l > Self::GAP);
-        self.busy = busy;
+        // Idle time since the last frame: the gap less the host work in
+        // it (this frame's, and commits applied before it). More than
+        // `GAP` starts a new burst; slow work of any kind does not.
+        let work = Duration::from_secs_f64((cpu_ms + self.work_ms).max(0.0) / 1e3);
+        self.work_ms = 0.0;
+        let idle_gap = self
+            .last
+            .is_some_and(|l| (now - l).saturating_sub(work) > Self::GAP);
         if self.frames == 0 || idle_gap {
             self.since = now;
             self.frames = 0;
@@ -227,6 +235,7 @@ impl Inner {
     /// once if anything can change pixels.
     fn sync(&mut self, window: &Window, session: &Session, drain: bool) {
         if drain {
+            let t = Instant::now();
             for buf in session.take_commits() {
                 match self.ui.apply(&buf) {
                     Ok(seq) => session.ack(seq),
@@ -236,6 +245,7 @@ impl Inner {
                     }
                 }
             }
+            self.stats.worked(t.elapsed().as_secs_f64() * 1e3);
         }
         let (w, h) = window.size();
         let scale = window.scale_factor() as f32;
@@ -461,11 +471,7 @@ impl App for HostApp {
             window.request_redraw();
         }
         let tweens = inner.ui.animation_count();
-        let busy = inner.ui.animating() || inner.ui.needs_paint();
-        if let Some(e) = inner
-            .stats
-            .frame(cpu_ms, 0.0, inner.ui.host.len(), tweens, busy)
-        {
+        if let Some(e) = inner.stats.frame(cpu_ms, 0.0, inner.ui.host.len(), tweens) {
             self.session.post_events(events::encode_events(&[e]), false);
         }
     }
@@ -485,9 +491,7 @@ mod tests {
         let mut stats = FrameStats::new();
         for k in 0..8 {
             assert!(
-                stats
-                    .frame_at(ms(k * 1200), 1.0, 1.0, 10, 0, false)
-                    .is_none(),
+                stats.frame_at(ms(k * 1200), 1.0, 1.0, 10, 0).is_none(),
                 "sparse frame {k}"
             );
         }
@@ -497,7 +501,7 @@ mod tests {
             if k == 30 {
                 stats.prepared(3.0);
             }
-            if let Some(e) = stats.frame_at(ms(start + k * 10), 1.0, 0.5, 10, 7, true) {
+            if let Some(e) = stats.frame_at(ms(start + k * 10), 1.0, 0.5, 10, 7) {
                 report = Some(e);
                 break;
             }
@@ -511,25 +515,32 @@ mod tests {
         assert_eq!(e.revision, 7);
     }
 
-    /// SPD-06: continuous slow frames (300 ms each, work still owed)
-    /// report; they are not idle gaps.
+    /// SPD-06: continuous slow frames (300 ms each) report; they are
+    /// not idle gaps.
     #[test]
-    fn slow_busy_frames_still_report() {
+    fn slow_frames_still_report() {
         let t0 = Instant::now();
         let mut stats = FrameStats::new();
-        let report = (0..6).find_map(|k| {
-            stats.frame_at(
-                t0 + Duration::from_millis(k * 300),
-                300.0,
-                290.0,
-                10,
-                3,
-                true,
-            )
-        });
+        let report = (0..6)
+            .find_map(|k| stats.frame_at(t0 + Duration::from_millis(k * 300), 300.0, 290.0, 10, 3));
         let e = report.expect("slow frames report");
         assert!((e.x - 3.33).abs() < 0.1, "fps {}", e.x);
         assert_eq!(e.y, 300.0);
+    }
+
+    /// SPD-10: slow commits (299 ms of applying each) with cheap frames
+    /// and no animation report too: the time went to host work.
+    #[test]
+    fn slow_commits_still_report() {
+        let t0 = Instant::now();
+        let mut stats = FrameStats::new();
+        let report = (0..6).find_map(|k| {
+            if k > 0 {
+                stats.worked(299.0);
+            }
+            stats.frame_at(t0 + Duration::from_millis(k * 300), 1.0, 0.5, 10, 0)
+        });
+        assert!(report.is_some(), "slow commits report");
     }
     use craie_ui::events::Event;
     use craie_ui::host::NodeId;
