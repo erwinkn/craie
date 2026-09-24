@@ -705,31 +705,42 @@ late in both apps; both print the work done per second and process CPU
 `bench/compare.sh` runs each app in a window for 15 s per tile count and
 summarizes (`bench/summarize.py`).
 
-Measured so far, storm on, the same work per second in both (heat
-13.7, log entries about 40, sparkline ticks 19.6, ripples about 0.7).
-Process CPU is the whole app over the steady interval, from cumulative
-totals (review round 5: the first table here subtracted elapsed spin
-time and understated Craie's CPU; the headless spin is now its thread
-CPU clock, subtracted between the first and last reports that the spin
-samples bracket, 7.7 s per run):
+Results (`bench/compare.sh` on Erwin's display, each window in front,
+2026-09-24; storm on; 15 s per run, steady 7 to 7.7 s). The work per
+second matched in every run: heat 13.7 to 14.8, log entries 38 to 41,
+sparkline ticks 19.4 to 20.1, ripples 0.67 to 0.78. Process CPU is the
+whole app (for Craie the native threads and the React worker); CPU per
+frame is process CPU divided by frames per second (at the midpoint of
+the frame range).
 
-| | frames/s | process CPU (whole app) |
-|---|---:|---:|
-| Craie 2,500 (headless, spin removed) | 118-121 | 39% |
-| Craie 5,000 (headless, spin removed) | 117-120 | 46% |
-| Craie 10,000 (headless, spin removed) | 117-121 | 64% |
-| GPUI 5,000, elements (window, 9 s) | 67-73 | 97-100% |
+| tiles | app | frames/s | process CPU | CPU per frame | frame cost (worst) |
+|------:|-----|---------:|------------:|--------------:|-------------------:|
+| 2,500  | Craie         | 118-120 | 51%  | 4.3 ms  | 1.08-1.66 ms (5.8)   |
+| 2,500  | GPUI elements | 102-110 | 93%  | 8.8 ms  | 4.58-5.12 ms (12.2)  |
+| 2,500  | GPUI canvas   | 109-120 | 64%  | 5.6 ms  | 1.95-2.52 ms (5.1)   |
+| 5,000  | Craie         | 114-120 | 61%  | 5.2 ms  | 1.45-2.24 ms (6.0)   |
+| 5,000  | GPUI elements | 63-70   | 101% | 15.2 ms | 9.94-11.15 ms (16.6) |
+| 5,000  | GPUI canvas   | 105-114 | 92%  | 8.4 ms  | 4.57-5.23 ms (10.8)  |
+| 10,000 | Craie         | 108-120 | 100% | 8.8 ms  | 2.42-3.84 ms (8.7)   |
+| 10,000 | GPUI elements | 31-35   | 100% | 30.3 ms | 23.11-26.19 ms (35.7) |
+| 10,000 | GPUI canvas   | 58-73   | 101% | 15.4 ms | 10.24-13.14 ms (21.0) |
 
-At 5,000 tiles GPUI saturates its UI thread and draws about 70 wall
-frames a second; Craie draws 120 with about half a core, React
-included. Limits: the GPUI row is one nine-second run of the port
-before review round 5 (its HUD and sparklines were then cached views
-without sizes, SPD-19); its other rows could not be measured here (a
-GPUI window stops drawing about 1.5 s after launch when it opens behind
-other windows, and this desktop was in use). Craie's rows are headless
-(its window path presents on a display). The full table needs
-`bench/compare.sh` on a display with each window in front; there
-neither app spins.
+Frame cost is not the same measurement in the two apps: Craie's is its
+frame loop (animation driver, layout, scene, upload, draw encoding);
+GPUI's is the wall view's render to paint (the root, the other panels,
+scene finalization, and Metal encoding are not in it, so it understates
+GPUI's frame). Compare process CPU and frames per second.
+
+- With the same element model (one view or element per tile), Craie
+  uses 2.0, 2.9, and 3.4 times less CPU per frame at 2,500, 5,000, and
+  10,000 tiles, and holds 108 to 120 fps where GPUI falls to 63-70 and
+  31-35.
+- Against GPUI painting the wall as raw quads (no element per tile, its
+  fastest way), Craie still uses 1.3, 1.6, and 1.75 times less CPU per
+  frame, with a React tree of 10,000 views.
+- At 10,000 tiles Craie reaches its own limit: 100% of a core and dips
+  to 108 fps. It still draws 1.6 to 1.9 times more frames than the
+  canvas GPUI and 3.4 times more than the element GPUI.
 
 ### E14: layout-aware virtualization, list versus a plain column (step 2)
 
