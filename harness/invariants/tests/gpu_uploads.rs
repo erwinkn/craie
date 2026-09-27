@@ -27,7 +27,7 @@ fn gpu_uploads_follow_changes() {
         return;
     };
     let format = wgpu::TextureFormat::Rgba8UnormSrgb;
-    let mut renderer = Renderer::new(&gpu, format);
+    let mut renderer = Renderer::new(gpu, format);
     let (w, h) = (640, 480);
     let target = gpu.device.create_texture(&wgpu::TextureDescriptor {
         label: None,
@@ -74,8 +74,8 @@ fn gpu_uploads_follow_changes() {
 
     let mut frame = |ui: &mut Ui| {
         ui.render(VIEW);
-        renderer.prepare(&gpu, ui.scene_mut());
-        renderer.draw(&gpu, &view, w, h, ui.scene_mut());
+        renderer.prepare(gpu, ui.scene_mut());
+        renderer.draw(gpu, &view, w, h, ui.scene_mut());
         renderer.stats.upload_bytes
     };
     assert!(frame(&mut ui) > 0);
@@ -188,7 +188,7 @@ fn identity_world_renders_at_1x() {
             .append(NIL, 0);
         ui.apply_txn(&t).unwrap();
         let px = pixel(
-            &gpu,
+            gpu,
             &mut ui,
             100,
             100,
@@ -244,22 +244,22 @@ fn half_pixel_edges_match_resolver() {
         let red = [255, 0, 0, 255];
         let y = 10;
         assert_eq!(
-            pixel(&gpu, &mut ui, 200, 200, (x0, y)),
+            pixel(gpu, &mut ui, 200, 200, (x0, y)),
             red,
             "x {x}: first column {x0}"
         );
         assert_ne!(
-            pixel(&gpu, &mut ui, 200, 200, (x0 - 1, y)),
+            pixel(gpu, &mut ui, 200, 200, (x0 - 1, y)),
             red,
             "x {x}: before {x0}"
         );
         assert_eq!(
-            pixel(&gpu, &mut ui, 200, 200, (x1 - 1, y)),
+            pixel(gpu, &mut ui, 200, 200, (x1 - 1, y)),
             red,
             "x {x}: last column"
         );
         assert_ne!(
-            pixel(&gpu, &mut ui, 200, 200, (x1, y)),
+            pixel(gpu, &mut ui, 200, 200, (x1, y)),
             red,
             "x {x}: after {x1}"
         );
@@ -307,18 +307,18 @@ fn oversized_glyph_draws_full_size() {
         b.max_y() - b.size.height / 6.0,
     ] {
         assert_eq!(
-            pixel(&gpu, &mut ui, 400, 700, at(c.0, y)),
+            pixel(gpu, &mut ui, 400, 700, at(c.0, y)),
             white,
             "stem at y {y}"
         );
     }
     // Outside the quad stays clear.
     assert_eq!(
-        pixel(&gpu, &mut ui, 400, 700, at(c.0, b.max_y() + 8.0)),
+        pixel(gpu, &mut ui, 400, 700, at(c.0, b.max_y() + 8.0)),
         black
     );
     assert_eq!(
-        pixel(&gpu, &mut ui, 400, 700, at(b.max_x() + 8.0, c.1)),
+        pixel(gpu, &mut ui, 400, 700, at(b.max_x() + 8.0, c.1)),
         black
     );
 }
@@ -370,7 +370,7 @@ fn settled_scroll_content_is_crisp() {
         // The block's top edge sits at 20*scale - 0.5 device px: the
         // pixel row above 20*scale is half covered.
         let row = (20.0 * scale) as u32 - 1;
-        let moving = pixel(&gpu, &mut ui, w, h, (10, row));
+        let moving = pixel(gpu, &mut ui, w, h, (10, row));
         assert!(
             moving[0] > 40 && moving[0] < 230,
             "scale {scale}: moving edge half covered, got {moving:?}"
@@ -380,12 +380,12 @@ fn settled_scroll_content_is_crisp() {
         // Ties to even: -0.5 snaps to 0, so the row above is clear and
         // the edge row is fully white.
         assert_eq!(
-            pixel(&gpu, &mut ui, w, h, (10, row)),
+            pixel(gpu, &mut ui, w, h, (10, row)),
             [0, 0, 0, 255],
             "scale {scale}"
         );
         assert_eq!(
-            pixel(&gpu, &mut ui, w, h, (10, row + 1)),
+            pixel(gpu, &mut ui, w, h, (10, row + 1)),
             [255, 255, 255, 255],
             "scale {scale}"
         );

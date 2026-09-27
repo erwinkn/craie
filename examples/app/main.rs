@@ -112,7 +112,7 @@ fn demo_txn() -> Vec<u8> {
     for (i, c) in colors.iter().enumerate() {
         let id = 10 + i as u32;
         enc.create(id, NodeKind::View);
-        enc.push(Mutation::Layout { id: id, style: 1 });
+        enc.push(Mutation::Layout { id, style: 1 });
         enc.fill(id, *c);
         enc.place(3, id, NIL);
         let tid = 20 + i as u32;

@@ -21,3 +21,6 @@ tracing.workspace = true
 taffy.workspace = true
 # Tests lay text out on the pinned fonts (assets/fonts).
 craie-text = { workspace = true, features = ["pinned-fonts"] }
+
+[lints]
+workspace = true
