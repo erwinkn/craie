@@ -183,7 +183,9 @@ selectable, inert and auto-focus (bits 0 to 3, the last two since
 protocol 8), then pressable, disabled and keep-focus (bits 4 to 6,
 protocol 7); unknown bits fail decoding. The trap op (0x62, protocol
 8) sets a node's focus-trap flags: active, modal, auto-focus and
-restore-focus (ARCHITECTURE-update topic 3). The claims op (0x61, protocol
+restore-focus (ARCHITECTURE-update topic 3). The group op (0x63,
+protocol 10) makes a node a focus group: horizontal, vertical, loop and
+select-on-focus, no bits unmaking it. The claims op (0x61, protocol
 4) replaces a node's claim set, or the window list's (NIL, key claims
 only): a version u32, a count u16, then per claim a kind, flags,
 modifiers, a pad byte, and a key u32 (a named key's code or a
@@ -1076,7 +1078,11 @@ misses the point, then walks the
 propagation path with listener-relative coordinates. Pointer
 capture holds a drag on the pressed node. Tab traverses focusable nodes
 in tree order, whatever their z, each owned layer right after its
-owner's subtree, inside the innermost active focus trap (`trap.rs`). Clipboard via arboard. IME with cursor-area tracking.
+owner's subtree, inside the innermost active focus trap (`trap.rs`); a
+focus group is one stop, and arrows, Home and End move among its
+members (`group.rs`). An unclaimed key down goes to the focused node's
+path before its default action (Tab's move, an arrow's, Enter's
+activation), as on the web. Clipboard via arboard. IME with cursor-area tracking.
 A pointer event on a text node carries the span under the pointer (key
 bits 16 and up, so at most 65,535 spans per paragraph), found from the
 placements, and the paragraph's revision (paragraph ops applied, a
@@ -1161,8 +1167,8 @@ Roles come from the explicit role field; the facade sets defaults
 (Pressable, TextInput, ScrollView, Text, List, list rows) and a plain
 View has none. States come from a scope's bits: the check roles report
 `checked`, and `expanded` and `selected` appear where the facade says
-the prop was given, `selected` on list rows only (ARCHITECTURE-update
-§13). Under an active modal trap, AccessKit's `modal` goes on the
+the prop was given, `selected` on list rows and tabs only
+(ARCHITECTURE-update §13). Under an active modal trap, AccessKit's `modal` goes on the
 trap's first `dialog` or `alertdialog` node, else on the trap. A list row reports its position among all items and the item
 count; rows appear in item order, and rows layout hides are not
 published.
@@ -1266,12 +1272,13 @@ event loop, the window, the device, or the render target.
 One threadsafe function delivers `ack | events` frames. JS recycles
 ids at once and mirrors each slot's generation; events carry the
 generation and JS drops stale ones; the ack resolves `flush()`.
-Payload ops copy typed-array bytes once. Protocol version 8 (36-byte
+Payload ops copy typed-array bytes once. Protocol version 10 (36-byte
 event records and claims since 4; inherited color in drawings and
 inputs since 5; the `switch`, `radio` and `radiogroup` roles and the
 ROLE op's reported states since 6; press flags, pressable spans, and
 `PRESS`/`ACTIVATE` since 7; focus traps, inert, auto-focus and the
-`dialog` and `alertdialog` roles since 8). The session hands JS its output in native
+`dialog` and `alertdialog` roles since 8; transform parts since 9;
+focus groups and the `tab` and `tablist` roles since 10). The session hands JS its output in native
 order: acks sit between event frames where they happened, so the ack
 of a transaction never overtakes an event raised before it applied,
 and the facade retires a claim set's old handlers on that ack.

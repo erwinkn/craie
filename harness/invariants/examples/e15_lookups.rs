@@ -13,7 +13,9 @@
 //! and a refresh after one box grows or one transform changes); key presses
 //! with no focus and 0, 50 or 500 key listeners (the keymap proxy until
 //! claims land), a key press with a node 40 deep focused, and Tab
-//! through 1,000 focusable nodes. Times are the mean per event; allocs
+//! through 1,000 focusable nodes, then with them in one focus group
+//! (Tab, and an arrow moving among them), then in 1,000 groups of three
+//! (Tab). Times are the mean per event; allocs
 //! are allocation calls per event.
 //!
 //!   cargo run --release -p craie-harness --example e15_lookups
@@ -25,7 +27,7 @@ use std::time::Instant;
 use craie_core::geom::{Affine, Size};
 use craie_ui::events::{Event, Key, KeyInput, Mods, mask};
 use craie_ui::host::NodeId;
-use craie_ui::mutation::{NIL, NodeKind, Transaction};
+use craie_ui::mutation::{NIL, NodeKind, Transaction, group_flag};
 use craie_ui::ui::Ui;
 
 static ALLOCS: AtomicUsize = AtomicUsize::new(0);
@@ -459,6 +461,60 @@ fn main() {
                 ui.dispatch(&key(Key::Tab, None))
             });
             println!("  {}", row("Tab, 1000 focusable          ", &c));
+
+            // The same focusables but the root in one focus group at the
+            // root: Tab (the group is one stop), and → moving among the
+            // members.
+            let mut t = Transaction::new(7);
+            t.interaction(1, 0, false)
+                .group(1, group_flag::HORIZONTAL | group_flag::LOOP);
+            tree.ui.apply_txn(&t).unwrap();
+            tree.ui.set_focus(None);
+            let c = cost(&mut tree.ui, 1000, |ui, _| {
+                ui.dispatch(&key(Key::Tab, None))
+            });
+            println!("  {}", row("Tab, 999 in one group        ", &c));
+            tree.ui.set_focus(None);
+            tree.ui.dispatch(&key(Key::Tab, None));
+            assert_ne!(tree.ui.focused(), Some(NodeId(1)));
+            let c = cost(&mut tree.ui, 1000, |ui, _| {
+                ui.dispatch(&key(Key::Right, None))
+            });
+            println!("  {}", row("arrow, 999 in one group      ", &c));
+
+            // Many small groups: the 1,000 focusables become plain, and
+            // each gets a new child group of three focusable views (4,000
+            // nodes more): Tab steps through 1,000 stops, each walk
+            // taking the groups' members away.
+            let mut t = Transaction::new(8);
+            t.group(1, 0);
+            let mut next = tree.nodes + 1;
+            for &id in &focusable {
+                let base = if tree.widgets.binary_search(&id).is_ok() {
+                    POINTER
+                } else {
+                    0
+                };
+                t.interaction(id, base, false);
+                let g = next;
+                t.create(g, NodeKind::View)
+                    .append(id, g)
+                    .group(g, group_flag::HORIZONTAL | group_flag::LOOP);
+                for m in g + 1..g + 4 {
+                    t.create(m, NodeKind::View)
+                        .append(g, m)
+                        .interaction(m, 0, true);
+                }
+                next += 4;
+            }
+            tree.ui.apply_txn(&t).unwrap();
+            tree.ui.layout(VIEW);
+            tree.ui.set_focus(None);
+            let c = cost(&mut tree.ui, 1000, |ui, _| {
+                ui.dispatch(&key(Key::Tab, None))
+            });
+            println!("  {}", row("Tab, 1000 groups x 3         ", &c));
+            assert!(tree.ui.focused().is_some_and(|f| f.0 > tree.nodes));
         }
     }
 }

@@ -14,12 +14,12 @@ use std::sync::{Arc, Mutex};
 
 use accesskit::{
     Action, ActionRequest, ActivationHandler, DeactivationHandler, Node, NodeId as A11yId,
-    Rect as A11yRect, Role, Toggled, TreeId, TreeInfo, TreeUpdate,
+    Orientation, Rect as A11yRect, Role, Toggled, TreeId, TreeInfo, TreeUpdate,
 };
 
 use crate::geom::Size;
 use crate::host::{NodeFlags, NodeId, ROOT};
-use crate::mutation::{NIL, NodeKind, Role as UiRole, reported};
+use crate::mutation::{NIL, NodeKind, Role as UiRole, group_flag, reported};
 use crate::states::state_bit;
 use crate::trap::Class;
 use crate::ui::Ui;
@@ -46,15 +46,17 @@ fn ak_role(role: UiRole) -> Role {
         UiRole::RadioGroup => Role::RadioGroup,
         UiRole::Dialog => Role::Dialog,
         UiRole::AlertDialog => Role::AlertDialog,
+        UiRole::Tab => Role::Tab,
+        UiRole::TabList => Role::TabList,
     }
 }
 
 /// Whether assistive technology reads `selected` on `role`: of Marbre
 /// web's selectable roles (tab, option, row, gridcell, treeitem, and
-/// the headers), Craie has the list row, which stands in for option and
-/// row. Add the others as they become roles.
+/// the headers), Craie has the tab and the list row, which stands in
+/// for option and row. Add the others as they become roles.
 fn selectable(role: UiRole) -> bool {
-    role == UiRole::ListItem
+    matches!(role, UiRole::ListItem | UiRole::Tab)
 }
 
 /// The window root's accessibility id.
@@ -252,6 +254,16 @@ impl Ui {
         }
         if props.reported & reported::SELECTED != 0 && selectable(props.role) {
             an.set_selected(bits & state_bit::SELECTED != 0);
+        }
+        // A focus group's arrow axis, when it has one.
+        if props.group
+            && let Some(g) = self.groups.get(&id.0)
+        {
+            match g.flags & (group_flag::HORIZONTAL | group_flag::VERTICAL) {
+                group_flag::HORIZONTAL => an.set_orientation(Orientation::Horizontal),
+                group_flag::VERTICAL => an.set_orientation(Orientation::Vertical),
+                _ => {}
+            }
         }
         if let Some(p) = self.host.paragraph(id) {
             an.set_value(p.text.clone());

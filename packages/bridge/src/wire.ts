@@ -14,7 +14,7 @@
 // across transactions.
 
 const MAGIC = 0x3257_5243 // "CRW2" little-endian
-export const VERSION = 9
+export const VERSION = 10
 export const NIL = 0xffff_ffff // no node / append / default style
 
 const enum Op {
@@ -40,6 +40,7 @@ const enum Op {
   Interaction = 0x60,
   Claims = 0x61,
   Trap = 0x62,
+  Group = 0x63,
   // payload
   Surface = 0x70,
   Payload = 0x71,
@@ -205,6 +206,8 @@ export const ROLE = {
   radiogroup: 16,
   dialog: 17,
   alertdialog: 18,
+  tab: 19,
+  tablist: 20,
 } as const
 export type AccessibilityRole = keyof typeof ROLE
 
@@ -285,6 +288,9 @@ export const CHORD_FLAG = { named: 1, noRepeat: 2, inInput: 4 } as const
 export const INTERACTION = { focusable: 1, selectable: 2, inert: 4, autoFocus: 8, pressShift: 4 } as const
 /** Trap op flag bits — mirror mutation.rs `trap_flag`. */
 export const TRAP = { active: 1, modal: 2, autoFocus: 4, restoreFocus: 8 } as const
+/** Focus group op flag bits — mirror mutation.rs `group_flag`. No bits:
+ * not a group. */
+export const GROUP = { horizontal: 1, vertical: 2, loop: 4, selectOnFocus: 8 } as const
 /** Modifier bits (key records, pointer records, chords) — mirror
  * events.rs `Mods`. */
 export const MODS = { shift: 1, ctrl: 2, alt: 4, meta: 8 } as const
@@ -1247,6 +1253,13 @@ export class Encoder {
    * node does. */
   trap(id: number, flags: number) {
     this.ops.u8(Op.Trap)
+    this.ops.u32(id)
+    this.ops.u8(flags)
+  }
+  /** A focus group on `id` (`GROUP` flags; 0 unmakes it): one Tab stop
+   * over its members, which the arrows of its orientation move among. */
+  group(id: number, flags: number) {
+    this.ops.u8(Op.Group)
     this.ops.u32(id)
     this.ops.u8(flags)
   }

@@ -31,6 +31,7 @@
 use std::collections::HashMap;
 
 use crate::events::{mask, out_kind};
+use crate::group::GroupWalk;
 use crate::host::{NodeFlags, NodeId};
 use crate::mutation::{NIL, NodeKind, trap_flag};
 use crate::ui::Ui;
@@ -244,10 +245,15 @@ impl Ui {
     /// Tab order within `scope` (ROOT: the window): tree order, each
     /// owned layer right after its owner's subtree, unowned layers
     /// after the app. `display: none` and `inert` hide a subtree but
-    /// not the layers its nodes own.
+    /// not the layers its nodes own. A focus group is one stop
+    /// (`group.rs`): its other members are skipped.
     pub(crate) fn tab_order(&self, scope: NodeId) -> Vec<NodeId> {
         let owned = self.owned_layers();
         let mut out = Vec::new();
+        // What the groups walked take away (`group_skips`), filtered out
+        // once at the end: all of it lies inside those groups.
+        let mut skip: Vec<u32> = Vec::new();
+        let mut walk = GroupWalk::default();
         let mut stack: Vec<(NodeId, bool)> = Vec::new();
         if scope.is_nil() {
             for &c in self.host.children(scope).iter().rev() {
@@ -265,7 +271,11 @@ impl Ui {
             };
             let hidden =
                 above || node.flags.contains(NodeFlags::INERT) || self.host.display_none(id);
-            if !hidden && (node.kind == NodeKind::Input || self.host.interaction(id).focusable) {
+            let i = self.host.interaction(id);
+            if !hidden && i.group {
+                self.group_skips(id, &mut skip, &mut walk);
+            }
+            if !hidden && (node.kind == NodeKind::Input || i.focusable) {
                 out.push(id);
             }
             if !owned.is_empty() {
@@ -287,6 +297,10 @@ impl Ui {
             for &c in self.host.children(id).iter().rev() {
                 stack.push((c, hidden));
             }
+        }
+        if !skip.is_empty() {
+            skip.sort_unstable();
+            out.retain(|n| skip.binary_search(&n.0).is_err());
         }
         out
     }

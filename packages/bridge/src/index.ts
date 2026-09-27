@@ -45,6 +45,7 @@ import {
 import { flattenShapes, type ShapeProps } from "./shapes.js"
 import {
   EVENT_KIND,
+  GROUP,
   SURFACE,
   TRAP,
   type AccessibilityRole,
@@ -252,9 +253,9 @@ export type Variants = { [key: `_${string}`]: (VariantStyle & Variants) | undefi
  * The accessibility tree carries them too: `checked` on the check roles
  * (`checkbox`, `switch`, `radio`; absent is unchecked), `expanded`
  * wherever the prop is given (`false` is collapsed; without the prop,
- * neither), `selected` where given on a list row, and `disabled`. */
+ * neither), `selected` where given on a list row or a tab, and `disabled`. */
 export interface StateProps {
-  /** Selected, or not when given `false`, on a list row; elsewhere a
+  /** Selected, or not when given `false`, on a list row or a tab; elsewhere a
    * styling state only (a selected checkbox is just checked or not). */
   selected?: boolean
   /** Expanded, or collapsed when given `false` (a menu trigger, a
@@ -302,7 +303,8 @@ export interface ViewProps extends ListenerProps, StateProps, Variants {
   accessibilityLabel?: string
   /** Accessibility role; a plain View has none, a Pressable is a
    * `button`. The check roles (`checkbox`, `switch`, `radio`) report
-   * `checked`; a `radiogroup` holds radios. A `dialog` or
+   * `checked`; a `radiogroup` holds radios, a `tablist` tabs (a `tab`
+   * reports `selected` where given). A `dialog` or
    * `alertdialog` in an active modal `FocusTrap` is announced as modal.
    * Assistive technology is
    * offered a click on enabled Pressables only, whatever their role. */
@@ -805,6 +807,54 @@ export function FocusTrap({
     { style, __trap: flags, __owner: owner },
     createElement(LayerOwner.Provider, { value: within }, children),
   )
+}
+
+export interface FocusGroupProps extends ViewProps {
+  /** Which arrows move: `horizontal` (←→), `vertical` (↑↓) or `both`
+   * (default). Home and End always go to the ends. */
+  orientation?: "horizontal" | "vertical" | "both"
+  /** An arrow past an end comes around to the other (default true). */
+  loop?: boolean
+  /** An arrow or Home/End move also activates the member reached: its
+   * `onPress` runs with `e.source` "keyboard" and no modifiers, as the
+   * web's `click()` (the radio-group pattern). (default false) */
+  selectOnFocus?: boolean
+}
+
+/** A composite control that is one Tab stop: radios, segments, tabs, a
+ * toolbar. Native does the keyboard (`group.rs`).
+ *
+ *   <FocusGroup accessibilityRole="radiogroup" orientation="vertical" selectOnFocus>
+ *     <Pressable accessibilityRole="radio" checked={size === "s"} onPress={() => setSize("s")}>Small</Pressable>
+ *     <Pressable accessibilityRole="radio" checked={size === "m"} onPress={() => setSize("m")}>Medium</Pressable>
+ *     <Pressable accessibilityRole="radio" disabled>Large</Pressable>
+ *   </FocusGroup>
+ *
+ * Tab lands on Medium while it is checked, and the next Tab leaves the
+ * group; ↓ from Medium focuses Small and presses it (Large is skipped).
+ *
+ * - Members: the focusable descendants that are enabled, not inert and
+ *   not hidden, none inside another member; with a `radiogroup` or
+ *   `tablist` role, only the `radio`s or `tab`s. A disabled one holding
+ *   the focus is a member, and the stop, until the focus leaves.
+ * - The Tab stop: the member holding the focus, else the first
+ *   `checked` or `selected` one, else the last focused, else the first.
+ * - Arrows move in tree order, and not from a TextInput (its caret keeps
+ *   them) or with Ctrl, Alt or Meta. A `keymap` claiming the chord wins:
+ *   highlight mode and typeahead stay in JS.
+ * - A FocusGroup inside another is one member of it, entered at its own
+ *   stop: in a vertical group of horizontal toolbars, ↑↓ move between
+ *   the toolbars and ←→ within one. */
+export function FocusGroup({
+  orientation = "both",
+  loop = true,
+  selectOnFocus = false,
+  ...props
+}: FocusGroupProps) {
+  const flags = (orientation !== "vertical" ? GROUP.horizontal : 0) |
+    (orientation !== "horizontal" ? GROUP.vertical : 0) |
+    (loop ? GROUP.loop : 0) | (selectOnFocus ? GROUP.selectOnFocus : 0)
+  return useHost("view", { ...props, __group: flags }, !!props.group)
 }
 
 export interface ListProps<T> {

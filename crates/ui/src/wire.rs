@@ -39,10 +39,10 @@ use crate::mutation::{
     Anchor, Claim, Command, ItemDesc, ItemTemplate, Mutation, NIL, NodeKind, Role, SubmitKey,
     TextSpan, Transaction, reported,
 };
-pub use crate::mutation::{interaction_flag, trap_flag};
+pub use crate::mutation::{group_flag, interaction_flag, trap_flag};
 
 pub const MAGIC: u32 = 0x3257_5243; // "CRW2"
-pub const VERSION: u16 = 9;
+pub const VERSION: u16 = 10;
 
 pub mod op {
     // structure
@@ -73,6 +73,9 @@ pub mod op {
     pub const CLAIMS: u8 = 0x61;
     /// id u32 | flags u8 (`trap_flag`): the node is a focus trap.
     pub const TRAP: u8 = 0x62;
+    /// id u32 | flags u8 (`group_flag`; 0: none): the node is a focus
+    /// group.
+    pub const GROUP: u8 = 0x63;
     // payload
     pub const SURFACE: u8 = 0x70;
     pub const PAYLOAD: u8 = 0x71;
@@ -539,6 +542,11 @@ pub fn encode(txn: &Transaction<'_>) -> Vec<u8> {
             }
             Mutation::Trap { id, flags } => {
                 ops.push(op::TRAP);
+                u32le(&mut ops, *id);
+                ops.push(*flags);
+            }
+            Mutation::Group { id, flags } => {
+                ops.push(op::GROUP);
                 u32le(&mut ops, *id);
                 ops.push(*flags);
             }
@@ -1129,6 +1137,13 @@ pub fn decode(buf: &[u8]) -> Result<Transaction<'_>, WireError> {
                     return Err(WireError::BadRef("trap flags"));
                 }
                 Mutation::Trap { id, flags }
+            }
+            op::GROUP => {
+                let (id, flags) = (r.u32()?, r.u8()?);
+                if flags & !group_flag::ALL != 0 {
+                    return Err(WireError::BadRef("group flags"));
+                }
+                Mutation::Group { id, flags }
             }
             op::CLAIMS => {
                 let (id, version) = (r.u32()?, r.u32()?);

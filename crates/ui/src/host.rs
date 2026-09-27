@@ -341,6 +341,9 @@ pub struct Interaction {
     pub role: Role,
     /// States reported while clear (`mutation::reported`).
     pub reported: u8,
+    /// A focus group (`group.rs`; its state is in `Ui::groups`): a bit
+    /// here spares the walks a map lookup per node.
+    pub group: bool,
 }
 
 /// A surface node's retained data: kind, parameters, and payload bytes.
