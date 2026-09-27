@@ -7,10 +7,11 @@
 //! one `ACTIVATE` event to the pressable itself, with no hit test, from
 //! each source:
 //!
-//! - a primary press released over the node it started on (or over
-//!   anything inside it: the web's click rule);
-//! - Enter on key down, or Space on key up, on a focused pressable
-//!   (bare keys; a key claim on the chord wins);
+//! - a primary press released over the node it started on, or over
+//!   anything inside it (React Aria's rule; the web clicks the nearest
+//!   common ancestor of the press and the release, LEDGER.md DF-45);
+//! - Enter on key down, or Space on key up, on a focused pressable, with
+//!   any modifiers (a key claim on the chord wins);
 //! - an accessibility click on the pressable or inside it.
 //!
 //! Focus groups activate the member they reach through `activate` too.
@@ -28,8 +29,12 @@ pub(crate) struct Press {
     pub(crate) node: NodeId,
     generation: u16,
     /// The span under the press's start, plus one (0: none), on a text
-    /// node: a pressable span activates only when released on itself.
+    /// node: a pressable span activates only when released on its own
+    /// pressable (the run of spans it joins).
     span: u32,
+    /// The paragraph's revision at the press (0: none): span indices
+    /// mean nothing across span tables.
+    revision: u32,
     /// The modifiers at the press's start: its activation carries them
     /// (a release reports none).
     mods: Mods,
@@ -51,6 +56,26 @@ impl Ui {
                 .paragraph(id)
                 .and_then(|p| p.spans.get(span as usize - 1))
                 .is_some_and(|s| s.pressable)
+    }
+
+    /// The pressable run span `span` (plus one) of text node `id` is in:
+    /// its first span, plus one (0: not a pressable span).
+    fn press_run(&self, id: NodeId, span: u32) -> u32 {
+        let Some(spans) = self.host.paragraph(id).map(|p| &p.spans) else {
+            return 0;
+        };
+        let mut i = span as usize;
+        if i == 0 || !spans.get(i - 1).is_some_and(|s| s.pressable) {
+            return 0;
+        }
+        while i > 1 && spans[i - 1].press_joins && spans[i - 2].pressable {
+            i -= 1;
+        }
+        i as u32
+    }
+
+    fn revision(&self, id: NodeId) -> u32 {
+        self.host.paragraph(id).map_or(0, |p| p.revision)
     }
 
     /// The innermost pressable on `hit`'s path at window point (x, y),
@@ -82,27 +107,31 @@ impl Ui {
             return;
         }
         let generation = self.host.node(node).map_or(0, |n| n.generation);
+        let revision = self.revision(node);
         self.press = Some(Press {
             node,
             generation,
             span,
+            revision,
             mods,
         });
+        let phase = press_phase::IN;
         self.emit_press(
             node,
             out_kind::PRESS,
-            press_phase::IN,
+            phase,
             1,
             (x, y),
-            span,
+            (span, revision),
             mods,
         );
     }
 
     /// The primary button came up at (x, y): the press ends (`PRESS`
     /// out) and, when the release is over the pressed node or inside
-    /// it, activates it. A pressed span activates when released on
-    /// itself; elsewhere on its node only if the node is pressable.
+    /// it, activates it. A pressed span activates when released on its
+    /// own pressable; elsewhere on its node only if the node is
+    /// pressable.
     pub(crate) fn press_up(&mut self, x: f32, y: f32) {
         let Some(p) = self.press.take() else {
             return;
@@ -112,21 +141,19 @@ impl Ui {
         }
         let flags = self.host.interaction(p.node).press;
         let own = flags & press::PRESSABLE != 0;
-        if flags & press::DISABLED != 0 || !(own || self.span_pressable(p.node, p.span)) {
-            // Disabled or unmarked since it began.
+        let pressed = (p.span, p.revision);
+        // A new span table: the pressed span may be another Text's now.
+        let retabled = self.revision(p.node) != p.revision;
+        let span_press = !retabled && self.span_pressable(p.node, p.span);
+        if flags & press::DISABLED != 0 || !(own || span_press) {
+            // Disabled, unmarked or retabled since it began. The cancel
+            // carries the old revision, like the press it ends.
             let phase = press_phase::CANCEL;
-            self.emit_press(p.node, out_kind::PRESS, phase, 1, (x, y), p.span, p.mods);
+            self.emit_press(p.node, out_kind::PRESS, phase, 1, (x, y), pressed, p.mods);
             return;
         }
-        self.emit_press(
-            p.node,
-            out_kind::PRESS,
-            press_phase::OUT,
-            1,
-            (x, y),
-            p.span,
-            p.mods,
-        );
+        let phase = press_phase::OUT;
+        self.emit_press(p.node, out_kind::PRESS, phase, 1, (x, y), pressed, p.mods);
         let hit = self.hit_test(x, y);
         if !hit.is_some_and(|h| self.ancestors(h).any(|n| n == p.node)) {
             return;
@@ -136,22 +163,18 @@ impl Ui {
         } else {
             0
         };
-        // Released on another span: a pressable node activates as a
-        // whole, a pressable span not at all.
-        let span = match (at == p.span, own) {
-            (true, _) => at,
+        // Released on the pressed span or another of its pressable's
+        // (its run): it activates. Elsewhere, a pressable node activates
+        // as a whole, a pressable span not at all.
+        let run = self.press_run(p.node, p.span);
+        let same = !retabled && (at == p.span || (run != 0 && self.press_run(p.node, at) == run));
+        let span = match (same, own) {
+            (true, _) => p.span,
             (false, true) => 0,
             (false, false) => return,
         };
-        self.emit_press(
-            p.node,
-            out_kind::ACTIVATE,
-            activate_source::POINTER,
-            1,
-            (x, y),
-            span,
-            p.mods,
-        );
+        let (source, at) = (activate_source::POINTER, (span, p.revision));
+        self.emit_press(p.node, out_kind::ACTIVATE, source, 1, (x, y), at, p.mods);
     }
 
     /// Ends the press without a release (window focus lost, the node
@@ -162,15 +185,8 @@ impl Ui {
         };
         if self.press_live(&p) {
             let at = self.last_pointer.unwrap_or_else(|| self.center(p.node));
-            self.emit_press(
-                p.node,
-                out_kind::PRESS,
-                press_phase::CANCEL,
-                1,
-                at,
-                p.span,
-                p.mods,
-            );
+            let (phase, pressed) = (press_phase::CANCEL, (p.span, p.revision));
+            self.emit_press(p.node, out_kind::PRESS, phase, 1, at, pressed, p.mods);
         }
     }
 
@@ -182,18 +198,20 @@ impl Ui {
             return false;
         }
         let at = self.center(id);
-        self.emit_press(id, out_kind::ACTIVATE, source, 0, at, 0, mods);
+        self.emit_press(id, out_kind::ACTIVATE, source, 0, at, (0, 0), mods);
         true
     }
 
-    /// A key down on the focused node, after claims: bare Enter
-    /// activates a focused pressable (each repeat too, as browsers do),
-    /// and bare Space begins a key press that its key up activates.
+    /// A key down on the focused node, after claims: Enter activates a
+    /// focused pressable (each repeat too, as browsers do), and Space
+    /// begins a key press that its key up activates. Modifiers stop
+    /// neither, as in browsers (Cmd+Enter on a link opens a new tab):
+    /// the activation carries them, and a claim on the chord wins.
     pub(crate) fn press_key_down(&mut self, k: &KeyInput) {
         let Some(f) = self.focus else {
             return;
         };
-        if k.mods != Mods::default() || !self.enabled_pressable(f) {
+        if !self.enabled_pressable(f) {
             return;
         }
         match k.key {
@@ -206,13 +224,13 @@ impl Ui {
     }
 
     /// A key up: Space ends the key press it began and activates the
-    /// node, if it still has focus.
+    /// node, if it still has focus, with the modifiers held now.
     pub(crate) fn press_key_up(&mut self, k: &KeyInput) {
         if k.key == Key::Space
             && let Some(n) = self.key_press.take()
             && self.focus == Some(n)
         {
-            self.activate(n, activate_source::KEY, Mods::default());
+            self.activate(n, activate_source::KEY, k.mods);
         }
     }
 
@@ -227,7 +245,8 @@ impl Ui {
 
     /// Queues a `PRESS` or `ACTIVATE` for `id` when it listens: `bits`
     /// are the phase or source (key bits 4 and 5), `button` 1 for the
-    /// primary and 0 for none.
+    /// primary and 0 for none, and the span (plus one) comes with the
+    /// paragraph revision it indexes.
     #[allow(clippy::too_many_arguments)]
     fn emit_press(
         &mut self,
@@ -236,7 +255,7 @@ impl Ui {
         bits: u32,
         button: u32,
         (x, y): (f32, f32),
-        span: u32,
+        (span, revision): (u32, u32),
         mods: Mods,
     ) {
         let want = if kind == out_kind::PRESS {
@@ -258,7 +277,7 @@ impl Ui {
         e.b = local.y;
         e.key = mods.bits() as u32 | bits << 4 | button << 8 | span << 16;
         if span != 0 {
-            e.revision = self.host.paragraph(id).map_or(0, |p| p.revision);
+            e.revision = revision;
         }
         self.pending_events.push(e);
     }

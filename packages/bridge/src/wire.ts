@@ -159,6 +159,7 @@ const SPAN_UNDERLINE = 1 << 1
 const SPAN_LINE_THROUGH = 1 << 2
 const SPAN_INHERIT_COLOR = 1 << 3
 const SPAN_PRESSABLE = 1 << 4
+const SPAN_PRESS_JOINS = 1 << 5
 /** Span decoration bits (`TextSpanIn.decoration`). */
 export const DECORATION = { underline: 1, lineThrough: 2 } as const
 
@@ -642,6 +643,10 @@ export interface TextSpanIn {
   /** A nested Text with `onPress`: presses on the span go to its text
    * node, with the span's index. */
   pressable?: boolean
+  /** A pressable span of the same pressable Text as the span before it
+   * (`<Text onPress>See <Text weight={700}>logs</Text></Text>`): a
+   * press on one and a release on the other activate. */
+  pressJoins?: boolean
 }
 
 /** The layout keys `s` sets — mirror states.rs `layout_key`: one per
@@ -976,7 +981,7 @@ export class Encoder {
     const key = JSON.stringify(spans.map(sp => [
       sp.start, sp.fontSize, sp.color >>> 0, sp.weight ?? 400, sp.italic ? 1 : 0,
       sp.decoration ?? 0, sp.letterSpacing ?? 0, sp.lineHeight ?? 0, sp.fontFamily || null,
-      sp.inheritColor ? 1 : 0, sp.pressable ? 1 : 0,
+      sp.inheritColor ? 1 : 0, sp.pressable ? 1 : 0, sp.pressJoins ? 1 : 0,
     ]))
     let start = this.spanIx.get(key)
     if (start === undefined) {
@@ -994,7 +999,8 @@ export class Encoder {
           (d & DECORATION.underline ? SPAN_UNDERLINE : 0) |
           (d & DECORATION.lineThrough ? SPAN_LINE_THROUGH : 0) |
           (sp.inheritColor ? SPAN_INHERIT_COLOR : 0) |
-          (sp.pressable ? SPAN_PRESSABLE : 0),
+          (sp.pressable ? SPAN_PRESSABLE : 0) |
+          (sp.pressJoins ? SPAN_PRESS_JOINS : 0),
         )
         w.u8(0)
         w.u32(sp.fontFamily ? this.strRef(sp.fontFamily) : NIL)

@@ -13,7 +13,7 @@ use accesskit::{Action, Node, Role, Toggled, TreeUpdate};
 use crate::a11y::aid;
 use crate::geom::Size;
 use crate::host::NodeId;
-use crate::mutation::{NIL, NodeKind, Role as UiRole, Transaction, reported};
+use crate::mutation::{NIL, NodeKind, Role as UiRole, Transaction, press, reported};
 use crate::states::state_bit::{CHECKED, DISABLED, EXPANDED, SELECTED};
 use crate::ui::Ui;
 use crate::wire;
@@ -23,7 +23,8 @@ const VIEW: Size = Size {
     height: 200.0,
 };
 
-/// A root holding one scope per `(role, reported, bits)`: nodes 1, 2, …
+/// A root holding one pressable scope per `(role, reported, bits)`:
+/// nodes 1, 2, …
 fn ui_with(nodes: &[(UiRole, u8, u64)]) -> Ui {
     let mut ui = Ui::new(1.0);
     let mut t = Transaction::new(1);
@@ -33,6 +34,7 @@ fn ui_with(nodes: &[(UiRole, u8, u64)]) -> Ui {
         t.create(id, NodeKind::View)
             .place(0, id, NIL)
             .role_reporting(id, role, rep)
+            .interaction_press(id, 0, true, press::PRESSABLE)
             .states(id, bits);
     }
     ui.apply_txn(&t).unwrap();
@@ -156,6 +158,23 @@ fn plain_button_reports_no_states() {
         assert_eq!(n.is_selected(), None);
         assert_eq!(n.toggled(), None);
     }
+}
+
+/// Click is offered only where it does something, on an enabled
+/// pressable: not on a disabled one, nor on a `View
+/// accessibilityRole="checkbox"` that only listens for pointers.
+#[test]
+fn click_only_on_enabled_pressables() {
+    let mut ui = ui_with(&[(UiRole::Button, 0, 0), (UiRole::CheckBox, 0, 0)]);
+    apply(&mut ui, |t| {
+        t.interaction_press(1, 0, false, press::PRESSABLE | press::DISABLED);
+        t.interaction(2, crate::events::mask::POINTER_UP, true);
+    });
+    let tree = ui.a11y_tree(VIEW);
+    let (button, check) = (node(&tree, 1), node(&tree, 2));
+    assert!(!button.supports_action(Action::Click));
+    assert!(!check.supports_action(Action::Click));
+    assert_eq!(check.toggled(), Some(Toggled::False), "still a checkbox");
 }
 
 /// A ROLE op that changes only the reported states applies: a button

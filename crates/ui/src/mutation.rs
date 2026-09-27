@@ -173,6 +173,11 @@ pub struct TextSpan {
     /// A press on this span presses its text node (`press.rs`): a
     /// nested Text with `onPress`. A node-level pressable needs none.
     pub pressable: bool,
+    /// This pressable span belongs to the same pressable Text as the
+    /// span before it: `<Text onPress>See <Text bold>logs</Text></Text>`
+    /// is two spans, one link. A press pressed on one and released on
+    /// the other activates.
+    pub press_joins: bool,
     /// Added to each cluster's advance, logical points.
     pub letter_spacing: f32,
     /// Absolute line height, logical points; 0: the font's. Span zero's
@@ -194,6 +199,7 @@ impl Default for TextSpan {
             decoration: 0,
             inherit_color: false,
             pressable: false,
+            press_joins: false,
             letter_spacing: 0.0,
             line_height: 0.0,
             family: NIL,
@@ -734,6 +740,7 @@ impl<'a> Transaction<'a> {
                     | (s.italic as u32) << 16
                     | (s.inherit_color as u32) << 17
                     | (s.pressable as u32) << 18
+                    | (s.press_joins as u32) << 19
                     | (s.decoration as u32) << 24;
                 [
                     s.start,

@@ -2,7 +2,7 @@ import { test, expect } from "bun:test"
 import { createElement } from "react"
 import { createRoot, Pressable, Text, View, type PressableProps, type PressEvt, type PressOutEvt } from "../src/index.js"
 import type { Transport, UiEvent } from "../src/host.js"
-import { ACTIVATE_SOURCE, EVENT_KIND, EVENT_MASK, MODS, PRESS_FLAG, PRESS_PHASE } from "../src/wire.js"
+import { ACTIVATE_SOURCE, EVENT_KIND, EVENT_MASK, MODS, PRESS_FLAG, PRESS_PHASE, ROLE } from "../src/wire.js"
 import { readFrame } from "./crw2.js"
 
 class FakeTransport implements Transport {
@@ -144,13 +144,71 @@ test("a nested Text with onPress is a pressable span", async () => {
   expect(readFrame(f).spans.map(s => s.pressable)).toEqual([false, false, false])
 })
 
-test("a root Text with onPress is a node-level pressable, not focusable", async () => {
+test("a root Text with onPress is a node-level pressable link, not focusable", async () => {
   const t = new FakeTransport()
+  const root = createRoot(t)
   let n = 0
-  createRoot(t).renderSync(createElement(Text, { onPress: () => n++ }, "Open"))
+  root.renderSync(createElement(Text, { onPress: () => n++ }, "Open"))
   await tick()
   const [id] = created(t)
   expect(t.interaction(id!)).toEqual([EVENT_MASK.activate, flag(PRESS_FLAG.pressable)])
   t.event!(activate(id!, 2))
   expect(n).toBe(1)
+  const role = () => t.all().filter(o => o.tag === 0x50 && o.id === id).at(-1)!.f[0]
+  expect(role()).toBe(ROLE.link)
+  // A role given wins; without onPress it is text again.
+  root.renderSync(createElement(Text, { onPress: () => n++, accessibilityRole: "button" }, "Open"))
+  await tick()
+  expect(role()).toBe(ROLE.button)
+  root.renderSync(createElement(Text, null, "Open"))
+  await tick()
+  expect(role()).toBe(ROLE.text)
+})
+
+test("a link in several spans joins them; two links side by side stay two", async () => {
+  const t = new FakeTransport()
+  createRoot(t).renderSync(createElement(Text, null,
+    "Deploy failed: ",
+    createElement(Text, { onPress: () => {} }, "See ", createElement(Text, { fontWeight: 700 }, "logs")),
+    createElement(Text, { onPress: () => {} }, "retry"),
+  ))
+  await tick()
+  const { spans } = readFrame(t.frames[0]!)
+  expect(spans.map(s => [s.pressable, s.pressJoins])).toEqual([
+    [false, false], [true, false], [true, true], [true, false],
+  ])
+})
+
+test("onPressIn or onPressOut alone makes no Text pressable", async () => {
+  const t = new FakeTransport()
+  createRoot(t).renderSync(createElement(Text, { onPressIn: () => {} },
+    "Open ", createElement(Text, { onPressOut: () => {} }, "now")))
+  await tick()
+  const [id] = created(t)
+  expect(t.interaction(id!)).toEqual([EVENT_MASK.press, 0])
+  expect(readFrame(t.frames[0]!).spans.map(s => s.pressable)).toEqual([false, false])
+})
+
+test("a press's out or cancel reaches the Text that heard it, across span tables", async () => {
+  const t = new FakeTransport()
+  const root = createRoot(t)
+  const log: string[] = []
+  const link = (name: string) => ({
+    onPress: () => log.push(`${name} press`),
+    onPressIn: () => log.push(`${name} in`),
+    onPressOut: (e: PressOutEvt) => log.push(`${name} ${e.cancelled ? "cancel" : "out"}`),
+  })
+  const App = ({ before }: { before: boolean }) => createElement(Text, null,
+    before ? createElement(Text, link("new"), "new ") : null,
+    createElement(Text, link("logs"), "logs"))
+  root.renderSync(createElement(App, { before: false }))
+  await tick()
+  const [id] = created(t)
+  t.event!(press(id!, PRESS_PHASE.in, { span: 1, revision: 1 }))
+  // A Text inserted before the link: span 1 is "new" now, and native
+  // cancels the press with the table it began in.
+  root.renderSync(createElement(App, { before: true }))
+  await tick()
+  t.event!(press(id!, PRESS_PHASE.cancel, { span: 1, revision: 1 }))
+  expect(log).toEqual(["logs in", "logs cancel"])
 })

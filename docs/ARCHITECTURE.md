@@ -1259,10 +1259,11 @@ event loop, the window, the device, or the render target.
 One threadsafe function delivers `ack | events` frames. JS recycles
 ids at once and mirrors each slot's generation; events carry the
 generation and JS drops stale ones; the ack resolves `flush()`.
-Payload ops copy typed-array bytes once. Protocol version 6 (36-byte
+Payload ops copy typed-array bytes once. Protocol version 7 (36-byte
 event records and claims since 4; inherited color in drawings and
 inputs since 5; the `switch`, `radio` and `radiogroup` roles and the
-ROLE op's reported states since 6). The session hands JS its output in native
+ROLE op's reported states since 6; press flags, pressable spans, and
+`PRESS`/`ACTIVATE` since 7). The session hands JS its output in native
 order: acks sit between event frames where they happened, so the ack
 of a transaction never overtakes an event raised before it applied,
 and the facade retires a claim set's old handlers on that ack.

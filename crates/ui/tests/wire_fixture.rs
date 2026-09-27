@@ -25,9 +25,9 @@ fn js_fixture_decodes_and_executes() {
     let txn = wire::decode(&buf).expect("fixture must decode");
     assert_eq!(txn.seq, 99);
     // Identical styles intern to one table row; the span table holds
-    // the paragraph's two spans.
+    // the paragraph's three spans.
     assert_eq!(txn.styles.len(), 1);
-    assert_eq!(txn.spans.len(), 2);
+    assert_eq!(txn.spans.len(), 3);
     // Span fields: span zero's line height; span one's family (through
     // the string table), both decorations, letter spacing, weight, italic.
     let (s0, s1) = (txn.spans[0], txn.spans[1]);
@@ -118,7 +118,7 @@ fn js_fixture_decodes_and_executes() {
     assert_eq!(style.aspect_ratio, Some(1.25));
     assert_eq!(style.overflow.x, taffy::Overflow::Hidden);
 
-    // Text: created, styled with two spans, moved, removed.
+    // Text: created, styled with three spans, moved, removed.
     assert!(host.node(NodeId(1)).is_none());
     let para = txn
         .mutations
@@ -134,6 +134,9 @@ fn js_fixture_decodes_and_executes() {
     assert!(spans[1].italic);
     assert_eq!(spans[1].weight, 700);
     assert!(spans[1].pressable && !spans[0].pressable);
+    assert!(!spans[1].press_joins);
+    assert_eq!(spans[2].start as usize, "héllo — مرحبا ".len());
+    assert!(spans[2].pressable && spans[2].press_joins);
 
     // Surface: kind, params, payload bytes.
     let sd = &host.surfaces[&3];

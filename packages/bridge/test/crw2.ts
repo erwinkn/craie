@@ -29,7 +29,7 @@ export interface Frame {
   spans: {
     start: number; fontSize: number; color: number; weight: number; italic: boolean
     decoration: number; family: string | undefined; letterSpacing: number; lineHeight: number
-    inheritColor: boolean; pressable: boolean
+    inheritColor: boolean; pressable: boolean; pressJoins: boolean
   }[]
   ops: Op[]
 }
@@ -65,6 +65,7 @@ export function readFrame(buf: Uint8Array): Frame {
       decoration: (flags >> 1) & 3,
       family: familyRef === 0xffff_ffff ? undefined : strings[familyRef],
       letterSpacing, lineHeight, inheritColor: !!(flags & 8), pressable: !!(flags & 16),
+      pressJoins: !!(flags & 32),
     })
   }
   const ops: Op[] = []

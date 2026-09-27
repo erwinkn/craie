@@ -692,6 +692,23 @@ Reviewer minors and nitpicks not fixed yet.
 - Resolves in: keeping keyboard mode across a press that moves no focus,
   if the kit wants Chrome's behavior.
 
+### DF-45: a release on another node clicks nothing, where the web clicks the common ancestor
+
+- Source: work item 3 (presses and activation), review of #17.
+- Where: crates/ui/src/press.rs (`press_up`).
+- Claim: press Archive, drag onto the row body and release. The kit on
+  the web uses native `onClick`, and the browser fires `click` on the
+  nearest common ancestor of the pointerdown and pointerup targets: the
+  row opens. Here the release is outside Archive, so Archive gets `PRESS`
+  out and nothing activates. Pressing the row and releasing on Archive
+  activates the row in both.
+- Why deferred: the rule built is React Aria's (release on the pressed
+  node or inside it), which the review and the lead judged the better UX:
+  a press abandoned by dragging off stays abandoned.
+- Resolves in: nothing, unless the kit needs parity with its web build;
+  then `press_up` would activate the innermost pressable around both the
+  press and the release targets.
+
 ## Closed
 
 - DF-8 (2026-09-24, same day): `native_reflow_publishes_after_the_frame`
@@ -972,3 +989,15 @@ Reviewer minors and nitpicks not fixed yet.
 - PR16-07 (run-log review): windowed E19 looked 3× faster than headless with no reason: they end at different points (`present` returning, GPU done), and the display adds up to one refresh; time to photons is a next step.
 - PR16-08 (run-log review): "reads as 'checkbox, checked'" sounded heard: it's AccessKit's mapping, and no screen reader was tried; "collapsed" is announced on Windows and iOS only.
 - PR16-09 (run-log review, nits): stale pointers ("On exe1 unless marked Mac", the follow-up's Numbers), "and #14 to 6", AccessKit glossed, `report.py` exits on any JS stamp outside dispatch → apply, and the inherited-color paragraph folded into a footnote under the table.
+- PR17-01 (press review): a link in two spans (`<Text onPress>See <Text weight={700}>logs</Text></Text>`) activated only when released on the span pressed, since `press_up` compared span indices: span flag bit 5 (press joins) marks a pressable span of the same pressable Text as the one before, `press_run` compares runs, and `a_pressable_span_presses_its_text` presses "fai", releases "led" (and back), and checks two adjacent links stay two.
+- PR17-02 (press review): "the web's click rule" was React Aria's; the web clicks the nearest common ancestor of the press and the release. The rule stays; press.rs, the Built paragraph, the test and the PR body say whose it is, and DF-45 records the divergence.
+- PR17-03 (press review): Click was offered on every button, link and check role, and on disabled pressables, where it did nothing: `a11y.rs` offers it on enabled pressables only, whatever the role, with no synthesized pointer fallback; `click_only_on_enabled_pressables` covers a disabled Pressable and a pointer-only checkbox View.
+- PR17-04 (press review): modified Enter and Space didn't activate, where Chromium's do (Shift+Enter, the kit's Cmd+Enter to open a link in a new tab): they activate with the modifiers (Space: those at its key up), claims still win, and the Shift+Enter assertion flipped.
+- PR17-05 (press review): dropping `key_press = None` from `set_focus` failed no test: Space down on Archive, Tab to the composer, Shift+Tab back, Space up now activates nothing, and Archive's `_pressed` is clear while away. The mutation fails it.
+- PR17-06 (press review): a span press could outlive its span table, with out going to whichever Text owned the index by then: `Press` keeps the paragraph revision, a changed one cancels at the release (with the old revision), and the facade sends out or cancel to the Text that heard the press in (`pressTarget`); a bun case inserts a Text before the link mid-press.
+- PR17-07 (press review): DF-42 to 44 collide with the focus-traps branch's; #17 keeps them (and DF-45) as it likely lands first, and the traps branch renumbers.
+- PR17-08 (press review, nits): ARCHITECTURE.md §16 said protocol 6: it says 7, with press flags, pressable spans and `PRESS`/`ACTIVATE`.
+- PR17-09 (press review, nits): an enabled Pressable inside a disabled one activates (React Native's rule, not the web's): the `disabled` JSDoc and the Built paragraph say so.
+- PR17-10 (press review, nits): `onPressIn` and `onPressOut` are primary-button only, where the kit's web `onPointerDown`/`onPointerUp` hear any: their JSDoc says so.
+- PR17-11 (press review, nits): a root `<Text onPress>` read as static text: it defaults to role `link` (a given role wins); the bun case checks both and the return to `text`.
+- PR17-12 (press review, nits): a lone `onPressIn` or `onPressOut` made a Text pressable, swallowing its row's presses: only `onPress` does now, and the JSDoc says a Text's press-in and out need it; a bun case checks such a Text sends no press flags or pressable spans.

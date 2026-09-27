@@ -164,7 +164,9 @@ pub mod span_flag {
     pub const INHERIT_COLOR: u8 = 1 << 3;
     /// A press on the span presses its node (`TextSpan::pressable`).
     pub const PRESSABLE: u8 = 1 << 4;
-    pub const ALL: u8 = ITALIC | UNDERLINE | LINE_THROUGH | INHERIT_COLOR | PRESSABLE;
+    /// The span continues the pressable before it (`TextSpan::press_joins`).
+    pub const PRESS_JOINS: u8 = 1 << 5;
+    pub const ALL: u8 = ITALIC | UNDERLINE | LINE_THROUGH | INHERIT_COLOR | PRESSABLE | PRESS_JOINS;
 }
 
 /// Bytes per span row.
@@ -773,6 +775,9 @@ pub fn encode(txn: &Transaction<'_>) -> Vec<u8> {
         if sp.pressable {
             flags |= span_flag::PRESSABLE;
         }
+        if sp.press_joins {
+            flags |= span_flag::PRESS_JOINS;
+        }
         out.push(flags);
         out.push(0);
         let family = family_refs.get(sp.family as usize).copied().unwrap_or(NIL);
@@ -972,6 +977,7 @@ pub fn decode(buf: &[u8]) -> Result<Transaction<'_>, WireError> {
                 | ((flags & span_flag::LINE_THROUGH != 0) as u8) << 1,
             inherit_color: flags & span_flag::INHERIT_COLOR != 0,
             pressable: flags & span_flag::PRESSABLE != 0,
+            press_joins: flags & span_flag::PRESS_JOINS != 0,
             letter_spacing,
             line_height,
             family,

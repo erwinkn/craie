@@ -831,7 +831,7 @@ impl Ui {
                     .spans
                     .iter()
                     .zip(spans)
-                    .any(|(a, b)| a.pressable != b.pressable);
+                    .any(|(a, b)| a.pressable != b.pressable || a.press_joins != b.press_joins);
                 if text_changed {
                     p.text.clear();
                     p.text.push_str(text);

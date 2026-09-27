@@ -237,8 +237,9 @@ fn a_disabled_pressable_swallows_presses() {
     assert_eq!(presses(&ui.take_events()), [P::In(3), P::Cancel(3)]);
 }
 
-/// The web's click rule: a release activates only over the pressed node
-/// or inside it, wherever the pointer went meanwhile. Only the primary
+/// React Aria's rule: a release activates only over the pressed node
+/// or inside it, wherever the pointer went meanwhile (the web would
+/// click the common ancestor, LEDGER.md DF-45). Only the primary
 /// button presses.
 #[test]
 fn a_release_activates_only_over_the_pressed_node() {
@@ -283,7 +284,8 @@ fn a_release_activates_only_over_the_pressed_node() {
 }
 
 /// Enter on key down and Space on key up activate a focused pressable,
-/// bare keys only; Space holds the pressed state meanwhile.
+/// modified or not (the activation carries the modifiers: Space's at
+/// its key up); Space holds the pressed state meanwhile.
 #[test]
 fn enter_and_space_activate_the_focused_pressable() {
     let mut ui = app();
@@ -305,7 +307,9 @@ fn enter_and_space_activate_the_focused_pressable() {
         "as browsers"
     );
     ui.dispatch(&Event::KeyDown(named(Key::Enter, Mods::SHIFT)));
-    assert_eq!(presses(&ui.take_events()), [], "a modified Enter");
+    let e = ui.take_events();
+    assert_eq!(presses(&e), [P::Activate(3, KEY)], "a modified Enter");
+    assert_eq!(e[0].key & 0xf, Mods::SHIFT as u32);
 
     ui.dispatch(&Event::KeyDown(named(Key::Space, 0)));
     assert_eq!(presses(&ui.take_events()), []);
@@ -316,12 +320,32 @@ fn enter_and_space_activate_the_focused_pressable() {
     ui.dispatch(&Event::KeyUp(named(Key::Space, 0)));
     assert_eq!(presses(&ui.take_events()), [P::Activate(3, KEY)]);
     assert!(ui.state_bits(NodeId(3)) & PRESSED == 0);
+    // Meta pressed while Space is held: the key up's modifiers.
+    ui.dispatch(&Event::KeyDown(named(Key::Space, 0)));
+    ui.dispatch(&Event::KeyUp(named(Key::Space, Mods::META)));
+    let e = ui.take_events();
+    assert_eq!(presses(&e), [P::Activate(3, KEY)]);
+    assert_eq!(e[0].key & 0xf, Mods::META as u32);
 
     // Focus moving away while Space is held ends the key press.
     ui.dispatch(&Event::KeyDown(named(Key::Space, 0)));
     apply(&mut ui, |t| {
         t.command(1, Command::Focus);
     });
+    ui.dispatch(&Event::KeyUp(named(Key::Space, 0)));
+    assert_eq!(presses(&ui.take_events()), []);
+    // For good: Tab away and back while it is held, and the key up
+    // still activates nothing (as on the web), nor was the node left
+    // pressed while away.
+    apply(&mut ui, |t| {
+        t.command(3, Command::Focus);
+    });
+    ui.dispatch(&Event::KeyDown(named(Key::Space, 0)));
+    ui.dispatch(&Event::KeyDown(named(Key::Tab, 0)));
+    assert_eq!(ui.focused(), Some(NodeId(4)));
+    assert!(ui.state_bits(NodeId(3)) & PRESSED == 0);
+    ui.dispatch(&Event::KeyDown(named(Key::Tab, Mods::SHIFT)));
+    assert_eq!(ui.focused(), Some(NodeId(3)));
     ui.dispatch(&Event::KeyUp(named(Key::Space, 0)));
     assert_eq!(presses(&ui.take_events()), []);
 
@@ -391,7 +415,8 @@ fn an_accessibility_click_activates_with_no_hit_test() {
     );
     assert_eq!(ui.focused(), None, "focus stays");
 
-    // Every pressable offers the click, whatever its role.
+    // Every enabled pressable offers the click, whatever its role
+    // (a11y_tests: and nothing else).
     let tree = ui.a11y_tree(Size::new(400.0, 300.0));
     let row = crate::a11y::aid(NodeId(1));
     let node = tree.nodes.iter().find(|(id, _)| *id == row).unwrap();
@@ -518,24 +543,32 @@ fn focus_visible_follows_the_browsers() {
 
 /// A nested Text with `onPress` is a pressable span: a press on it
 /// presses its text node (with the span), a press elsewhere on the text
-/// reaches the pressable around it, and a release on another span
-/// activates nothing.
+/// reaches the pressable around it, a release on another span of the
+/// same pressable Text activates it (`<Text onPress>See <Text
+/// weight>logs</Text></Text>`), and a release anywhere else activates
+/// nothing.
 #[test]
 fn a_pressable_span_presses_its_text() {
     let mut ui = app();
+    // "Deploy " plain, "fai" and "led" one link, in two spans.
     let plain = TextSpan::default();
     let link = TextSpan {
         start: 7,
         pressable: true,
         ..TextSpan::default()
     };
+    let joined = TextSpan {
+        start: 10,
+        press_joins: true,
+        ..link
+    };
     apply(&mut ui, |t| {
-        t.paragraph(2, "Deploy failed", &[plain, link]);
+        t.paragraph(2, "Deploy failed", &[plain, link, joined]);
         t.interaction(2, mask::ACTIVATE | mask::PRESS, false);
     });
     ui.render(Size::new(400.0, 300.0));
     let layout = ui.text_layout(NodeId(2)).unwrap();
-    let (on_plain, on_link) = (layout.caret(1).x, layout.caret(9).x);
+    let (on_plain, on_link, on_joined) = (layout.caret(1).x, layout.caret(9).x, layout.caret(12).x);
     let line = layout.caret(1).top + layout.caret(1).height / 2.0;
     let e = click(&mut ui, on_link, line);
     assert_eq!(presses(&e), [P::In(2), P::Out(2), P::Activate(2, POINTER)]);
@@ -549,6 +582,42 @@ fn a_pressable_span_presses_its_text() {
     down(&mut ui, on_link, line);
     up(&mut ui, on_plain, line);
     assert_eq!(presses(&ui.take_events()), [P::In(2), P::Out(2)]);
+
+    // Pressed on "fai", released on "led": the one link, as pressed.
+    down(&mut ui, on_link, line);
+    up(&mut ui, on_joined, line);
+    let e = ui.take_events();
+    assert_eq!(presses(&e), [P::In(2), P::Out(2), P::Activate(2, POINTER)]);
+    assert_eq!(e.last().unwrap().key >> 16, 2);
+    down(&mut ui, on_joined, line);
+    up(&mut ui, on_link, line);
+    let e = ui.take_events();
+    assert_eq!(presses(&e), [P::In(2), P::Out(2), P::Activate(2, POINTER)]);
+    assert_eq!(e.last().unwrap().key >> 16, 3);
+
+    // Two links side by side stay two.
+    let second = TextSpan {
+        press_joins: false,
+        ..joined
+    };
+    apply(&mut ui, |t| {
+        t.paragraph(2, "Deploy failed", &[plain, link, second]);
+    });
+    down(&mut ui, on_link, line);
+    up(&mut ui, on_joined, line);
+    assert_eq!(presses(&ui.take_events()), [P::In(2), P::Out(2)]);
+
+    // A new span table mid-press cancels it: its span may be another
+    // Text's now. The cancel carries the revision it was pressed in.
+    down(&mut ui, on_link, line);
+    let pressed = ui.host.paragraph(NodeId(2)).unwrap().revision;
+    apply(&mut ui, |t| {
+        t.paragraph(2, "Deploy failed", &[plain, link, second]);
+    });
+    up(&mut ui, on_link, line);
+    let e = ui.take_events();
+    assert_eq!(presses(&e), [P::In(2), P::Cancel(2)]);
+    assert_eq!(e.last().unwrap().revision, pressed);
 }
 
 /// The press flags and the span flag round-trip; the flag bits no one
@@ -564,12 +633,18 @@ fn press_flags_round_trip() {
     );
     t.paragraph(
         0,
-        "ab",
+        "abc",
         &[
             TextSpan::default(),
             TextSpan {
                 start: 1,
                 pressable: true,
+                ..TextSpan::default()
+            },
+            TextSpan {
+                start: 2,
+                pressable: true,
+                press_joins: true,
                 ..TextSpan::default()
             },
         ],
@@ -580,7 +655,9 @@ fn press_flags_round_trip() {
     let mut ui = Ui::new(1.0);
     ui.apply(&buf).unwrap();
     assert_eq!(ui.host.interaction(NodeId(0)).press, press::ALL);
-    assert!(ui.host.paragraph(NodeId(0)).unwrap().spans[1].pressable);
+    let spans = &ui.host.paragraph(NodeId(0)).unwrap().spans;
+    assert!(spans[1].pressable && !spans[1].press_joins);
+    assert!(spans[2].pressable && spans[2].press_joins);
 
     let i = buf
         .windows(9)

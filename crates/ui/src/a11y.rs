@@ -164,19 +164,19 @@ impl Ui {
 
         let mut an = Node::new(ak_role(props.role));
         let bits = self.state_bits(id);
-        match props.role {
-            UiRole::Button | UiRole::Link => an.add_action(Action::Click),
-            // A check role is always checked or not: a clear bit (or no
-            // `checked` prop) reads unchecked.
-            UiRole::CheckBox | UiRole::Switch | UiRole::RadioButton => {
-                an.add_action(Action::Click);
-                an.set_toggled(Toggled::from(bits & state_bit::CHECKED != 0));
-            }
-            // Any pressable takes a click (a pressable row, a tab).
-            _ if props.press & crate::mutation::press::PRESSABLE != 0 => {
-                an.add_action(Action::Click)
-            }
-            _ => {}
+        // A check role is always checked or not: a clear bit (or no
+        // `checked` prop) reads unchecked.
+        if matches!(
+            props.role,
+            UiRole::CheckBox | UiRole::Switch | UiRole::RadioButton
+        ) {
+            an.set_toggled(Toggled::from(bits & state_bit::CHECKED != 0));
+        }
+        // Click only where it does something: on an enabled pressable,
+        // whatever its role (a row, a tab). A button-role View with no
+        // onPress offers none.
+        if self.enabled_pressable(id) {
+            an.add_action(Action::Click);
         }
         // Expanded and selected only where the prop was given: a plain
         // button is neither collapsed nor unselected. Selected only on a
