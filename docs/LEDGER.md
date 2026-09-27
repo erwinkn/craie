@@ -436,7 +436,7 @@ Reviewer minors and nitpicks not fixed yet.
 
 ### DF-29: kit values variants do not apply
 
-- Source: work item 5; the PR #7 review (PR7-12, PR7-16).
+- Source: work item 5; the PR #7 review (PR7-12).
 - Where: packages/bridge/src/host.ts (`variantValues`).
 - Claim: Marbre's variants also set `z`, `pointerEvents`,
   `visibility`, elevation and the focus ring, and percent translates;
@@ -444,18 +444,11 @@ Reviewer minors and nitpicks not fixed yet.
   `_hover={{ pointerEvents: "none" }}` or `style: { zIndex: 2 }` in a
   variant is logged once and left out, as is every other key a variant
   does not apply.
-- Also: `_hover` on an element that is no scope means the nearest
-  scope's hover in Craie, the element's own on Marbre web (`<Text
-  _hover>` in questions.tsx, Icon `_hover` in tool-run.tsx). Inside a
-  Pressable they agree; a bare `<Text _hover>` outside one logs "needs
-  a scope" and does nothing.
 - Why deferred: each needs its own native value in the table (z
   re-sorts the parent, pointer events and visibility change hit
   testing, the focus ring and elevation are paint sources), and none
-  is on a screen the kit ports first. An implicit scope per `_hover`
-  element would make every such node a scope.
-- Resolves in: when a ported component needs one; the Marbre port
-  flags the `_hover` difference.
+  is on a screen the kit ports first.
+- Resolves in: when a ported component needs one.
 ### DF-30: images are decoded per node, and fetched per mount
 
 - Source: images (work item 8) implementation (own finding).
@@ -806,13 +799,13 @@ Reviewer minors and nitpicks not fixed yet.
 - PR7-13 (states review): a disabled Pressable was half disabled: it is not focusable, reads as disabled to assistive technology, and native masks pressed and focus-visible under `disabled` as it did hover (tested natively and in bun).
 - PR7-14 (states review): toggling `group` remounted the children: the scope Provider is always rendered (bun test).
 - PR7-15 (states review): specificity compared every rank: it is depth, then the latest rank tested, then declaration order, as the spec says. `_selected._pressed` against `_hover._pressed`, both on, tie at pressed, so the later declared wins where the full compare picked selected (tested).
-- PR7-16 (states review, nit): `_hover` on a non-scope element differs from Marbre web: recorded in DF-29 and topic 5.
-- PR7-17 (states review, nit): inherited color follows the native tree and scopes React's, so Portal content under a colored Pressable draws its own color: documented in topic 5 and tested in bun.
+- PR7-16 (states review, nit): `_hover` on a non-scope element differs from Marbre web: recorded in DF-29 and topic 5. Wrong: Marbre web also reads the nearest scope; corrected in topic 5 by PR #11.
+- PR7-17 (states review, nit): inherited color follows the native tree and scopes React's, so Portal content under a colored Pressable draws its own color: documented in topic 5 and tested in bun. Reversed by PR #11: a Portal or Layer starts a new scope chain too.
 - PR7-18 (states review, nit): DF-28 says what cancels an animation on a tabled node, per key (tested).
 - PR7-19 (states review): the harness's one allocation per hover was its own event vector: events drain into a kept buffer (`Ui::drain_events`), and a "hover, no scopes" row gives the reference (0 allocations; 116 µs for 1,000 dependents against 4.2 µs for none).
 - PR7-20 (states review): the breakpoint delta was not restyle alone: a row that sends the 1,000 heights directly with no tables splits it (about 200 µs of layout the heights cause anyway, 130 µs of restyle).
 - PR7-21 (states review): ARCHITECTURE §13 said restyle recomputes every scope's input bits: it says the three ancestor chains, and when.
-- PR7-22 (states review): the untested items have tests: StrictMode and Suspense with scopes, a group toggle, a Text with no color above (white), `COLOR` and scopes through a Portal, table limits, `_touch` with hover masking, and a Text moved under another `COLOR`.
+- PR7-22 (states review): the untested items have tests: StrictMode and Suspense with scopes, a group toggle, a Text with no color above (white), `COLOR` and scopes through a Portal (reversed by PR #11: neither crosses), table limits, `_touch` with hover masking, and a Text moved under another `COLOR`.
 - PR8-01 (images review): the decoder did not bound memory (a 249 KB PNG took 1.25 GB): the probe and the decode reject over 64 megapixels (`MAX_PIXELS`) before any buffer, the codecs check 32,768 px a side, and `decode` reserves the decoded buffer, plus the RGBA copy for a format that needs one, against 512 MiB (`MAX_ALLOC`) before `from_decoder`. The rotation copy is gone: the decoder crops and shrinks in the stored orientation and turns the small result. A probe over the budget fails the image, so no huge intrinsic size is set. The false "512 MiB" comment is replaced. Tests: a 4 x 4 PNG claiming 20,000 x 20,000 fails in both, and the reserve fails one byte short for RGBA and gray.
 - PR8-02 (images review): a new `src` blanked the image and collapsed its layout until the decode landed: the old bitmap and natural size stay until the new image's first pixels or failure. An unsized image with a new aspect decodes twice as a result (DF-38).
 - PR8-03 (images review): a failed fetch left the previous `src`'s image on screen: the facade sends empty bytes, which clear it, and fires `onError`.
@@ -850,6 +843,13 @@ Reviewer minors and nitpicks not fixed yet.
 - PR10-03 (clippy review, nit): `value_field::ALL` was the literal `0xFF`, so a retired flag would still count as known: it is the OR of the flags (0xFF today).
 - PR10-04 (clippy review, nit): `lists.rs` sliced `reference[..n]`, whose length is `n` by construction: `reference.iter()`.
 - PR10-05 (clippy review, nit): `bleed` allowed `manual_checked_ops` for its `n > 0` check: `NonZeroU32::new(n)` guards the three divisions instead, lint-free.
+- PR11-01 (scopes review): the Layer cut was untested (undoing it kept every test green, since the Layer's Text read its inner Pressable either way): a bare `_expanded` directly in the Layer now logs "needs a scope" and sends no table.
+- PR11-02 (scopes review): the bridge suite still flaked under load, in `layers.test.ts` ("reopens on top" failed 2 of 7 runs at load 35-50), which ticked once after a state update: a shared `settle` (tick until an op shows, at most 100 ticks, then once more) replaces every such single tick there and the text-root test's own helper.
+- PR11-03 (scopes review): `disabled` was left out of `TextInput`'s types only, and a kit's props spread through still set DISABLED (an editable field read as disabled): `TextInput` drops it at runtime and logs it once (bun test).
+- PR11-04 (scopes review): the smoke's Portal case read `_row` across the Portal, now dead (it logged "unknown variant key"): its View is a scope with `selected` and reads its own.
+- PR11-05 (scopes review): a named group used across a layer logged only "unknown variant key": it says no group of that name is above, and that a Portal or Layer starts a new chain.
+- PR11-06 (scopes review): the docs said a missing scope is a dev-time error in Marbre: it is a development log, on the unmerged `ui/state-scopes` branch, and Marbre's spec still says layer content keeps its opener's scope (topic 5 says so; the planning thread flips D28).
+- PR11-07 (scopes review, nits): the TextInput JSDoc named `_focus` (not a key; `_focusVisible`); the text-root test's last step ticks once more past its predicate, so a later resend would show; the scope rules left DF-29 (kit values) for topic 5 only, and PR7-16, PR7-17 and PR7-22 say what #11 reversed; topic 5's facade bullet is reflowed; `ViewProps.group` no longer says toggling it remounts the children (PR7-14).
 - DF-14 (no inherited color in drawings) and DF-24 (input color and vector `currentColor`): fixed in PR #12 (inherited color). A `currentColor` with no `color` on a `G` above no longer throws: the facade flags the shape's fill or stroke (a `current` byte in each DRAWING shape, protocol 5) and native paints it with the node's inherited `COLOR` (its own, else the nearest ancestor's, else white, as a span) times the shape's opacity. A `Vector`'s `color` is its node's `COLOR`, so its variants and transitions apply; a `G`'s stays in the drawing. A change patches one paint slot per shape: a hover recoloring 1,000 icons is a paint patch each, with no layout, chunk rebuild, tessellation or allocation (EXPERIMENTS.md, state styles). A TextInput's color is its `COLOR` the same way: INPUT_CONFIG no longer carries one, its variants apply, and the facade's warning is gone. The kit's token colors (`'ink-3'`) still resolve before they reach a prop.
 - PR12-01 (color review): the runtime handshake still said protocol 4 (`craie_runtime_version`, `loadBindings`), so a stale `craie-node.node` passed the load check and failed at its first transaction: each side now answers with its own wire `VERSION`, and a bun test holds the cross-language fixture's header to the JS `VERSION` (Rust's `wire_fixture` decodes it only at the Rust one), so the two can't drift apart unnoticed.
 - PR12-02 (color review): no test had more than one `currentColor` item, so a patch that stopped after the first slot survived: `current_color_resolves_nearest` now has a stroke, a solid, and a shape whose fill and stroke both inherit with different tints, and the harness drawing inherits on its square's fill (non-white tint) and its ring's stroke. With that mutant, the unit test and the incremental-vs-rebuild oracle fail.

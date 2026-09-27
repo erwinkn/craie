@@ -58,9 +58,13 @@ function Row({ selected, unread }: { selected: boolean; unread: boolean }) {
       _row: { _hover: { style: { opacity: 1 } } },
       _touch: { style: { opacity: 1 } },
     }),
+    // A Portal starts a new scope chain: its content reads the scopes
+    // inside it.
     createElement(Portal, {}, createElement(View, {
+      group: true,
+      selected,
       style: { position: "absolute", width: 4, height: 4, opacity: 0 },
-      _row: { _selected: { style: { opacity: 1 } } },
+      _selected: { style: { opacity: 1 } },
     })),
   )
 }

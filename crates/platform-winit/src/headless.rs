@@ -295,8 +295,10 @@ mod tests {
         let thread =
             std::thread::spawn(move || run_counted(host, Size::new(100.0, 100.0), 1.0, &counter));
         let submit = |t: &Transaction<'_>| session.submit(craie_ui::wire::encode(t)).unwrap();
+        // A liveness bound, not a budget: llvmpipe's first frame took
+        // over 5 s on exe1 at load 55.
         let wait = |what: &str, done: &dyn Fn() -> bool| {
-            let deadline = Instant::now() + Duration::from_secs(5);
+            let deadline = Instant::now() + Duration::from_secs(30);
             while !done() {
                 assert!(Instant::now() < deadline, "timed out: {what}");
                 std::thread::sleep(Duration::from_millis(5));
