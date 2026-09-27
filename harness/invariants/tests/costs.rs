@@ -316,6 +316,7 @@ fn typing_counts_shapes() {
             text: Some(ch.into()),
             char: Some(ch.into()),
             mods: Mods::default(),
+            ..KeyInput::default()
         }));
         ui.render(VIEW);
         let c = ui.counters().since(&before);
@@ -330,6 +331,7 @@ fn typing_counts_shapes() {
             text: None,
             char: None,
             mods: Mods::default(),
+            ..KeyInput::default()
         })
     };
     let preedit = |cursor: usize| Event::ImePreedit {

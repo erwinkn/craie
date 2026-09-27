@@ -30,11 +30,12 @@ use taffy::{
 use craie_core::geom::Affine;
 
 use crate::mutation::{
-    Anchor, Command, ItemDesc, ItemTemplate, Mutation, NIL, NodeKind, Role, TextSpan, Transaction,
+    Anchor, Claim, Command, ItemDesc, ItemTemplate, Mutation, NIL, NodeKind, Role, SubmitKey,
+    TextSpan, Transaction,
 };
 
 pub const MAGIC: u32 = 0x3257_5243; // "CRW2"
-pub const VERSION: u16 = 3;
+pub const VERSION: u16 = 4;
 
 pub mod op {
     // structure
@@ -56,6 +57,9 @@ pub mod op {
     pub const LABEL: u8 = 0x51;
     // interaction
     pub const INTERACTION: u8 = 0x60;
+    /// id u32 (NIL: the window list) | version u32 | count u16 |
+    /// count × (kind u8, flags u8, mods u8, 0 u8, key u32)
+    pub const CLAIMS: u8 = 0x61;
     // payload
     pub const SURFACE: u8 = 0x70;
     pub const PAYLOAD: u8 = 0x71;
@@ -95,6 +99,17 @@ pub mod cmd {
     pub const SET_TEXT: u8 = 2;
     /// Followed by two f32s: set the scroll offset (logical).
     pub const SCROLL_TO: u8 = 3;
+    /// Followed by a string ref: replace the focused input's selection.
+    pub const INSERT_TEXT: u8 = 4;
+    /// Followed by a string ref: put it on the clipboard.
+    pub const WRITE_CLIPBOARD: u8 = 5;
+}
+
+/// INPUT_CONFIG flag bits.
+pub mod input_flag {
+    pub const MULTILINE: u8 = 1 << 0;
+    /// Bits 1 and 2: the submit key (`SubmitKey` as u8).
+    pub const SUBMIT_SHIFT: u8 = 1;
 }
 
 /// Interaction flag bits.
@@ -438,6 +453,7 @@ pub fn encode(txn: &Transaction<'_>) -> Vec<u8> {
                 color,
                 placeholder,
                 multiline,
+                submit,
             } => {
                 let s = strings.get(placeholder);
                 ops.push(op::INPUT_CONFIG);
@@ -445,7 +461,7 @@ pub fn encode(txn: &Transaction<'_>) -> Vec<u8> {
                 f32le(&mut ops, *font_size);
                 u32le(&mut ops, *color);
                 u32le(&mut ops, s);
-                ops.push(*multiline as u8);
+                ops.push(*multiline as u8 | (*submit as u8) << input_flag::SUBMIT_SHIFT);
             }
             Mutation::Role { id, role } => {
                 ops.push(op::ROLE);
@@ -479,6 +495,20 @@ pub fn encode(txn: &Transaction<'_>) -> Vec<u8> {
                     },
                 );
             }
+            Mutation::Claims {
+                id,
+                version,
+                claims,
+            } => {
+                ops.push(op::CLAIMS);
+                u32le(&mut ops, *id);
+                u32le(&mut ops, *version);
+                ops.extend_from_slice(&(claims.len() as u16).to_le_bytes());
+                for c in claims.iter() {
+                    ops.extend_from_slice(&[c.kind, c.flags, c.mods, 0]);
+                    u32le(&mut ops, c.key);
+                }
+            }
             Mutation::Surface { id, kind, params } => {
                 ops.push(op::SURFACE);
                 u32le(&mut ops, *id);
@@ -508,6 +538,16 @@ pub fn encode(txn: &Transaction<'_>) -> Vec<u8> {
                         ops.push(cmd::SCROLL_TO);
                         f32le(&mut ops, *x);
                         f32le(&mut ops, *y);
+                    }
+                    Command::InsertText(t) => {
+                        let s = strings.get(t);
+                        ops.push(cmd::INSERT_TEXT);
+                        u32le(&mut ops, s);
+                    }
+                    Command::WriteClipboard(t) => {
+                        let s = strings.get(t);
+                        ops.push(cmd::WRITE_CLIPBOARD);
+                        u32le(&mut ops, s);
                     }
                 }
             }
@@ -904,13 +944,21 @@ pub fn decode(buf: &[u8]) -> Result<Transaction<'_>, WireError> {
                     spans: start..end,
                 }
             }
-            op::INPUT_CONFIG => Mutation::InputConfig {
-                id: r.u32()?,
-                font_size: r.f32()?,
-                color: r.u32()?,
-                placeholder: string(r.u32()?)?.into(),
-                multiline: r.u8()? != 0,
-            },
+            op::INPUT_CONFIG => {
+                let (id, font_size, color) = (r.u32()?, r.f32()?, r.u32()?);
+                let placeholder = string(r.u32()?)?.into();
+                let flags = r.u8()?;
+                let submit = SubmitKey::from_u8(flags >> input_flag::SUBMIT_SHIFT)
+                    .ok_or(WireError::BadRef("input flags"))?;
+                Mutation::InputConfig {
+                    id,
+                    font_size,
+                    color,
+                    placeholder,
+                    multiline: flags & input_flag::MULTILINE != 0,
+                    submit,
+                }
+            }
             op::ROLE => {
                 let id = r.u32()?;
                 let role = Role::from_u8(r.u8()?).ok_or(WireError::BadRef("role"))?;
@@ -930,6 +978,29 @@ pub fn decode(buf: &[u8]) -> Result<Transaction<'_>, WireError> {
                     listeners,
                     focusable: flags & interaction_flag::FOCUSABLE != 0,
                     selectable: flags & interaction_flag::SELECTABLE != 0,
+                }
+            }
+            op::CLAIMS => {
+                let (id, version) = (r.u32()?, r.u32()?);
+                let n = r.u16()? as usize;
+                let mut claims = Vec::with_capacity(n.min(r.remaining() / 8));
+                for _ in 0..n {
+                    let [kind, flags, mods, _] = [r.u8()?, r.u8()?, r.u8()?, r.u8()?];
+                    let c = Claim {
+                        kind,
+                        flags,
+                        mods,
+                        key: r.u32()?,
+                    };
+                    if !c.valid() {
+                        return Err(WireError::BadRef("claim"));
+                    }
+                    claims.push(c);
+                }
+                Mutation::Claims {
+                    id,
+                    version,
+                    claims: claims.into(),
                 }
             }
             op::SURFACE => Mutation::Surface {
@@ -952,6 +1023,8 @@ pub fn decode(buf: &[u8]) -> Result<Transaction<'_>, WireError> {
                     cmd::BLUR => Command::Blur,
                     cmd::SET_TEXT => Command::SetText(string(r.u32()?)?.into()),
                     cmd::SCROLL_TO => Command::ScrollTo(r.f32()?, r.f32()?),
+                    cmd::INSERT_TEXT => Command::InsertText(string(r.u32()?)?.into()),
+                    cmd::WRITE_CLIPBOARD => Command::WriteClipboard(string(r.u32()?)?.into()),
                     other => return Err(WireError::BadOp(other)),
                 };
                 Mutation::Command { id, cmd }

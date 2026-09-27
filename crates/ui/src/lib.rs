@@ -12,6 +12,9 @@ pub mod animation;
 #[cfg(test)]
 mod animation_tests;
 pub mod bridge;
+pub mod claims;
+#[cfg(test)]
+mod claims_tests;
 pub mod clipboard;
 mod dispatch;
 pub mod events;

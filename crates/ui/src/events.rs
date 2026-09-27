@@ -6,7 +6,7 @@
 //! frames (`crate::bridge`).
 
 /// Keyboard modifier state at event time.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Mods {
     pub shift: bool,
     pub ctrl: bool,
@@ -15,9 +15,45 @@ pub struct Mods {
     pub meta: bool,
 }
 
-/// Named (non-text) keys Craie recognizes. Code values are the wire u32.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+impl Mods {
+    pub const SHIFT: u8 = 1 << 0;
+    pub const CTRL: u8 = 1 << 1;
+    pub const ALT: u8 = 1 << 2;
+    pub const META: u8 = 1 << 3;
+    /// The chord grammar's `mod`: Cmd on Apple platforms, Ctrl elsewhere.
+    pub const COMMAND: u8 = if cfg!(target_os = "macos") {
+        Mods::META
+    } else {
+        Mods::CTRL
+    };
+
+    /// The four modifiers as bits (`SHIFT`, `CTRL`, `ALT`, `META`), as
+    /// pointer and key records carry them.
+    pub fn bits(self) -> u8 {
+        self.shift as u8 | (self.ctrl as u8) << 1 | (self.alt as u8) << 2 | (self.meta as u8) << 3
+    }
+
+    pub fn from_bits(bits: u8) -> Mods {
+        Mods {
+            shift: bits & Mods::SHIFT != 0,
+            ctrl: bits & Mods::CTRL != 0,
+            alt: bits & Mods::ALT != 0,
+            meta: bits & Mods::META != 0,
+        }
+    }
+
+    /// The platform's command modifier (`mod`) is down and the other of
+    /// Cmd and Ctrl is up: the editing commands' chords (`mod+c`).
+    pub fn command(self) -> bool {
+        self.bits() & (Mods::CTRL | Mods::META) == Mods::COMMAND
+    }
+}
+
+/// Named (non-text) keys Craie recognizes. Code values are the wire
+/// byte (`code`); the bridge's chord grammar names them.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Key {
+    #[default]
     Unknown,
     Backspace,
     Tab,
@@ -32,6 +68,11 @@ pub enum Key {
     PageUp,
     PageDown,
     Delete,
+    Space,
+    Insert,
+    ContextMenu,
+    /// F1 to F24.
+    F(u8),
 }
 
 impl Key {
@@ -52,21 +93,90 @@ impl Key {
             Key::PageUp => 11,
             Key::PageDown => 12,
             Key::Delete => 13,
+            Key::Space => 14,
+            Key::Insert => 15,
+            Key::ContextMenu => 16,
+            Key::F(n) => 31 + n.clamp(1, 24) as u32,
         }
+    }
+
+    /// The key of a wire code; `None` for codes no key has.
+    pub fn from_code(code: u32) -> Option<Key> {
+        Some(match code {
+            0 => Key::Unknown,
+            1 => Key::Backspace,
+            2 => Key::Tab,
+            3 => Key::Enter,
+            4 => Key::Escape,
+            5 => Key::Left,
+            6 => Key::Up,
+            7 => Key::Right,
+            8 => Key::Down,
+            9 => Key::Home,
+            10 => Key::End,
+            11 => Key::PageUp,
+            12 => Key::PageDown,
+            13 => Key::Delete,
+            14 => Key::Space,
+            15 => Key::Insert,
+            16 => Key::ContextMenu,
+            32..=55 => Key::F((code - 31) as u8),
+            _ => return None,
+        })
     }
 }
 
 /// A normalized key press/release.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct KeyInput {
     pub key: Key,
-    /// Printable text for this press (layout + shift applied); `None`
-    /// for pure named keys and when a command modifier is held.
+    /// Printable text for this press (layout, Shift and Option applied);
+    /// `None` for pure named keys and when a command modifier is held.
     pub text: Option<String>,
-    /// The raw character when `key` is `Key::Unknown` — e.g. "a" — so JS
-    /// shortcuts can key on it.
+    /// The character the key gives on the current layout, Shift and
+    /// Alt applied but not Ctrl or Cmd, as the web's `event.key` ("O"
+    /// for Shift+O, "?" for Shift+/, "с" on a Cyrillic layout), when it
+    /// is a character key: what chords match, lower-cased.
     pub char: Option<String>,
+    /// Where the key is: the character it gives on a US layout, for
+    /// letters, digits and punctuation ('c' for the C position on any
+    /// layout). Chords with Alt and a letter or digit, and chords typed
+    /// on a non-Latin layout, match it instead of `char`.
+    pub code: Option<char>,
     pub mods: Mods,
+    /// The platform's auto-repeat of a held key.
+    pub repeat: bool,
+}
+
+impl KeyInput {
+    /// The character a chord compares with (lower-cased): the physical
+    /// key's for Alt with a letter or digit (macOS turns Option+I into
+    /// "ˆ") and for keys whose layout gives a non-Latin letter (so
+    /// `mod+c` copies on a Cyrillic layout), else `char`.
+    pub fn chord_char(&self) -> Option<char> {
+        let mut chars = self.char.as_deref().unwrap_or("").chars();
+        let base = match (chars.next(), chars.next()) {
+            (Some(c), None) => c.to_lowercase().next(),
+            _ => None,
+        };
+        match (self.code, base) {
+            (Some(p), _) if self.mods.alt && p.is_ascii_alphanumeric() => Some(p),
+            (Some(p), Some(b)) if b.is_alphabetic() && !latin(b) => Some(p),
+            _ => base,
+        }
+    }
+
+    /// Whether this press is `mods` plus the character `c`, by the chord
+    /// rule: the editing commands' test (`is(Mods::COMMAND, 'c')`).
+    pub fn is(&self, mods: u8, c: char) -> bool {
+        self.key == Key::Unknown && self.mods.bits() == mods && self.chord_char() == Some(c)
+    }
+}
+
+/// Latin script: ASCII, Latin-1, Latin Extended-A and -B, and Latin
+/// Extended Additional.
+fn latin(c: char) -> bool {
+    c <= '\u{24F}' || ('\u{1E00}'..='\u{1EFF}').contains(&c)
 }
 
 /// Pointer button identity.
@@ -115,6 +225,12 @@ pub enum Event {
     ImeDone,
     /// Window focus changed.
     Focus(bool),
+    /// Files dropped on the window at (x, y): their paths.
+    Drop {
+        x: f32,
+        y: f32,
+        paths: Vec<String>,
+    },
 }
 
 // ------------------------------------------------------------- out events
@@ -127,13 +243,15 @@ pub mod out_kind {
     pub const POINTER_ENTER: u8 = 4;
     pub const POINTER_LEAVE: u8 = 5;
     pub const WHEEL: u8 = 6;
+    /// A key nothing claimed (`key_bits`); `text` = its `char`.
     pub const KEY_DOWN: u8 = 7;
     pub const KEY_UP: u8 = 8;
     pub const FOCUS: u8 = 9;
     pub const BLUR: u8 = 10;
     /// Text input buffer changed; `text` carries the committed value.
     pub const CHANGE: u8 = 11;
-    /// Enter pressed in a single-line input; `text` carries the value.
+    /// The input's submit key (`input::SubmitKey`) was pressed; `text`
+    /// carries the value.
     pub const SUBMIT: u8 = 12;
     /// A scrollable node's offset changed natively; x/y = offset.
     pub const SCROLL: u8 = 13;
@@ -150,6 +268,25 @@ pub mod out_kind {
     /// (ms), b = mean layout and scene time (ms), key = live nodes,
     /// revision = running tweens.
     pub const FRAME_STATS: u8 = 16;
+    /// A claimed discrete event (`claims.rs`), always sent: node = the
+    /// claiming node (NIL: the window list), key = claim kind | index
+    /// << 8, revision = the claim set's version. Paste: `text` = the
+    /// clipboard's plain text; copy and cut: the selected text; drop:
+    /// the paths, one per line, and x/y; context menu: x/y.
+    pub const CLAIM: u8 = 17;
+}
+
+/// A key record's `key` field: the modifiers in bits 0 to 3 (as
+/// pointer records), repeat in bit 4, composing in bit 5, the named key
+/// (`Key::code`) in bits 8 to 15 and the physical key's US character
+/// (`KeyInput::code`, ASCII; 0: none) in bits 16 to 23.
+pub fn key_bits(k: &KeyInput, composing: bool) -> u32 {
+    let code = k.code.filter(char::is_ascii).map_or(0, |c| c as u32);
+    k.mods.bits() as u32
+        | (k.repeat as u32) << 4
+        | (composing as u32) << 5
+        | k.key.code() << 8
+        | code << 16
 }
 
 /// One event bound for JS: which node, what, pointer position (logical),

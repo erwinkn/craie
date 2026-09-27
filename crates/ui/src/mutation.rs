@@ -23,6 +23,9 @@ use std::ops::Range;
 use craie_core::geom::Affine;
 use taffy::Style;
 
+pub use crate::claims::Claim;
+pub use crate::input::SubmitKey;
+
 /// `u32::MAX`: no node / append / root / default style.
 pub const NIL: u32 = u32::MAX;
 
@@ -258,6 +261,12 @@ pub enum Command<'a> {
     SetText(Cow<'a, str>),
     /// Set a scroll container's offset (logical points).
     ScrollTo(f32, f32),
+    /// Replace the selection of the focused input, when it is this node
+    /// or inside it, as if typed: an undo step and a change event. A
+    /// paste claim's answer.
+    InsertText(Cow<'a, str>),
+    /// Put text on the clipboard: a copy or cut claim's answer.
+    WriteClipboard(Cow<'a, str>),
 }
 
 /// Strings and payload bytes borrow from a decoded buffer or are owned
@@ -313,6 +322,7 @@ pub enum Mutation<'a> {
         color: u32,
         placeholder: Cow<'a, str>,
         multiline: bool,
+        submit: SubmitKey,
     },
     // semantics
     Role {
@@ -331,6 +341,13 @@ pub enum Mutation<'a> {
         focusable: bool,
         /// Its text descendants form one selection domain.
         selectable: bool,
+    },
+    /// Replaces the node's claims (`claims.rs`; empty clears). `id` NIL
+    /// is the window list.
+    Claims {
+        id: u32,
+        version: u32,
+        claims: Cow<'a, [Claim]>,
     },
     // payload
     Surface {
@@ -404,6 +421,7 @@ impl Mutation<'_> {
             | Mutation::Role { id, .. }
             | Mutation::Label { id, .. }
             | Mutation::Interaction { id, .. }
+            | Mutation::Claims { id, .. }
             | Mutation::Surface { id, .. }
             | Mutation::Payload { id, .. }
             | Mutation::Command { id, .. }
@@ -634,6 +652,25 @@ impl<'a> Transaction<'a> {
         placeholder: impl Into<Cow<'a, str>>,
         multiline: bool,
     ) -> &mut Self {
+        // Enter submits a single line and breaks a multiline one.
+        let submit = if multiline {
+            SubmitKey::None
+        } else {
+            SubmitKey::Enter
+        };
+        self.input_config_submit(id, font_size, color, placeholder, multiline, submit)
+    }
+
+    /// Input config with its submit key.
+    pub fn input_config_submit(
+        &mut self,
+        id: u32,
+        font_size: f32,
+        color: u32,
+        placeholder: impl Into<Cow<'a, str>>,
+        multiline: bool,
+        submit: SubmitKey,
+    ) -> &mut Self {
         let placeholder = placeholder.into();
         self.push(Mutation::InputConfig {
             id,
@@ -641,6 +678,7 @@ impl<'a> Transaction<'a> {
             color,
             placeholder,
             multiline,
+            submit,
         })
     }
 
@@ -673,6 +711,15 @@ impl<'a> Transaction<'a> {
             listeners,
             focusable,
             selectable,
+        })
+    }
+
+    /// The node's claims (NIL: the window list), known to JS as `version`.
+    pub fn claims(&mut self, id: u32, version: u32, claims: &[Claim]) -> &mut Self {
+        self.push(Mutation::Claims {
+            id,
+            version,
+            claims: claims.to_vec().into(),
         })
     }
 

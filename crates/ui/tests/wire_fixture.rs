@@ -3,7 +3,10 @@
 //! decode and execute cleanly here.
 
 use craie_core::Affine;
+use craie_ui::claims::{Claim, chord_flag, claim_kind};
+use craie_ui::events::{Key, Mods};
 use craie_ui::host::NodeId;
+use craie_ui::input::SubmitKey;
 use craie_ui::mutation::{Mutation, NodeKind, Role};
 use craie_ui::surface;
 use craie_ui::ui::Ui;
@@ -55,7 +58,27 @@ fn js_fixture_decodes_and_executes() {
     assert_eq!(i.listeners, 0x1ff);
     assert!(i.focusable);
     assert_eq!(i.role, Role::MultilineTextInput);
-    assert_eq!(ui.inputs.text(2), "seed");
+    // `setText` leaves the caret at the start, so the insert lands first.
+    assert_eq!(ui.inputs.text(2), "!seed");
+    assert_eq!(ui.inputs.get(2).unwrap().submit, SubmitKey::ModEnter);
+
+    // Claim sets, the input's and the window list's.
+    let set = &ui.host.claims[&2];
+    assert_eq!(set.version, 7);
+    assert_eq!(
+        set.claims,
+        [
+            Claim::char(Mods::CTRL | Mods::SHIFT, 'k'),
+            Claim::named(0, Key::Escape).with(chord_flag::NO_REPEAT),
+            Claim::of(claim_kind::PASTE),
+        ]
+    );
+    let window = &ui.host.claims[&craie_ui::mutation::NIL];
+    assert_eq!(window.version, 3);
+    assert_eq!(
+        window.claims,
+        [Claim::char(Mods::SHIFT, '?').with(chord_flag::IN_INPUT)]
+    );
 
     // The root owns its layout row.
     let style = host.style(NodeId(0)).to_taffy();
@@ -172,4 +195,7 @@ fn js_fixture_decodes_and_executes() {
     assert_eq!(asset.view_box, [0.0, 0.0, 10.0, 10.0]);
     assert_eq!(asset.items.len(), 1);
     assert_eq!(asset.paints[0], craie_vector::Paint::Solid(0x0080_ffff));
+
+    // WriteClipboard, addressed to no node.
+    assert_eq!(ui.inputs.clipboard.get().as_deref(), Some("copied"));
 }

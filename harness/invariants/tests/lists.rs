@@ -651,6 +651,7 @@ fn focused_row_stays_rendered() {
             text: None,
             char: None,
             mods: Default::default(),
+            ..craie_ui::events::KeyInput::default()
         },
     ));
     assert_eq!(ui.focused(), Some(NodeId(id)));
@@ -1104,6 +1105,7 @@ fn focus_survives_splices_above() {
             text: None,
             char: None,
             mods: Default::default(),
+            ..craie_ui::events::KeyInput::default()
         },
     ));
     assert_eq!(ui.focused(), Some(NodeId(id)));

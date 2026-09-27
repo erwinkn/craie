@@ -116,6 +116,40 @@ Changes: §2 (wire), §13, §16 (event records, protocol version 4).
   collections set the tail (p99 35 to 51 ms, max 150 ms, with a 150 MB
   churning heap).
 
+**Built (work item 1).** As targeted, with these choices:
+
+- Claim sets travel in their own op (`CLAIMS`, 0x61: version, then 8
+  bytes per claim), not in the interaction op. They change with state
+  (`when`) far more often than listeners do, and the interaction row
+  stays fixed-size. An empty set removes the node's claims.
+- The window list (id NIL) holds key claims only. Copy and cut with
+  nothing focused are claimed on the text selection's domain and its
+  ancestors.
+- A paste claim's answer is `InsertText`: it replaces the selection of
+  the focused input inside the claimer, as typed (an undo step and a
+  change event). No range or revision yet: those come with rebased
+  writes (topic 11), and so does the rich format. Copy and cut answer
+  with `WriteClipboard` (NIL may send it); cut then inserts "".
+- The session keeps native order between acks and event frames, so JS
+  never sees a transaction's ack before an event raised before that
+  transaction applied. The facade drops an old version's handlers when
+  the ack of the transaction that replaced it arrives, which is then
+  exact. Frames carrying claims are never dropped from the bounded
+  queue.
+- The facade (`@craie/bridge`): `keymap`, `onPaste`, `onCopy`, `onCut`
+  (return a string to answer; return nothing to do nothing), `onDrop`,
+  `onContextMenu`, `useHotkeys`, `useClipboard`. A version is new only
+  when the claims change (chords, kinds, flags), not when a handler
+  closure does; the handlers of the current version refresh every
+  commit.
+- Every `useHotkeys` in the tree shares the one window list, in mount
+  order, and the first match wins. Marbre gives each hook its own
+  window listener, so two hooks binding the same chord both fire
+  there. An unknown chord is logged and left out rather than thrown,
+  so a typo does not take the app down.
+- Claims on a nested Text (no native node of its own) are not
+  supported yet (`LEDGER.md`, DF-10).
+
 ## 2. Keys
 
 Changes: §2, §13, §16.
@@ -163,6 +197,25 @@ the flag is dropped. Native acts first:
 - Escape no longer blurs an input natively.
 - Chord identity is the kit's rule plus the non-Latin fallback.
 - Repeat on by default, off per claim (closes K2).
+
+**Built (work item 1).** As targeted, with these choices:
+
+- A key record's `key` packs the modifiers (bits 0 to 3), repeat (4),
+  composing (5), the named key (8 to 15) and the physical key as its
+  US-layout character (16 to 23, 0 off the US layout). Its text is the
+  logical character with Shift and Alt applied, as the web's
+  `event.key` ("?" for Shift+/), so `shift+?` is the chord for "?".
+- Named keys add Space, Insert, ContextMenu and F1 to F24. Claims beat
+  every default, Tab traversal included; Shift+Tab is its own chord.
+- The submit key rides in the input config's flag byte. The facade
+  mirrors Marbre: `onSubmit` with no `submitKey` means `enter`, and no
+  `onSubmit` means `none`. The Rust builder's default is `enter` for a
+  single line and `none` for multiline. A single-line input submits on
+  Shift+Enter too, as a form field does.
+- Native editing commands match exact `mod` chords by the same rule:
+  Ctrl+Alt+C no longer copies, and `mod+y` redoes (it undid before).
+- A key with nothing focused goes to no one: the whole-tree walk for
+  key listeners is gone, and window shortcuts are window-list claims.
 
 ## 3. Focus, press and activation
 
@@ -865,6 +918,7 @@ Changes: §15, §16.
 | §12 Decisions | "First values at mount do not tween" | Kept for transitions; `enter` covers mount; scroll timelines join the clock |
 | §13 Decisions | "No BVH or R-tree for ordinary UI" | No separate spatial index (R-tree, rebuilt BVH): the node tree carries a bounding box per subtree, which makes the hit test 12x to 236x faster (E15) |
 | §13 behavior | Escape blurs inputs; Tab and Enter act before JS; presses reach every listener | Claims, input policies, focus traps and groups, innermost press, one activate |
+| §2 Decisions | "The ack remains only to resolve `flush()`" | The ack also retires old claim handlers; the session keeps acks and events in native order |
 | §15 Target | No device-loss handling | Rebuild the device and upload everything again |
 | Non-goals | "Inline formatting context" | Inline boxes that break across lines, and floats |
 | Non-goals | "controlled inputs" | Removed: controlled values are rebased writes |

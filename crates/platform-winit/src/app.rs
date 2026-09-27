@@ -295,10 +295,11 @@ impl Inner {
     fn flush_out(ui: &mut Ui, session: &Session) {
         let events = ui.take_events();
         if !events.is_empty() {
-            // Animation ends resolve JS promises: those frames never drop.
-            let reliable = events
-                .iter()
-                .any(|e| e.kind == events::out_kind::ANIMATION_END);
+            // Animation ends resolve JS promises, and claims are user
+            // actions only JS carries out: those frames never drop.
+            let reliable = events.iter().any(|e| {
+                e.kind == events::out_kind::ANIMATION_END || e.kind == events::out_kind::CLAIM
+            });
             session.post_events(events::encode_events(&events), reliable);
         }
     }
@@ -751,6 +752,7 @@ mod publish_tests {
             text: None,
             char: None,
             mods: Mods::default(),
+            ..KeyInput::default()
         }));
         assert!(ui.needs_paint(), "geometry is stale until the frame");
         prepare_frame(&mut ui, &mut renderer, &gpu, (400, 400), 1.0);

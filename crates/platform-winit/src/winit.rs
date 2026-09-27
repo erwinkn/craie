@@ -13,7 +13,7 @@ use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
 use winit::event::{ElementState, Ime, MouseButton, MouseScrollDelta, StartCause, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
-use winit::keyboard::{Key as WKey, NamedKey};
+use winit::keyboard::{Key as WKey, KeyCode, NamedKey, PhysicalKey};
 use winit::window::{WindowAttributes, WindowId};
 
 use craie_core::Size;
@@ -44,6 +44,7 @@ pub fn run<A: App>(title: &str, logical_size: Size, app: A) {
             )),
         mods: Mods::default(),
         pointer: (0.0, 0.0),
+        dropped: Vec::new(),
     };
     event_loop.run_app(&mut driver).expect("event loop error");
 }
@@ -56,6 +57,9 @@ struct Driver<A: App> {
     mods: Mods,
     /// Last pointer position (logical); wheel events carry no position.
     pointer: (f32, f32),
+    /// Files dropped since the last wait: winit sends one event per
+    /// file, the app gets one drop.
+    dropped: Vec<String>,
 }
 
 impl<A: App> Driver<A> {
@@ -75,13 +79,25 @@ impl<A: App> Driver<A> {
                 NamedKey::PageUp => Key::PageUp,
                 NamedKey::PageDown => Key::PageDown,
                 NamedKey::Delete => Key::Delete,
-                _ => Key::Unknown,
+                NamedKey::Space => Key::Space,
+                NamedKey::Insert => Key::Insert,
+                NamedKey::ContextMenu => Key::ContextMenu,
+                _ => F_KEYS
+                    .iter()
+                    .position(|f| f == named)
+                    .map_or(Key::Unknown, |i| Key::F(i as u8 + 1)),
             },
             _ => Key::Unknown,
         };
+        // Shift and Alt apply, Ctrl does not (the web's `event.key`,
+        // which chords are written against); `code` backs it up.
         let char = match &event.logical_key {
             WKey::Character(c) => Some(c.to_string()),
             _ => None,
+        };
+        let code = match event.physical_key {
+            PhysicalKey::Code(code) => us_char(code),
+            PhysicalKey::Unidentified(_) => None,
         };
         // `text` is the printable string for this press. Command chords
         // (meta/ctrl) are shortcuts, not text — the platform filters them
@@ -99,9 +115,103 @@ impl<A: App> Driver<A> {
             key,
             text,
             char,
+            code,
             mods: self.mods,
+            repeat: event.repeat,
         }
     }
+}
+
+const F_KEYS: [NamedKey; 24] = [
+    NamedKey::F1,
+    NamedKey::F2,
+    NamedKey::F3,
+    NamedKey::F4,
+    NamedKey::F5,
+    NamedKey::F6,
+    NamedKey::F7,
+    NamedKey::F8,
+    NamedKey::F9,
+    NamedKey::F10,
+    NamedKey::F11,
+    NamedKey::F12,
+    NamedKey::F13,
+    NamedKey::F14,
+    NamedKey::F15,
+    NamedKey::F16,
+    NamedKey::F17,
+    NamedKey::F18,
+    NamedKey::F19,
+    NamedKey::F20,
+    NamedKey::F21,
+    NamedKey::F22,
+    NamedKey::F23,
+    NamedKey::F24,
+];
+
+/// A physical key as the character it types on a US layout: letters,
+/// digits and punctuation (`KeyInput::code`).
+fn us_char(code: KeyCode) -> Option<char> {
+    const LETTERS: [KeyCode; 26] = [
+        KeyCode::KeyA,
+        KeyCode::KeyB,
+        KeyCode::KeyC,
+        KeyCode::KeyD,
+        KeyCode::KeyE,
+        KeyCode::KeyF,
+        KeyCode::KeyG,
+        KeyCode::KeyH,
+        KeyCode::KeyI,
+        KeyCode::KeyJ,
+        KeyCode::KeyK,
+        KeyCode::KeyL,
+        KeyCode::KeyM,
+        KeyCode::KeyN,
+        KeyCode::KeyO,
+        KeyCode::KeyP,
+        KeyCode::KeyQ,
+        KeyCode::KeyR,
+        KeyCode::KeyS,
+        KeyCode::KeyT,
+        KeyCode::KeyU,
+        KeyCode::KeyV,
+        KeyCode::KeyW,
+        KeyCode::KeyX,
+        KeyCode::KeyY,
+        KeyCode::KeyZ,
+    ];
+    const DIGITS: [KeyCode; 10] = [
+        KeyCode::Digit0,
+        KeyCode::Digit1,
+        KeyCode::Digit2,
+        KeyCode::Digit3,
+        KeyCode::Digit4,
+        KeyCode::Digit5,
+        KeyCode::Digit6,
+        KeyCode::Digit7,
+        KeyCode::Digit8,
+        KeyCode::Digit9,
+    ];
+    if let Some(i) = LETTERS.iter().position(|&k| k == code) {
+        return Some((b'a' + i as u8) as char);
+    }
+    if let Some(i) = DIGITS.iter().position(|&k| k == code) {
+        return Some((b'0' + i as u8) as char);
+    }
+    Some(match code {
+        KeyCode::Minus => '-',
+        KeyCode::Equal => '=',
+        KeyCode::BracketLeft => '[',
+        KeyCode::BracketRight => ']',
+        KeyCode::Backslash => '\\',
+        KeyCode::Semicolon => ';',
+        KeyCode::Quote => '\'',
+        KeyCode::Backquote => '`',
+        KeyCode::Comma => ',',
+        KeyCode::Period => '.',
+        KeyCode::Slash => '/',
+        _ => return None,
+    })
 }
 
 impl<A: App> ApplicationHandler for Driver<A> {
@@ -142,8 +252,16 @@ impl<A: App> ApplicationHandler for Driver<A> {
         }
     }
 
-    /// Sleeps until the app's next timer, if it has one.
+    /// Delivers the files dropped this turn as one drop, then sleeps
+    /// until the app's next timer, if it has one.
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        if !self.dropped.is_empty()
+            && let Some(window) = &self.window
+        {
+            let (x, y) = self.pointer;
+            let paths = std::mem::take(&mut self.dropped);
+            self.app.event(window, &Event::Drop { x, y, paths });
+        }
         event_loop.set_control_flow(match self.app.next_timer() {
             Some(at) => ControlFlow::WaitUntil(at),
             None => ControlFlow::Wait,
@@ -255,6 +373,11 @@ impl<A: App> ApplicationHandler for Driver<A> {
                     ElementState::Released => Event::KeyUp(input),
                 };
                 self.app.event(window, &ev);
+            }
+            // Drops carry no position in winit 0.30: the drag's last
+            // cursor position is where the files landed.
+            WindowEvent::DroppedFile(path) => {
+                self.dropped.push(path.to_string_lossy().into_owned());
             }
             WindowEvent::Ime(ime) => match ime {
                 Ime::Enabled => {}

@@ -280,6 +280,8 @@ pub struct Host {
     pub surfaces: HashMap<u32, SurfaceData>,
     /// Vector nodes' assets, id-keyed.
     pub vectors: HashMap<u32, VectorData>,
+    /// Claim sets (`claims.rs`), id-keyed; NIL keys the window list.
+    pub claims: HashMap<u32, crate::claims::ClaimSet>,
     /// Item index of a list row (a child of a List node); NIL otherwise.
     pub list_index: Vec<u32>,
     /// List states and scroll anchors (§7).
@@ -332,6 +334,7 @@ impl Host {
             transitions: HashMap::new(),
             surfaces: HashMap::new(),
             vectors: HashMap::new(),
+            claims: HashMap::new(),
             list_index: Vec::new(),
             lists: crate::list::Lists::default(),
             revs: Revs::default(),
@@ -457,6 +460,7 @@ impl Host {
         self.transitions.remove(&id.0);
         self.surfaces.remove(&id.0);
         self.vectors.remove(&id.0);
+        self.claims.remove(&id.0);
         self.list_index[i] = NIL;
         self.lists.forget(id.0);
         if kind == NodeKind::Surface {
@@ -556,6 +560,7 @@ impl Host {
         self.transitions.remove(&id.0);
         self.surfaces.remove(&id.0);
         self.vectors.remove(&id.0);
+        self.claims.remove(&id.0);
         self.list_index[i] = NIL;
         self.lists.forget(id.0);
         let generation = self.nodes[i].generation.wrapping_add(1);

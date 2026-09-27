@@ -45,9 +45,17 @@ struct Inner {
     commit_bytes: usize,
     /// Applied seqs awaiting JS delivery, UI -> JS.
     acks: VecDeque<u64>,
+    /// Acks ever pushed, and ever taken (`acks` holds the difference).
+    acks_pushed: u64,
+    acks_taken: u64,
     /// Encoded UI -> JS event frames awaiting pickup, each with whether
-    /// it must not drop (it carries animation ends).
-    events: VecDeque<(Vec<u8>, bool)>,
+    /// it must not drop (it carries animation ends or claims) and
+    /// `acks_pushed` when it was posted: output keeps the order native
+    /// produced it in, so JS never sees an ack before an event raised
+    /// before that transaction applied (a claim event names the claim
+    /// set version it matched, and JS drops a version's handlers once a
+    /// newer one is acked).
+    events: VecDeque<EventFrame>,
     /// Tagged frames a pump could not deliver (the receiver's queue was
     /// full), in order: delivered before anything newer.
     stalled: VecDeque<Vec<u8>>,
@@ -61,6 +69,12 @@ struct Inner {
     closed: Option<String>,
 }
 
+struct EventFrame {
+    bytes: Vec<u8>,
+    reliable: bool,
+    acks_before: u64,
+}
+
 /// Outbox frame tags: the first byte of each `take_out` frame.
 pub mod out_tag {
     /// `u32 count` + `count` × `u64 seq`.
@@ -71,8 +85,8 @@ pub mod out_tag {
 
 /// Bound on queued event frames; past it the oldest droppable frame
 /// drops (stale UI events are worthless to a JS side that isn't
-/// draining). Reliable frames (animation ends: a promise waits on each)
-/// never drop.
+/// draining). Reliable frames (animation ends: a promise waits on each;
+/// claims: a user action waits on each) never drop.
 const MAX_EVENT_FRAMES: usize = 1024;
 
 /// What a pump's sender did with one frame.
@@ -130,6 +144,7 @@ impl Session {
         let notify = {
             let mut inner = self.inner.lock().unwrap();
             inner.acks.push_back(seq);
+            inner.acks_pushed += 1;
             inner.notify.clone()
         };
         self.changed.notify_all();
@@ -147,11 +162,16 @@ impl Session {
                 return;
             }
             if inner.events.len() >= MAX_EVENT_FRAMES
-                && let Some(i) = inner.events.iter().position(|(_, r)| !r)
+                && let Some(i) = inner.events.iter().position(|f| !f.reliable)
             {
                 inner.events.remove(i);
             }
-            inner.events.push_back((frame, reliable));
+            let acks_before = inner.acks_pushed;
+            inner.events.push_back(EventFrame {
+                bytes: frame,
+                reliable,
+                acks_before,
+            });
             inner.notify.clone()
         };
         if let Some(notify) = notify {
@@ -225,33 +245,47 @@ impl Session {
         self.inner.lock().unwrap().notify = Some(Arc::new(f));
     }
 
-    /// Drains pending UI -> JS output as tagged frames: one ACKS frame
-    /// covering all pending acks, then every queued event frame.
+    /// Drains pending UI -> JS output as tagged frames, in the order
+    /// native produced it: each event frame, preceded by an ACKS frame
+    /// with the acks pushed before it, then an ACKS frame with the rest.
     pub fn take_out(&self) -> Vec<Vec<u8>> {
         Self::take_out_locked(&mut self.inner.lock().unwrap())
     }
 
     fn take_out_locked(inner: &mut Inner) -> Vec<Vec<u8>> {
         let mut out = Vec::with_capacity(inner.events.len() + 1);
-        if !inner.acks.is_empty() {
-            let mut frame = Vec::with_capacity(5 + inner.acks.len() * 8);
-            frame.push(out_tag::ACKS);
-            frame.extend_from_slice(&(inner.acks.len() as u32).to_le_bytes());
-            for seq in inner.acks.drain(..) {
-                frame.extend_from_slice(&seq.to_le_bytes());
-            }
-            out.push(frame);
-        }
-        for (mut frame, _) in inner.events.drain(..) {
+        for f in std::mem::take(&mut inner.events) {
+            Self::take_acks_until(inner, f.acks_before, &mut out);
+            let mut frame = f.bytes;
             frame.insert(0, out_tag::EVENTS);
             out.push(frame);
         }
+        Self::take_acks_until(inner, u64::MAX, &mut out);
         out
+    }
+
+    /// Appends an ACKS frame with the pending acks among the first
+    /// `until` ever pushed, if any.
+    fn take_acks_until(inner: &mut Inner, until: u64, out: &mut Vec<Vec<u8>>) {
+        let n = (until.saturating_sub(inner.acks_taken)).min(inner.acks.len() as u64) as usize;
+        if n == 0 {
+            return;
+        }
+        let mut frame = Vec::with_capacity(5 + n * 8);
+        frame.push(out_tag::ACKS);
+        frame.extend_from_slice(&(n as u32).to_le_bytes());
+        for seq in inner.acks.drain(..n) {
+            frame.extend_from_slice(&seq.to_le_bytes());
+        }
+        inner.acks_taken += n as u64;
+        out.push(frame);
     }
 
     /// JS thread: drains pending acks without blocking.
     pub fn take_acks(&self) -> Vec<u64> {
-        self.inner.lock().unwrap().acks.drain(..).collect()
+        let mut inner = self.inner.lock().unwrap();
+        inner.acks_taken += inner.acks.len() as u64;
+        inner.acks.drain(..).collect()
     }
 
     /// JS thread: blocks until acks are pending or the session closes,
@@ -260,6 +294,7 @@ impl Session {
         let mut inner = self.inner.lock().unwrap();
         loop {
             if !inner.acks.is_empty() {
+                inner.acks_taken += inner.acks.len() as u64;
                 return inner.acks.drain(..).collect();
             }
             if inner.closed.is_some() {
@@ -439,6 +474,43 @@ mod tests {
         receiver.join().unwrap();
         assert_eq!(*queue.lock().unwrap(), [2], "the refused frame arrived");
         assert!(!s.is_stalled());
+    }
+
+    /// Output keeps native's order: an event raised before a
+    /// transaction applied arrives before that transaction's ack.
+    #[test]
+    fn acks_and_events_keep_their_order() {
+        let s = Session::new();
+        s.ack(1);
+        s.post_events(vec![0xA], false);
+        s.ack(2);
+        s.ack(3);
+        s.post_events(vec![0xB], true);
+        s.ack(4);
+        let ack = |seqs: &[u64]| {
+            let mut f = vec![out_tag::ACKS];
+            f.extend_from_slice(&(seqs.len() as u32).to_le_bytes());
+            seqs.iter()
+                .for_each(|q| f.extend_from_slice(&q.to_le_bytes()));
+            f
+        };
+        let out = s.take_out();
+        assert_eq!(
+            out,
+            [
+                ack(&[1]),
+                vec![out_tag::EVENTS, 0xA],
+                ack(&[2, 3]),
+                vec![out_tag::EVENTS, 0xB],
+                ack(&[4]),
+            ]
+        );
+        // Acks drained elsewhere are not sent again.
+        s.ack(5);
+        s.post_events(vec![0xC], false);
+        assert_eq!(s.take_acks(), [5]);
+        s.ack(6);
+        assert_eq!(s.take_out(), [vec![out_tag::EVENTS, 0xC], ack(&[6])]);
     }
 
     #[test]

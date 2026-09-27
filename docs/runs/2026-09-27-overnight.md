@@ -25,7 +25,9 @@ Times are UTC.
 | 01:40 | PR #2 review fixed (9 of 10 findings); final E19 numbers rerun |
 | 01:52 | E15 reach index built; oracle test and harness agree with the walk |
 | 02:00 | E15 verification (cargo, wasm32, clippy, bun, tsc) |
-| 02:40 | PR #3 (E15) review fixed (all 10 findings, plus a clamp panic in the rounded-clip hit test); E15 rerun twice |
+| 02:32 | PR #3 (E15) review fixed (all 10 findings, plus a clamp panic in the rounded-clip hit test); E15 rerun twice |
+| 02:36 | PR #3 reverified (CI, 282 workspace tests) and merged as `3e9f0f3` |
+| 02:45 | Claims and keys (work item 1, protocol 4) built on E15; 15 dispatch tests, 10 bridge tests |
 
 ## PRs
 
@@ -33,6 +35,7 @@ Times are UTC.
 | --- | --- | --- |
 | [#1](https://github.com/erwinkn/craie/pull/1) | The crate split, plus Linux-host test fixes | Merged |
 | [#2](https://github.com/erwinkn/craie/pull/2) | E19: event round trip under load; React priorities for native events | Merged |
+| [#3](https://github.com/erwinkn/craie/pull/3) | E15: hit-test reach index; propagation paths no longer allocate | Merged |
 
 ## Numbers
 
@@ -83,6 +86,19 @@ percent of the layout pass that stales it, and 16 bytes per node. Rerun on the M
 - E15: the list's scroller still checks each row's reach in turn (14x,
   not 100x). Binary search over a column's sorted rows would fix it;
   not done, since long lists are virtualized.
+
+- Claims and keys: see `ARCHITECTURE-update.md` topics 1 and 2,
+  "Built". The ones to look at:
+  - Claim sets travel in their own op, not the interaction op.
+  - A paste is answered with `InsertText` (the focused input's
+    selection when the answer lands), not a range against a revision;
+    ranges come with rebased writes (topic 11, `LEDGER.md` DF-11).
+  - All `useHotkeys` share one window list: the first match in mount
+    order wins, where Marbre fires every hook that binds the chord.
+  - The session now keeps acks and events in native order, so the
+    facade drops old claim handlers exactly when native has moved on.
+  - Escape no longer blurs; a key with nothing focused reaches no one
+    (window shortcuts are claims); `mod+y` redoes (it undid).
 
 ## Open questions for Erwin
 

@@ -195,6 +195,43 @@ Reviewer minors and nitpicks not fixed yet.
 - Resolves in: keying the cache on the world scale in steps (powers of
   two), or E07 (coverage preparation).
 
+### DF-9: `setText` leaves the caret at the start
+
+- Source: claims and keys (work item 1) implementation (own finding).
+- Where: crates/ui/src/input.rs (`Inputs::set_text`).
+- Claim: after JS sets an input's value, the caret sits at offset 0,
+  so the next keystroke types before the text. A DOM input moves the
+  caret to the end when its value is set.
+- Why deferred: pre-existing, and controlled values become rebased
+  writes (topic 11), which define where the caret goes.
+- Resolves in: topic 11's rebased writes, or a one-line change to put
+  the caret at the end if a consumer hits it first.
+
+### DF-10: no claims on a nested Text
+
+- Source: claims and keys (work item 1) implementation (own finding).
+- Where: packages/bridge/src/host.ts (`emitProps`, nested Text).
+- Claim: `onContextMenu`, `onDrop` and `keymap` on a Text nested in
+  another Text do nothing: a nested Text is spans of its root and has
+  no native node to hold a claim set.
+- Why deferred: needs claims per span, which interactive spans
+  (topic 11) define; a nested Text cannot take focus, so only the
+  pointer claims are affected.
+- Resolves in: interactive spans (topic 11).
+
+### DF-11: a paste answer has no range
+
+- Source: claims and keys (work item 1) implementation (own finding).
+- Where: crates/ui/src/ui.rs (`Command::InsertText`).
+- Claim: `InsertText` replaces the focused input's selection when the
+  answer arrives. If the user moves the caret between the claim and
+  the answer (one round trip, 0.2 to 5 ms at p99 outside major
+  collections, E19), the text lands at the new caret.
+- Why deferred: topic 1's target expresses the range against the
+  buffer revision the claim saw; revisions and rebasing come with
+  rebased writes (topic 11).
+- Resolves in: topic 11's rebased writes.
+
 ## Closed
 
 - DF-8 (2026-09-24, same day): `native_reflow_publishes_after_the_frame`
