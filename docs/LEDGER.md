@@ -709,6 +709,21 @@ Reviewer minors and nitpicks not fixed yet.
   then `press_up` would activate the innermost pressable around both the
   press and the release targets.
 
+### DF-46: a paragraph update cancels a press on its spans
+
+- Source: work item 3 (presses and activation), review of #17 (PR17-06).
+- Where: crates/ui/src/press.rs (the span press's revision check).
+- Claim: a press on a pressable span remembers the paragraph revision it
+  started on, and any new paragraph op for that Text cancels it. So in
+  `<Text>Updated {ago} · <Text onPress={retry}>Retry</Text></Text>`, where
+  `ago` ticks every second, a slow click on Retry can land after a tick
+  and activate nothing.
+- Why deferred: native doesn't know which span belongs to which pressable
+  Text, so it can't tell a text change from an owner change; cancelling
+  is the safe side. Live text next to a link is rare in the kit.
+- Resolves in: when a screen puts a link in ticking text; the paragraph
+  op would then carry span owners, and only an owner change would cancel.
+
 ## Closed
 
 - DF-8 (2026-09-24, same day): `native_reflow_publishes_after_the_frame`
