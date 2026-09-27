@@ -646,6 +646,52 @@ Reviewer minors and nitpicks not fixed yet.
   report toggled like the check roles, `pressed` on a button is toggled
   (AccessKit's toggle button), and `mixed` needs a value past one bit.
 
+### DF-42: no `onLongPress` or `onMiddlePress`
+
+- Source: work item 3 (presses and activation).
+- Where: crates/ui/src/press.rs, packages/bridge/src/index.ts
+  (`PressProps`).
+- Claim: the kit's `PressableProps` has `onLongPress` (a held press) and
+  `onMiddlePress` (the middle button), and Craie's Pressable has neither.
+  A long press is a click on release, and a middle press presses nothing,
+  so "open in a new tab" on a middle click of a row does nothing.
+- Why deferred: the brief allowed it. A long press needs a native timer
+  that cancels the click, with a threshold per platform. A middle press is
+  a second `ACTIVATE` source (button 2) that the kit's web version maps to
+  `auxclick`.
+- Resolves in: a `PRESS` phase for the long press after a hold (the
+  release then sends no `ACTIVATE`), and middle-button presses reported
+  with button 2, which the facade routes to `onMiddlePress`.
+
+### DF-43: pressable spans are pointer-only
+
+- Source: work item 3 (presses and activation).
+- Where: crates/ui/src/press.rs (`span_pressable`), crates/ui/src/a11y.rs.
+- Claim: a nested `<Text onPress>` (a link in a sentence) activates on a
+  click only. It's no Tab stop, Enter can't reach it, and assistive
+  technology sees one text node with no link inside, so VoiceOver can't
+  click it (the paragraph's own click goes to the pressable around it).
+  A web `<a href>` in a paragraph is all three.
+- Why deferred: a span has no node of its own to focus or to put in the
+  accessibility tree. Both need per-span nodes (DF-1's cluster mapping)
+  and topic 11's interactive spans.
+- Resolves in: topic 11: a span-level focus target and a link node per
+  pressable span in the accessibility tree, activated through
+  `Ui::activate` with the span.
+
+### DF-44: a keep-focus press clears focus-visible
+
+- Source: work item 3 (presses and activation).
+- Where: crates/ui/src/dispatch.rs (`pointer_down`, modality).
+- Claim: Tab to the composer's send button, then click the mention button
+  (`preventFocusOnPress`): focus stays on send, but its ring goes away,
+  since any pointer press leaves keyboard mode. Chrome keeps the ring
+  when a click moves no focus.
+- Why deferred: the brief's rule ("a pointer press turns it off") is the
+  one built.
+- Resolves in: keeping keyboard mode across a press that moves no focus,
+  if the kit wants Chrome's behavior.
+
 ## Closed
 
 - DF-8 (2026-09-24, same day): `native_reflow_publishes_after_the_frame`

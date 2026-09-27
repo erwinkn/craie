@@ -300,6 +300,67 @@ event (`executor.rs:545`).
   an active trap, to the trap's auto-focus target, else its first focusable
   node; outside traps, nowhere, as browsers do, with a blur event.
 
+**Built (work item 3, presses and activation).** Innermost press, one
+activate, keep focus and focus-visible as targeted (traps, groups and
+`inert` are the other half). The example: a pressable inbox row holding an
+Archive button, a composer, and a mention button under it.
+
+- A press on Archive sends `PRESS` in and out, then one `ACTIVATE`, to
+  Archive alone; the row's `onPress` stays silent, and its raw
+  `onPointerUp` still fires. Enter on a focused row activates it on key
+  down (each repeat again, as browsers do), and Space on key up, holding
+  `_pressed` meanwhile. A row `keymap` claiming Enter wins, and nothing
+  activates. VoiceOver's click activates the row without a hit test, so an
+  overlay drawn over it doesn't take the click, and it leaves focus and
+  focus-visible alone. It no longer synthesizes a pointer down and up.
+- The encoding (protocol 7): the INTERACTION flag byte's bits 4 to 6
+  carry the node's press flags (pressable, disabled, keep focus; bit 7 is
+  reserved). Span flag bit 4 marks a pressable span, the first slice of
+  topic 11's interactive spans. New events are `PRESS` (19) and `ACTIVATE`
+  (20), with listener mask bits 9 and 10. Their key is mods | phase or
+  source << 4 | button << 8 | span + 1 << 16. x/y are the release point
+  for a click, else the node's center. Ops 0x64 and 0x65 are still free.
+- Only the primary button presses, as only it clicks on the web. A
+  pointer that leaves the node keeps the press; the release activates
+  when it lands on the pressed node or inside it (the web's click rule),
+  else it is `PRESS` out with no activate. The activation carries the
+  modifiers held at press start, since the platform's pointer-up has
+  none: Cmd+click on a row reads `e.meta`.
+- Cancel (`onPressOut` with `cancelled`): window focus loss (which also
+  ends hover, with leave events), the node leaving the tree, the node
+  disabled or unmarked before the release, or a new press while one is
+  held. A key press ends when focus moves or the window blurs.
+- A disabled pressable swallows presses from the pointer and from
+  assistive technology: the row around a disabled Archive doesn't
+  activate either. Natively it stays focusable if flagged so; the facade's
+  Pressable drops `focusable` when disabled.
+- Keep focus (`preventFocusOnPress`, any node on the hit path): the press
+  moves no focus, places no caret, and starts no selection. The mention
+  button activates while the composer keeps its caret and composition. The
+  facade also takes the Pressable out of the Tab order unless `focusable`
+  is given, as the kit does on the web (`tabIndex=-1`).
+- A Text with `onPress` is a pressable. A root Text is one at the node
+  level; a nested Text marks its span (and the spans inside it), and
+  activates only when released on the same span. Neither is focusable,
+  like a web span (`LEDGER.md` DF-43).
+- Focus-visible: the modality model already followed the rules. Keys other
+  than bare modifiers and command chords turn keyboard mode on, a pointer
+  press turns it off, an input always shows it, and programmatic focus
+  keeps the mode. The accessibility click was the gap (its synthesized
+  press cleared keyboard mode). One deviation: Chrome keeps the ring when
+  a click moves no focus (a keep-focus press); here that press is still a
+  pointer press and clears it (`LEDGER.md` DF-44).
+- `_pressed` still follows the hit node and its ancestors, like the web's
+  `:active`: pressing Archive shows the row pressed too.
+- Focus groups activate a member through the same native path
+  (`Ui::activate(id, source, mods)`), so `selectOnFocus` needs no event of
+  its own.
+- The facade (`@craie/bridge`): `onPress(e: PressEvt)` with `e.source`
+  (`"pointer"`, `"keyboard"` or `"accessibility"`), `onPressIn`,
+  `onPressOut(e: PressOutEvt)` with `e.cancelled`, and
+  `preventFocusOnPress`, on Pressable and Text. `onLongPress` and
+  `onMiddlePress` are deferred (`LEDGER.md` DF-42).
+
 ## 4. Lookup cost
 
 Changes: §13. The decision "No BVH or R-tree for ordinary UI" reopens,
