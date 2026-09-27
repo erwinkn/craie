@@ -26,6 +26,7 @@ import {
 import {
   CraieHost,
   onFrameStats as onFrameStatsInternal,
+  warnOnce,
   type ClipboardEvt,
   type ContextMenuEvt,
   type DropEvt,
@@ -219,7 +220,7 @@ export interface ViewProps extends ListenerProps, StateProps, Variants {
   style?: StyleProps
   /** Makes the View a scope whose states its variants and its
    * descendants' read; a name also addresses it (`_name`) from further
-   * down. Adding or removing it remounts the children. */
+   * down. */
   group?: boolean | string
   /** The color descendant text inherits. */
   color?: string | number
@@ -298,8 +299,8 @@ export interface BarsProps extends Omit<SurfaceProps, "kind" | "params" | "paylo
   /** Gap between bars, logical points (default 2). */
   gap?: number
 }
-/** A TextInput is a scope: its own `_hover` and `_focus` read its own
- * states. `disabled` waits for a read-only input natively. */
+/** A TextInput is a scope: its own `_hover` and `_focusVisible` read
+ * its own states. `disabled` waits for a read-only input natively. */
 export interface TextInputProps extends ListenerProps, Omit<StateProps, "disabled">, Variants {
   accessibilityRole?: AccessibilityRole
   style?: StyleProps
@@ -746,12 +747,16 @@ function keyIndex<T>(items: readonly T[], keyOf: (item: T, i: number) => unknown
 }
 
 export function TextInput(props: TextInputProps) {
+  // Left out at runtime too (a kit's props may carry it): it would report
+  // a field that still edits as disabled, and mask hover and focus.
+  const { disabled, ...rest } = props as TextInputProps & { disabled?: boolean }
+  if (disabled) warnOnce("TextInput takes no disabled yet")
   // focusable by default; a Tab ring that skips the only editable field
   // would surprise.
   return useHost("input", {
     focusable: true,
     accessibilityRole: props.multiline ? "multilineTextInput" : "textInput",
-    ...props,
+    ...rest,
   }, true)
 }
 

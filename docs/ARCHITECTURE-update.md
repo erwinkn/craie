@@ -483,26 +483,29 @@ defineStates(["unread", "streaming"])
 - The facade (`@craie/bridge`, re-exported by `@craie/react`):
   `defineStates`; `Pressable` and `TextInput` are always scopes, a
   View with `group` (a name makes `_name` address it) is one, and all
-  take `selected`, `expanded`, `checked`, `highlighted` and `states`,
-  and all but `TextInput` take `disabled` (a read-only input is not
-  native yet). A disabled Pressable stops `onPress`, leaves the Tab
-  order and reads as disabled to assistive technology. A `_` key is a state of the
-  nearest scope, an environment key, or a group up the tree; other `_`
-  keys and every value key a variant does not apply (`pointerEvents`,
-  `zIndex`, ...) are logged once and left out. Scopes flow through
-  React context, which a `Portal` (new: its children are window roots)
-  or a `Layer` resets. Otherwise the item in `<Pressable
-  expanded><Layer><Text _hover={{ color: "red" }} /></Layer></Pressable>`
-  would turn red with the pointer on the trigger, not on the item. The
-  context Provider is always there, so toggling `group`
-  keeps the children mounted. Variant tables resolve to ids
-  and go out at the seal, when their signature changed.
+  take `selected`, `expanded`, `checked`, `highlighted` and `states`.
+  All but `TextInput` take `disabled` (a read-only input is not native
+  yet; an input given one logs it and leaves it out). A disabled
+  Pressable stops `onPress`, leaves the Tab order and reads as disabled
+  to assistive technology. A `_` key is a state of the nearest scope,
+  an environment key, or a group up the tree; other `_` keys and every
+  value key a variant does not apply (`pointerEvents`, `zIndex`, ...)
+  are logged once and left out. Scopes flow through React context,
+  which a `Portal` (new: its children are window roots) or a `Layer`
+  resets. Otherwise the item in `<Pressable expanded><Layer><Text
+  _hover={{ color: "red" }} /></Layer></Pressable>` would turn red with
+  the pointer on the trigger, not on the item. The context Provider is
+  always there, so toggling `group` keeps the children mounted.
+  Variant tables resolve to ids and go out at the seal, when their
+  signature changed.
 - `_hover` on an element that is no scope means the nearest scope's
   hover, as on Marbre web and native: in
   `<Pressable><Text _hover={{ color: "red" }} /></Pressable>` the text
   turns red with the pointer on the Pressable's padding. A state key
-  with no scope above is a logged error here and a dev-time error in
-  Marbre.
+  with no scope above is logged once and left out; Marbre logs it in
+  development (branch `ui/state-scopes`). Marbre's spec still says
+  layer content keeps its opener's scope (`ui-kit.md`, and that
+  branch's D28 draft); Craie cuts at the layer as web does.
 - Layout values apply per key: one per property, axis and side. With
   `padding` 16/12, `_narrow: { padding: { left: 4, right: 4 } }` and
   `_compact: { padding: { top: 6, bottom: 6 } }`, a compact window gets

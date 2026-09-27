@@ -192,14 +192,17 @@ test("a Portal or Layer starts a new scope chain", async () => {
         // No scope inside: the opener's is not in reach.
         createElement(View, { _menu: { _expanded: { style: { opacity: 1 } } }, _pressed: { borderRadius: 2 } })),
       createElement(Layer, { z: 50 },
+        // Nor in a Layer: this reads nothing.
+        createElement(View, { _expanded: { style: { opacity: 1 } } }),
         createElement(Pressable, {},
           createElement(Text, { _hover: { color: "#fff" } }, "item")))))
     await tick()
   } finally {
     console.error = log
   }
-  expect(errors.filter(e => e.includes('"_menu"')).length).toBe(1)
+  expect(errors.filter(e => e.includes('no group "menu" above')).length).toBe(1)
   expect(errors.some(e => e.includes("_pressed needs a scope"))).toBe(true)
+  expect(errors.some(e => e.includes("_expanded needs a scope"))).toBe(true)
   const ops = t.ops()
   // Two scopes: the expanded opener and the item inside the layer.
   const states = ops.filter(o => o.tag === 0xb0)
@@ -211,19 +214,31 @@ test("a Portal or Layer starts a new scope chain", async () => {
   expect(tables[0]!.variants!.map(v => v.terms.map(x => [x.scope, x.mask]))).toEqual([[[item, bit("hover")]]])
 })
 
-test("a TextInput is its own scope", async () => {
+test("a TextInput is its own scope, with no disabled", async () => {
+  const errors: string[] = []
+  const log = console.error
+  console.error = (m: string) => errors.push(m)
   const t = new FakeTransport()
-  createRoot(t).renderSync(createElement(Pressable, {},
-    createElement(TextInput, {
-      states: { unread: true },
-      _focusVisible: { borderColor: "#4c8dff" },
-      _unread: { borderWidth: 2 },
-    })))
-  await tick()
+  // A kit's props may carry it past the types.
+  const kit = { disabled: true }
+  try {
+    createRoot(t).renderSync(createElement(Pressable, {},
+      createElement(TextInput, {
+        ...kit,
+        states: { unread: true },
+        _focusVisible: { borderColor: "#4c8dff" },
+        _unread: { borderWidth: 2 },
+      })))
+    await tick()
+  } finally {
+    console.error = log
+  }
+  expect(errors.some(e => e.includes("TextInput takes no disabled"))).toBe(true)
   const ops = t.ops()
   const input = created(ops, 2)[0]!
-  // The input sends its own app bits and its variants read only it.
-  expect(ops.find(o => o.tag === 0xb0 && o.id === input)).toBeDefined()
+  // The input sends its own app bits, not disabled, and its variants
+  // read only it.
+  expect(ops.find(o => o.tag === 0xb0 && o.id === input)!.bits! & bit("disabled")).toBe(0n)
   const table = ops.find(o => o.tag === 0xb1 && o.id === input)!
   expect(table.variants!.map(v => v.terms.map(x => [x.scope, x.mask]))).toEqual([
     [[input, bit("focusVisible")]],

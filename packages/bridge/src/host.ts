@@ -650,7 +650,8 @@ function flattenVariants(
       let c = chain
       while (c && c.name !== name) c = c.parent
       if (!c) {
-        warnOnce(`unknown variant key "${key}"`)
+        warnOnce(`unknown variant key "${key}": not a state or environment, and no group "${name}" above`
+          + " (a Portal or Layer starts a new chain)")
         continue
       }
       s = c
