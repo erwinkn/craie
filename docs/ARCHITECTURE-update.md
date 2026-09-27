@@ -1352,15 +1352,15 @@ JS.
   boundaries, and a GPU test checks that a looping
   rotation turns the pixels at 0.25 s and 1.25 s with no transaction.
 - **Cost** (`harness/invariants/examples/motion_cost.rs`, exe1, release,
-  load 43 to 65, so noisy). Mounting 1,000 rows (a View and a label),
-  median of 15: 11.2 ms plain and 12.4 ms with `enter` at load 43. At
-  load 65, 44.1 and 36.9, then 39.5 and 53.8: within noise. Wire:
-  85,204 bytes, and 126,226 with `enter` (as measured, before the
-  index byte: 127,226 now). Per frame: 1,000 enters run
-  0.43 to 1.75 ms. One loop among 1,000 still rows takes 0.05 to
-  0.20 ms, 1,000 loops 0.40 to 0.90 ms, and a still frame nothing.
-  Loops allocate 0 per frame. The enters allocate 13 times on their
-  first frame, then nothing.
+  after review #21, three runs at load 47 to 48, so noisy). Mounting
+  1,000 rows (a View and a label), median of 15: 33.8 to 51.3 ms plain
+  and 40.8 to 59.0 ms with `enter`, within noise of each other (at
+  load 43 before the review: 11.2 and 12.4). Wire: 85,204 bytes, and
+  127,226 with `enter` (a 42-byte ANIMATION op per row). Per frame:
+  1,000 enters run 0.47 to 1.77 ms. One loop among 1,000 still rows
+  takes 0.09 to 0.19 ms, 1,000 loops 0.53 to 1.28 ms, and a still
+  frame nothing. Loops allocate 0 per frame. The enters allocate about
+  13 times over their 22 frames (0.6 a frame), then nothing.
 - Not yet: exits and id parking, scroll timelines and named keyframes
   (the rest of item 6). Also blur and shimmer frames (work item 7), a
   dash offset channel (DF-55), end events for variant animations
