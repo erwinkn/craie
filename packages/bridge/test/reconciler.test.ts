@@ -10,7 +10,7 @@ import type { HostNode, Transport, UiEvent } from "../src/host.js"
 import { readFrame, type Op } from "./crw2.js"
 import { settle } from "./settle.js"
 import { decodeEvents } from "../src/native.js"
-import { CURRENT, STATE_BIT } from "../src/wire.js"
+import { CURRENT, REPORTED, STATE_BIT } from "../src/wire.js"
 
 class FakeTransport implements Transport {
   frames: Uint8Array[] = []
@@ -201,6 +201,57 @@ test("facade components send explicit roles", async () => {
   const roles = t.ops(0).filter(o => o.tag === 0x50).map(o => o.f[0])
   // A plain View with listeners sends no role.
   expect(roles.sort()).toEqual([ROLE.button, ROLE.text, ROLE.scrollView].sort())
+})
+
+// The kit's check inputs and menu triggers: check roles carry `checked`
+// in the state bits; `expanded` and `selected` are reported only where
+// given on a scope (a TextInput is one), so a plain Pressable reports
+// neither, and a View that is no scope, whose states never reach native,
+// reports nothing.
+test("check roles and reported states", async () => {
+  const t = new FakeTransport()
+  const root = createRoot(t)
+  function App({ open }: { open?: boolean }) {
+    return createElement(View, null,
+      createElement(Pressable, { accessibilityRole: "checkbox", checked: false }),
+      createElement(Pressable, { accessibilityRole: "switch", checked: true }),
+      createElement(Pressable, { accessibilityRole: "radio" }),
+      createElement(View, { accessibilityRole: "radiogroup" }),
+      createElement(Pressable, { expanded: open, selected: false }),
+      createElement(Pressable, { onPress: () => {} }),
+      createElement(TextInput, { expanded: false, selected: true }),
+      createElement(View, { expanded: open }))
+  }
+  const log = console.error
+  console.error = () => {} // the scope-less View's warning
+  try {
+    root.renderSync(createElement(App, { open: false }))
+    await tick()
+  } finally {
+    console.error = log
+  }
+  const roles = t.ops(0).filter(o => o.tag === 0x50).map(o => o.f)
+  expect(roles).toEqual([
+    [ROLE.checkbox, 0],
+    [ROLE.switch, 0],
+    [ROLE.radio, 0],
+    [ROLE.radiogroup, 0],
+    [ROLE.button, REPORTED.expanded | REPORTED.selected],
+    [ROLE.button, 0],
+    [ROLE.textInput, REPORTED.expanded | REPORTED.selected],
+  ])
+  expect([ROLE.switch, ROLE.radio, ROLE.radiogroup]).toEqual([14, 15, 16])
+  const trigger = t.ops(0).filter(o => o.tag === 0x50)[4]!.id
+
+  // Opening changes the bits alone; dropping the prop stops reporting.
+  root.renderSync(createElement(App, { open: true }))
+  await tick()
+  expect(t.ops().filter(o => o.tag === 0x50)).toEqual([])
+  root.renderSync(createElement(App, {}))
+  await tick()
+  expect(t.ops().filter(o => o.tag === 0x50)).toEqual([
+    { tag: 0x50, id: trigger, f: [ROLE.button, REPORTED.selected] },
+  ])
 })
 
 test("hidden sends display none through the layout op", async () => {

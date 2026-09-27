@@ -8,6 +8,8 @@
 //! presentation.
 
 pub mod a11y;
+#[cfg(test)]
+mod a11y_tests;
 pub mod animation;
 #[cfg(test)]
 mod animation_tests;

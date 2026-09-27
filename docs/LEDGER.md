@@ -612,6 +612,40 @@ Reviewer minors and nitpicks not fixed yet.
   elements) that emits `Paint::Current` for the affected paints, or at
   least a report note at import.
 
+### DF-40: `expanded` is silent on macOS and Linux
+
+- Source: PR #14 review (a11y states), M1.
+- Where: crates/ui/src/a11y.rs (`set_expanded`); upstream
+  accesskit_macos 0.27 and accesskit_atspi_common 0.20.
+- Claim: Craie puts `expanded` in the AccessKit tree where the prop was
+  given, but only the Windows (UIA ExpandCollapse) and iOS adapters read
+  `is_expanded()`. On the Mac, `<Pressable expanded={open}>` is "button"
+  to VoiceOver, never "collapsed" or "expanded"; Orca on Linux hears
+  the same.
+- Why deferred: the gap is upstream; Craie's tree is right and serves
+  Windows today.
+- Resolves in: AccessKit support (macOS `AXExpanded`, AT-SPI
+  `State::Expandable` and `State::Expanded`), upstreamed or patched, and
+  an AccessKit bump.
+
+### DF-41: accessibility states and roles the kit uses that Craie lacks
+
+- Source: PR #14 review (a11y states), m5 and n1.
+- Where: crates/ui/src/mutation.rs (`Role`), crates/ui/src/a11y.rs,
+  packages/bridge/src/wire.ts (`ROLE`).
+- Claim: `pressed` (toggle buttons), `mixed` (indeterminate checkboxes)
+  and `highlighted` don't reach assistive technology, and the menu roles
+  (`menu`, `menuitem`, `menuitemcheckbox`, `menuitemradio`) don't exist.
+  The kit's select (`select.native.tsx`) builds `menuitemradio` with
+  `aria-checked`, so on Craie an adapter falls back to `button` and the
+  item's checked state is styling only.
+- Why deferred: out of PR #14's scope (check roles and three states);
+  `CheckInputProps` has no indeterminate.
+- Resolves in: the accessibility pass (ARCHITECTURE-update §13): the
+  roles append after `radiogroup` (a protocol bump), check menu items
+  report toggled like the check roles, `pressed` on a button is toggled
+  (AccessKit's toggle button), and `mixed` needs a value past one bit.
+
 ## Closed
 
 - DF-8 (2026-09-24, same day): `native_reflow_publishes_after_the_frame`
@@ -865,6 +899,14 @@ Reviewer minors and nitpicks not fixed yet.
 - PR13-06 (run-log review): an "Open risks" list: inputs inherit color silently, CRV1 kind 3 with no bump, clippy on macOS and wasm cfgs not in CI, the winit SIGSEGV at exit.
 - PR13-07 (run-log review): DF-39 moved from the profile deferrals to "Known gaps" with TextInput `disabled`; EXPERIMENTS.md carries the pre-R12-04 caveat.
 - PR13-08 (run-log review, nits): clippy's `bad_bit_mask` wording (checks that can't fire), the target-dir rule scoped to parallel agent runs, Erwin's go-ahead paraphrased from the message, jargon replaced (conflicts, reaching across a layer, color records, scene rebuilds), DF-29's reason spelled out, "Marbre web and native" narrowed to Marbre web (here and in topic 5), test counts named alike in the timeline, #12's macOS check placed.
+- PR14-01 (a11y review): the PR and §13 said `expanded={false}` reads "collapsed", but the macOS and AT-SPI adapters never read `expanded` (Windows and iOS do): the code stays, the PR body, §13 and the `expanded` JSDoc say where it's heard, and DF-40 tracks the upstream gap.
+- PR14-02 (a11y review): `selected` was reported on every role, and the kit styles checkboxes and radios with `selected` (a checkbox would read "checked, selected" on Linux): `a11y.rs` reports it on selectable roles only, Marbre web's `aria-selected` rule, which is the list row among Craie's roles. `selected_check_roles_report_checked_only` fails without the gate.
+- PR14-03 (a11y review): a ROLE op that changed only the reported byte was untested (an executor comparing the role alone kept every test green): `reported_alone_updates` gives a button `expanded` and takes it back.
+- PR14-04 (a11y review): the facade's scope gate on reported states was untested: the bun case has a scope-less `View` with `expanded` and expects no ROLE op; deleting the gate fails it.
+- PR14-05 (a11y review): the PR said the widened dirty mask is why a toggle reaches the tree, but every transaction republishes it: the mask stays (it mirrors DISABLED), the docs and the tests' header say it's bookkeeping, and the tests assert the semantic revision for each of the four bits, so dropping any of them from `state_bit::A11Y` fails a test.
+- PR14-06 (a11y review): the PR said a TextInput isn't a scope; it is (since #11): "What's left" is corrected, and the bun case checks a TextInput sends `[textInput, expanded | selected]`.
+- PR14-07 (a11y review): the deferred states and roles weren't in this file: DF-41 (pressed, mixed, highlighted, the menu roles) and DF-40.
+- PR14-08 (a11y review, nits): `radiogroup` is role 16 (still protocol 6; the fixture's layer container carries it), and ARCHITECTURE.md's §14 paragraph is rewrapped.
 - MAC-01 (Mac verify): two `allocations` tests failed on Metal: `whole_frame_budgets` (opacity 0.5, four passes: 127 against 125) and `list_frames_do_not_allocate` (57 against 56): the wgpu budget was a flat per-pass constant measured at one draw count. On Metal (wgpu 30), a frame with one pass that draws costs 53 in wgpu besides the command lists; each opacity layer (its pass, the composite, the parent's resumed pass) costs 62 to 70 more (1 to 5 layers, as trackers grow); and wgpu-core records each pass into a fresh `Vec` that grows at 5, 9, 17, 33... commands (a pass is its draws plus 3 setup commands, plus 1 per rect/path pipeline switch). The budget is now 53 + 70 per layer + each pass's command-list growth, from a walk of the draw list that the test checks against `RenderStats` (passes, draws): exact for single-pass frames (56, 57), 127 against 130 for opacity 0.5. Craie's own phases still assert 0. Linux keeps the old constants until they're measured on exe1.
 - MAC-02 (Mac verify): E19 phases that join native and JS stamps read 58,876,521 ms (js) and the same negative (apply): the probe read `CLOCK_UPTIME_RAW`, which stops during sleep, where Node's `process.hrtime` reads mach continuous time. It reads `CLOCK_MONOTONIC_RAW` now, and `report.py` refuses stamps outside dispatch → apply.
 - MAC-03 (Mac verify): E19 round trips of 24 to 35 ms at p50 (125 ms at p95), idle, were the probe's own timers waking up to 150 ms late (macOS coalescing in an agent-started shell), counted as "wait". With the probe on, on macOS, the headless loop spins to every deadline and the windowed waker spins to each click: 1.01 and 0.29 ms at p50. Linux keeps its timed waits.
