@@ -894,7 +894,8 @@ Image nodes own color rasters (work item 8): a raster per decoded
 bitmap, at the decode size, its quad set to the drawn size each chunk
 build (`set_quad`), so a bitmap draws scaled until a better one lands.
 The core keeps each bitmap's pixels, up to 64 MB for all images (least
-recently drawn dropped first), and re-inserts an evicted one when a
+recently drawn dropped first; never one it could not decode again: an
+old `src` up while the new one loads, or a payload that failed since), and re-inserts an evicted one when a
 visible chunk misses it, as text re-rasterizes glyphs; one whose copy
 was dropped decodes again. `release` frees a raster's area and
 recycles its id when the node's image changes or goes; glyph rasters
@@ -1214,8 +1215,10 @@ after each prepared frame. Probes run before decodes, a newer decode
 of an image replaces its queued one, and queued work for images the
 core dropped goes (`Ui::take_dropped_images`). Decoding is bounded:
 over 64 megapixels fails at the header, and the decoder's buffers are
-reserved against 512 MiB before it allocates. A codec panic fails its
-image; a worker that dies anyway is replaced. `craie_ui::platform` holds the contract: `WindowId`
+reserved against 512 MiB before it allocates (codecs may add about
+one more image), and a WebP whose chunks claim more than the file
+holds is not asked for its EXIF. A codec panic fails its image; a
+worker that dies anyway is replaced. `craie_ui::platform` holds the contract: `WindowId`
 and `PlatformWindow` (surface size, scale, frame request, text input);
 the clipboard seam is `craie_ui::clipboard::Clipboard`. One window.
 

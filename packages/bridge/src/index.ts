@@ -500,7 +500,7 @@ export function Vector(props: VectorProps) {
   return useHost("vector", { accessibilityRole: "image", ...rest, viewBox, shapes })
 }
 
-export interface ImageProps extends ListenerProps {
+export interface ImageProps extends ListenerProps, Variants {
   style?: StyleProps
   backgroundColor?: string | number
   borderRadius?: number
@@ -547,7 +547,9 @@ export function Image({ src, fit, alt, ref, ...props }: ImageProps) {
     else if (ref) (ref as { current: HostNode | null }).current = n
   }, [ref])
   useEffect(() => {
-    if (typeof src !== "string") return
+    // Bytes in hand: an earlier URL's must not come back when the next
+    // URL loads (the bytes stay up until it does).
+    if (typeof src !== "string") return setFetched(undefined)
     // Unmounting or a newer `src` cancels the fetch, without an error.
     const abort = new AbortController()
     const timer = setTimeout(
@@ -572,7 +574,7 @@ export function Image({ src, fit, alt, ref, ...props }: ImageProps) {
       abort.abort()
     }
   }, [src])
-  return createElement("image", {
+  return useHost("image", {
     accessibilityRole: alt === "" ? undefined : "image",
     accessibilityLabel: alt || undefined,
     ...props,

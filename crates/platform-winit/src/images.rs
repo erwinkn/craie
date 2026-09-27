@@ -26,9 +26,12 @@ use image::{
 
 /// Pixels an image may have: 8,000 x 8,000.
 pub const MAX_PIXELS: u64 = 64_000_000;
-/// Bytes the decoder's buffers may take at once: the decoded image and
-/// the RGBA copy of a format that needs one (a 64 MP RGB8 photo takes
-/// 192 MB; a 64 MP RGBA16 PNG, 512 MB plus a 256 MB copy, fails).
+/// Bytes the image crate's buffers may take at once: the decoded image
+/// and the RGBA copy of a format that needs one (a 64 MP RGB8 photo
+/// takes 192 MB; a 64 MP RGBA16 PNG, 512 MB plus a 256 MB copy, fails).
+/// Codecs may add up to about one more image of their own (lossless
+/// WebP decodes through a `w*h*4` buffer; progressive JPEG keeps its
+/// coefficients).
 pub const MAX_ALLOC: u64 = 512 << 20;
 /// Either side, as the codecs check it.
 const MAX_SIDE: u32 = 32_768;
@@ -258,10 +261,37 @@ fn turns(o: Orientation) -> bool {
     matches!(o, Rotate90 | Rotate270 | Rotate90FlipH | Rotate270FlipH)
 }
 
+/// The EXIF orientation. An unreadable EXIF chunk shows the image
+/// unturned, as browsers do.
+fn orientation(d: &mut impl ImageDecoder, bytes: &[u8]) -> Orientation {
+    let webp = bytes.starts_with(b"RIFF") && bytes.get(8..12) == Some(b"WEBP");
+    if webp && !webp_chunks_fit(bytes) {
+        return Orientation::NoTransforms;
+    }
+    d.orientation().unwrap_or(Orientation::NoTransforms)
+}
+
+/// Whether each chunk of a RIFF (WebP) file fits in what is left of
+/// it. image-webp allocates an EXIF chunk's declared size before
+/// reading it, past `Limits`: 78 bytes can ask for 4 GiB.
+fn webp_chunks_fit(bytes: &[u8]) -> bool {
+    let mut rest = bytes.get(12..).unwrap_or_default();
+    while let Some(head) = rest.get(..8) {
+        let size = u32::from_le_bytes([head[4], head[5], head[6], head[7]]) as u64;
+        let left = rest.len() as u64 - 8;
+        if size > left {
+            return false;
+        }
+        // Chunks are padded to an even size (the last one may not be).
+        rest = &rest[8 + (size + size % 2).min(left) as usize..];
+    }
+    true
+}
+
 /// The natural size: the header's, turned by the EXIF orientation.
 fn probe(bytes: &[u8]) -> Result<[u32; 2], String> {
     let (mut d, w, h) = reader(bytes, limits(MAX_ALLOC))?;
-    let o = d.orientation().unwrap_or(Orientation::NoTransforms);
+    let o = orientation(&mut d, bytes);
     Ok(if turns(o) { [h, w] } else { [w, h] })
 }
 
@@ -271,8 +301,7 @@ fn probe(bytes: &[u8]) -> Result<[u32; 2], String> {
 fn decode(bytes: &[u8], crop: [u32; 4], size: [u32; 2], alloc: u64) -> Result<Vec<u8>, String> {
     let mut limits = limits(alloc);
     let (mut d, w, h) = reader(bytes, limits.clone())?;
-    // An unreadable EXIF chunk shows the image unturned, as browsers do.
-    let o = d.orientation().unwrap_or(Orientation::NoTransforms);
+    let o = orientation(&mut d, bytes);
     // RGB, gray, and RGBA are shrunk as decoded; the rest are converted
     // to RGBA first, a second full-size buffer.
     let native = matches!(
@@ -419,7 +448,8 @@ fn bleed(rgba: &mut [u8], w: usize, h: usize) {
 mod tests {
     use super::*;
     use craie_ui::mutation::{NIL, NodeKind, Transaction};
-    use image::{GrayAlphaImage, GrayImage, ImageFormat, Luma, LumaA, Rgba};
+    use image::codecs::webp::WebPEncoder;
+    use image::{ExtendedColorType, GrayAlphaImage, GrayImage, ImageFormat, Luma, LumaA, Rgba};
     use std::sync::mpsc::{Receiver, channel};
 
     fn test_png(width: u32, height: u32, pixel: impl Fn(u32, u32) -> Rgba<u8>) -> Vec<u8> {
@@ -605,6 +635,43 @@ mod tests {
             .unwrap();
         let rgba = decode(gray.get_ref(), full, [10, 10], 10_000).unwrap();
         assert_eq!(&rgba[..4], [7, 7, 7, 255]);
+        // A 1 x 1 WebP whose EXIF chunk claims 4 GiB: its orientation is
+        // not read (image-webp would allocate the claim).
+        let webp = webp_bomb();
+        assert!(!webp_chunks_fit(&webp));
+        assert!(webp_chunks_fit(&webp[..webp.len() - 8]));
+        assert!(matches!(
+            probe_req(&webp),
+            ImageResult::Size {
+                width: 1,
+                height: 1,
+                ..
+            }
+        ));
+        let full = [0, 0, 1, 1];
+        assert_eq!(
+            decode(&webp, full, [1, 1], MAX_ALLOC).unwrap(),
+            [9, 8, 7, 255]
+        );
+    }
+
+    /// RIFF, VP8X with the EXIF flag, a 1 x 1 VP8L, and an EXIF chunk
+    /// header claiming 0xFFFF_FFF0 bytes, none of them there.
+    fn webp_bomb() -> Vec<u8> {
+        let mut lossless = Vec::new();
+        WebPEncoder::new_lossless(&mut lossless)
+            .encode(&[9, 8, 7, 255], 1, 1, ExtendedColorType::Rgba8)
+            .unwrap();
+        let vp8x = [
+            b"VP8X".as_slice(),
+            &10u32.to_le_bytes(),
+            &[0x08, 0, 0, 0],
+            &[0; 6],
+        ];
+        let exif = [b"EXIF".as_slice(), &0xFFFF_FFF0u32.to_le_bytes()];
+        let body = [&vp8x[..], &[&lossless[12..]], &exif[..]].concat().concat();
+        let size = (body.len() as u32 + 4).to_le_bytes();
+        [b"RIFF".as_slice(), &size, b"WEBP", &body].concat()
     }
 
     /// The probe reads the header only: a file cut short fails at the

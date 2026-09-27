@@ -162,7 +162,8 @@ pub fn plan(fit: Fit, natural: [u32; 2], content: Rect, scale: f32, max: u32) ->
     };
     // The drawn rect starts on a device pixel, so a bitmap decoded at
     // its drawn size maps texel to pixel (no blur from a half-pixel
-    // letterbox offset).
+    // letterbox offset). The snap is relative to the node, whose chunk
+    // origin snaps in world space (at rest, as text does).
     let snap = |v: f32| (v * scale).round() / scale;
     let mut dest = Rect::new(
         snap(dest.origin.x),
@@ -245,6 +246,11 @@ impl Bitmap {
             || p.size[0] * 2 < w
             || p.size[1] * 2 < h
     }
+
+    /// Whether `p` is drawn at another size, past a pixel of slack.
+    fn off(&self, p: &Plan) -> bool {
+        (0..2).any(|i| self.size[i].abs_diff(p.size[i]) > 1)
+    }
 }
 
 /// Decode state of one image node.
@@ -261,7 +267,20 @@ struct State {
     error: Option<String>,
     /// The load event went out.
     loaded: bool,
+    /// The plan the node's last build asked for: one unchanged since
+    /// then has settled.
+    last: Option<Plan>,
     bitmap: Option<Bitmap>,
+}
+
+impl State {
+    /// Whether the bitmap can be decoded again (it is of this payload,
+    /// which has not failed): only then may its CPU copy go.
+    fn restorable(&self) -> bool {
+        self.bitmap
+            .as_ref()
+            .is_some_and(|b| b.id == self.id && self.error.is_none())
+    }
 }
 
 /// CPU copies of decoded pixels kept for re-insertion (`Bitmap::rgba`).
@@ -327,7 +346,7 @@ impl Images {
             }
             match &b.rgba {
                 Some(rgba) => atlas.insert(b.raster, rgba),
-                None if b.id == st.id && !st.pending && st.error.is_none() => {
+                None if st.restorable() && !st.pending => {
                     st.pending = true;
                     self.requests.push(ImageRequest::Decode {
                         id: st.id,
@@ -343,7 +362,10 @@ impl Images {
     }
 
     /// Drops CPU copies past the budget, least recently drawn first
-    /// (the atlas's use stamps). `keep` stays: it was just decoded.
+    /// (the atlas's use stamps). `keep` stays: it was just decoded. So
+    /// does a copy that could not be decoded again (`restorable`): an
+    /// old `src` up while the new one loads, or pixels of a payload that
+    /// later failed.
     fn trim(&mut self, keep: u32, atlas: &RasterAtlas) {
         let mut held = self.bytes();
         if held <= self.budget {
@@ -353,7 +375,7 @@ impl Images {
         let mut old: Vec<(u32, u32)> = self
             .states
             .iter()
-            .filter(|&(&node, _)| node != keep)
+            .filter(|&(&node, st)| node != keep && st.restorable())
             .filter_map(|(&node, st)| {
                 let b = st.bitmap.as_ref().filter(|b| b.rgba.is_some())?;
                 Some((epoch.wrapping_sub(atlas.entry(b.raster).last_used), node))
@@ -389,7 +411,8 @@ impl Ui {
     }
 
     /// Payloads replaced or removed since the last call: the platform
-    /// drops work it still has queued for them.
+    /// drops work it still has queued for them. The embedder must call
+    /// it (as it calls `take_image_requests`), or the list grows.
     pub fn take_dropped_images(&mut self) -> Vec<ImageId> {
         std::mem::take(&mut self.images.dropped)
     }
@@ -562,6 +585,7 @@ impl Ui {
                 pending: true,
                 error: None,
                 loaded: false,
+                last: None,
                 bitmap,
             },
         );
@@ -580,7 +604,9 @@ impl Ui {
 
     /// Image chunk: the pixels as one quad, fitted to the content box.
     /// Asks for a decode when the drawn size or source rect outgrew the
-    /// pixels; until they arrive, the old pixels draw scaled.
+    /// pixels (a step ahead, while the box grows); until they arrive,
+    /// the old pixels draw scaled. Once the plan holds for a frame,
+    /// pixels at another size are decoded again at the drawn size.
     pub(crate) fn build_image(&mut self, id: NodeId, data: &LayoutData, w: &mut ChunkWriter) {
         let Some(d) = self.host.images.get(&id.0) else {
             return;
@@ -595,19 +621,29 @@ impl Ui {
             (data.rect.size.height - data.insets[1]).max(0.0),
         );
         let max = self.scene.atlas.page_size() - 2;
-        let wanted = st
+        let planned = st
             .natural
-            .filter(|_| !st.pending && st.error.is_none())
+            .filter(|_| st.error.is_none())
             .and_then(|n| plan(d.fit, n, content, self.scale, max));
-        if let Some(p) = wanted {
-            let current = st.bitmap.as_ref().filter(|b| b.id == st.id);
-            if current.is_none_or(|b| b.stale(&p)) {
-                let size = match current {
-                    Some(b) if p.size[0] > b.size[0] || p.size[1] > b.size[1] => {
-                        grown(p.size, p.crop, max)
-                    }
-                    _ => p.size,
-                };
+        let settled = planned.is_some() && planned == st.last;
+        st.last = planned;
+        if let Some(p) = planned.filter(|_| !st.pending) {
+            let size = match st.bitmap.as_ref().filter(|b| b.id == st.id) {
+                None => Some(p.size),
+                Some(b) if b.stale(&p) => Some(if p.size[0] > b.size[0] || p.size[1] > b.size[1] {
+                    grown(p.size, p.crop, max)
+                } else {
+                    p.size
+                }),
+                Some(b) if b.off(&p) && settled => Some(p.size),
+                Some(b) if b.off(&p) => {
+                    // Look again next frame: if the box holds, it settles.
+                    self.host.dirty.content.push(id.0);
+                    None
+                }
+                Some(_) => None,
+            };
+            if let Some(size) = size {
                 st.pending = true;
                 self.images.requests.push(ImageRequest::Decode {
                     id: st.id,
@@ -1175,6 +1211,59 @@ mod tests {
         assert!(events(&mut ui).is_empty(), "loaded once");
     }
 
+    /// An old `src` still up while the new one loads keeps its CPU copy
+    /// past the budget: it cannot be decoded again, so after an
+    /// eviction it comes back from the copy instead of going blank.
+    #[test]
+    fn an_old_src_keeps_its_copy() {
+        let mut ui = two_images(40 * 40 * 4);
+        show(&mut ui, 1);
+        serve(&mut ui, [100, 100]);
+        let old = shown(&ui, 1);
+        payload(&mut ui, 1, b"1b");
+        show(&mut ui, 2);
+        serve(&mut ui, [100, 100]);
+        assert_eq!(shown(&ui, 1), old);
+        assert!(!ui.scene.atlas.entry(raster(&ui, 1)).resident, "evicted");
+        assert_eq!(ui.image_bytes(), 2 * 40 * 40 * 4, "over the budget");
+        show(&mut ui, 1);
+        ui.render(Size::new(200.0, 200.0));
+        assert_eq!(shown(&ui, 1), old);
+        assert!(ui.scene.atlas.entry(raster(&ui, 1)).resident, "re-inserted");
+    }
+
+    /// A box that grows decodes a step ahead while it moves, then once
+    /// more at its drawn size when it holds.
+    #[test]
+    fn a_resize_settles_at_the_drawn_size() {
+        let mut ui = image_ui(Fit::Fill);
+        serve(&mut ui, [1000, 1000]);
+        let frame = |ui: &mut Ui| -> Vec<[u32; 2]> {
+            ui.render(Size::new(200.0, 200.0));
+            let reqs = ui.take_image_requests();
+            for r in &reqs {
+                ui.image_result(answer(r, [1000, 1000]));
+            }
+            reqs.iter()
+                .map(|r| match *r {
+                    ImageRequest::Decode { width, height, .. } => [width, height],
+                    ImageRequest::Probe { .. } => panic!("{r:?}"),
+                })
+                .collect()
+        };
+        // 80 px, then 84 and 88 (x1.1 over two frames), then held.
+        relayout(&mut ui, 1, &sized(42.0, 42.0));
+        assert_eq!(frame(&mut ui), [[105, 105]]);
+        relayout(&mut ui, 1, &sized(44.0, 44.0));
+        assert!(frame(&mut ui).is_empty());
+        assert_eq!(frame(&mut ui), [[88, 88]]);
+        for _ in 0..3 {
+            assert!(frame(&mut ui).is_empty());
+        }
+        assert!(!ui.needs_paint());
+        assert_eq!(ui.images.states[&1].bitmap.as_ref().unwrap().size, [88, 88]);
+    }
+
     /// The decode size is in device pixels: a scale change asks again.
     #[test]
     fn a_scale_change_redecodes() {
@@ -1240,6 +1329,42 @@ mod tests {
         let p = plan_of(Fit::Fill, [100, 100], 100_000.0, 10.0, 1.0);
         assert_eq!(p.quad, [65535, 6]);
         assert_eq!(p.dest.size, Size::new(65535.0, 6.0));
+    }
+
+    /// The snap is node-relative, and the node's chunk origin snaps in
+    /// world space: at 1.25x, a letterboxed image at x = 11 pt (13.75
+    /// device px) still starts on a device pixel.
+    #[test]
+    fn the_quad_lands_on_device_pixels_at_fractional_scales() {
+        for scale in [1.25, 1.5] {
+            let mut ui = Ui::new(scale);
+            let inset = |v: f32| taffy::LengthPercentage::length(v);
+            let parent = taffy::Style {
+                padding: taffy::Rect {
+                    left: inset(11.0),
+                    top: inset(7.3),
+                    right: inset(0.0),
+                    bottom: inset(0.0),
+                },
+                ..Default::default()
+            };
+            let mut t = Transaction::new(1);
+            t.create(2, NodeKind::View)
+                .layout(2, &parent)
+                .create(1, NodeKind::Image)
+                .layout(1, &sized(10.0, 10.0))
+                .payload(1, &b"x"[..])
+                .image_config(1, Fit::Contain)
+                .place(NIL, 2, NIL)
+                .place(2, 1, NIL);
+            ui.apply_txn(&t).unwrap();
+            serve(&mut ui, [3, 2]);
+            let r = ui.scene.chunk_world_bounds(1);
+            assert!(r.origin.x > 11.0 * scale - 1.0, "inset: {r:?}");
+            assert!(r.size.height < 10.0 * scale, "letterboxed: {r:?}");
+            assert_eq!(r.origin.x, r.origin.x.round(), "{scale}: {r:?}");
+            assert_eq!(r.origin.y, r.origin.y.round(), "{scale}: {r:?}");
+        }
     }
 
     /// Bad input rejects the transaction; undecodable bytes do not (they
