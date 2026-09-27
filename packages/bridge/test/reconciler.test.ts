@@ -945,8 +945,62 @@ test("image URLs are fetched once per change; failures reach onError", async () 
   t.frames.length = 0
   root.renderSync(createElement(App, { src: "/nonexistent/craie-image.png" }))
   await settle()
-  // The old bytes stay; nothing is sent.
-  expect(t.frames.flatMap(f => readFrame(f).ops).some(o => o.tag === 0x71)).toBe(false)
+  // The old image must not stand in for the new src: empty bytes clear it.
+  const sent = t.frames.flatMap(f => readFrame(f).ops).filter(o => o.tag === 0x71)
+  expect(sent.map(o => o.bytes!.length)).toEqual([0])
   expect(errors.length).toBe(1)
   expect(errors[0]).toContain("ENOENT")
+})
+
+test("image URLs A, B, then A again send A's bytes again", async () => {
+  const t = new FakeTransport()
+  const root = createRoot(t)
+  const settle = async () => { for (let i = 0; i < 20; i++) await tick() }
+  const a = "data:application/octet-stream;base64,AQID"
+  const b = "data:application/octet-stream;base64,BAU="
+  const App = ({ src }: { src: string }) => createElement(Image, { src })
+  for (const src of [a, b, a]) {
+    root.renderSync(createElement(App, { src }))
+    await settle()
+  }
+  const payloads = t.frames.flatMap(f => readFrame(f).ops).filter(o => o.tag === 0x71)
+  expect(payloads.map(o => [...o.bytes!])).toEqual([[1, 2, 3], [4, 5], [1, 2, 3]])
+})
+
+test("unmounting an image cancels its fetch, without onError", async () => {
+  const t = new FakeTransport()
+  const root = createRoot(t)
+  const errors: string[] = []
+  const signals: AbortSignal[] = []
+  const real = globalThis.fetch
+  globalThis.fetch = ((_: unknown, init?: RequestInit) => new Promise((_, reject) => {
+    const signal = init!.signal!
+    signals.push(signal)
+    signal.addEventListener("abort", () => reject(signal.reason))
+  })) as typeof fetch
+  try {
+    function App({ show }: { show: boolean }) {
+      return createElement(View, {}, show
+        ? createElement(Image, { src: "https://example.com/a.png", onError: e => errors.push(e.message) })
+        : null)
+    }
+    root.renderSync(createElement(App, { show: true }))
+    for (let i = 0; i < 5; i++) await tick()
+    expect(signals.length).toBe(1)
+    expect(signals[0]!.aborted).toBe(false)
+    root.renderSync(createElement(App, { show: false }))
+    for (let i = 0; i < 5; i++) await tick()
+    expect(signals[0]!.aborted).toBe(true)
+    expect(errors).toEqual([])
+  } finally {
+    globalThis.fetch = real
+  }
+})
+
+test("alt=\"\" marks an image decorative", async () => {
+  const t = new FakeTransport()
+  const root = createRoot(t)
+  root.renderSync(createElement(Image, { src: new Uint8Array([1]), alt: "" }))
+  await tick()
+  expect(t.ops(0).some(o => o.tag === 0x50 || o.tag === 0x51)).toBe(false)
 })

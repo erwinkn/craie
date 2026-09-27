@@ -1,7 +1,8 @@
 //! Image decoding cost (work item 8): a 12-megapixel photo shown small.
 //! A synthetic 4,000 x 3,000 photo (smooth gradients plus grain, so it
-//! compresses like one), as JPEG (quality 85) and PNG, through the
-//! platform decoder (`images::run`, the worker's body):
+//! compresses like one), as JPEG (quality 85) and PNG, then as PNGs the
+//! decoder converts (RGBA, gray, 16-bit RGB), through the platform
+//! decoder (`images::run`, the worker's body):
 //!
 //! - probe: the header, for the natural size;
 //! - decode only: the full image to pixels (`image::load_from_memory`);
@@ -19,7 +20,7 @@ use std::time::Instant;
 use craie_platform_winit::images;
 use craie_ui::image::{ImageId, ImageRequest, ImageResult};
 use image::codecs::jpeg::JpegEncoder;
-use image::{ImageFormat, RgbImage};
+use image::{DynamicImage, ImageFormat, RgbImage};
 
 const RUNS: usize = 7;
 const W: u32 = 4000;
@@ -83,13 +84,31 @@ fn main() {
         .unwrap();
     let full = (W * H * 4) as usize;
     println!("{W} x {H} photo; a full RGBA texture would hold {full} bytes");
-    for (name, bytes) in [("JPEG q85", &jpeg), ("PNG", &png)] {
+    let as_png = |img: DynamicImage| {
+        let mut png = Vec::new();
+        img.write_to(&mut Cursor::new(&mut png), ImageFormat::Png)
+            .unwrap();
+        png
+    };
+    let rgb = DynamicImage::ImageRgb8(img);
+    let rgba = as_png(DynamicImage::ImageRgba8(rgb.to_rgba8()));
+    let gray = as_png(DynamicImage::ImageLuma8(rgb.to_luma8()));
+    let rgb16 = as_png(DynamicImage::ImageRgb16(rgb.to_rgb16()));
+    for (name, bytes) in [
+        ("JPEG q85", &jpeg),
+        ("PNG", &png),
+        ("PNG RGBA", &rgba),
+        ("PNG gray", &gray),
+        ("PNG RGB 16-bit", &rgb16),
+    ] {
+        // Built once: the request holds its own copy of the bytes.
+        let req = ImageRequest::Probe {
+            id: ImageId(1),
+            bytes: bytes.as_slice().into(),
+        };
         let probe = median(|| {
             let t = Instant::now();
-            let r = images::run(&ImageRequest::Probe {
-                id: ImageId(1),
-                bytes: bytes.as_slice().into(),
-            });
+            let r = images::run(&req);
             assert!(matches!(r, ImageResult::Size { .. }));
             ms(t)
         });

@@ -416,16 +416,20 @@ export interface ImageProps extends ListenerProps {
   borderColor?: string | number
   borderWidth?: number
   /** The encoded image (PNG, JPEG, WebP, GIF's first frame): a URL
-   * (http, https, data, file) or a path, fetched once per change, or the
-   * bytes (identity compare). */
+   * (http, https, data, blob, file) or a path, fetched once per change,
+   * or the bytes, compared by identity (a new `Uint8Array` each render is
+   * sent each time). A relative path resolves against the process's
+   * working directory (`process.cwd()`), not the module. */
   src: string | Uint8Array
   /** How the image fills the content box (default cover). */
   fit?: ImageFit
-  /** The accessible name. */
+  /** The accessible name. `alt=""` marks the image decorative: assistive
+   * technology skips it. */
   alt?: string
-  /** Decoded: the natural size in pixels. */
+  /** Decoded: the natural size in pixels. Fires again when the same
+   * bytes are sent again. */
   onLoad?: (e: ImageLoadEvt) => void
-  /** The fetch or the decode failed. */
+  /** The fetch (30 s at most) or the decode failed. The image clears. */
   onError?: (e: ImageErrorEvt) => void
   accessibilityRole?: AccessibilityRole
   hidden?: boolean
@@ -453,19 +457,33 @@ export function Image({ src, fit, alt, ref, ...props }: ImageProps) {
   }, [ref])
   useEffect(() => {
     if (typeof src !== "string") return
+    // Unmounting or a newer `src` cancels the fetch, without an error.
+    const abort = new AbortController()
+    const timer = setTimeout(
+      () => abort.abort(Error(`timed out after ${IMAGE_TIMEOUT / 1000} s (${src})`)),
+      IMAGE_TIMEOUT,
+    )
     let live = true
-    loadImage(src).then(
+    loadImage(src, abort.signal).then(
       (bytes) => live && setFetched(bytes),
       (e: unknown) => {
+        if (!live) return
+        // Empty bytes clear the image: the old `src`'s must not stay.
+        setFetched(new Uint8Array(0))
+        const err = abort.signal.aborted ? abort.signal.reason : e
         const target = node.current
-        if (live && target) onError.current?.({ target, message: String((e as Error)?.message ?? e) })
+        if (target) onError.current?.({ target, message: String((err as Error)?.message ?? err) })
       },
-    )
-    return () => { live = false }
+    ).finally(() => clearTimeout(timer))
+    return () => {
+      live = false
+      clearTimeout(timer)
+      abort.abort()
+    }
   }, [src])
   return createElement("image", {
-    accessibilityRole: "image",
-    accessibilityLabel: alt,
+    accessibilityRole: alt === "" ? undefined : "image",
+    accessibilityLabel: alt || undefined,
     ...props,
     ref: setRef,
     bytes: typeof src === "string" ? fetched : src,
@@ -473,16 +491,19 @@ export function Image({ src, fit, alt, ref, ...props }: ImageProps) {
   })
 }
 
+/** How long an image URL may take to load (ms). */
+const IMAGE_TIMEOUT = 30_000
+
 /** The bytes of an image URL: http(s), data, and blob URLs by `fetch`;
  * file URLs and paths from disk. */
-async function loadImage(src: string): Promise<Uint8Array> {
+async function loadImage(src: string, signal: AbortSignal): Promise<Uint8Array> {
   if (/^(https?|data|blob):/i.test(src)) {
-    const res = await fetch(src)
+    const res = await fetch(src, { signal })
     if (!res.ok) throw Error(`${res.status} ${res.statusText} (${src})`)
     return new Uint8Array(await res.arrayBuffer())
   }
   const { readFile } = await import("node:fs/promises")
-  return new Uint8Array(await readFile(src.startsWith("file:") ? new URL(src) : src))
+  return new Uint8Array(await readFile(src.startsWith("file:") ? new URL(src) : src, { signal }))
 }
 
 /** Bar chart surface (`SURFACE.bars`). */

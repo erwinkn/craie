@@ -70,7 +70,7 @@ fn run_counted(session: Arc<Session>, logical: Size, scale: f32, frames: &Atomic
         *signal.0.lock().unwrap() = true;
         signal.1.notify_one();
     };
-    let images = crate::images::Decoder::new(wake.clone());
+    let mut images = crate::images::Decoder::new(wake.clone());
     session.install_wake(Arc::new(wake));
 
     let mut stats = FrameStats::new();

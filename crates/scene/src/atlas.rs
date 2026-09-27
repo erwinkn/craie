@@ -453,20 +453,38 @@ fn blit(page: &mut Page, page_size: u32, bpp: u32, x: u16, y: u16, w: u32, h: u3
     let row = (w * bpp) as usize;
     let (x, y) = (x as usize, y as usize);
     let b = bpp as usize;
+    let g = GUTTER as usize;
+    // The gutter is written on every insert: a reused slot may hold an
+    // evicted bitmap's pixels, and quads sample up to one pixel out. A
+    // mask's gutter is empty; a color raster's repeats its edge pixels,
+    // so a bitmap filling its quad keeps its full color to the edge (a
+    // clear gutter would fade the outer half pixel).
+    let color = bpp == 4;
     for r in 0..h as usize {
         let dst = (y + r) * stride + x * b;
         page.data[dst..dst + row].copy_from_slice(&src[r * row..r * row + row]);
-        // The gutter columns, cleared: a reused slot may hold an evicted
-        // bitmap's pixels, and glyph quads sample one gutter pixel out.
-        let left = dst - GUTTER as usize * b;
-        page.data[left..dst].fill(0);
-        page.data[dst + row..dst + row + GUTTER as usize * b].fill(0);
+        let (first, last) = (dst, dst + row - b);
+        for k in 1..=g {
+            if color {
+                page.data.copy_within(first..first + b, dst - k * b);
+                page.data.copy_within(last..last + b, last + k * b);
+            } else {
+                page.data[dst - k * b..dst - k * b + b].fill(0);
+                page.data[last + k * b..last + k * b + b].fill(0);
+            }
+        }
     }
-    let g = GUTTER as usize;
     let full = (w as usize + 2 * g) * b;
-    for gy in (y - g..y).chain(y + h as usize..y + h as usize + g) {
-        let at = gy * stride + (x - g) * b;
-        page.data[at..at + full].fill(0);
+    let line = |gy: usize| gy * stride + (x - g) * b;
+    for k in 1..=g {
+        for (gy, edge) in [(y - k, y), (y + h as usize - 1 + k, y + h as usize - 1)] {
+            let at = line(gy);
+            if color {
+                page.data.copy_within(line(edge)..line(edge) + full, at);
+            } else {
+                page.data[at..at + full].fill(0);
+            }
+        }
     }
     let rect = RectPx::new(
         (x - g) as u32,
@@ -511,6 +529,38 @@ mod tests {
             assert_eq!(px(x - 1 + k, y + 8), 0, "bottom gutter");
         }
         assert_eq!(px(x, y), 128);
+    }
+
+    /// A color raster's gutter repeats its edge pixels, corners included,
+    /// over whatever the slot held.
+    #[test]
+    fn color_gutters_repeat_the_edges() {
+        let mut atlas = RasterAtlas::with_budget(64, 0, 1);
+        let big = atlas.new_id(62, 62, true);
+        atlas.insert(big, &[255u8; 62 * 62 * 4]);
+        atlas.begin_epoch();
+        // 2 x 2: red, green / blue, white.
+        let px = [
+            [255, 0, 0, 255],
+            [0, 255, 0, 255],
+            [0, 0, 255, 255],
+            [255; 4],
+        ];
+        let small = atlas.new_id(2, 2, true);
+        atlas.insert(small, px.as_flattened());
+        let e = atlas.entry(small);
+        let (x, y) = (e.x as usize, e.y as usize);
+        let (data, _) = atlas.page_bytes(true, 0);
+        let at =
+            |x: usize, y: usize| -> [u8; 4] { data[(y * 64 + x) * 4..][..4].try_into().unwrap() };
+        let rows: Vec<Vec<[u8; 4]>> = (y - 1..y + 3)
+            .map(|y| (x - 1..x + 3).map(|x| at(x, y)).collect())
+            .collect();
+        let [r, g, b, w] = px;
+        assert_eq!(
+            rows,
+            [[r, r, g, g], [r, r, g, g], [b, b, w, w], [b, b, w, w]].map(Vec::from)
+        );
     }
 
     fn fill(atlas: &mut RasterAtlas, n: usize) -> Vec<RasterId> {

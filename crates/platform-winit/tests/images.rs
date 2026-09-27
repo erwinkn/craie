@@ -156,8 +156,10 @@ fn draw(gpu: &Gpu, r: &mut Renderer, ui: &mut Ui) -> Vec<[u8; 4]> {
     out
 }
 
-/// The sampled texel at the center of each stripe is exact; edges
-/// blend (linear filtering), so only centers are checked.
+/// Each stripe's color is exact at its center and along the box's
+/// edges: the atlas gutter repeats the bitmap's edge pixels, so the
+/// linear filter never mixes in black. Inside, stripes blend where they
+/// meet.
 #[test]
 fn each_fit_draws_its_part_of_the_image() {
     let Some(gpu) = Gpu::try_headless() else {
@@ -170,9 +172,11 @@ fn each_fit_draws_its_part_of_the_image() {
     let img = draw(&gpu, &mut r, &mut ui);
     let at = |x: u32, y: u32| img[(y * W + x) as usize];
 
-    // Cover: the middle 20 x 20 of the image (green, blue) fills the box.
-    for y in [2, 20, 37] {
-        assert_eq!((at(5, y), at(34, y)), (GREEN, BLUE), "cover row {y}");
+    // Cover: the middle 20 x 20 of the image (green, blue) fills the box,
+    // edges and corners included.
+    for y in [0, 2, 20, 37, 39] {
+        assert_eq!((at(0, y), at(5, y)), (GREEN, GREEN), "cover row {y}");
+        assert_eq!((at(34, y), at(39, y)), (BLUE, BLUE), "cover row {y}");
     }
     // Contain: the whole image, letterboxed to rows 10 to 30.
     let x0 = 50;
@@ -183,10 +187,11 @@ fn each_fit_draws_its_part_of_the_image() {
     // Fill: the whole image stretched to the box.
     let x0 = 100;
     for (k, c) in [RED, GREEN, BLUE, WHITE].into_iter().enumerate() {
-        for y in [2, 37] {
+        for y in [0, 2, 37, 39] {
             assert_eq!(at(x0 + 5 + 10 * k as u32, y), c, "fill stripe {k} row {y}");
         }
     }
+    assert_eq!((at(x0, 0), at(x0 + 39, 39)), (RED, WHITE), "fill corners");
     // Between the boxes: nothing.
     assert_eq!(at(45, 20), CLEAR);
 
@@ -256,4 +261,52 @@ fn a_rounded_parent_clips_an_image() {
         (at(1, 1), at(38, 1), at(1, 38), at(38, 38)),
         (CLEAR, CLEAR, CLEAR, CLEAR)
     );
+}
+
+/// A red square, its outer ring transparent black (a common export),
+/// stretched 4x on white. The ring's color never shows: the decoder
+/// gives transparent pixels their neighbours' color, so the filtered
+/// edge fades from red to white with no darker pixel between.
+#[test]
+fn transparent_edges_have_no_dark_rim() {
+    let Some(gpu) = Gpu::try_headless() else {
+        eprintln!("no GPU adapter: skipped");
+        return;
+    };
+    let mut r = Renderer::new(&gpu, FORMAT);
+    let mut ui = Ui::new(1.0);
+    ui.clear = 0xFFFF_FFFF;
+    let rgba: Vec<u8> = (0..10)
+        .flat_map(|y| (0..10).map(move |x| (x, y)))
+        .flat_map(|(x, y)| {
+            let ring = x == 0 || y == 0 || x == 9 || y == 9;
+            if ring { [0; 4] } else { RED }
+        })
+        .collect();
+    let png = craie_platform_winit::capture::encode_png(10, 10, &rgba);
+    let side = taffy::Dimension::length(40.0);
+    let style = taffy::Style {
+        size: taffy::Size {
+            width: side,
+            height: side,
+        },
+        ..Default::default()
+    };
+    let mut t = Transaction::new(1);
+    t.create(1, NodeKind::Image)
+        .layout(1, &style)
+        .payload(1, png)
+        .image_config(1, Fit::Fill)
+        .place(NIL, 1, NIL);
+    ui.apply_txn(&t).unwrap();
+    settle(&mut ui);
+    let img = draw(&gpu, &mut r, &mut ui);
+    let at = |x: u32, y: u32| img[(y * W + x) as usize];
+    assert_eq!((at(0, 20), at(20, 20)), (WHITE, RED));
+    // Along a row across the left edge: green and blue stay equal (a
+    // mix of red and white, never of black), and red never dims.
+    for x in 0..12 {
+        let [r, g, b, _] = at(x, 20);
+        assert!(r == 255 && g == b, "x {x}: {:?}", at(x, 20));
+    }
 }

@@ -684,7 +684,7 @@ container:
 **Current.** As targeted, except `ImageInstance` and group opacity by
 multiply-through (only isolated layers exist). An image draws as a
 color glyph: one `GlyphInstance` quad of its node's raster, sized to
-the fitted rect (work item 8). One chunk per node (id =
+the fitted rect, its origin on a device pixel (work item 8). One chunk per node (id =
 node id) in `RectInstance` (40 B) and `GlyphInstance` (20 B) pools, a
 paint pool, and path mesh pools (`PathVertex`, 16 B: chunk-local
 position, paint, chunk; and triangle indices), with up to four
@@ -851,10 +851,17 @@ guard.
 Image nodes own color rasters (work item 8): a raster per decoded
 bitmap, at the decode size, its quad set to the drawn size each chunk
 build (`set_quad`), so a bitmap draws scaled until a better one lands.
-The core keeps each bitmap's pixels and re-inserts an evicted one when
-a visible chunk misses it, as text re-rasterizes glyphs. `release`
-frees a raster's area and recycles its id when the node's image
-changes or goes; glyph rasters are never released.
+The core keeps each bitmap's pixels, up to 64 MB for all images (least
+recently drawn dropped first), and re-inserts an evicted one when a
+visible chunk misses it, as text re-rasterizes glyphs; one whose copy
+was dropped decodes again. `release` frees a raster's area and
+recycles its id when the node's image changes or goes; glyph rasters
+are never released. A color raster's 1 px gutter repeats its edge
+pixels (a mask's is empty), so a magnified bitmap keeps its full color
+to the edge under linear filtering. Rasters stay straight alpha, as
+the shader expects: the decoder averages premultiplied and gives
+transparent pixels their neighbours' color, so filtering shows no dark
+rim. Large images share the atlas's pages (DF-36).
 
 **Target.** Stable `RasterId` with separate residency (atlas, rect,
 generation). Drawing records reference the id, never baked atlas
@@ -1135,7 +1142,12 @@ requests (`Ui::take_image_requests`: probe a header, decode a source
 rect at a pixel size) with the `image` crate (PNG, JPEG, WebP, GIF's
 first frame; EXIF orientation applied) and wakes the loop; results go
 back through `Ui::image_result` after commits, and new requests go out
-after each prepared frame. `craie_ui::platform` holds the contract: `WindowId`
+after each prepared frame. Probes run before decodes, a newer decode
+of an image replaces its queued one, and queued work for images the
+core dropped goes (`Ui::take_dropped_images`). Decoding is bounded:
+over 64 megapixels fails at the header, and the decoder's buffers are
+reserved against 512 MiB before it allocates. A codec panic fails its
+image; a worker that dies anyway is replaced. `craie_ui::platform` holds the contract: `WindowId`
 and `PlatformWindow` (surface size, scale, frame request, text input);
 the clipboard seam is `craie_ui::clipboard::Clipboard`. One window.
 

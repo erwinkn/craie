@@ -737,24 +737,35 @@ choices:
   the pixel size (the drawn size at the display scale, never above the
   source, at most a page). A probe first reads the header for the
   natural size, which is the intrinsic size (a pixel per point, like a
-  Vector's view box). A box that grows asks for a new decode; one that
-  shrinks keeps its bitmap down to half the size (DF-34).
+  Vector's view box). A box that grows asks for 1.25 times the size it
+  needs, so a steady resize redecodes every 25 %; one that shrinks keeps
+  its bitmap down to half the size, and a cover crop within 2 device px
+  keeps it too (DF-34, DF-37). A new `src` keeps the old image and its
+  natural size until the new pixels or failure (DF-38).
 - The platform decodes on one worker thread (`image` crate: PNG, JPEG,
   WebP, GIF's first frame; EXIF orientation applied) and averages the
-  crop down. The core keeps the pixels and puts them in the color atlas
-  as a raster; the quad is a color glyph, so images need no new
-  instance type or shader. An evicted image re-inserts from the core's
-  copy.
+  crop down, premultiplied. It rejects images over 64 megapixels at the
+  header and reserves its buffers against 512 MiB before decoding (a
+  250 KB PNG can claim 16,000 x 16,000). Probes jump the queue, queued
+  work for dropped images goes, and a codec panic fails only its image.
+  The core keeps the pixels (64 MB for all images, then decode again)
+  and puts them in the color atlas as a raster; the quad is a color
+  glyph, so images need no new instance type or shader. The gutter
+  repeats a color raster's edge pixels, so magnified edges keep their
+  color. No color management yet (DF-35).
 - The facade fetches URLs (http, https, data, blob, file, paths) once
   per `src`, or takes a `Uint8Array`, and keeps the old image until the
-  new one arrives. Kit gaps (numeric `src`, SVG data URLs, placeholder
-  and fallback, own-radius clipping) are DF-31 and DF-32; images are not
-  shared across nodes (DF-30).
+  new one arrives. A failed or timed-out (30 s) fetch clears the image
+  and fires `onError`; unmounting aborts the fetch. `alt=""` is
+  decorative: no role, no label. Kit gaps (numeric `src`, SVG data URLs,
+  ICO, placeholder and fallback, own-radius clipping) are DF-31 and
+  DF-32; images are not shared across nodes (DF-30).
 - Cost (exe1, loaded; `cargo run --release -p craie-platform-winit
-  --example images`): a 4,000 x 3,000 JPEG (1.9 MB) probes in 0.1 ms and
-  decodes to an 80 x 80 cover in 63 ms (50 ms of it the full decode),
-  for 25.6 KB of texture instead of 48 MB; the same photo as PNG takes
-  97 ms. One worker serializes decodes (DF-33).
+  --example images`): a 4,000 x 3,000 JPEG (1.9 MB) probes in 0.06 ms
+  and decodes to an 80 x 80 cover in 60 to 80 ms (most of it the full
+  decode), for 25.6 KB of texture instead of 48 MB; the same photo as
+  PNG takes about 120 ms, as 16-bit PNG about 220 ms. One worker
+  serializes decodes (DF-33).
 
 ## 11. Inline content and editing
 

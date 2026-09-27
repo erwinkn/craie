@@ -119,8 +119,8 @@ pub mod image_event {
 }
 
 /// What a node shows of its image: the source rect, the drawn rect
-/// (content-box coordinates, logical) and its size in device pixels,
-/// and the pixel size to decode to.
+/// (content-box coordinates, logical, its origin on a device pixel) and
+/// its size in device pixels, and the pixel size to decode to.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Plan {
     pub crop: [u32; 4],
@@ -160,8 +160,25 @@ pub fn plan(fit: Fit, natural: [u32; 2], content: Rect, scale: f32, max: u32) ->
             )
         }
     };
+    // The drawn rect starts on a device pixel, so a bitmap decoded at
+    // its drawn size maps texel to pixel (no blur from a half-pixel
+    // letterbox offset).
+    let snap = |v: f32| (v * scale).round() / scale;
+    let mut dest = Rect::new(
+        snap(dest.origin.x),
+        snap(dest.origin.y),
+        dest.size.width,
+        dest.size.height,
+    );
     let px = |v: f32| (v * scale).round().max(1.0);
-    let (qw, qh) = (px(dest.size.width), px(dest.size.height));
+    let (mut qw, mut qh) = (px(dest.size.width), px(dest.size.height));
+    // A quad side is a u16 of device pixels: a larger box draws its
+    // image at the largest size that fits, aspect kept.
+    let over = qw.max(qh) / u16::MAX as f32;
+    if over > 1.0 {
+        (qw, qh) = ((qw / over).floor().max(1.0), (qh / over).floor().max(1.0));
+        dest.size = craie_core::geom::Size::new(qw / scale, qh / scale);
+    }
     let mut size = [(qw as u32).min(crop[2]), (qh as u32).min(crop[3])];
     let over = size[0].max(size[1]);
     if over > max {
@@ -170,29 +187,59 @@ pub fn plan(fit: Fit, natural: [u32; 2], content: Rect, scale: f32, max: u32) ->
     Some(Plan {
         crop,
         dest,
-        quad: [
-            qw.min(u16::MAX as f32) as u16,
-            qh.min(u16::MAX as f32) as u16,
-        ],
+        quad: [qw as u16, qh as u16],
         size,
     })
 }
 
-/// Decoded pixels of one node and their raster.
+/// A request that grows a bitmap, rounded up a step (x1.25) so a box
+/// that keeps growing (a window drag) decodes every few frames, not
+/// every frame; capped by the source rect and a page.
+fn grown(size: [u32; 2], crop: [u32; 4], max: u32) -> [u32; 2] {
+    let [w, h] = size.map(|v| v as f32);
+    let k = 1.25f32
+        .min(crop[2] as f32 / w)
+        .min(crop[3] as f32 / h)
+        .min(max as f32 / w.max(h));
+    if k <= 1.0 {
+        return size;
+    }
+    [
+        ((w * k) as u32).max(size[0]).min(crop[2]),
+        ((h * k) as u32).max(size[1]).min(crop[3]),
+    ]
+}
+
+/// Decoded pixels on screen and their raster.
 struct Bitmap {
+    /// The payload they came from: the node's current one, or, until
+    /// that one loads or fails, the one before (a new `src` keeps the
+    /// old image up).
+    id: ImageId,
+    natural: [u32; 2],
     crop: [u32; 4],
     size: [u32; 2],
-    rgba: Vec<u8>,
+    /// The CPU copy, to re-insert after an atlas eviction. Dropped past
+    /// the memory budget, least recently drawn first; an eviction then
+    /// decodes again.
+    rgba: Option<Vec<u8>>,
     raster: RasterId,
 }
 
 impl Bitmap {
-    /// Whether `p` wants other pixels: another source rect, a larger
-    /// size, or less than half the size on a side (hysteresis: a box
-    /// that shrinks a little keeps its pixels, drawn scaled down).
+    /// Whether `p` wants other pixels: a larger size, less than half
+    /// the size on a side (hysteresis: a box that shrinks a little keeps
+    /// its pixels, drawn scaled down), or a source rect whose edges moved
+    /// more than 2 drawn pixels (a cover box that changes aspect).
     fn stale(&self, p: &Plan) -> bool {
         let [w, h] = self.size;
-        self.crop != p.crop
+        let edges = |c: [u32; 4]| [c[0], c[0] + c[2], c[1], c[1] + c[3]].map(|v| v as f32);
+        let (a, b) = (edges(self.crop), edges(p.crop));
+        let per = [
+            p.quad[0] as f32 / p.crop[2] as f32,
+            p.quad[1] as f32 / p.crop[3] as f32,
+        ];
+        (0..4).any(|i| (a[i] - b[i]).abs() * per[i / 2] > 2.0)
             || p.size[0] > w
             || p.size[1] > h
             || p.size[0] * 2 < w
@@ -202,18 +249,25 @@ impl Bitmap {
 
 /// Decode state of one image node.
 struct State {
+    /// The current payload.
     id: ImageId,
-    /// A request for this image is with the platform: at most one at a
-    /// time, so a resizing box does not queue a decode per frame.
+    bytes: Arc<[u8]>,
+    /// The current payload's natural size, once probed.
+    natural: Option<[u32; 2]>,
+    /// A request for this payload is with the platform: at most one at
+    /// a time, so a resizing box does not queue a decode per frame.
     pending: bool,
-    failed: bool,
+    /// Why the current payload failed. Nothing more is asked for it.
+    error: Option<String>,
     /// The load event went out.
     loaded: bool,
     bitmap: Option<Bitmap>,
 }
 
+/// CPU copies of decoded pixels kept for re-insertion (`Bitmap::rgba`).
+const BUDGET: usize = 64 << 20;
+
 /// Image nodes' decode state and the platform's work queue.
-#[derive(Default)]
 pub(crate) struct Images {
     next: u64,
     /// Each live image's node.
@@ -221,39 +275,109 @@ pub(crate) struct Images {
     /// By node id.
     states: HashMap<u32, State>,
     requests: Vec<ImageRequest>,
+    /// Payloads replaced or removed since the platform last asked: work
+    /// it queued for them is moot.
+    dropped: Vec<ImageId>,
+    /// Bytes of CPU copies to keep (`BUDGET`; tests set less).
+    pub(crate) budget: usize,
+}
+
+impl Default for Images {
+    fn default() -> Images {
+        Images {
+            next: 0,
+            nodes: HashMap::new(),
+            states: HashMap::new(),
+            requests: Vec::new(),
+            dropped: Vec::new(),
+            budget: BUDGET,
+        }
+    }
 }
 
 impl Images {
+    /// Retires a payload: its queued requests go, and results for it
+    /// are dropped from now on.
+    fn retire(&mut self, id: ImageId) {
+        self.nodes.remove(&id);
+        self.requests.retain(|r| r.id() != id);
+        self.dropped.push(id);
+    }
+
     /// Drops a node's image: its raster, queued requests, and the
     /// mapping that routes results to it (late results are dropped).
     pub(crate) fn forget(&mut self, node: u32, atlas: &mut RasterAtlas) {
         let Some(st) = self.states.remove(&node) else {
             return;
         };
-        self.nodes.remove(&st.id);
-        self.requests.retain(|r| r.id() != st.id);
+        self.retire(st.id);
         if let Some(b) = st.bitmap {
             atlas.release(b.raster);
         }
     }
 
-    /// Re-inserts the pixels of evicted image rasters that a visible
-    /// chunk draws (`missing` sorted by id).
-    pub(crate) fn ensure_resident(&self, missing: &[RasterId], atlas: &mut RasterAtlas) {
-        for b in self.states.values().filter_map(|s| s.bitmap.as_ref()) {
-            if missing.binary_search_by_key(&b.raster.0, |r| r.0).is_ok() {
-                atlas.insert(b.raster, &b.rgba);
+    /// Re-inserts evicted image rasters that a visible chunk draws
+    /// (`missing` sorted by id) from their CPU copy, or, when the budget
+    /// dropped it, asks for the same pixels again.
+    pub(crate) fn ensure_resident(&mut self, missing: &[RasterId], atlas: &mut RasterAtlas) {
+        for st in self.states.values_mut() {
+            let Some(b) = &st.bitmap else { continue };
+            if missing.binary_search_by_key(&b.raster.0, |r| r.0).is_err() {
+                continue;
+            }
+            match &b.rgba {
+                Some(rgba) => atlas.insert(b.raster, rgba),
+                None if b.id == st.id && !st.pending && st.error.is_none() => {
+                    st.pending = true;
+                    self.requests.push(ImageRequest::Decode {
+                        id: st.id,
+                        bytes: st.bytes.clone(),
+                        crop: b.crop,
+                        width: b.size[0],
+                        height: b.size[1],
+                    });
+                }
+                None => {}
             }
         }
     }
 
-    /// Texture bytes held by image rasters (CPU copies; the atlas holds
-    /// as many while resident).
+    /// Drops CPU copies past the budget, least recently drawn first
+    /// (the atlas's use stamps). `keep` stays: it was just decoded.
+    fn trim(&mut self, keep: u32, atlas: &RasterAtlas) {
+        let mut held = self.bytes();
+        if held <= self.budget {
+            return;
+        }
+        let epoch = atlas.epoch();
+        let mut old: Vec<(u32, u32)> = self
+            .states
+            .iter()
+            .filter(|&(&node, _)| node != keep)
+            .filter_map(|(&node, st)| {
+                let b = st.bitmap.as_ref().filter(|b| b.rgba.is_some())?;
+                Some((epoch.wrapping_sub(atlas.entry(b.raster).last_used), node))
+            })
+            .collect();
+        old.sort_unstable_by(|a, b| b.cmp(a));
+        for (_, node) in old {
+            if held <= self.budget {
+                break;
+            }
+            let b = self.states.get_mut(&node).and_then(|s| s.bitmap.as_mut());
+            if let Some(rgba) = b.and_then(|b| b.rgba.take()) {
+                held -= rgba.len();
+            }
+        }
+    }
+
+    /// Bytes of CPU copies held (the atlas holds its own while
+    /// resident).
     pub(crate) fn bytes(&self) -> usize {
         self.states
             .values()
-            .filter_map(|s| s.bitmap.as_ref())
-            .map(|b| b.rgba.len())
+            .filter_map(|s| s.bitmap.as_ref()?.rgba.as_ref())
+            .map(Vec::len)
             .sum()
     }
 }
@@ -264,8 +388,14 @@ impl Ui {
         std::mem::take(&mut self.images.requests)
     }
 
-    /// Bytes of decoded image pixels held (one copy; the atlas holds
-    /// another while they are resident).
+    /// Payloads replaced or removed since the last call: the platform
+    /// drops work it still has queued for them.
+    pub fn take_dropped_images(&mut self) -> Vec<ImageId> {
+        std::mem::take(&mut self.images.dropped)
+    }
+
+    /// Bytes of decoded image pixels held on the CPU (the atlas holds
+    /// its own copy while they are resident).
     pub fn image_bytes(&self) -> usize {
         self.images.bytes()
     }
@@ -279,21 +409,19 @@ impl Ui {
         let Some(st) = self.images.states.get_mut(&node) else {
             return;
         };
-        let id = NodeId(node);
+        st.pending = false;
         match result {
             ImageResult::Size { width, height, .. } => {
-                st.pending = false;
                 if width == 0 || height == 0 {
-                    st.failed = true;
-                    self.image_event(id, image_event::FAILED, "empty image");
+                    self.image_failed(node, "empty image".into());
                     return;
                 }
-                if let Some(d) = self.host.images.get_mut(&node) {
-                    d.natural = Some([width, height]);
+                st.natural = Some([width, height]);
+                if st.bitmap.is_none() {
+                    // The natural size is the intrinsic size. A previous
+                    // image still up keeps its own until this one draws.
+                    self.set_natural(node, Some([width, height]));
                 }
-                // The natural size is the intrinsic size.
-                self.host.revs.layout_input.bump();
-                self.host.mark_layout(id);
                 self.host.dirty.content.push(node);
             }
             ImageResult::Pixels {
@@ -303,7 +431,6 @@ impl Ui {
                 rgba,
                 ..
             } => {
-                st.pending = false;
                 let max = self.scene.atlas.page_size() - 2;
                 if width == 0 || height == 0 || width > max || height > max {
                     return;
@@ -311,6 +438,7 @@ impl Ui {
                 if rgba.len() != width as usize * height as usize * 4 {
                     return;
                 }
+                let natural = st.natural.unwrap_or([width, height]);
                 if let Some(old) = st.bitmap.take() {
                     self.scene.atlas.release(old.raster);
                 }
@@ -318,30 +446,63 @@ impl Ui {
                 let raster = self.scene.atlas.new_scaled_id(w, h, w, h, true);
                 self.scene.atlas.insert(raster, &rgba);
                 st.bitmap = Some(Bitmap {
+                    id: st.id,
+                    natural,
                     crop,
                     size: [width, height],
-                    rgba,
+                    rgba: Some(rgba),
                     raster,
                 });
+                let first = !std::mem::replace(&mut st.loaded, true);
                 // The chunk names the old raster: it rebuilds before the
                 // next draw.
                 self.host.dirty.content.push(node);
-                if !std::mem::replace(&mut st.loaded, true) {
-                    let natural = self.host.images.get(&node).and_then(|d| d.natural);
-                    let [nw, nh] = natural.unwrap_or([width, height]);
-                    let mut e = self.event(out_kind::IMAGE, id);
-                    e.key = image_event::LOADED;
-                    e.x = nw as f32;
-                    e.y = nh as f32;
-                    self.pending_events.push(e);
+                self.set_natural(node, Some(natural));
+                self.images.trim(node, &self.scene.atlas);
+                if first {
+                    self.image_loaded(node, natural);
                 }
             }
-            ImageResult::Failed { error, .. } => {
-                st.pending = false;
-                st.failed = true;
-                self.image_event(id, image_event::FAILED, &error);
-            }
+            ImageResult::Failed { error, .. } => self.image_failed(node, error),
         }
+    }
+
+    /// The layout's natural size (the intrinsic size of an unsized
+    /// image).
+    fn set_natural(&mut self, node: u32, natural: Option<[u32; 2]>) {
+        if let Some(d) = self.host.images.get_mut(&node)
+            && d.natural != natural
+        {
+            d.natural = natural;
+            self.host.revs.layout_input.bump();
+            self.host.mark_layout(NodeId(node));
+        }
+    }
+
+    /// The current payload failed. A previous image still up goes (it
+    /// is not this `src`); pixels of this payload stay (a later decode
+    /// at another size failed) and it is not asked again.
+    fn image_failed(&mut self, node: u32, error: String) {
+        let Some(st) = self.images.states.get_mut(&node) else {
+            return;
+        };
+        st.error = Some(error.clone());
+        if let Some(b) = st.bitmap.take_if(|b| b.id != st.id) {
+            self.scene.atlas.release(b.raster);
+        }
+        if st.bitmap.is_none() {
+            self.set_natural(node, None);
+        }
+        self.host.dirty.content.push(node);
+        self.image_event(NodeId(node), image_event::FAILED, &error);
+    }
+
+    fn image_loaded(&mut self, node: u32, [w, h]: [u32; 2]) {
+        let mut e = self.event(out_kind::IMAGE, NodeId(node));
+        e.key = image_event::LOADED;
+        e.x = w as f32;
+        e.y = h as f32;
+        self.pending_events.push(e);
     }
 
     fn image_event(&mut self, id: NodeId, key: u32, text: &str) {
@@ -352,41 +513,59 @@ impl Ui {
     }
 
     /// A PAYLOAD on an Image node: new bytes, a new `ImageId`, and a
-    /// probe for the natural size. Empty bytes clear the image.
+    /// probe for the natural size. The image on screen stays until the
+    /// new one draws or fails. Empty bytes clear the image. Equal bytes
+    /// report again (a new `src` with the same content still gets its
+    /// load or error event).
     pub(crate) fn set_image(&mut self, node: u32, bytes: &[u8]) {
         let Some(d) = self.host.images.get(&node) else {
             return;
         };
         if d.bytes[..] == *bytes {
+            let st = self.images.states.get(&node);
+            if let Some(error) = st.and_then(|s| s.error.clone()) {
+                self.image_event(NodeId(node), image_event::FAILED, &error);
+            } else if let Some(st) = st.filter(|s| s.loaded) {
+                let natural = st.natural.unwrap_or_default();
+                self.image_loaded(node, natural);
+            }
             return;
         }
-        self.images.forget(node, &mut self.scene.atlas);
-        self.images.next += 1;
-        let id = ImageId(self.images.next);
         let bytes: Arc<[u8]> = bytes.into();
         self.host.copied_bytes += bytes.len() as u64;
         if let Some(d) = self.host.images.get_mut(&node) {
             d.bytes = bytes.clone();
-            d.natural = None;
-        }
-        if !bytes.is_empty() {
-            self.images.nodes.insert(id, node);
-            self.images.states.insert(
-                node,
-                State {
-                    id,
-                    pending: true,
-                    failed: false,
-                    loaded: false,
-                    bitmap: None,
-                },
-            );
-            self.images.requests.push(ImageRequest::Probe { id, bytes });
         }
         self.host.revs.resource.bump();
-        self.host.revs.layout_input.bump();
-        self.host.mark_layout(NodeId(node));
         self.host.dirty.content.push(node);
+        if bytes.is_empty() {
+            self.images.forget(node, &mut self.scene.atlas);
+            self.set_natural(node, None);
+            return;
+        }
+        self.images.next += 1;
+        let id = ImageId(self.images.next);
+        let bitmap = match self.images.states.remove(&node) {
+            Some(old) => {
+                self.images.retire(old.id);
+                old.bitmap
+            }
+            None => None,
+        };
+        self.images.nodes.insert(id, node);
+        self.images.states.insert(
+            node,
+            State {
+                id,
+                bytes: bytes.clone(),
+                natural: None,
+                pending: true,
+                error: None,
+                loaded: false,
+                bitmap,
+            },
+        );
+        self.images.requests.push(ImageRequest::Probe { id, bytes });
     }
 
     pub(crate) fn set_image_fit(&mut self, node: u32, fit: Fit) {
@@ -406,12 +585,9 @@ impl Ui {
         let Some(d) = self.host.images.get(&id.0) else {
             return;
         };
-        let (Some(natural), Some(st)) = (d.natural, self.images.states.get_mut(&id.0)) else {
+        let Some(st) = self.images.states.get_mut(&id.0) else {
             return;
         };
-        if st.failed {
-            return;
-        }
         let content = Rect::new(
             data.content[0],
             data.content[1],
@@ -419,32 +595,46 @@ impl Ui {
             (data.rect.size.height - data.insets[1]).max(0.0),
         );
         let max = self.scene.atlas.page_size() - 2;
-        let Some(p) = plan(d.fit, natural, content, self.scale, max) else {
+        let wanted = st
+            .natural
+            .filter(|_| !st.pending && st.error.is_none())
+            .and_then(|n| plan(d.fit, n, content, self.scale, max));
+        if let Some(p) = wanted {
+            let current = st.bitmap.as_ref().filter(|b| b.id == st.id);
+            if current.is_none_or(|b| b.stale(&p)) {
+                let size = match current {
+                    Some(b) if p.size[0] > b.size[0] || p.size[1] > b.size[1] => {
+                        grown(p.size, p.crop, max)
+                    }
+                    _ => p.size,
+                };
+                st.pending = true;
+                self.images.requests.push(ImageRequest::Decode {
+                    id: st.id,
+                    bytes: st.bytes.clone(),
+                    crop: p.crop,
+                    width: size[0],
+                    height: size[1],
+                });
+            }
+        }
+        // The pixels on screen, planned against their own image (a
+        // previous `src` keeps its own aspect until the new one draws).
+        let Some(b) = &st.bitmap else { return };
+        let Some(p) = plan(d.fit, b.natural, content, self.scale, max) else {
             return;
         };
-        if !st.pending && st.bitmap.as_ref().is_none_or(|b| b.stale(&p)) {
-            st.pending = true;
-            self.images.requests.push(ImageRequest::Decode {
-                id: st.id,
-                bytes: d.bytes.clone(),
-                crop: p.crop,
-                width: p.size[0],
-                height: p.size[1],
-            });
-        }
-        if let Some(b) = &st.bitmap {
-            self.scene.atlas.set_quad(b.raster, p.quad[0], p.quad[1]);
-            let paint = w.paint(0xFFFF_FFFF);
-            let r = p.dest;
-            w.glyph(
-                r.origin.x,
-                r.origin.y,
-                r.size.width,
-                r.size.height,
-                b.raster,
-                paint,
-            );
-        }
+        self.scene.atlas.set_quad(b.raster, p.quad[0], p.quad[1]);
+        let paint = w.paint(0xFFFF_FFFF);
+        let r = p.dest;
+        w.glyph(
+            r.origin.x,
+            r.origin.y,
+            r.size.width,
+            r.size.height,
+            b.raster,
+            paint,
+        );
     }
 }
 
@@ -677,20 +867,379 @@ mod tests {
         assert!(resize(&mut ui, 30.0).is_empty(), "a small shrink redecodes");
         let raster = ui.images.states[&1].bitmap.as_ref().unwrap().raster;
         assert_eq!(ui.scene.atlas.entry(raster).quad_w, 60);
+        // A grow asks a step ahead: 100 px drawn, 125 decoded, so the
+        // next few grows need nothing.
         let reqs = resize(&mut ui, 50.0);
-        assert!(matches!(
-            reqs[..],
-            [ImageRequest::Decode {
-                width: 100,
-                height: 100,
+        let [
+            ImageRequest::Decode {
+                width: 125,
+                height: 125,
+                crop,
                 ..
-            }]
-        ));
+            },
+        ] = reqs[..]
+        else {
+            panic!("{reqs:?}")
+        };
+        ui.image_result(ImageResult::Pixels {
+            id,
+            crop,
+            width: 125,
+            height: 125,
+            rgba: vec![1; 125 * 125 * 4],
+        });
+        assert!(resize(&mut ui, 55.0).is_empty(), "within the step");
+        assert_eq!(resize(&mut ui, 70.0).len(), 1);
+        let raster = ui.images.states[&1].bitmap.as_ref().unwrap().raster;
         let mut t = Transaction::new(4);
         t.remove(1);
         ui.apply_txn(&t).unwrap();
         assert!(!ui.scene.atlas.entry(raster).resident);
         assert_eq!(ui.image_bytes(), 0);
+        assert!(ui.take_dropped_images().contains(&id));
+    }
+
+    /// Answers a request as a decoder would for an image of `natural`
+    /// pixels (pixels all 255).
+    fn answer(r: &ImageRequest, [w, h]: [u32; 2]) -> ImageResult {
+        match *r {
+            ImageRequest::Probe { id, .. } => ImageResult::Size {
+                id,
+                width: w,
+                height: h,
+            },
+            ImageRequest::Decode {
+                id,
+                crop,
+                width,
+                height,
+                ..
+            } => ImageResult::Pixels {
+                id,
+                crop,
+                width,
+                height,
+                rgba: vec![255; (width * height * 4) as usize],
+            },
+        }
+    }
+
+    /// Renders and answers requests until none are left.
+    fn serve(ui: &mut Ui, natural: [u32; 2]) {
+        for _ in 0..8 {
+            ui.render(Size::new(200.0, 200.0));
+            let reqs = ui.take_image_requests();
+            if reqs.is_empty() {
+                return;
+            }
+            for r in &reqs {
+                ui.image_result(answer(r, natural));
+            }
+        }
+        panic!("image requests never settled");
+    }
+
+    fn sized(w: f32, h: f32) -> taffy::Style {
+        taffy::Style {
+            size: taffy::Size {
+                width: taffy::Dimension::length(w),
+                height: taffy::Dimension::length(h),
+            },
+            ..Default::default()
+        }
+    }
+
+    fn relayout(ui: &mut Ui, node: u32, style: &taffy::Style) {
+        let mut t = Transaction::new(9);
+        t.layout(node, style);
+        ui.apply_txn(&t).unwrap();
+    }
+
+    fn payload(ui: &mut Ui, node: u32, bytes: &[u8]) {
+        let mut t = Transaction::new(9);
+        t.payload(node, bytes);
+        ui.apply_txn(&t).unwrap();
+    }
+
+    fn unsized_image(bytes: &[u8]) -> Ui {
+        let mut ui = Ui::new(1.0);
+        let mut t = Transaction::new(1);
+        t.create(1, NodeKind::Image)
+            .payload(1, bytes)
+            .place(NIL, 1, NIL);
+        ui.apply_txn(&t).unwrap();
+        ui
+    }
+
+    fn laid_out(ui: &mut Ui) -> Size {
+        ui.render(Size::new(200.0, 200.0));
+        ui.layouts.data(NodeId(1)).rect.size
+    }
+
+    fn shown(ui: &Ui, node: u32) -> ImageId {
+        ui.images.states[&node].bitmap.as_ref().unwrap().id
+    }
+
+    /// A new `src` keeps the old image, and its size, on screen until
+    /// the new one draws; the old payload's queued work is dropped.
+    #[test]
+    fn a_new_src_keeps_the_old_image_until_it_draws() {
+        let mut ui = unsized_image(b"a");
+        serve(&mut ui, [30, 20]);
+        let a = ui.images.states[&1].id;
+        events(&mut ui);
+        payload(&mut ui, 1, b"b");
+        assert_eq!(laid_out(&mut ui), Size::new(30.0, 20.0));
+        assert_eq!(shown(&ui, 1), a);
+        let raster = ui.images.states[&1].bitmap.as_ref().unwrap().raster;
+        assert!(ui.scene.atlas.entry(raster).resident);
+        assert_eq!(ui.take_dropped_images(), [a]);
+        let reqs = ui.take_image_requests();
+        let [ImageRequest::Probe { id: b, .. }] = reqs[..] else {
+            panic!("{reqs:?}")
+        };
+        ui.image_result(answer(&reqs[0], [50, 10]));
+        assert_eq!(laid_out(&mut ui), Size::new(30.0, 20.0), "not collapsed");
+        assert_eq!(shown(&ui, 1), a);
+        serve(&mut ui, [50, 10]);
+        assert_eq!(shown(&ui, 1), b);
+        assert_eq!(laid_out(&mut ui), Size::new(50.0, 10.0));
+        let ev = events(&mut ui);
+        assert_eq!(
+            ev.iter().map(|e| (e.key, e.x, e.y)).collect::<Vec<_>>(),
+            [(image_event::LOADED, 50.0, 10.0)]
+        );
+    }
+
+    /// A new `src` that fails takes the old image down: it is not that
+    /// `src`'s picture.
+    #[test]
+    fn a_failed_src_clears_the_old_image() {
+        let mut ui = unsized_image(b"a");
+        serve(&mut ui, [30, 20]);
+        events(&mut ui);
+        payload(&mut ui, 1, b"b");
+        let id = ui.take_image_requests()[0].id();
+        ui.image_result(ImageResult::Failed {
+            id,
+            error: "unsupported format".into(),
+        });
+        assert!(ui.images.states[&1].bitmap.is_none());
+        assert_eq!(laid_out(&mut ui), Size::ZERO);
+        assert_eq!(events(&mut ui)[0].key, image_event::FAILED);
+    }
+
+    /// A header that probes but does not decode (a truncated file)
+    /// leaves no intrinsic size behind.
+    #[test]
+    fn a_decode_failure_after_a_probe_clears_the_natural_size() {
+        let mut ui = unsized_image(b"a");
+        let probe = ui.take_image_requests();
+        ui.image_result(answer(&probe[0], [30, 20]));
+        assert_eq!(laid_out(&mut ui), Size::new(30.0, 20.0));
+        let id = ui.take_image_requests()[0].id();
+        ui.image_result(ImageResult::Failed {
+            id,
+            error: "unexpected end of file".into(),
+        });
+        assert_eq!(laid_out(&mut ui), Size::ZERO);
+    }
+
+    /// A decode at a new size that fails keeps the pixels already up,
+    /// and is not tried again.
+    #[test]
+    fn a_failed_redecode_keeps_the_pixels() {
+        let mut ui = image_ui(Fit::Fill);
+        serve(&mut ui, [1000, 1000]);
+        events(&mut ui);
+        relayout(&mut ui, 1, &sized(60.0, 60.0));
+        ui.render(Size::new(200.0, 200.0));
+        let id = ui.take_image_requests()[0].id();
+        ui.image_result(ImageResult::Failed {
+            id,
+            error: "out of memory".into(),
+        });
+        assert_eq!(shown(&ui, 1), id);
+        assert_eq!(events(&mut ui)[0].key, image_event::FAILED);
+        relayout(&mut ui, 1, &sized(90.0, 90.0));
+        ui.render(Size::new(200.0, 200.0));
+        assert!(ui.take_image_requests().is_empty());
+        assert!(ui.image_bytes() > 0);
+    }
+
+    /// Equal bytes (a new `src` with the same content) report again.
+    #[test]
+    fn equal_bytes_report_again() {
+        let mut ui = image_ui(Fit::Cover);
+        serve(&mut ui, [30, 20]);
+        events(&mut ui);
+        payload(&mut ui, 1, b"encoded");
+        let ev = events(&mut ui);
+        assert_eq!(
+            ev.iter().map(|e| (e.key, e.x, e.y)).collect::<Vec<_>>(),
+            [(image_event::LOADED, 30.0, 20.0)]
+        );
+        assert!(ui.take_image_requests().is_empty());
+
+        let mut ui = image_ui(Fit::Cover);
+        let id = ui.take_image_requests()[0].id();
+        ui.image_result(ImageResult::Failed {
+            id,
+            error: "bad".into(),
+        });
+        events(&mut ui);
+        payload(&mut ui, 1, b"encoded");
+        let ev = events(&mut ui);
+        assert_eq!((ev.len(), ev[0].key, &ev[0].text[..]), (1, 1, "bad"));
+    }
+
+    /// Two 40 x 40 images, one shown at a time, in an atlas with room
+    /// for one: showing one evicts the other's raster.
+    fn two_images(budget: usize) -> Ui {
+        let mut ui = Ui::new(1.0);
+        ui.scene.atlas = RasterAtlas::with_budget(64, 1, 1);
+        ui.images.budget = budget;
+        let mut t = Transaction::new(1);
+        for node in [1u32, 2] {
+            let bytes: &[u8] = if node == 1 { b"1" } else { b"2" };
+            t.create(node, NodeKind::Image)
+                .payload(node, bytes)
+                .image_config(node, Fit::Fill)
+                .place(NIL, node, NIL);
+        }
+        ui.apply_txn(&t).unwrap();
+        ui
+    }
+
+    fn show(ui: &mut Ui, node: u32) {
+        let hidden = taffy::Style {
+            display: taffy::Display::None,
+            ..sized(40.0, 40.0)
+        };
+        let mut t = Transaction::new(9);
+        t.layout(node, &sized(40.0, 40.0)).layout(3 - node, &hidden);
+        ui.apply_txn(&t).unwrap();
+    }
+
+    fn raster(ui: &Ui, node: u32) -> RasterId {
+        ui.images.states[&node].bitmap.as_ref().unwrap().raster
+    }
+
+    /// An evicted image comes back from its CPU copy, without a decode.
+    #[test]
+    fn an_evicted_image_reinserts_from_its_copy() {
+        let mut ui = two_images(BUDGET);
+        show(&mut ui, 1);
+        serve(&mut ui, [100, 100]);
+        let r1 = raster(&ui, 1);
+        show(&mut ui, 2);
+        serve(&mut ui, [100, 100]);
+        assert!(!ui.scene.atlas.entry(r1).resident, "evicted");
+        assert!(ui.scene.atlas.entry(raster(&ui, 2)).resident);
+        show(&mut ui, 1);
+        ui.render(Size::new(200.0, 200.0));
+        assert!(ui.take_image_requests().is_empty());
+        assert!(ui.scene.atlas.entry(r1).resident, "re-inserted");
+        assert_eq!(ui.image_bytes(), 2 * 40 * 40 * 4);
+    }
+
+    /// Past the budget, the least recently drawn copy goes; its image
+    /// decodes again when it is evicted and drawn.
+    #[test]
+    fn copies_past_the_budget_decode_again() {
+        let mut ui = two_images(40 * 40 * 4);
+        show(&mut ui, 1);
+        serve(&mut ui, [100, 100]);
+        show(&mut ui, 2);
+        serve(&mut ui, [100, 100]);
+        assert_eq!(ui.image_bytes(), 40 * 40 * 4);
+        assert!(ui.images.states[&1].bitmap.as_ref().unwrap().rgba.is_none());
+        events(&mut ui);
+        show(&mut ui, 1);
+        ui.render(Size::new(200.0, 200.0));
+        let reqs = ui.take_image_requests();
+        let [
+            ImageRequest::Decode {
+                crop,
+                width: 40,
+                height: 40,
+                ..
+            },
+        ] = reqs[..]
+        else {
+            panic!("{reqs:?}")
+        };
+        assert_eq!(crop, [0, 0, 100, 100]);
+        ui.image_result(answer(&reqs[0], [100, 100]));
+        assert!(ui.scene.atlas.entry(raster(&ui, 1)).resident);
+        assert!(events(&mut ui).is_empty(), "loaded once");
+    }
+
+    /// The decode size is in device pixels: a scale change asks again.
+    #[test]
+    fn a_scale_change_redecodes() {
+        let mut ui = image_ui(Fit::Fill);
+        ui.scale = 1.0;
+        serve(&mut ui, [1000, 1000]);
+        assert_eq!(ui.images.states[&1].bitmap.as_ref().unwrap().size, [40, 40]);
+        ui.scale = 2.0;
+        ui.render(Size::new(200.0, 200.0));
+        let reqs = ui.take_image_requests();
+        // 80 px drawn, a step ahead.
+        assert!(
+            matches!(
+                reqs[..],
+                [ImageRequest::Decode {
+                    width: 100,
+                    height: 100,
+                    ..
+                }]
+            ),
+            "{reqs:?}"
+        );
+    }
+
+    /// A cover box that changes aspect redecodes its source rect; a
+    /// pixel of change does not. Pixels for an older rect that land
+    /// after a resize draw until the new rect's arrive.
+    #[test]
+    fn cover_redecodes_a_new_aspect_and_takes_late_pixels() {
+        let mut ui = image_ui(Fit::Cover);
+        serve(&mut ui, [4000, 3000]);
+        let crop_of = |ui: &Ui| ui.images.states[&1].bitmap.as_ref().unwrap().crop;
+        assert_eq!(crop_of(&ui), [500, 0, 3000, 3000]);
+        relayout(&mut ui, 1, &sized(40.0, 39.0));
+        ui.render(Size::new(200.0, 200.0));
+        assert!(ui.take_image_requests().is_empty(), "a pixel of aspect");
+        relayout(&mut ui, 1, &sized(60.0, 40.0));
+        ui.render(Size::new(200.0, 200.0));
+        let wide = ui.take_image_requests();
+        assert_eq!(wide.len(), 1);
+        relayout(&mut ui, 1, &sized(40.0, 60.0));
+        ui.render(Size::new(200.0, 200.0));
+        assert!(ui.take_image_requests().is_empty(), "one at a time");
+        ui.image_result(answer(&wide[0], [4000, 3000]));
+        assert_eq!(crop_of(&ui), [0, 166, 4000, 2667]);
+        ui.render(Size::new(200.0, 200.0));
+        let reqs = ui.take_image_requests();
+        let [ImageRequest::Decode { crop, .. }] = reqs[..] else {
+            panic!("{reqs:?}")
+        };
+        assert_eq!(crop, [1000, 0, 2000, 3000]);
+    }
+
+    /// The drawn rect starts on a device pixel; a quad past a u16 keeps
+    /// its aspect.
+    #[test]
+    fn plans_snap_to_device_pixels_and_clamp_the_quad() {
+        // Contain letterboxes 3 x 2 in 10 x 10: y = 1.67, snapped to 2.
+        let p = plan_of(Fit::Contain, [3, 2], 10.0, 10.0, 1.0);
+        assert_eq!(p.dest.origin.y, 2.0);
+        let p = plan_of(Fit::Contain, [3, 2], 10.0, 10.0, 1.5);
+        assert_eq!(p.dest.origin.y * 1.5, 3.0);
+        let p = plan_of(Fit::Fill, [100, 100], 100_000.0, 10.0, 1.0);
+        assert_eq!(p.quad, [65535, 6]);
+        assert_eq!(p.dest.size, Size::new(65535.0, 6.0));
     }
 
     /// Bad input rejects the transaction; undecodable bytes do not (they

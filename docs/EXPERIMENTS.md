@@ -147,24 +147,33 @@ pt square.
 `cargo run --release -p craie-platform-winit --example images` (rerun
 on the Mac with the same command). The platform decoder's body
 (`images::run`), one thread, medians of 7, on exe1 (llvmpipe host, 8
-cores) at load average 16 to 23 (loaded; indicative only). A synthetic
+cores) at load average about 11 (loaded; indicative only). A synthetic
 4,000 x 3,000 photo: smooth gradients plus grain, so it compresses like
-one. A full RGBA texture of it would be 48,000,000 bytes.
+one. A full RGBA texture of it would be 48,000,000 bytes. Rerun after
+the PR #8 review (PR8-15): the probe is timed without copying the
+bytes, and the PNG rows the decoder converts are new.
 
 | source | probe | decode only | 80 x 80 cover | 400 x 300 contain |
 |---|---|---|---|---|
-| JPEG q85, 1.9 MB | 0.09 ms | 50.3 ms | 62.9 ms | 78.1 ms |
-| PNG, 23.4 MB | 2.5 ms | 85.0 ms | 97.3 ms | 112.4 ms |
+| JPEG q85, 1.9 MB | 0.055 ms | 57.0 ms | 79.2 ms | 65.9 ms |
+| PNG RGB, 23.4 MB | 0.001 ms | 88.6 ms | 121.1 ms | 114.8 ms |
+| PNG RGBA, 26.2 MB | 0.001 ms | 122.0 ms | 142.2 ms | 133.4 ms |
+| PNG gray, 7.8 MB | 0.001 ms | 37.3 ms | 39.1 ms | 43.4 ms |
+| PNG RGB 16-bit, 46.7 MB | 0.001 ms | 177.1 ms | 218.7 ms | 222.2 ms |
 | texture bytes | | | 25,600 (1,875x less) | 480,000 (100x less) |
 
 - 80 x 80 is a 40 pt avatar at 2x (a 3,000 x 3,000 center crop);
   400 x 300 a 200 pt card image. The texture bytes are what the decode
   keeps: in the core (to re-insert after an eviction without decoding
-  again), in the atlas page's CPU mirror, and on the GPU.
-- The full decode is most of the cost; averaging 9 megapixels down
-  adds 12 to 13 ms, 400 x 300 about 28 ms (the thumbnail filter's cost
-  grows with the output). Reduced-size JPEG decode would cut the first
-  part (DF-33).
+  again, up to 64 MB for all images), in the atlas page's CPU mirror,
+  and on the GPU.
+- The full decode is most of the cost. RGB, gray and RGBA are averaged
+  down as decoded; RGBA is premultiplied first (a pass over the crop).
+  16-bit is converted to 8-bit RGBA before the shrink, a second
+  full-size buffer (96 MB here) and about 40 ms. Reduced-size JPEG
+  decode would cut the first part (DF-33).
+- The earlier "PNG probe 2.5 ms" timed the request's copy of the 23 MB
+  file, not the probe: a probe reads the header only.
 
 ### E15: interaction lookups, index versus walk
 
