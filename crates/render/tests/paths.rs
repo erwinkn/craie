@@ -131,7 +131,7 @@ fn paths_draw_with_antialiased_edges() {
     s.commit_chunk(0, &mut w);
     place(&mut s, 0);
     s.set_order(vec![OrderItem::Chunk(0)], vec![]);
-    let img = render(&gpu, &mut r, &mut s);
+    let img = render(gpu, &mut r, &mut s);
     assert!(r.stats.msaa);
     assert_eq!(px(&img, 32, 32), [255, 0, 0, 255]);
     assert_eq!(px(&img, 2, 2), [0, 0, 0, 255]);
@@ -159,7 +159,7 @@ fn frames_without_paths_stay_single_sampled() {
     s.commit_chunk(0, &mut w);
     place(&mut s, 0);
     s.set_order(vec![OrderItem::Chunk(0)], vec![]);
-    let img = render(&gpu, &mut r, &mut s);
+    let img = render(gpu, &mut r, &mut s);
     assert!(!r.stats.msaa);
     assert_eq!(px(&img, 16, 16), [0, 255, 0, 255]);
 }
@@ -191,7 +191,7 @@ fn gradients_interpolate_their_stops() {
         to_gradient: [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
         stops: vec![(0.0, 0xFF00_00FF), (1.0, 0x0000_FFFF)],
     });
-    let img = render(&gpu, &mut r, &mut s);
+    let img = render(gpu, &mut r, &mut s);
     assert_eq!(px(&img, 2, 10), [255, 0, 0, 255], "padded start");
     assert_eq!(px(&img, 60, 10), [0, 0, 255, 255], "padded end");
     let mid = px(&img, 31, 10);
@@ -209,7 +209,7 @@ fn gradients_interpolate_their_stops() {
         to_gradient: [0.5, 0.0, 0.0, 0.5, -16.0, -16.0],
         stops: vec![(0.0, 0xFFFF_FFFF), (0.5, 0x00FF_00FF), (1.0, 0x0000_00FF)],
     });
-    let img = render(&gpu, &mut r, &mut s);
+    let img = render(gpu, &mut r, &mut s);
     let center = px(&img, 32, 32);
     assert!(center[0] > 230 && center[1] > 240, "{center:?}");
     assert_eq!(px(&img, 1, 1), [0, 0, 0, 255], "outside the radius");
@@ -245,7 +245,7 @@ fn paths_in_layers_composite() {
         ],
         vec![0.5],
     );
-    let img = render(&gpu, &mut r, &mut s);
+    let img = render(gpu, &mut r, &mut s);
     // The opacity layer, and the path run's multisampled layer in it.
     assert!(r.stats.msaa && r.stats.layers == 2);
     // White at half coverage over black, in sRGB: 188.
@@ -282,7 +282,7 @@ fn rect_edges_match_across_sample_counts() {
             order.push(OrderItem::Chunk(1));
         }
         s.set_order(order, vec![]);
-        let img = render(&gpu, r, &mut s);
+        let img = render(gpu, r, &mut s);
         assert_eq!(r.stats.msaa, with_path);
         img
     };
@@ -331,7 +331,7 @@ fn gradients_without_stops_draw_nothing() {
     s.commit_chunk(0, &mut w);
     place(&mut s, 0);
     s.set_order(vec![OrderItem::Chunk(0)], vec![]);
-    let img = render(&gpu, &mut r, &mut s);
+    let img = render(gpu, &mut r, &mut s);
     assert_eq!(px(&img, 32, 32), [0, 0, 0, 255]);
 }
 
@@ -391,7 +391,7 @@ fn glyph_edges_match_across_sample_counts() {
         eprintln!("no GPU adapter: skipped");
         return;
     };
-    let (a, b) = with_and_without_path(&gpu, &mut r, &|s, w| {
+    let (a, b) = with_and_without_path(gpu, &mut r, &|s, w| {
         s.transforms.set_snap(0, false);
         let id = s.atlas.new_id(8, 8, false);
         s.atlas.insert(id, &[255u8; 64]);
@@ -413,7 +413,7 @@ fn zero_area_rects_draw_nothing() {
         eprintln!("no GPU adapter: skipped");
         return;
     };
-    let (a, b) = with_and_without_path(&gpu, &mut r, &|s, w| {
+    let (a, b) = with_and_without_path(gpu, &mut r, &|s, w| {
         s.transforms.set_snap(0, false);
         let white = w.paint(0xFFFF_FFFF);
         w.rect(Rect::new(8.5, 8.0, 0.0, 16.0), 0.0, white);
@@ -424,7 +424,7 @@ fn zero_area_rects_draw_nothing() {
     });
     // Snapped: a 0.3-wide rect whose edges round to one column has no
     // area either.
-    let (c, d) = with_and_without_path(&gpu, &mut r, &|s, w| {
+    let (c, d) = with_and_without_path(gpu, &mut r, &|s, w| {
         let white = w.paint(0xFFFF_FFFF);
         w.rect(Rect::new(8.1, 8.0, 0.3, 16.0), 0.0, white);
         s.commit_chunk(0, w);
@@ -432,7 +432,7 @@ fn zero_area_rects_draw_nothing() {
         vec![OrderItem::Chunk(0)]
     });
     // Rotated (not axis-aligned): zero width still draws nothing.
-    let (e, f) = with_and_without_path(&gpu, &mut r, &|s, w| {
+    let (e, f) = with_and_without_path(gpu, &mut r, &|s, w| {
         s.transforms
             .set_local(0, Affine::translate(20.0, 20.0).mul(&Affine::rotate(0.5)));
         let white = w.paint(0xFFFF_FFFF);
@@ -479,7 +479,7 @@ fn stretched_rects_fit_their_layer() {
             vec![OrderItem::Chunk(0)]
         };
         s.set_order(order, vec![1.0]);
-        render(&gpu, r, &mut s)
+        render(gpu, r, &mut s)
     };
     let (direct, layered) = (draw(&mut r, false), draw(&mut r, true));
     assert_same(&direct, &layered, (0, 0, W, W));
@@ -519,7 +519,7 @@ fn clips_matching_a_path_change_nothing() {
         }
         s.set_placement(0, p);
         s.set_order(vec![OrderItem::Chunk(0)], vec![]);
-        render(&gpu, r, &mut s)
+        render(gpu, r, &mut s)
     };
     let (plain, clipped) = (draw(&mut r, false), draw(&mut r, true));
     assert_same(&plain, &clipped, (4, 4, 30, 30));
@@ -537,7 +537,7 @@ fn transformed_rects_and_glyphs_ignore_paths_elsewhere() {
         eprintln!("no GPU adapter: skipped");
         return;
     };
-    let (a, b) = with_and_without_path(&gpu, &mut r, &|s, w| {
+    let (a, b) = with_and_without_path(gpu, &mut r, &|s, w| {
         s.transforms
             .set_local(0, Affine([8.0, 0.01, 0.0, 0.125, 8.25, 20.25]));
         s.transforms.set_snap(0, false);
@@ -550,7 +550,7 @@ fn transformed_rects_and_glyphs_ignore_paths_elsewhere() {
     // Everything above the added dot (rows 55..61).
     assert_same(&a, &b, (0, 0, W, 52));
     for scale in [0.25, 6.0] {
-        let (a, b) = with_and_without_path(&gpu, &mut r, &|s, w| {
+        let (a, b) = with_and_without_path(gpu, &mut r, &|s, w| {
             s.transforms
                 .set_local(0, Affine([scale, 0.0, 0.0, scale, 8.49, 8.49]));
             s.transforms.set_snap(0, false);
@@ -597,7 +597,7 @@ fn enlarged_glyphs_fit_their_layer() {
             vec![OrderItem::Chunk(0)]
         };
         s.set_order(order, vec![1.0]);
-        render(&gpu, r, &mut s)
+        render(gpu, r, &mut s)
     };
     let (direct, layered) = (draw(&mut r, false), draw(&mut r, true));
     assert_same(&direct, &layered, (0, 0, W, W));
@@ -627,7 +627,7 @@ fn glyphs_in_reused_slots_stay_clean() {
     s.commit_chunk(0, &mut w);
     place(&mut s, 0);
     s.set_order(vec![OrderItem::Chunk(0)], vec![]);
-    let img = render(&gpu, &mut r, &mut s);
+    let img = render(gpu, &mut r, &mut s);
     for (x, y) in [(17, 12), (12, 17), (18, 12), (7, 12)] {
         assert_eq!(px(&img, x, y), [0, 0, 0, 255], "({x}, {y})");
     }
@@ -667,7 +667,7 @@ fn nested_clips_matching_a_path_change_nothing() {
             },
         );
         s.set_order(vec![OrderItem::Chunk(0)], vec![]);
-        render(&gpu, r, &mut s)
+        render(gpu, r, &mut s)
     };
     let plain = draw(&mut r, 0);
     assert_same(&plain, &draw(&mut r, 1), (4, 4, 30, 30));
@@ -697,7 +697,7 @@ fn path_layers_keep_painter_order() {
         place(&mut s, id);
     }
     s.set_order((0..3).map(OrderItem::Chunk).collect(), vec![]);
-    let img = render(&gpu, &mut r, &mut s);
+    let img = render(gpu, &mut r, &mut s);
     assert_eq!(px(&img, 10, 10), [255, 0, 0, 255]);
     assert_eq!(px(&img, 20, 20), [0, 0, 255, 255]);
     assert_eq!(px(&img, 30, 30), [0, 255, 0, 255]);
@@ -752,7 +752,7 @@ fn adjacent_meshes_stay_seamless_across_disjoint_content() {
             ]
         };
         s.set_order(order, vec![]);
-        let img = render(&gpu, r, &mut s);
+        let img = render(gpu, r, &mut s);
         assert_eq!(r.stats.layers, 1);
         img
     };

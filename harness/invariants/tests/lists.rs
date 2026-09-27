@@ -285,8 +285,8 @@ fn oracle_with(list_style: taffy::Style, what: &str, expect_exact: bool) {
     if !expect_exact {
         assert!(!exact, "{what}: meant to exercise inexact sums");
     }
-    for i in 0..n as usize {
-        let (r, ours) = (reference[i], content_top + l.offset(i));
+    for (i, &r) in reference.iter().enumerate() {
+        let ours = content_top + l.offset(i);
         let plain_y = plain.layouts.data(NodeId(100 + i as u32)).rect.origin.y;
         let (b_ours, b_plain) = (
             gamma(4) * r + i as f64 * gap_err_ours,

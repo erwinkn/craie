@@ -27,3 +27,5 @@ pinned-fonts = []
 [dev-dependencies]
 craie-text = { path = ".", features = ["pinned-fonts"] }
 
+[lints]
+workspace = true
