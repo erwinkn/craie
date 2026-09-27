@@ -7,7 +7,7 @@ use crate::events::{self, Event, Key, KeyInput, Mods, UiEvent, mask, out_kind};
 use craie_core::geom::{Affine, Point};
 
 use crate::geom::Rect;
-use crate::host::{NodeId, ROOT};
+use crate::host::{NodeFlags, NodeId, ROOT};
 use crate::input::KeyAction;
 use crate::mutation::NodeKind;
 use crate::ui::Ui;
@@ -33,38 +33,53 @@ fn in_rounded(p: Point, r: &Rect, radius: f32) -> bool {
     if rad <= 0.0 {
         return true;
     }
-    let cx = p.x.clamp(r.origin.x + rad, r.max_x() - rad);
-    let cy = p.y.clamp(r.origin.y + rad, r.max_y() - rad);
+    // Not `clamp`: at a radius of half the size, rounding can put the
+    // low bound a hair above the high one, and `clamp` panics then.
+    let cx = p.x.max(r.origin.x + rad).min(r.max_x() - rad);
+    let cy = p.y.max(r.origin.y + rad).min(r.max_y() - rad);
     let (dx, dy) = (p.x - cx, p.y - cy);
     dx * dx + dy * dy <= rad * rad
 }
 
 impl Ui {
-    /// Ancestor chain of `id`, deepest first (inclusive).
-    pub(crate) fn path_to(&self, id: NodeId) -> Vec<NodeId> {
-        let mut path = Vec::new();
-        let mut cur = id;
-        loop {
-            path.push(cur);
-            let p = self.host.parent(cur);
-            if !p.is_node() {
-                break;
-            }
-            cur = p;
-        }
-        path
+    /// `id` and its ancestors, deepest first.
+    pub(crate) fn ancestors(&self, id: NodeId) -> impl Iterator<Item = NodeId> + '_ {
+        std::iter::successors(Some(id), |&n| {
+            Some(self.host.parent(n)).filter(|p| p.is_node())
+        })
     }
 
-    /// Emits `event` to every node on `path` whose listener mask covers
+    /// The deepest node on the ancestor chains of both `a` and `b`.
+    fn common_ancestor(&self, a: Option<NodeId>, b: Option<NodeId>) -> Option<NodeId> {
+        let (mut a, mut b) = (a?, b?);
+        let (mut da, mut db) = (self.ancestors(a).count(), self.ancestors(b).count());
+        while da > db {
+            a = self.host.parent(a);
+            da -= 1;
+        }
+        while db > da {
+            b = self.host.parent(b);
+            db -= 1;
+        }
+        while a != b {
+            a = self.host.parent(a);
+            b = self.host.parent(b);
+        }
+        a.is_node().then_some(a)
+    }
+
+    /// Emits `event` to `id` and each ancestor whose listener mask covers
     /// its kind.
-    fn emit_path(&mut self, path: &[NodeId], mut event: UiEvent) {
+    fn emit_path(&mut self, id: NodeId, mut event: UiEvent) {
         let bit = events::mask_for(event.kind);
-        for &id in path {
-            if self.host.interaction(id).listeners & bit != 0 {
-                event.node = id.0;
-                event.generation = self.host.node(id).map_or(0, |n| n.generation);
+        let mut cur = id;
+        while cur.is_node() {
+            if self.host.interaction(cur).listeners & bit != 0 {
+                event.node = cur.0;
+                event.generation = self.host.node(cur).map_or(0, |n| n.generation);
                 self.pending_events.push(event.clone());
             }
+            cur = self.host.parent(cur);
         }
     }
 
@@ -82,12 +97,21 @@ impl Ui {
     }
 
     /// Deepest node containing (x, y) logical, honoring transforms, clip
-    /// chains, scroll offsets, and `display: none`.
+    /// chains, scroll offsets, and `display: none`. Skips the subtrees
+    /// whose reach misses the point (`reach.rs`).
     pub fn hit_test(&self, x: f32, y: f32) -> Option<NodeId> {
-        let p = Point::new(x, y);
+        self.hit_roots(Point::new(x, y), true)
+    }
+
+    /// `hit_test` visiting every node: the oracle for the index.
+    pub fn hit_test_walk(&self, x: f32, y: f32) -> Option<NodeId> {
+        self.hit_roots(Point::new(x, y), false)
+    }
+
+    fn hit_roots(&self, p: Point, prune: bool) -> Option<NodeId> {
         for i in (0..self.host.child_count(ROOT)).rev() {
             let root = self.host.child_at(ROOT, i);
-            if let Some(hit) = self.hit_node(root, p) {
+            if let Some(hit) = self.hit_node(root, p, prune) {
                 return Some(hit);
             }
         }
@@ -97,8 +121,14 @@ impl Ui {
     /// `p` is in the parent's child frame (its border box minus scroll).
     /// Each node tests in its own frame, so clips and bounds stay exact
     /// under rotation and scale.
-    fn hit_node(&self, id: NodeId, p: Point) -> Option<NodeId> {
-        self.host.node(id)?;
+    fn hit_node(&self, id: NodeId, p: Point, prune: bool) -> Option<NodeId> {
+        let node = self.host.node(id)?;
+        if prune
+            && !node.flags.contains(NodeFlags::REACH)
+            && self.reach.get(id.index()).is_some_and(|r| !r.contains(p))
+        {
+            return None;
+        }
         let style = self.host.style(id);
         if style.display() == taffy::Display::None {
             return None;
@@ -121,7 +151,7 @@ impl Ui {
             // Children paint above their parent and later siblings above
             // earlier ones: test them last to first.
             for &child in self.host.children(id).iter().rev() {
-                if let Some(hit) = self.hit_node(child, cp) {
+                if let Some(hit) = self.hit_node(child, cp, prune) {
                     return Some(hit);
                 }
             }
@@ -221,6 +251,7 @@ impl Ui {
     /// Handles one normalized platform event: native consumption
     /// (scroll, editing, focus) plus JS emission into `pending_events`.
     pub fn dispatch(&mut self, ev: &Event) {
+        self.refresh_reach();
         match ev {
             Event::PointerMove { x, y } => self.pointer_move(*x, *y),
             Event::PointerDown { x, y, button, mods } => self.pointer_down(*x, *y, *button, *mods),
@@ -250,23 +281,21 @@ impl Ui {
                         e.b = off[1];
                         self.pending_events.push(e);
                     }
-                    let path = self.path_to(hit);
                     let mut e = self.event(out_kind::WHEEL, hit);
                     e.x = *x;
                     e.y = *y;
                     e.a = *dx;
                     e.b = *dy;
-                    self.emit_path(&path, e);
+                    self.emit_path(hit, e);
                 }
             }
             Event::KeyDown(k) => self.key_down(k),
             Event::KeyUp(k) => {
                 if let Some(f) = self.focus {
-                    let path = self.path_to(f);
                     let mut e = self.event(out_kind::KEY_UP, f);
                     e.key = k.key.code();
                     e.text = k.char.clone().unwrap_or_default();
-                    self.emit_path(&path, e);
+                    self.emit_path(f, e);
                 }
             }
             Event::ImePreedit { text, cursor } => {
@@ -314,27 +343,21 @@ impl Ui {
         let hit = self.hit_test(x, y);
         if hit != self.hover {
             // Synthesize leave/enter on the symmetric difference of the
-            // ancestor chains.
-            let old: Vec<NodeId> = self.hover.map(|h| self.path_to(h)).unwrap_or_default();
-            let new: Vec<NodeId> = hit.map(|h| self.path_to(h)).unwrap_or_default();
-            for &id in &old {
-                if !new.contains(&id)
-                    && self.host.interaction(id).listeners & mask::POINTER_ENTER_LEAVE != 0
-                {
-                    let mut e = self.event(out_kind::POINTER_LEAVE, id);
-                    e.x = x;
-                    e.y = y;
-                    self.pending_events.push(e);
-                }
-            }
-            for &id in &new {
-                if !old.contains(&id)
-                    && self.host.interaction(id).listeners & mask::POINTER_ENTER_LEAVE != 0
-                {
-                    let mut e = self.event(out_kind::POINTER_ENTER, id);
-                    e.x = x;
-                    e.y = y;
-                    self.pending_events.push(e);
+            // ancestor chains: each chain below their common ancestor.
+            let common = self.common_ancestor(self.hover, hit).unwrap_or(ROOT);
+            for (from, kind) in [
+                (self.hover, out_kind::POINTER_LEAVE),
+                (hit, out_kind::POINTER_ENTER),
+            ] {
+                let mut cur = from.unwrap_or(ROOT);
+                while cur.is_node() && cur != common {
+                    if self.host.interaction(cur).listeners & mask::POINTER_ENTER_LEAVE != 0 {
+                        let mut e = self.event(kind, cur);
+                        e.x = x;
+                        e.y = y;
+                        self.pending_events.push(e);
+                    }
+                    cur = self.host.parent(cur);
                 }
             }
             self.hover = hit;
@@ -360,7 +383,7 @@ impl Ui {
         // Focus: nearest focusable/input ancestor of the hit; clicking
         // non-focusable space blurs.
         let focus_target = hit.and_then(|h| {
-            self.path_to(h).into_iter().find(|&id| {
+            self.ancestors(h).find(|&id| {
                 self.host.kind(id) == Some(NodeKind::Input) || self.host.interaction(id).focusable
             })
         });
@@ -420,7 +443,6 @@ impl Ui {
         button: crate::events::Button,
         mods: Mods,
     ) {
-        let path = self.path_to(hit);
         let button_code = match button {
             crate::events::Button::Primary => 1,
             crate::events::Button::Secondary => 2,
@@ -435,27 +457,29 @@ impl Ui {
         // `a`/`b` carry coordinates relative to each receiving node's
         // border box — the offsets behaviors (sliders, drags) need.
         let bit = events::mask_for(kind);
-        for &id in &path {
-            if self.host.interaction(id).listeners & bit == 0 {
-                continue;
+        let mut id = hit;
+        while id.is_node() {
+            if self.host.interaction(id).listeners & bit != 0 {
+                // A text node's event carries the span under the pointer
+                // (key bits 16+, span + 1; 0: none): nested Text routes
+                // by it.
+                let span = self.span_at(id, x, y).map_or(0, |s| s + 1);
+                let local = self
+                    .node_to_window(id)
+                    .invert()
+                    .map_or(Point::new(0.0, 0.0), |m| m.apply(Point::new(x, y)));
+                let mut e = self.event(kind, id);
+                e.x = x;
+                e.y = y;
+                e.a = local.x;
+                e.b = local.y;
+                e.key = key | span << 16;
+                if span != 0 {
+                    e.revision = self.host.paragraph(id).map_or(0, |p| p.revision);
+                }
+                self.pending_events.push(e);
             }
-            // A text node's event carries the span under the pointer (key
-            // bits 16+, span + 1; 0: none): nested Text routes by it.
-            let span = self.span_at(id, x, y).map_or(0, |s| s + 1);
-            let local = self
-                .node_to_window(id)
-                .invert()
-                .map_or(Point::new(0.0, 0.0), |m| m.apply(Point::new(x, y)));
-            let mut e = self.event(kind, id);
-            e.x = x;
-            e.y = y;
-            e.a = local.x;
-            e.b = local.y;
-            e.key = key | span << 16;
-            if span != 0 {
-                e.revision = self.host.paragraph(id).map_or(0, |p| p.revision);
-            }
-            self.pending_events.push(e);
+            id = self.host.parent(id);
         }
     }
 
@@ -528,14 +552,12 @@ impl Ui {
         e.key = k.key.code();
         e.text = k.char.clone().unwrap_or_default();
         match self.focus {
-            Some(f) => {
-                let path = self.path_to(f);
-                self.emit_path(&path, e);
-            }
+            Some(f) => self.emit_path(f, e),
             None => {
                 // Global delivery: every node with a key listener.
-                let mut stack: Vec<NodeId> =
-                    self.host.children(ROOT).iter().rev().copied().collect();
+                let mut stack = std::mem::take(&mut self.walk);
+                stack.clear();
+                stack.extend(self.host.children(ROOT).iter().rev());
                 while let Some(id) = stack.pop() {
                     if self.host.node(id).is_none() {
                         continue;
@@ -545,10 +567,9 @@ impl Ui {
                         e.generation = self.host.node(id).map_or(0, |n| n.generation);
                         self.pending_events.push(e.clone());
                     }
-                    for &child in self.host.children(id).iter().rev() {
-                        stack.push(child);
-                    }
+                    stack.extend(self.host.children(id).iter().rev());
                 }
+                self.walk = stack;
             }
         }
     }

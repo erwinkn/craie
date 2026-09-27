@@ -112,6 +112,148 @@ instead of both reading the closed state.
 The harness found one bug: `runApp` held the process for 2 s after the
 window closed (an un-unref'd timeout in a `Promise.race`).
 
+### E15: interaction lookups, index versus walk
+
+`cargo run --release -p craie-harness --example e15_lookups`. Trees of
+1k, 10k and 100k nodes at 1440x900, in three shapes:
+
+- deep: cards 28 pt square, each a chain of 40 nested views, wrapped in
+  rows across the window;
+- wide: groups of up to 5,000 cells 6 pt square, wrapped;
+- list: a scroller holding a plain column of rows (a row, a label, a
+  button), scrolled to its middle.
+
+Pointer moves follow a fixed path of 1,000 points across the window;
+keys go with no focus (0, 50 or 500 key listeners, standing in for
+keymaps until claims land) and with a node 40 deep focused; Tab cycles
+through 1,000 focusable nodes. Times are the mean per event on exe1
+(indicative, as above); allocations are allocator calls per event.
+
+The walk before this change, in an earlier walk-only run (µs per event;
+the index table below repeats the walk from its own run, and every
+speedup comes from that one):
+
+| tree      | hit test | pointer move | key, no focus (0 / 500 listeners) | key, focused | Tab |
+|-----------|----------|--------------|-----------------------------------|--------------|-----|
+| deep 1k   | 13.8     | 13.4         | 4.4 / 12.7                        | 0.28         | 5.8 |
+| deep 10k  | 137      | 135          | 42 / 53                           | 0.27         | 52  |
+| deep 100k | 1,397    | 1,280        | 427 / 455                         | 0.28         | 538 |
+| wide 100k | 1,088    | 1,108        | 294 / 311                         | 0.10         | 560 |
+| list 100k | 682      | 680          | 329 / 344                         | 0.10         | 681 |
+
+The hit test was the only lookup on a per-frame path that grew with the
+tree: at 100k nodes a pointer move cost over a millisecond, a tenth of a
+120 Hz frame, spent before any listener ran. Keys and Tab are
+keypresses, and stay under 0.7 ms even at 100k nodes.
+
+**The reach index** (`crates/ui/src/reach.rs`). Each node keeps its
+reach: a box around everything a hit test can find in its subtree, in
+its parent's frame. For example, a 100x40 button at (20, 10) whose
+tooltip child sits absolutely at (0, 44) with size 160x30 has the reach
+(20, 10)–(180, 84); a scroller that clips cuts its content's reach to its
+own box. The hit test skips a subtree whose reach misses the point, so
+it visits the nodes on the way down and their siblings instead of every
+node before the hit.
+
+- Reach includes transforms (the box of the mapped corners), scroll
+  offsets, clips per axis, and `display: none` (empty). It is padded
+  against rounding: a few ulps at the box's magnitude, times the
+  condition number of the node's transform (1 for rotations and uniform
+  scales). A transform that squashes one axis 1,000-fold makes its
+  inverse round about 1,000 times worse; without that factor the index
+  missed 6 of a million points aimed at the corners of such boxes.
+- Upkeep is lazy. Any change to a box, clip, overflow, display, scroll
+  offset, transform or the children marks the node stale, with its
+  ancestors up to the first that is already stale: one flag bit. The
+  frame refreshes the stale nodes at the end of its layout
+  (`Ui::render`), children first; each dispatch refreshes whatever
+  changed since (a transaction or a scroll between frames).
+- A stale node is never pruned: until its refresh, the hit test walks it
+  in full. `hit_test_walk` stays as the oracle. A randomized test (12
+  seeds, 24 rounds of random styles with borders and padding,
+  transforms, moves, removals whose ids are reused at once, and
+  scrolls; 400 points per check, half aimed at box edges and corners;
+  checked before layout, after layout, and after the frame's refresh)
+  asserts they agree. Two more tests cover a million points around
+  boxes squashed up to 100,000-fold, and a clip that moves inside an
+  unchanged box (a percentage border). Deleting any one of the six
+  invalidation hooks (layout's touch, its clip term, `set_spatial`'s,
+  `scroll_to`'s, `mark_layout`'s, and `touch` marking the node itself
+  when it is already stale) fails at least one of the three; the clip
+  term fails only its own test. The harness asserts agreement on every
+  tree too.
+
+With the index (µs per event; the walk and the index from the same run;
+speedup = walk / index):
+
+| tree      | hit test, walk | hit test, index | pointer move | full refresh | refresh after one box grows (its layout pass) | after one transform |
+|-----------|----------------|-----------------|--------------|--------------|-----------------------------------------------|---------------------|
+| deep 1k   | 13.3           | 0.12 (107x)     | 0.14         | 26           | 1.1 (41)                                      | 0.13                |
+| deep 10k  | 131            | 0.82 (159x)     | 0.90         | 277          | 6.8 (282)                                     | 0.66                |
+| deep 100k | 1,259          | 5.3 (236x)      | 5.7          | 4,080        | 116 (2,416)                                   | 6.3                 |
+| wide 1k   | 11.4           | 0.16 (70x)      | 0.17         | 14           | 9.1 (450)                                     | 2.3                 |
+| wide 10k  | 108            | 2.7 (39x)       | 2.9          | 117          | 67 (2,378)                                    | 92 (noise, see below) |
+| wide 100k | 1,059          | 7.7 (137x)      | 7.7          | 1,481        | 297 (4,172)                                   | 12                  |
+| list 1k   | 5.6            | 0.48 (12x)      | 0.53         | 17           | 7.9 (138)                                     | 0.87                |
+| list 10k  | 66             | 4.6 (14x)       | 4.6          | 157          | 75 (1,311)                                    | 7.6                 |
+| list 100k | 694            | 50 (14x)        | 49           | 2,627        | 976 (14,801)                                  | 85                  |
+
+Two reruns after the review fixes (headless Linux exe1, loaded VM, load
+average 15 and 17) put the wide 10k refresh after one transform at 12.9
+and 11.9 µs, next to wide 100k's 11.7 and 11.4: the 92 was noise. The
+rest moved with the load: speedups of 9x to 328x and 11x to 240x, and
+a refresh after one box grows at 1.4 to 9 percent of its layout pass
+(one outlier at 15: deep 100k, 523 of 3,551 µs, in the first rerun).
+
+What it says:
+
+- The index wins by 12x to 236x, and a pointer move at 100k nodes costs
+  5 to 50 µs instead of 0.7 to 1.3 ms.
+- The upkeep is small next to what caused it. A refresh after one edit
+  costs 2 to 7 percent of that edit's layout pass, and a full refresh
+  (after a whole new tree) about 1 percent of building and laying out
+  that tree (4 ms of 387 ms at deep 100k). Memory is 16 bytes per node
+  plus a flag bit.
+- The refresh belongs to the frame, not the next event. During a
+  layout animation every frame stales the index; refreshed on the first
+  pointer move, list 100k would pay 976 µs + 49 µs on it, more than the
+  694 µs walk. `Ui::render` refreshes once layout is done (outside the
+  harness's layout timing), so the dispatch's refresh finds nothing
+  stale unless a transaction or a scroll came in between. The probe's
+  hit test after a drawn frame gets the pruning too.
+- The list gains least, 14x: the index still checks each of the
+  scroller's direct children against the point, one box per row.
+  Children of a column are sorted by position, so a binary search would
+  make it logarithmic, but real long lists are virtualized (E14), with a
+  few dozen rows mounted, so it is not worth doing now.
+
+The other lookups:
+
+- Walking a propagation path no longer allocates: it follows parent
+  links, and hover's enter and leave stop at the common ancestor. The
+  events still do: each listener gets its own copy, and a key event's
+  copy allocates its text. A pointer move now makes 0 to 2 allocations
+  (1 to 12 before); a focused key 6 (11).
+- A key with no focus still walks the whole tree (0.4 ms at 100k), now
+  on a reused stack (3 allocations, from 8 to 15). Claims (work item 1)
+  replace it with a window-level list of key listeners, so no index is
+  built for it.
+- Tab stays a walk: 0.5 to 0.7 ms at 100k nodes, once per keypress. A focus
+  order per trap (work item 3) can replace it if traps need one.
+
+Two older bugs, fixed in the PR #3 review:
+
+- Removing the hovered node cleared the hover, so the next move sent
+  enter again to every ancestor still under the pointer, with no leave
+  between; detaching an ancestor did the same. The hover now falls back
+  to the parent of the subtree that left, which gets no leave (as a
+  removed DOM element gets no `mouseleave`). A test walks siblings,
+  cousins, separate roots and those removals, event by event.
+- The rounded-clip test (`in_rounded`) clamped with `f32::clamp`, which
+  panics when rounding puts its low bound above its high one: a radius
+  of half the box, at an origin a border offsets. Borders in the
+  randomized test found it.
+
 ## Step 1 — crate split, CRW2, retained scene (2026-09-23)
 
 Conditions: the shared M5 Max ran under heavy load (load average 12 to

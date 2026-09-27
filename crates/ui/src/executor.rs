@@ -532,17 +532,25 @@ impl Ui {
                 child,
                 before,
             } => {
+                let child = NodeId(*child);
+                if self.host.parent(child) != NodeId(*parent) {
+                    self.unhover(child);
+                }
                 self.host
-                    .insert_before(NodeId(*parent), NodeId(*child), NodeId(*before));
+                    .insert_before(NodeId(*parent), child, NodeId(*before));
             }
-            Mutation::Detach { id } => self.host.detach(NodeId(*id)),
+            Mutation::Detach { id } => {
+                self.unhover(NodeId(*id));
+                self.host.detach(NodeId(*id));
+            }
             Mutation::Remove { id } => {
                 let node = NodeId(*id);
                 // Its tweens end before the slot's generation moves.
                 self.end_animations_of(node, crate::animation::end_reason::REMOVED);
+                self.unhover(node);
                 self.host.remove(node);
                 self.forget_node_state(node);
-                for slot in [&mut self.focus, &mut self.hover, &mut self.pressed] {
+                for slot in [&mut self.focus, &mut self.pressed] {
                     if *slot == Some(node) {
                         *slot = None;
                     }
@@ -831,6 +839,18 @@ impl Ui {
         }
     }
 
+    /// `node` leaves its place in the tree: if the pointer is over it or
+    /// inside it, the hover falls back to its parent. Its ancestors stay
+    /// hovered (no second enter on the next move); the subtree gets no
+    /// leave, as a removed DOM element gets no `mouseleave`.
+    fn unhover(&mut self, node: NodeId) {
+        if let Some(h) = self.hover
+            && self.ancestors(h).any(|n| n == node)
+        {
+            self.hover = Some(self.host.parent(node)).filter(|p| p.is_node());
+        }
+    }
+
     /// Drops per-node state held outside the host when a slot is created
     /// or freed: a recycled id must start clean.
     fn forget_node_state(&mut self, node: NodeId) {
@@ -875,11 +895,13 @@ impl Ui {
         let s = &mut self.host.spatial[node.index()];
         let before = (s.transformed(), s.layered());
         let mut changed = false;
+        let mut moved = false;
         if let Some(t) = transform
             && s.transform != t
         {
             s.transform = t;
             changed = true;
+            moved = true;
         }
         if let Some(o) = opacity
             && s.opacity != o
@@ -890,7 +912,11 @@ impl Ui {
         if !changed {
             return;
         }
-        if before != (s.transformed(), s.layered()) {
+        let after = (s.transformed(), s.layered());
+        if moved {
+            self.host.touch(node);
+        }
+        if before != after {
             // A transform record or an opacity layer appears or goes:
             // the draw topology changes.
             self.host.revs.structure.bump();

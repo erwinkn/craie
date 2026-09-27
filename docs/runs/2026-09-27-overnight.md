@@ -23,6 +23,9 @@ Times are UTC.
 | 01:27 | PR #2 (E19) opened after verification (cargo, bun, tsc, smoke, windowed under Xvfb) |
 | 01:30 | E15 walk baseline measured (1k, 10k, 100k nodes), in parallel with the review |
 | 01:40 | PR #2 review fixed (9 of 10 findings); final E19 numbers rerun |
+| 01:52 | E15 reach index built; oracle test and harness agree with the walk |
+| 02:00 | E15 verification (cargo, wasm32, clippy, bun, tsc) |
+| 02:40 | PR #3 (E15) review fixed (all 10 findings, plus a clamp panic in the rounded-clip hit test); E15 rerun twice |
 
 ## PRs
 
@@ -48,6 +51,19 @@ the JS part alone (native dispatch to React's commit, p50 / p99):
 JS is quick, garbage-collection pauses set its tail, and on exe1 the
 rest is llvmpipe rasterizing. Rerun on the Mac: `sh bench/e19.sh`.
 
+E15, µs per pointer move's hit test, the full walk against the reach
+index (speedup):
+
+| tree | 1k nodes | 10k | 100k |
+| --- | --- | --- | --- |
+| deep (cards of 40 nested views) | 13 → 0.12 (107x) | 131 → 0.82 (159x) | 1,259 → 5.3 (236x) |
+| wide (groups of 5,000 cells) | 11 → 0.16 (70x) | 108 → 2.7 (39x) | 1,059 → 7.7 (137x) |
+| list (one scroller of rows) | 5.6 → 0.48 (12x) | 66 → 4.6 (14x) | 694 → 50 (14x) |
+
+Walk and index from the same run. Keeping the index costs 2 to 7
+percent of the layout pass that stales it, and 16 bytes per node. Rerun on the Mac:
+`cargo run --release -p craie-harness --example e15_lookups`.
+
 ## Decisions
 
 - E19: native events' React updates take React DOM's priorities
@@ -56,7 +72,22 @@ rest is llvmpipe rasterizing. Rerun on the Mac: `sh bench/e19.sh`.
 - E19: the bridge renders a discrete event's updates before the next
   event of the same native batch (`flushSyncWork`), so a press sees the
   state the previous press left, as with the DOM's one task per event.
+- E15: the hit test gets the index (a reach box per subtree, refreshed
+  after each frame's layout and again before dispatch; a stale subtree
+  is walked in full, and the reach is padded against rounding by the
+  transform's condition number, so the index and the walk agree).
+  Tab and the key walk with no focus stay walks: they are once per
+  keypress and under 0.7 ms at 100k nodes, and claims (item 1) replace
+  the key walk with a window list. Walking a propagation path no longer
+  allocates.
+- E15: the list's scroller still checks each row's reach in turn (14x,
+  not 100x). Binary search over a column's sorted rows would fix it;
+  not done, since long lists are virtualized.
 
 ## Open questions for Erwin
+
+- `craie-render --test paths` failed once in the first full test run
+  of PR #2 and passed in five reruns. Likely a timing flake under
+  llvmpipe load; worth watching on the Mac.
 
 ## Next steps

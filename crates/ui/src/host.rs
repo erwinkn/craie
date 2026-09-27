@@ -88,6 +88,8 @@ impl NodeFlags {
     pub const LAYOUT: NodeFlags = NodeFlags(1 << 1);
     /// Text content or metrics changed; the shaped paragraph is stale.
     pub const TEXT: NodeFlags = NodeFlags(1 << 2);
+    /// The hit-test reach is stale (`reach.rs`); so is every ancestor's.
+    pub const REACH: NodeFlags = NodeFlags(1 << 3);
 
     pub fn contains(self, other: NodeFlags) -> bool {
         self.0 & other.0 != 0
@@ -568,10 +570,37 @@ impl Host {
     }
 
     /// Flags `id` layout-dirty and queues it once for cache invalidation.
+    /// Its reach is stale too: a layout input (display, overflow) or its
+    /// children changed.
     pub fn mark_layout(&mut self, id: NodeId) {
         if let Some(n) = self.nodes.get_mut(id.index()).filter(|n| n.is_live()) {
             n.flags.set(NodeFlags::LAYOUT);
             self.dirty.layout.push(id.0);
+            self.touch(id);
+        }
+    }
+
+    /// Marks `id`'s hit-test reach stale (`reach.rs`), with its
+    /// ancestors up to the first one already stale.
+    pub fn touch(&mut self, id: NodeId) {
+        let mut cur = id;
+        while let Some(n) = self.node_mut(cur) {
+            if cur != id && n.flags.contains(NodeFlags::REACH) {
+                break;
+            }
+            n.flags.set(NodeFlags::REACH);
+            cur = n.parent();
+        }
+    }
+
+    pub fn reach_stale(&self, id: NodeId) -> bool {
+        self.node(id)
+            .is_some_and(|n| n.flags.contains(NodeFlags::REACH))
+    }
+
+    pub(crate) fn reach_fresh(&mut self, id: NodeId) {
+        if let Some(n) = self.node_mut(id) {
+            n.flags.clear(NodeFlags::REACH);
         }
     }
 

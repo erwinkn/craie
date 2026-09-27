@@ -771,6 +771,7 @@ impl TreeView<'_> {
         if data.scroll_extent != before.scroll_extent {
             self.store.extents.push(id.0);
         }
+        let reach = data.rect != before.rect || data.clip_box != before.clip_box;
         if data.rect.origin != before.rect.origin {
             self.store.moved.push(id.0);
         } else if data.rect.size != before.rect.size
@@ -782,6 +783,9 @@ impl TreeView<'_> {
         }
         if let Some(n) = self.host.node_mut(id) {
             n.flags.clear(NodeFlags::LAYOUT);
+        }
+        if reach {
+            self.host.touch(id);
         }
     }
 }

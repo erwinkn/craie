@@ -39,8 +39,7 @@ pub const SELECTION_COLOR: u32 = 0x3584_E47A;
 impl Ui {
     /// The nearest selectable node on `id`'s path (itself included).
     pub(crate) fn selection_domain(&self, id: NodeId) -> Option<NodeId> {
-        self.path_to(id)
-            .into_iter()
+        self.ancestors(id)
             .find(|&n| self.host.interaction(n).selectable)
     }
 
