@@ -1080,7 +1080,9 @@ capture holds a drag on the pressed node. Tab traverses focusable nodes
 in tree order, whatever their z, each owned layer right after its
 owner's subtree, inside the innermost active focus trap (`trap.rs`); a
 focus group is one stop, and arrows, Home and End move among its
-members (`group.rs`). Clipboard via arboard. IME with cursor-area tracking.
+members (`group.rs`). An unclaimed key down goes to the focused node's
+path before its default action (Tab's move, an arrow's, Enter's
+activation), as on the web. Clipboard via arboard. IME with cursor-area tracking.
 A pointer event on a text node carries the span under the pointer (key
 bits 16 and up, so at most 65,535 spans per paragraph), found from the
 placements, and the paragraph's revision (paragraph ops applied, a

@@ -14,12 +14,12 @@ use std::sync::{Arc, Mutex};
 
 use accesskit::{
     Action, ActionRequest, ActivationHandler, DeactivationHandler, Node, NodeId as A11yId,
-    Rect as A11yRect, Role, Toggled, TreeId, TreeInfo, TreeUpdate,
+    Orientation, Rect as A11yRect, Role, Toggled, TreeId, TreeInfo, TreeUpdate,
 };
 
 use crate::geom::Size;
 use crate::host::{NodeFlags, NodeId, ROOT};
-use crate::mutation::{NIL, NodeKind, Role as UiRole, reported};
+use crate::mutation::{NIL, NodeKind, Role as UiRole, group_flag, reported};
 use crate::states::state_bit;
 use crate::trap::Class;
 use crate::ui::Ui;
@@ -254,6 +254,16 @@ impl Ui {
         }
         if props.reported & reported::SELECTED != 0 && selectable(props.role) {
             an.set_selected(bits & state_bit::SELECTED != 0);
+        }
+        // A focus group's arrow axis, when it has one.
+        if props.group
+            && let Some(g) = self.groups.get(&id.0)
+        {
+            match g.flags & (group_flag::HORIZONTAL | group_flag::VERTICAL) {
+                group_flag::HORIZONTAL => an.set_orientation(Orientation::Horizontal),
+                group_flag::VERTICAL => an.set_orientation(Orientation::Vertical),
+                _ => {}
+            }
         }
         if let Some(p) = self.host.paragraph(id) {
             an.set_value(p.text.clone());

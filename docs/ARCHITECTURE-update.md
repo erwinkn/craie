@@ -546,7 +546,12 @@ Tab back lands on Small.
   input) that is enabled is a member, and its subtree is not searched
   further; a hidden or inert subtree holds none. A disabled one (press
   or state `DISABLED`) is no member and no Tab stop of its own, even when
-  left focusable, but what it holds may be members, as on the web. A
+  left focusable, but what it holds may be members, as on the web. While
+  it holds the focus (disabled after focusing, or focused by `focus()`)
+  it is a member and the group's stop: Tab and Shift+Tab leave the group
+  from it, and an arrow goes to the next or previous enabled member in
+  tree order from its place, rather than Tab jumping to the window's
+  first stop and arrows doing nothing. A
   `radiogroup` takes only `radio`s and a `tablist` only `tab`s; any
   other focusable in it (a "More…" button) stays its own Tab stop, and
   arrows from it do nothing.
@@ -554,7 +559,9 @@ Tab back lands on Small.
   selected, else the last focused, else the first. The first rule is a
   choice: with focus on Small while Medium is checked, Tab leaves the
   group from Small, as a roving `tabIndex` does, rather than stepping to
-  Medium.
+  Medium. A group node left focusable is a Tab stop of its own, before
+  its members, and arrows on it do nothing, as on the web: the review
+  weighed skipping it or entering at the stop, and kept the web's.
 - **Last focused** is native, per group: `Ui::groups` maps the group's
   id to its flags and the (id, generation) of the member focused last,
   noted in `set_focus`. A removed or reused id fails the generation
@@ -565,35 +572,66 @@ Tab back lands on Small.
   the focus; Home and End go to the innermost group's ends. At an end
   without `loop` the key does nothing, and is still the group's (no
   activation). No arrows from a text input, whose caret keeps them, nor
-  with Ctrl, Alt or Meta (Shift passes). The `KEY_DOWN` event still
-  goes to JS, as for Tab. With `SELECT_ON_FOCUS`, each move activates
-  the member reached once, through `Ui::activate` with the keyboard
-  source and the key's modifiers; a claim on the chord wins over the
-  whole group, so JS highlight mode claims ↑↓ and native stays out.
+  with Ctrl, Alt or Meta (Shift passes). With `SELECT_ON_FOCUS`, each
+  move activates the member reached once, through `Ui::activate` with
+  the keyboard source and no modifiers, as the web's `click()`: Shift+↓
+  is no Shift+click. A claim on the chord wins over the whole group, so
+  JS highlight mode claims ↑↓ and native stays out.
+- **`KEY_DOWN` goes to the node focused when the key went down**, if
+  still live, before any default action, as on the web: ↓ from Small
+  sends `KEY_DOWN` to Small, then blur Small, focus Medium, and (with
+  `SELECT_ON_FOCUS`) Medium's activation. This covers every unclaimed
+  key, so it changes main in two ways: Tab's `KEY_DOWN` went to the node
+  Tab focused and now goes to the one it left, and Enter's activation
+  and an input's change or submit now follow the `KEY_DOWN` instead of
+  preceding it.
 - **Nesting.** A group inside another is one member of it, entered at
   its own stop, and its members are its own: in a vertical group of
   horizontal toolbars, ↑↓ move between the toolbars (landing on each
   one's stop) and ←→ within one. A key the inner group's orientation
   doesn't take goes to the outer group. An empty inner group is no
   member. Focus inside a nested group counts as the outer group's last
-  focused too, so Tab back returns to it.
+  focused too, so Tab back returns to it. An outer `SELECT_ON_FOCUS`
+  group's arrow into a nested group activates the leaf it lands on, the
+  inner group's stop (a tab holding a toolbar gets selected).
 - **Traps.** A group in a trap is one stop of the trap's cycle. A trap
   in a group scopes Tab and arrows to itself: with focus in it, the
   group around it doesn't apply.
 - **Accessibility.** `tab` and `tablist` map to AccessKit's `Tab` and
-  `TabList`, and a `tab` reports `selected` like a list row. Nothing
-  else changes: AccessKit has no roving focus to announce, and each
-  member keeps its own node, role and states.
-- **Cost** (E15, exe1, load 20 to 41; best of 6 runs of main and 4 of
-  this branch, interleaved; single runs varied up to 4x). A group costs
-  nothing until one exists: Tab through 1,000 focusables at 100k nodes
-  is 538, 587 and 607 µs (deep, wide, list) against main's 586, 649 and
-  607, with the same allocations. With the root a group over 999 of
-  them, Tab costs one more walk of the group's subtree: 1,182, 1,252 and
-  1,331 µs, 31 to 37 allocations against 20 to 24. An arrow walks the
-  group once: 516 to 544 µs, 12 to 14 allocations. Real groups hold a
-  few nodes, so both are about a Tab. The group map is a B-tree: a
-  `HashMap` lookup on every node walked made Tab in a group 5x slower.
+  `TabList`, and a `tab` reports `selected` like a list row. The group
+  node reports its orientation, from its flags: horizontal or vertical,
+  none for `both` (screen readers announce the arrow axis from it; the
+  web sets no `aria-orientation`). AccessKit has no roving focus to
+  announce, and each member keeps its own node, role and states.
+- **Cost.** Tab walks the tree once. Each group it reaches adds one walk
+  of the group's subtree (a nested group's is walked again for each
+  level above it), pushing the stops the group takes away. They are
+  sorted once at the end, and the order is filtered with a binary
+  search, so Tab is O(nodes + skipped · log skipped) however many groups
+  there are. The first version re-sorted at each group, and 1,000 groups
+  cost 1 to 11 ms per Tab. A `group` bit in the node's `Interaction`
+  spares the walks a map lookup on each node that is no group. It isn't
+  a node flag because the 16-byte header's flag byte is full. The walks
+  of one Tab share their buffers. E15 on exe1, best of 4 interleaved
+  runs, load 19 to 47 (single runs varied 2 to 3x):
+
+  | 100k nodes, deep / wide / list | per Tab | allocations |
+  | --- | --- | --- |
+  | Tab, 1,000 focusable, no group (main: 665 / 700 / 648 µs) | 662 / 807 / 696 µs | 20 / 21 / 24, as main |
+  | Tab, 999 in one group at the root | 1,770 / 1,756 / 1,436 µs | 39 / 41 / 45 |
+  | Tab, 1,000 groups of 3 (4,000 nodes more) | 1,052 / 1,096 / 863 µs | 35 / 36 / 39 |
+  | Tab, 1,000 groups of 3, before the fix | 2,759 / 2,305 / 2,745 µs | about 2,030 |
+  | ↓, 999 in one group | 573 / 542 / 526 µs | 12 / 13 / 14 |
+
+  The fix shows best on small trees, where the groups are most of the
+  work. At 1k nodes (plus the 4,000), 1,000 groups cost 212 / 154 / 113
+  µs per Tab, down from 10.6 / 0.8 / 3.5 ms. The no-group row comes from
+  a separate Tab-only A/B, best of 6 alternating runs (load 31 to 52 on
+  8 cores, where single runs of either build spanned 650 to 2,600 µs).
+  With no group, the walk differs from main by one field read on an
+  `Interaction` it already loads (still 12 bytes), so the gap reads as
+  load; no instruction counter is on exe1 to settle it. The group map is a B-tree: a `HashMap`
+  made Tab in a group 5x slower when the walk looked up every node.
 - **Deferred.** No right-to-left flip of ←→ (DF-50). `both` moves in one
   line in tree order, not a grid (DF-51). No PageUp and PageDown, and
   typeahead is JS's, as targeted. Menu, listbox and tree item roles

@@ -512,3 +512,152 @@ fn tabs_have_their_roles() {
     assert_eq!(tab(&mut ui, false), Some(11));
     assert_eq!(key(&mut ui, Key::Right), Some(12));
 }
+
+/// The key goes to the node it leaves: `KEY_DOWN` on the old focus,
+/// then the focus change, then (`selectOnFocus`) the activation, and
+/// Tab alike.
+#[test]
+fn the_key_goes_to_the_node_it_leaves() {
+    let mut ui = radios();
+    apply(&mut ui, |t| {
+        for id in [1, 11, 12] {
+            t.interaction_press(id, LISTEN | mask::KEY, true, press::PRESSABLE);
+        }
+    });
+    focus(&mut ui, 11);
+    ui.take_events();
+    let events = |ui: &mut Ui| -> Vec<(u8, u32)> {
+        let e = ui.take_events();
+        e.iter().map(|e| (e.kind, e.node)).collect()
+    };
+    key(&mut ui, Key::Down);
+    assert_eq!(
+        events(&mut ui),
+        [
+            (out_kind::KEY_DOWN, 11),
+            (out_kind::BLUR, 11),
+            (out_kind::FOCUS, 12),
+            (out_kind::ACTIVATE, 12),
+        ]
+    );
+    focus(&mut ui, 1);
+    ui.take_events();
+    tab(&mut ui, false);
+    assert_eq!(
+        events(&mut ui),
+        [
+            (out_kind::KEY_DOWN, 1),
+            (out_kind::BLUR, 1),
+            (out_kind::FOCUS, 12)
+        ]
+    );
+}
+
+/// `selectOnFocus` activates with no modifiers, as the web's `click()`:
+/// Shift+↓ is no Shift+click.
+#[test]
+fn select_on_focus_activates_without_modifiers() {
+    let mut ui = radios();
+    focus(&mut ui, 11);
+    ui.take_events();
+    let shift = Mods {
+        shift: true,
+        ..Mods::default()
+    };
+    assert_eq!(key_with(&mut ui, Key::Down, shift), Some(12));
+    let acts: Vec<u32> = ui
+        .take_events()
+        .iter()
+        .filter(|e| e.kind == out_kind::ACTIVATE)
+        .map(|e| e.key)
+        .collect();
+    assert_eq!(acts, [KEY << 4]);
+}
+
+/// A disabled member still focusable (a `View focusable` with state
+/// `DISABLED`, or `focus()` on it) is the stop while it holds focus:
+/// Tab goes on in tree order, and arrows move to the enabled members
+/// around it.
+#[test]
+fn a_focused_disabled_member_is_the_stop() {
+    let mut ui = app(Role::None, g::VERTICAL, Role::Button, 4);
+    apply(&mut ui, |t| {
+        t.states(12, DISABLED);
+    });
+    focus(&mut ui, 12);
+    assert_eq!(tab(&mut ui, false), Some(2));
+    focus(&mut ui, 12);
+    assert_eq!(tab(&mut ui, true), Some(1));
+    focus(&mut ui, 12);
+    assert_eq!(key(&mut ui, Key::Down), Some(13));
+    // Gone from it, it is skipped again.
+    assert_eq!(key(&mut ui, Key::Up), Some(11));
+    focus(&mut ui, 12);
+    assert_eq!(key(&mut ui, Key::Up), Some(11));
+    focus(&mut ui, 1);
+    assert_eq!(tab(&mut ui, false), Some(11));
+}
+
+/// Focus on a non-member in the group (a "More…" button in a
+/// radiogroup) leaves the last focused member as it was.
+#[test]
+fn a_non_member_is_never_the_last_focused() {
+    let mut ui = app(Role::RadioGroup, g::VERTICAL, Role::RadioButton, 3);
+    apply(&mut ui, |t| {
+        button(t, 10, 14);
+    });
+    focus(&mut ui, 12);
+    focus(&mut ui, 14);
+    focus(&mut ui, 1);
+    assert_eq!(tab(&mut ui, false), Some(12));
+    assert_eq!(tab(&mut ui, false), Some(14));
+}
+
+/// Removing a group drops its state; its id reused by a plain View is
+/// no group.
+#[test]
+fn a_removed_group_is_forgotten() {
+    let mut ui = radios();
+    apply(&mut ui, |t| {
+        for id in [11, 12, 13, 10] {
+            t.remove(id);
+        }
+    });
+    assert!(ui.groups.is_empty());
+    apply(&mut ui, |t| {
+        view(t, 0, 10);
+        for id in [11, 12] {
+            button(t, 10, id);
+        }
+    });
+    focus(&mut ui, 1);
+    let ring: Vec<_> = (0..3).map(|_| tab(&mut ui, false).unwrap()).collect();
+    // Appended after 2; every item a stop.
+    assert_eq!(ring, [2, 11, 12]);
+}
+
+/// The group's arrow axis reaches AccessKit: horizontal or vertical,
+/// none for both.
+#[test]
+fn the_orientation_is_in_the_accessibility_tree() {
+    use accesskit::Orientation;
+    let mut ui = radios();
+    let orientation = |ui: &mut Ui| {
+        let tree = ui.a11y_tree(VIEW);
+        let (_, n) = tree
+            .nodes
+            .iter()
+            .find(|(n, _)| *n == aid(NodeId(10)))
+            .unwrap();
+        n.orientation()
+    };
+    assert_eq!(orientation(&mut ui), Some(Orientation::Vertical));
+    apply(&mut ui, |t| {
+        t.group(10, g::HORIZONTAL);
+    });
+    assert_eq!(orientation(&mut ui), Some(Orientation::Horizontal));
+    apply(&mut ui, |t| {
+        t.group(10, BOTH);
+    });
+    assert_eq!(orientation(&mut ui), None);
+}

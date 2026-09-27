@@ -622,6 +622,17 @@ impl Ui {
             }
         }
 
+        // Unclaimed keys go to the focused node's path, before their
+        // default actions, as on the web: a Tab or an arrow that moves
+        // focus reaches the node it leaves. With nothing focused, to no
+        // one (window shortcuts are claims).
+        if let Some(f) = self.focus {
+            let mut e = self.event(out_kind::KEY_DOWN, f);
+            e.key = events::key_bits(k, composing);
+            e.text = k.char.clone().unwrap_or_default();
+            self.emit_path(f, e);
+        }
+
         // Tab traversal, within the innermost active trap (`trap.rs`).
         if k.key == Key::Tab && !k.mods.ctrl && !k.mods.meta {
             let order = self.tab_order(self.tab_scope());
@@ -674,15 +685,6 @@ impl Ui {
                     self.emit_change(id);
                 }
             }
-        }
-
-        // Unclaimed keys go to the focused node's path; with nothing
-        // focused, to no one (window shortcuts are claims).
-        if let Some(f) = self.focus {
-            let mut e = self.event(out_kind::KEY_DOWN, f);
-            e.key = events::key_bits(k, composing);
-            e.text = k.char.clone().unwrap_or_default();
-            self.emit_path(f, e);
         }
     }
 

@@ -816,8 +816,8 @@ export interface FocusGroupProps extends ViewProps {
   /** An arrow past an end comes around to the other (default true). */
   loop?: boolean
   /** An arrow or Home/End move also activates the member reached: its
-   * `onPress` runs with `e.source` "keyboard" (the radio-group
-   * pattern). (default false) */
+   * `onPress` runs with `e.source` "keyboard" and no modifiers, as the
+   * web's `click()` (the radio-group pattern). (default false) */
   selectOnFocus?: boolean
 }
 
@@ -835,7 +835,8 @@ export interface FocusGroupProps extends ViewProps {
  *
  * - Members: the focusable descendants that are enabled, not inert and
  *   not hidden, none inside another member; with a `radiogroup` or
- *   `tablist` role, only the `radio`s or `tab`s.
+ *   `tablist` role, only the `radio`s or `tab`s. A disabled one holding
+ *   the focus is a member, and the stop, until the focus leaves.
  * - The Tab stop: the member holding the focus, else the first
  *   `checked` or `selected` one, else the last focused, else the first.
  * - Arrows move in tree order, and not from a TextInput (its caret keeps

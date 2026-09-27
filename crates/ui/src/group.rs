@@ -26,7 +26,7 @@
 //! (checked or selected), else the last focused, else the first. The
 //! last focused is kept natively, per group, as (id, generation).
 
-use crate::events::{Key, KeyInput, activate_source};
+use crate::events::{Key, KeyInput, Mods, activate_source};
 use crate::host::{NodeFlags, NodeId};
 use crate::mutation::{Role, group_flag, press};
 use crate::states::state_bit;
@@ -39,6 +39,14 @@ pub(crate) struct Group {
     /// The member focused last, as (id, generation): a leaf, possibly
     /// inside a nested group.
     last: Option<(NodeId, u16)>,
+}
+
+/// `walk_group`'s buffers: the members found, and its stack. The Tab
+/// walk reuses one across the groups it meets.
+#[derive(Default)]
+pub(crate) struct GroupWalk {
+    members: Vec<(NodeId, NodeId)>,
+    stack: Vec<NodeId>,
 }
 
 /// The item role a composite group role implies (Marbre web's pairs
@@ -55,15 +63,23 @@ impl Ui {
     /// Makes `id` a focus group with `group_flag` bits, keeping its last
     /// focused member; no bits unmake it.
     pub(crate) fn set_group(&mut self, id: NodeId, flags: u8) {
+        let old = self.groups.get(&id.0).map_or(0, |g| g.flags);
+        if flags == old {
+            return;
+        }
         if flags == 0 {
             self.groups.remove(&id.0);
         } else {
             self.groups.entry(id.0).or_default().flags = flags;
         }
+        self.host.interaction[id.index()].group = flags != 0;
+        // The orientation is in the accessibility tree.
+        self.host.revs.semantic.bump();
+        self.host.dirty.semantic.push(id.0);
     }
 
-    fn is_group(&self, id: NodeId) -> bool {
-        self.groups.contains_key(&id.0)
+    pub(crate) fn is_group(&self, id: NodeId) -> bool {
+        self.host.interaction(id).group
     }
 
     /// Whether `n` would be a leaf member of a group taking `item`
@@ -82,11 +98,18 @@ impl Ui {
     /// Group `g`'s members in tree order, each with its leaf: itself, or
     /// a nested group's stop. Hidden and inert subtrees hold none, and a
     /// nested group with no members is not one. A disabled candidate is
-    /// no member (what it holds may be), and goes to `disabled`.
-    fn walk_group(&self, g: NodeId, mut disabled: impl FnMut(NodeId)) -> Vec<(NodeId, NodeId)> {
+    /// no member (what it holds may be), and goes to `disabled`, unless
+    /// it holds the focus: then it is one, the stop, until focus leaves.
+    /// They land in `walk.members`.
+    fn walk_group(&self, g: NodeId, walk: &mut GroupWalk, mut disabled: impl FnMut(NodeId)) {
         let item = item_role(self.host.interaction(g).role);
-        let mut out = Vec::new();
-        let mut stack: Vec<NodeId> = self.host.children(g).iter().rev().copied().collect();
+        let GroupWalk {
+            members: out,
+            stack,
+        } = walk;
+        out.clear();
+        stack.clear();
+        stack.extend(self.host.children(g).iter().rev());
         while let Some(n) = stack.pop() {
             let Some(node) = self.host.node(n) else {
                 continue;
@@ -105,15 +128,20 @@ impl Ui {
                     out.push((n, n));
                     continue;
                 }
-                disabled(n);
+                if self.focus == Some(n) {
+                    out.push((n, n));
+                } else {
+                    disabled(n);
+                }
             }
             stack.extend(self.host.children(n).iter().rev());
         }
-        out
     }
 
     fn group_members(&self, g: NodeId) -> Vec<(NodeId, NodeId)> {
-        self.walk_group(g, |_| {})
+        let mut walk = GroupWalk::default();
+        self.walk_group(g, &mut walk, |_| {});
+        walk.members
     }
 
     /// Whether `n` is a member of group `g`, which holds it: what
@@ -129,7 +157,7 @@ impl Ui {
         let member = if self.is_group(n) {
             self.group_stop(n).is_some()
         } else {
-            self.candidate(n, item) && !self.disabled(n)
+            self.candidate(n, item) && (!self.disabled(n) || self.focus == Some(n))
         };
         member
             && self.ancestors(n).take_while(|&a| a != g).all(|a| {
@@ -142,10 +170,9 @@ impl Ui {
     /// The member of `g` that is `n` or holds it (a nested group), if
     /// `n` is in one: `members` are `g`'s.
     fn member_holding(&self, members: &[(NodeId, NodeId)], n: NodeId) -> Option<usize> {
-        // The outermost candidate below `g` on `n`'s path.
+        // Members don't nest, so at most one is on `n`'s path.
         self.ancestors(n)
-            .filter_map(|a| members.iter().position(|&(m, _)| m == a))
-            .last()
+            .find_map(|a| members.iter().position(|&(m, _)| m == a))
     }
 
     /// Group `g`'s Tab stop, as (member, leaf): the member holding the
@@ -179,11 +206,12 @@ impl Ui {
 
     /// The Tab stops group `g` takes away: every member's leaf but the
     /// stop's, and the disabled candidates left focusable. The Tab walk
-    /// calls it with each group it reaches, outer groups first.
-    pub(crate) fn group_skips(&self, g: NodeId, skip: &mut Vec<u32>) {
-        let members = self.walk_group(g, |n| skip.push(n.0));
-        let stop = self.stop_of(g, &members);
-        for (i, &(_, leaf)) in members.iter().enumerate() {
+    /// calls it with each group it reaches, reusing one `walk`, and
+    /// filters once at the end.
+    pub(crate) fn group_skips(&self, g: NodeId, skip: &mut Vec<u32>, walk: &mut GroupWalk) {
+        self.walk_group(g, walk, |n| skip.push(n.0));
+        let stop = self.stop_of(g, &walk.members);
+        for (i, &(_, leaf)) in walk.members.iter().enumerate() {
             if Some(i) != stop {
                 skip.push(leaf.0);
             }
@@ -273,8 +301,10 @@ impl Ui {
             let leaf = members[j].1;
             if leaf != f {
                 self.set_focus(Some(leaf));
+                // With no modifiers, as the web's `click()`: Shift+↓ is
+                // no Shift+click.
                 if flags & group_flag::SELECT_ON_FOCUS != 0 {
-                    self.activate(leaf, activate_source::KEY, k.mods);
+                    self.activate(leaf, activate_source::KEY, Mods::default());
                 }
             }
             return true;

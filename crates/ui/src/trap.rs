@@ -31,6 +31,7 @@
 use std::collections::HashMap;
 
 use crate::events::{mask, out_kind};
+use crate::group::GroupWalk;
 use crate::host::{NodeFlags, NodeId};
 use crate::mutation::{NIL, NodeKind, trap_flag};
 use crate::ui::Ui;
@@ -249,8 +250,10 @@ impl Ui {
     pub(crate) fn tab_order(&self, scope: NodeId) -> Vec<NodeId> {
         let owned = self.owned_layers();
         let mut out = Vec::new();
-        // Group members that are not their group's stop, sorted.
+        // What the groups walked take away (`group_skips`), filtered out
+        // once at the end: all of it lies inside those groups.
         let mut skip: Vec<u32> = Vec::new();
+        let mut walk = GroupWalk::default();
         let mut stack: Vec<(NodeId, bool)> = Vec::new();
         if scope.is_nil() {
             for &c in self.host.children(scope).iter().rev() {
@@ -268,14 +271,11 @@ impl Ui {
             };
             let hidden =
                 above || node.flags.contains(NodeFlags::INERT) || self.host.display_none(id);
-            if !hidden && !self.groups.is_empty() && self.groups.contains_key(&id.0) {
-                self.group_skips(id, &mut skip);
-                skip.sort_unstable();
+            let i = self.host.interaction(id);
+            if !hidden && i.group {
+                self.group_skips(id, &mut skip, &mut walk);
             }
-            if !hidden
-                && (node.kind == NodeKind::Input || self.host.interaction(id).focusable)
-                && skip.binary_search(&id.0).is_err()
-            {
+            if !hidden && (node.kind == NodeKind::Input || i.focusable) {
                 out.push(id);
             }
             if !owned.is_empty() {
@@ -297,6 +297,10 @@ impl Ui {
             for &c in self.host.children(id).iter().rev() {
                 stack.push((c, hidden));
             }
+        }
+        if !skip.is_empty() {
+            skip.sort_unstable();
+            out.retain(|n| skip.binary_search(&n.0).is_err());
         }
         out
     }
