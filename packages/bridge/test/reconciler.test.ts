@@ -7,7 +7,8 @@ import {
 import { CraieHost } from "../src/host.js"
 import { flattenShapes, MAX_BYTES, MAX_SHAPES } from "../src/shapes.js"
 import type { HostNode, Transport, UiEvent } from "../src/host.js"
-import { readFrame } from "./crw2.js"
+import { readFrame, type Op } from "./crw2.js"
+import { settle } from "./settle.js"
 import { decodeEvents } from "../src/native.js"
 import { STATE_BIT } from "../src/wire.js"
 
@@ -331,9 +332,9 @@ test("List keeps the focused item's row across splices by identity", async () =>
           createElement(TextInput, { value: `item ${it.id}`, accessibilityLabel: `in ${it.id}` }),
       }))
   const ops = () => t.frames.flatMap(f => readFrame(f).ops)
-  const settle = async () => { for (let i = 0; i < 5; i++) await tick() }
+  const flush = async () => { for (let i = 0; i < 5; i++) await tick() }
   root.renderSync(createElement(App, { items }))
-  await settle()
+  await flush()
   const listId = ops().find(o => o.tag === 0x01 && o.f[0] === 4)!.id
   let revision = 1
   const range = (a: number, b: number, keepIndex: number, keepId: number, y = revision) =>
@@ -342,7 +343,7 @@ test("List keeps the focused item's row across splices by identity", async () =>
   // Native: rows 500..503 visible, item 900 (id 900) focused.
   t.frames.length = 0
   range(500, 503, 900, 900)
-  await settle()
+  await flush()
   const rowOf = (index: number) => ops().filter(o => o.tag === 0x92 && o.f[0] === index).at(-1)!.id
   const row = rowOf(900)
   const input = ops().find(o => o.tag === 0x02 && o.f[0] === row)!.id
@@ -358,14 +359,14 @@ test("List keeps the focused item's row across splices by identity", async () =>
   t.frames.length = 0
   items = [...make(-3, 3), ...items]
   root.renderSync(createElement(App, { items }))
-  await settle()
+  await flush()
   revision++
   survives("prepend", 903)
   // A late event from the old item order: its indices are dropped, its
   // kept identity still holds (no rows for 600..603 appear).
   t.frames.length = 0
   range(600, 603, 900, 900, revision - 1)
-  await settle()
+  await flush()
   expect(ops().some(o => o.tag === 0x92 && o.f[0] === 600)).toBe(false)
   expect(ops().some(o => o.tag === 0x04 && o.id === row)).toBe(false)
 
@@ -373,7 +374,7 @@ test("List keeps the focused item's row across splices by identity", async () =>
   t.frames.length = 0
   items = items.slice(10)
   root.renderSync(createElement(App, { items }))
-  await settle()
+  await flush()
   revision++
   survives("removal before", 893)
 
@@ -382,7 +383,7 @@ test("List keeps the focused item's row across splices by identity", async () =>
   const focused = items[893]!
   items = [focused, ...items.slice(0, 893), ...items.slice(894)]
   root.renderSync(createElement(App, { items }))
-  await settle()
+  await flush()
   revision++
   survives("reorder", 0)
 
@@ -390,7 +391,7 @@ test("List keeps the focused item's row across splices by identity", async () =>
   t.frames.length = 0
   items = items.slice(1)
   root.renderSync(createElement(App, { items }))
-  await settle()
+  await flush()
   expect(ops().some(o => o.tag === 0x04 && o.id === row)).toBe(true)
 })
 
@@ -623,18 +624,24 @@ test("a text root mounted hidden keeps its text", async () => {
     return createElement(View, null,
       createElement(Activity, { mode, children: createElement(Text, null, "content ", word) }))
   }
-  root.renderSync(createElement(App, { mode: "hidden", word: "one" }))
-  await tick()
-  const all = () => t.frames.splice(0).flatMap(f => readFrame(f).ops)
+  // The ops since the last render. Hidden work commits at idle
+  // priority, so each step settles until its op shows.
+  const all = () => t.frames.flatMap(f => readFrame(f).ops)
+  const render = (mode: "hidden" | "visible", word: string) => {
+    t.frames.length = 0
+    root.renderSync(createElement(App, { mode, word }))
+  }
+  render("hidden", "one")
+  await settle(() => all().some(o => o.tag === 0x40))
   let ops = all()
   const id = ops.find(o => o.tag === 0x40)!.id // the only text node
-  const text = (list: typeof ops) => list.filter(o => o.tag === 0x40 && o.id === id).map(o => o.s).at(-1)
+  const text = (list: Op[]) => list.filter(o => o.tag === 0x40 && o.id === id).map(o => o.s).at(-1)
   expect(text(ops)).toBe("content one")
-  root.renderSync(createElement(App, { mode: "hidden", word: "two" }))
-  await tick()
+  render("hidden", "two")
+  await settle(() => text(all()) !== undefined)
   expect(text(all())).toBe("content two")
-  root.renderSync(createElement(App, { mode: "visible", word: "two" }))
-  await tick()
+  render("visible", "two")
+  await settle(() => all().some(o => o.tag === 0x10 && o.id === id))
   ops = all()
   expect(text(ops)).toBe(undefined) // unchanged: not resent
   expect(ops.some(o => o.tag === 0x10 && o.id === id)).toBe(true) // layout: shown
@@ -1055,17 +1062,17 @@ test("image URLs are fetched once per change; failures reach onError", async () 
   const t = new FakeTransport()
   const root = createRoot(t)
   const errors: string[] = []
-  const settle = async () => { for (let i = 0; i < 20; i++) await tick() }
+  const flush = async () => { for (let i = 0; i < 20; i++) await tick() }
   function App({ src }: { src: string }) {
     return createElement(Image, { src, onError: e => errors.push(e.message) })
   }
   root.renderSync(createElement(App, { src: "data:application/octet-stream;base64,AQID" }))
-  await settle()
+  await flush()
   const payloads = t.frames.flatMap(f => readFrame(f).ops).filter(o => o.tag === 0x71)
   expect(payloads.map(o => [...o.bytes!])).toEqual([[1, 2, 3]])
   t.frames.length = 0
   root.renderSync(createElement(App, { src: "/nonexistent/craie-image.png" }))
-  await settle()
+  await flush()
   // The old image must not stand in for the new src: empty bytes clear it.
   const sent = t.frames.flatMap(f => readFrame(f).ops).filter(o => o.tag === 0x71)
   expect(sent.map(o => o.bytes!.length)).toEqual([0])
@@ -1076,13 +1083,13 @@ test("image URLs are fetched once per change; failures reach onError", async () 
 test("image URLs A, B, then A again send A's bytes again", async () => {
   const t = new FakeTransport()
   const root = createRoot(t)
-  const settle = async () => { for (let i = 0; i < 20; i++) await tick() }
+  const flush = async () => { for (let i = 0; i < 20; i++) await tick() }
   const a = "data:application/octet-stream;base64,AQID"
   const b = "data:application/octet-stream;base64,BAU="
   const App = ({ src }: { src: string }) => createElement(Image, { src })
   for (const src of [a, b, a]) {
     root.renderSync(createElement(App, { src }))
-    await settle()
+    await flush()
   }
   const payloads = t.frames.flatMap(f => readFrame(f).ops).filter(o => o.tag === 0x71)
   expect(payloads.map(o => [...o.bytes!])).toEqual([[1, 2, 3], [4, 5], [1, 2, 3]])
@@ -1129,14 +1136,14 @@ test("alt=\"\" marks an image decorative", async () => {
 test("an image URL after bytes shows the bytes, not an older URL's, while it loads", async () => {
   const t = new FakeTransport()
   const root = createRoot(t)
-  const settle = async () => { for (let i = 0; i < 20; i++) await tick() }
+  const flush = async () => { for (let i = 0; i < 20; i++) await tick() }
   const a = "data:application/octet-stream;base64,AQID"
   const x = new Uint8Array([9])
   const b = "data:application/octet-stream;base64,BAU="
   const App = ({ src }: { src: string | Uint8Array }) => createElement(Image, { src })
   for (const src of [a, x]) {
     root.renderSync(createElement(App, { src }))
-    await settle()
+    await flush()
   }
   const real = globalThis.fetch
   let release!: () => void
@@ -1144,12 +1151,12 @@ test("an image URL after bytes shows the bytes, not an older URL's, while it loa
   globalThis.fetch = (async (url: string) => { await held; return real(url) }) as typeof fetch
   try {
     root.renderSync(createElement(App, { src: b }))
-    await settle()
+    await flush()
     // While B loads: nothing sent, so X stays up (A must not come back).
     const sent = t.frames.flatMap(f => readFrame(f).ops).filter(o => o.tag === 0x71)
     expect(sent.map(o => [...o.bytes!])).toEqual([[1, 2, 3], [9]])
     release()
-    await settle()
+    await flush()
   } finally {
     globalThis.fetch = real
   }

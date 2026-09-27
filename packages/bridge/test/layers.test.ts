@@ -4,6 +4,7 @@ import { createRoot, Layer, View } from "../src/index.js"
 import type { Transport, UiEvent } from "../src/host.js"
 import { NIL } from "../src/wire.js"
 import { readFrame, type Op } from "./crw2.js"
+import { settle } from "./settle.js"
 
 class FakeTransport implements Transport {
   frames: Uint8Array[] = []
@@ -13,6 +14,8 @@ class FakeTransport implements Transport {
   close() {}
   ops(i = -1) { return readFrame(this.frames.at(i)!).ops }
   all() { return this.frames.flatMap(f => readFrame(f).ops) }
+  /** Ops went out since `frames` was last cleared. */
+  sent = () => this.all().length > 0
 }
 
 const tick = () => new Promise(r => setTimeout(r, 0))
@@ -131,11 +134,11 @@ test("a layer's z updates in place; unmounting removes its container", async () 
   t.frames.length = 0
   root.renderSync(createElement(App))
   setZ(90)
-  await tick()
+  await settle(t.sent)
   expect(t.all()).toMatchObject([{ tag: SPATIAL, id: container, f: [4, 90] }])
   t.frames.length = 0
   setOpen(false)
-  await tick()
+  await settle(t.sent)
   expect(t.all().some(o => o.tag === REMOVE && o.id === container)).toBe(true)
 })
 
@@ -155,11 +158,11 @@ test("a layer closes with its last child and reopens on top", async () => {
   const [[first], [second]] = layers(t.all()) as number[][]
   t.frames.length = 0
   setShown(false)
-  await tick()
+  await settle(t.sent)
   expect(t.all().some(o => o.tag === REMOVE && o.id === first)).toBe(true)
   t.frames.length = 0
   setShown(true)
-  await tick()
+  await settle(t.sent)
   // Open order: it is now the newest layer, above the second.
   const ops = t.all()
   const [[again, owner]] = layers(ops) as number[][]
@@ -194,11 +197,11 @@ test("an owner stays open while a layer it owns is open", async () => {
   // The dialog's own child leaves; the menu it owns keeps it open.
   t.frames.length = 0
   setShown(false)
-  await tick()
+  await settle(t.sent)
   expect(t.all().some(o => o.tag === REMOVE && (o.id === dialog || o.id === menu))).toBe(false)
   t.frames.length = 0
   setShown(true)
-  await tick()
+  await settle(t.sent)
   const ops = t.all()
   expect(layers(ops)).toEqual([])
   expect(ops.find(o => o.tag === PLACE)!.f[0]).toBe(dialog)
@@ -220,12 +223,12 @@ test("closing cascades to an idle owner, and both reopen", async () => {
   expect([none, owner]).toEqual([NIL, dialog])
   t.frames.length = 0
   setShown(false)
-  await tick()
+  await settle(t.sent)
   const removed = t.all().filter(o => o.tag === REMOVE).map(o => o.id)
   expect(removed).toEqual(expect.arrayContaining([dialog, menu]))
   t.frames.length = 0
   setShown(true)
-  await tick()
+  await settle(t.sent)
   const [[dialog2, none2], [, owner2]] = layers(t.all()) as number[][]
   expect([none2, owner2]).toEqual([NIL, dialog2])
 })
@@ -246,7 +249,7 @@ test("an app root remounted while a layer is open lands below it", async () => {
   const [[container]] = layers(t.all()) as number[][]
   t.frames.length = 0
   setKey(1)
-  await tick()
+  await settle(t.sent)
   const placed = t.all().filter(o => o.tag === PLACE && o.f[0] === NIL)
   expect(placed.map(o => o.f[2])).toEqual([container])
 })
@@ -269,7 +272,7 @@ test("a child inserted before another inside a layer", async () => {
   const b = ops.find(o => o.tag === PLACE && o.f[0] === container)!.id
   t.frames.length = 0
   setFirst(true)
-  await tick()
+  await settle(t.sent)
   const a = t.all().find(o => o.tag === CREATE)!.id
   expect(t.all().find(o => o.tag === PLACE)!.f).toEqual([container, a, b])
 })
