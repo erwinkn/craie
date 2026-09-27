@@ -110,7 +110,11 @@ Changes: §2 (wire), §13, §16 (event records, protocol version 4).
   command, measured while JS is idle, while a reply streams at 60 tokens a
   second into a long thread, and across garbage-collection pauses. Report
   the distribution. It bounds what claims cost, and it is the evidence for
-  or against routing more through JS later.
+  or against routing more through JS later. Measured (`EXPERIMENTS.md`, E19):
+  on a quiet heap, native dispatch to React's commit takes 0.2 to 0.4 ms
+  at p50 and under 5 ms at p99, even while a reply streams; major
+  collections set the tail (p99 35 to 51 ms, max 150 ms, with a 150 MB
+  churning heap).
 
 ## 2. Keys
 

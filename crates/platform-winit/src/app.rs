@@ -18,6 +18,7 @@ use craie_ui::surface::SurfacePainter;
 use craie_ui::ui::Ui;
 
 use crate::clipboard::SystemClipboard;
+use crate::probe::Probe;
 use crate::{App, Wake, Window};
 
 /// A `platform::App` that renders a `Session`-fed `Ui` into one window.
@@ -32,6 +33,8 @@ pub struct HostApp {
     /// `CRAIE_CAPTURE`: write one settled frame to this PNG, then exit.
     capture: Option<(PathBuf, Duration)>,
     capture_due: Option<Instant>,
+    /// `CRAIE_E19`: the event round-trip probe (`probe.rs`).
+    probe: Option<Probe>,
     /// Zero of the UI clock (`Ui::set_time`).
     start: Instant,
 }
@@ -172,7 +175,18 @@ impl HostApp {
                 (PathBuf::from(p), Duration::from_millis(ms))
             }),
             capture_due: None,
+            probe: Probe::from_env(),
             start: Instant::now(),
+        }
+    }
+
+    /// Dispatches the E19 probe's due clicks as platform input.
+    fn probe_clicks(&mut self, window: &Window) {
+        for e in &self.probe.as_mut().map(Probe::clicks).unwrap_or_default() {
+            self.event(window, e);
+        }
+        if let Some(p) = &self.probe {
+            p.finish(&self.session);
         }
     }
 
@@ -322,6 +336,9 @@ impl App for HostApp {
         ui.inputs.clipboard = Box::new(SystemClipboard);
         let poke = wake.clone();
         self.session.install_wake(Arc::new(move || poke.wake()));
+        if let Some(p) = &mut self.probe {
+            p.wake_with(wake.clone());
+        }
         let mut inner = Inner {
             gpu,
             surface,
@@ -350,6 +367,9 @@ impl App for HostApp {
         self.tick();
         if let Some(inner) = &mut self.inner {
             inner.sync(window, &self.session, true);
+            if let Some(p) = &mut self.probe {
+                p.applied(&inner.ui);
+            }
             // Assistive-tech action requests arrive through the shared
             // queue; drain them on the UI thread like input events.
             let actions: Vec<accesskit::ActionRequest> =
@@ -381,6 +401,8 @@ impl App for HostApp {
                 return true;
             }
         }
+        // The probe's waker may have fired for a click.
+        self.probe_clicks(window);
         false
     }
 
@@ -416,17 +438,21 @@ impl App for HostApp {
     }
 
     fn next_timer(&self) -> Option<Instant> {
-        let at = self.inner.as_ref()?.ui.next_settle()?;
-        Some(self.start + Duration::from_secs_f64(at.max(0.0)))
+        let settle = self.inner.as_ref()?.ui.next_settle();
+        let settle = settle.map(|at| self.start + Duration::from_secs_f64(at.max(0.0)));
+        let click = self.probe.as_ref().and_then(Probe::due);
+        settle.into_iter().chain(click).min()
     }
 
-    /// A moving space may have come to rest: snap it and repaint.
+    /// A moving space may have come to rest: snap it and repaint. A
+    /// probe click may be due.
     fn timer(&mut self, window: &Window) {
         self.tick();
         let Some(inner) = &mut self.inner else { return };
         if inner.ui.settle() {
             window.request_redraw();
         }
+        self.probe_clicks(window);
     }
 
     fn redraw(&mut self, window: &Window) {
@@ -484,6 +510,10 @@ impl App for HostApp {
         let cpu_ms = t.elapsed().as_secs_f64() * 1e3;
         window.pre_present_notify();
         inner.gpu.queue.present(frame);
+        if let Some(p) = &mut self.probe {
+            p.presented(&inner.ui);
+            p.finish(&self.session);
+        }
         // Running animations advance every frame: ask for the next one
         // (presentation paces it). Idle requests none.
         if inner.ui.animating() {

@@ -191,7 +191,8 @@ export async function runApp(
     })
     const reason = host.run()
     worker.postMessage({ craieShutdown: true })
-    await Promise.race([stopped, new Promise((r) => setTimeout(r, 2000))])
+    // Unref'd: a worker that exits at once must not hold the process 2 s.
+    await Promise.race([stopped, new Promise((r) => setTimeout(r, 2000).unref())])
     if (reason !== "Native window closed") throw Error(reason)
   } catch (error) {
     host.close(error instanceof Error ? error.message : String(error))

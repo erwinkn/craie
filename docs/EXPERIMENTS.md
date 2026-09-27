@@ -6,6 +6,112 @@ reason it landed. Proposals live in `ARCHITECTURE.md`, in the
 only when it has a measured result. Decisions in `ARCHITECTURE.md`
 override older entries below.
 
+## ARCHITECTURE-update experiments (2026-09-27)
+
+Measured during the overnight run (`docs/runs/2026-09-27-overnight.md`)
+on exe1: a shared Linux VM, 8 CPUs, no GPU (wgpu on llvmpipe, software
+rasterization), load average 13 to 15 from other agents. Times are
+indicative and move about 40 percent run to run; the Mac numbers decide.
+
+### E19: event round trip under load
+
+`sh bench/e19.sh` (windowed; keep the window in front), or
+`CRAIE_HEADLESS=1 sh bench/e19.sh`. The native probe
+(`crates/platform-winit/src/probe.rs`, `CRAIE_E19=<csv>`) clicks a
+40x40 marker 1,000 times per load, 30 to 70 ms apart on a schedule
+fixed in advance, not after each answer, so a stall is sampled as often
+as it lasts. Windowed, a thread wakes the event loop at each due time,
+as platform input would; headless, the loop spins to its deadlines. The
+app (`bench/e19/app.tsx`) answers the n-th click by filling the marker
+with `n << 8 | 0xff`; native sees the answer in the applied paint, with
+no protocol change. Native stamps each click when it was due,
+dispatched, applied and drawn; JS stamps the handler and the commit (a
+layout effect) on `process.hrtime`, the same monotonic clock. The
+phases:
+
+- wait: due → dispatched (native was busy with a frame)
+- js: dispatched → committed, the whole JS part, split into
+  - deliver: dispatched → handler (event batch, TSFN hop, JS queue)
+  - react: handler → committed (render and commit)
+- apply: committed → applied (seal, encode and send the transaction;
+  the native thread takes it between frames)
+- paint: applied → drawn. Headless, drawn is when the GPU finished the
+  next frame; windowed, when `present` returned (the display shows it
+  one or two vsyncs later), so the two modes end at different points.
+
+Loads: idle; stream, a 400-message thread (newest first) whose reply
+grows 60 tokens a second, re-parsed as light markdown on each token; gc,
+a 150 MB heap of records (231 MB in use), 1/400 replaced every 10 ms,
+plus 1 MB of short-lived garbage per tick, so the collector runs a major
+collection every few seconds; and both.
+
+Headless, 1800x1400 device px at 120 Hz, release addon, React production
+build, discrete priority (below). Round trip p50 / p95 / p99, phases p50
+/ p99, in ms:
+
+| load      | round trip            | wait        | js          | deliver     | react       | apply       | paint       |
+|-----------|-----------------------|-------------|-------------|-------------|-------------|-------------|-------------|
+| idle      | 11.3 / 20.0 / 27.0    | 0.0 / 2.7   | 0.40 / 4.0  | 0.21 / 3.8  | 0.18 / 0.91 | 0.13 / 2.0  | 10.5 / 24.7 |
+| stream    | 64.3 / 101.5 / 119.6  | 13.1 / 40.5 | 0.21 / 4.8  | 0.12 / 4.7  | 0.07 / 1.2  | 24.5 / 47.4 | 25.3 / 47.1 |
+| gc        | 16.1 / 37.6 / 70.0    | 0.0 / 9.9   | 0.64 / 35.2 | 0.42 / 35.0 | 0.15 / 1.2  | 0.11 / 3.7  | 13.9 / 33.4 |
+| stream+gc | 80.0 / 135.2 / 178.8  | 15.0 / 50.8 | 0.84 / 50.8 | 0.69 / 50.7 | 0.09 / 2.7  | 29.5 / 66.6 | 31.9 / 66.8 |
+
+The gc load ran 7 major collections (up to 98 ms) and 578 minor ones (up
+to 35 ms) in 50 s; 146 of 1,000 clicks were in JS during a pause of
+2 ms or more (188 with stream+gc, major pauses up to 121 ms). Windowed
+under Xvfb (300 clicks, still llvmpipe), round trip to `present`:
+idle 7.8 / 16.3 / 21.5, stream 39.0 / 63.4 / 77.0; js p50 / p99 0.46 /
+4.7 and 0.26 / 4.2. Runs move by 20 to 40 percent on this host; an
+earlier set had idle at 15.6 / 34.0 / 44.2 and stream at 70.9 / 105.6 /
+127.5.
+
+What it says:
+
+- JS is fast when its heap is quiet. From native dispatch to React's
+  commit takes 0.2 to 0.4 ms at p50 and under 5 ms at p99, streaming or
+  not. A streaming reply does not delay a click's handler.
+- Garbage collection sets the JS tail: a major pause holds every event
+  that arrives during it (js p99 35 to 51 ms, max 110 to 150 ms). A
+  claimed chord pressed then waits up to a major pause, and a
+  per-keystroke round trip would drop or reorder typing. This supports
+  topic 1's rules: continuous input is never claimable, and native never
+  blocks on JS.
+- Here native is the bottleneck. Under stream, llvmpipe spends most of
+  each frame rasterizing 2.5 megapixels, so a click waits 13 ms for the
+  native thread, its commit waits 25 ms behind the frame in flight, and
+  the answer takes another 25 ms to be drawn. Frame CPU (prepare and
+  encode) is 1.4 ms, so on a GPU these phases should shrink to about one
+  frame each. That is the prediction the Mac run checks.
+
+Priority. The reconciler scheduled every native event's updates at
+default priority, one scheduler task (a `setImmediate` in Node) after
+the handler. They now take React DOM's priorities: discrete for press,
+key, focus and text events, so the update commits in the event's own
+microtasks; continuous for move, wheel and scroll
+(`packages/bridge/src/index.ts`, tested in `reconciler.test.ts`). A/B,
+same host, react phase p50 / p99 (ms):
+
+| load      | default     | discrete    |
+|-----------|-------------|-------------|
+| idle      | 0.26 / 1.73 | 0.19 / 2.39 |
+| stream    | 0.09 / 1.18 | 0.08 / 0.84 |
+| gc        | 0.23 / 1.43 | 0.21 / 0.91 |
+| stream+gc | 0.12 / 10.7 | 0.09 / 4.2  |
+
+The difference is within the noise for this load, whose streaming
+render is cheap (memoized messages); a heavy transition render could
+still hold a default-priority click behind it. Discrete priority stays
+for its semantics, as in React DOM. For example, a keyDown that opens a
+menu renders and commits on its own, before the pending streaming-token
+update, not batched into that render. Native delivers events in
+batches, where the DOM gives each event its own task, so the bridge
+flushes a discrete event's updates before the next event in the batch:
+two presses on a toggle in one batch open and close it, as in the DOM,
+instead of both reading the closed state.
+
+The harness found one bug: `runApp` held the process for 2 s after the
+window closed (an un-unref'd timeout in a `Promise.race`).
+
 ## Step 1 — crate split, CRW2, retained scene (2026-09-23)
 
 Conditions: the shared M5 Max ran under heavy load (load average 12 to

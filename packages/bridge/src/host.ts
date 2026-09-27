@@ -351,9 +351,14 @@ export class CraieHost {
   /** Live nodes by native id — the event-dispatch target table. */
   private nodes = new Map<number, HostNode>()
 
-  constructor(private transport: Transport) {
+  /** `inEvent` runs each event's dispatch; the root sets React's
+   * update priority for its kind around it. */
+  constructor(
+    private transport: Transport,
+    inEvent: (kind: number, dispatch: () => void) => void = (_, dispatch) => dispatch(),
+  ) {
     transport.onAck?.((seq) => this.ack(seq))
-    transport.onEvent?.((ev) => this.dispatchEvent(ev))
+    transport.onEvent?.((ev) => inEvent(ev.kind, () => this.dispatchEvent(ev)))
   }
 
   /** Native applied transaction `seq`: resolve its flush waiters. */

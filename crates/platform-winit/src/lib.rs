@@ -13,6 +13,7 @@ pub mod capture;
 pub mod clipboard;
 pub mod fonts;
 pub mod headless;
+pub mod probe;
 mod winit;
 
 use std::sync::{Arc, Mutex};

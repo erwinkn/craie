@@ -12,7 +12,12 @@ import React, {
   type Ref,
 } from "react"
 import ReactReconciler from "react-reconciler"
-import { ConcurrentRoot, DefaultEventPriority } from "react-reconciler/constants.js"
+import {
+  ConcurrentRoot,
+  ContinuousEventPriority,
+  DefaultEventPriority,
+  DiscreteEventPriority,
+} from "react-reconciler/constants.js"
 import {
   CraieHost,
   onFrameStats as onFrameStatsInternal,
@@ -22,6 +27,7 @@ import {
   type Transport,
 } from "./host.js"
 import {
+  EVENT_KIND,
   SURFACE,
   type AccessibilityRole,
   type AnimProp,
@@ -537,6 +543,36 @@ export class Root {
   }
 }
 
+/** An event's update priority, as React DOM assigns it: an update in a
+ * press, key, focus or text handler renders synchronously (E19); one in
+ * a move, wheel or scroll handler ahead of default work. */
+function eventPriority(kind: number): number {
+  switch (kind) {
+    case EVENT_KIND.pointerDown: case EVENT_KIND.pointerUp:
+    case EVENT_KIND.keyDown: case EVENT_KIND.keyUp:
+    case EVENT_KIND.focus: case EVENT_KIND.blur:
+    case EVENT_KIND.change: case EVENT_KIND.submit:
+      return DiscreteEventPriority
+    case EVENT_KIND.pointerMove: case EVENT_KIND.pointerEnter: case EVENT_KIND.pointerLeave:
+    case EVENT_KIND.wheel: case EVENT_KIND.scroll:
+      return ContinuousEventPriority
+    default:
+      return DefaultEventPriority
+  }
+}
+
 export function createRoot(transport: Transport): Root {
-  return new Root(new CraieHost(transport))
+  return new Root(new CraieHost(transport, (kind, dispatch) => {
+    const outer = priority
+    priority = eventPriority(kind)
+    try {
+      dispatch()
+    } finally {
+      priority = outer
+    }
+    // Native delivers events in batches, where the DOM gives each its
+    // own task: render a discrete event's updates before the next event,
+    // so a second press in the batch sees the first one's state.
+    if (eventPriority(kind) === DiscreteEventPriority) reconciler.flushSyncWork()
+  }))
 }

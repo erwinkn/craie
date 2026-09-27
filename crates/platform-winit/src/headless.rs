@@ -5,7 +5,8 @@
 //! format), and frame statistics as `HostApp`; frames are paced at 120
 //! Hz while the UI owes a paint or animates (spinning between frames:
 //! the pacing must not depend on coalesced timers), and each frame
-//! waits for the GPU. There is no input: the app drives itself.
+//! waits for the GPU. There is no input: the app drives itself, or the
+//! E19 probe clicks (`probe.rs`).
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
@@ -18,6 +19,7 @@ use craie_ui::events;
 use craie_ui::ui::Ui;
 
 use crate::app::{FrameStats, prepare_frame};
+use crate::probe::Probe;
 
 const FRAME: Duration = Duration::from_nanos(8_333_333);
 /// Waits shorter than this spin (see the wait below).
@@ -71,6 +73,7 @@ fn run_counted(session: Arc<Session>, logical: Size, scale: f32, frames: &Atomic
 
     let mut stats = FrameStats::new();
     let mut spin = SpinLog::new();
+    let mut probe = Probe::from_env();
     let mut next_frame = Instant::now();
     loop {
         if session.is_closed() {
@@ -94,6 +97,13 @@ fn run_counted(session: Arc<Session>, logical: Size, scale: f32, frames: &Atomic
         {
             ui.settle();
         }
+        if let Some(p) = &mut probe {
+            p.applied(&ui);
+            for e in &p.clicks() {
+                ui.dispatch(e);
+            }
+            p.finish(&session);
+        }
         // Commits raise events with no paint (an animate that ends at
         // once): they go out now, not with the next frame.
         flush_events(&mut ui, &session);
@@ -113,6 +123,10 @@ fn run_counted(session: Arc<Session>, logical: Size, scale: f32, frames: &Atomic
                 timeout: None,
             });
             frames.fetch_add(1, Ordering::SeqCst);
+            if let Some(p) = &mut probe {
+                p.presented(&ui);
+                p.finish(&session);
+            }
             let tweens = ui.animation_count();
             if let Some(e) = stats.frame(cpu_ms, prepare_ms, ui.host.len(), tweens) {
                 session.post_events(events::encode_events(&[e]), false);
@@ -123,10 +137,14 @@ fn run_counted(session: Arc<Session>, logical: Size, scale: f32, frames: &Atomic
         let settle = ui
             .next_settle()
             .map(|at| start + Duration::from_secs_f64(at.max(0.0)));
-        let until = match (owes.then_some(next_frame), settle) {
-            (Some(a), Some(b)) => Some(a.min(b)),
-            (a, b) => a.or(b),
-        };
+        let until = [
+            owes.then_some(next_frame),
+            settle,
+            probe.as_ref().and_then(Probe::due),
+        ]
+        .into_iter()
+        .flatten()
+        .min();
         let (lock, cv) = &*woken;
         let mut flag = lock.lock().unwrap();
         while !*flag {
