@@ -20,26 +20,30 @@ Times are UTC.
 | 00:46 | PR #1 (`split`) opened: Linux-host fixes to the release graph and font tests |
 | 00:49 | PR #1 reviewed (5 findings, all fixed), merged as `f25f7b3` |
 | 01:07 | E19 harness running; baseline and priority A/B on exe1 |
-| 01:40 | E19 A/B done; branch verified (cargo, bun, tsc, smoke, windowed under Xvfb) |
+| 01:27 | PR #2 (E19) opened after verification (cargo, bun, tsc, smoke, windowed under Xvfb) |
+| 01:30 | E15 walk baseline measured (1k, 10k, 100k nodes), in parallel with the review |
+| 01:40 | PR #2 review fixed (9 of 10 findings); final E19 numbers rerun |
 
 ## PRs
 
 | PR | What | Status |
 | --- | --- | --- |
 | [#1](https://github.com/erwinkn/craie/pull/1) | The crate split, plus Linux-host test fixes | Merged |
+| [#2](https://github.com/erwinkn/craie/pull/2) | E19: event round trip under load; React priorities for native events | Merged |
 
 ## Numbers
 
 Full tables in `docs/EXPERIMENTS.md`. All on exe1 (llvmpipe, loaded).
 
-E19, click to drawn, headless, ms (p50 / p95 / p99):
+E19, click to drawn (GPU done), headless, ms (p50 / p95 / p99), and
+the JS part alone (native dispatch to React's commit, p50 / p99):
 
-| load | round trip | JS part, p50 / p99 (deliver + react, summed) |
+| load | round trip | JS part |
 | --- | --- | --- |
-| idle | 15.6 / 34.0 / 44.2 | 0.4 / 7 |
-| stream (60 tok/s into 400 messages) | 70.9 / 105.6 / 127.5 | 0.2 / 6 |
-| gc (150 MB churning heap) | 12.9 / 27.2 / 64.8 | 0.5 / 37 |
-| stream + gc | 72.7 / 117.8 / 156.7 | 0.7 / 47 |
+| idle | 11.3 / 20.0 / 27.0 | 0.40 / 4.0 |
+| stream (60 tok/s into 400 messages) | 64.3 / 101.5 / 119.6 | 0.21 / 4.8 |
+| gc (150 MB churning heap) | 16.1 / 37.6 / 70.0 | 0.64 / 35.2 |
+| stream + gc | 80.0 / 135.2 / 178.8 | 0.84 / 50.8 |
 
 JS is quick, garbage-collection pauses set its tail, and on exe1 the
 rest is llvmpipe rasterizing. Rerun on the Mac: `sh bench/e19.sh`.
@@ -49,6 +53,9 @@ rest is llvmpipe rasterizing. Rerun on the Mac: `sh bench/e19.sh`.
 - E19: native events' React updates take React DOM's priorities
   (discrete for press, key, focus, text; continuous for move, wheel,
   scroll). No measurable latency change; kept for the semantics.
+- E19: the bridge renders a discrete event's updates before the next
+  event of the same native batch (`flushSyncWork`), so a press sees the
+  state the previous press left, as with the DOM's one task per event.
 
 ## Open questions for Erwin
 

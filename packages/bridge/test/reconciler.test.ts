@@ -138,6 +138,30 @@ test("an update in a press handler commits in microtasks, a timer's in a later t
   expect(t.frames.length).toBe(1)
 })
 
+test("each press in one event batch sees the state the previous one left", async () => {
+  const t = new FakeTransport()
+  const root = createRoot(t)
+  let shown = false
+  function Toggle() {
+    const [open, setOpen] = useState(false)
+    shown = open
+    return createElement(View, { onPointerDown: () => setOpen(!open) })
+  }
+  root.renderSync(createElement(Toggle))
+  await tick()
+  const id = t.ops(0).find(o => o.tag === 0x01)!.id
+  const press = { kind: 2, node: id, generation: 0, revision: 0, x: 0, y: 0, a: 0, b: 0, key: 1 << 8, text: "" }
+  // Two presses delivered together, as native batches input while busy:
+  // open, then closed again (not open twice from a stale `open`).
+  t.eventCb!(press)
+  t.eventCb!(press)
+  await tick()
+  expect(shown).toBe(false)
+  t.eventCb!(press)
+  await tick()
+  expect(shown).toBe(true)
+})
+
 test("subtree deletion frees every node", async () => {
   const t = new FakeTransport()
   const root = createRoot(t)

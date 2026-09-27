@@ -544,9 +544,8 @@ export class Root {
 }
 
 /** An event's update priority, as React DOM assigns it: an update in a
- * press, key, focus or text handler renders synchronously once the
- * event batch is dispatched (E19); one in a move, wheel or scroll
- * handler ahead of default work. */
+ * press, key, focus or text handler renders synchronously (E19); one in
+ * a move, wheel or scroll handler ahead of default work. */
 function eventPriority(kind: number): number {
   switch (kind) {
     case EVENT_KIND.pointerDown: case EVENT_KIND.pointerUp:
@@ -571,5 +570,9 @@ export function createRoot(transport: Transport): Root {
     } finally {
       priority = outer
     }
+    // Native delivers events in batches, where the DOM gives each its
+    // own task: render a discrete event's updates before the next event,
+    // so a second press in the batch sees the first one's state.
+    if (eventPriority(kind) === DiscreteEventPriority) reconciler.flushSyncWork()
   }))
 }

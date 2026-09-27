@@ -5,14 +5,16 @@
 //! `n << 8 | 0xff`, so the marker appears as opaque black (no answers);
 //! clicks start a second after that. They arrive on their own schedule,
 //! not after the previous answer, so a stall is sampled as often as it
-//! lasts. The probe stamps each click when it was due (a platform event
-//! would have arrived), when it is dispatched (native was free), when
-//! the commit that answers it is applied, and when the first frame after
-//! that is drawn (headless: the GPU finished; windowed: presented). When
-//! every click is drawn, or nothing has happened for 10 s, it writes
-//! `seq,due,dispatched,applied,presented` per click (ns on the clock
-//! Node's `process.hrtime` reads; 0: never) and closes the session with
-//! "e19 done".
+//! lasts. Windowed, a thread wakes the loop at each click's due time, as
+//! platform input does (the loop's own timers can fire late); headless,
+//! the loop spins to its deadlines. The probe stamps each click when it
+//! was due, when it is dispatched (native was free), when the commit
+//! that answers it is applied, and when the first frame after that is
+//! drawn (headless: the GPU finished; windowed: `present` returned). When
+//! every click is drawn, or nothing has happened for 10 s (30 s before
+//! the marker shows), it writes `seq,due,dispatched,applied,presented`
+//! per click (ns on the clock Node's `process.hrtime` reads; 0: never)
+//! and closes the session with "e19 done".
 
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -23,15 +25,20 @@ use craie_ui::events::{Button, Event, Mods};
 use craie_ui::host::NodeId;
 use craie_ui::ui::Ui;
 
+use crate::Wake;
+
 const GAP_MS: (u32, u32) = (30, 70);
 const TIMEOUT: Duration = Duration::from_secs(10);
+/// The app may build its load before it mounts (the gc load's heap).
+const STARTUP: Duration = Duration::from_secs(30);
 
 pub struct Probe {
     out: PathBuf,
     at: (f32, f32),
     want: usize,
-    rng: Rng,
-    next: Instant,
+    /// Each click's due time, from when the marker shows.
+    schedule: Vec<Instant>,
+    wake: Option<Wake>,
     target: Option<NodeId>,
     /// Per click: due, dispatched, applied, presented (ns; 0 until then).
     stamps: Vec<[u64; 4]>,
@@ -59,8 +66,8 @@ impl Probe {
             out,
             at,
             want,
-            rng: Rng::new(0xE19),
-            next: now,
+            schedule: Vec::new(),
+            wake: None,
             target: None,
             stamps: Vec::with_capacity(want),
             applied: 0,
@@ -69,10 +76,23 @@ impl Probe {
         })
     }
 
+    /// Windowed: wake the loop at each click's due time.
+    pub fn wake_with(&mut self, wake: Wake) {
+        self.wake = Some(wake);
+    }
+
+    fn timeout(&self) -> Duration {
+        if self.target.is_some() {
+            TIMEOUT
+        } else {
+            STARTUP
+        }
+    }
+
     /// When the probe must next run: the next click, or the timeout.
     pub fn due(&self) -> Option<Instant> {
-        let click = (self.target.is_some() && self.stamps.len() < self.want).then_some(self.next);
-        let timeout = self.progress + TIMEOUT;
+        let click = self.schedule.get(self.stamps.len()).copied();
+        let timeout = self.progress + self.timeout();
         Some(click.map_or(timeout, |c| c.min(timeout)))
     }
 
@@ -81,16 +101,12 @@ impl Probe {
     /// platform input does.
     pub fn clicks(&mut self) -> Vec<Event> {
         let mut out = Vec::new();
-        if self.target.is_none() {
-            return out;
-        }
         let now = Instant::now();
         let ns = now_ns();
         let (x, y) = self.at;
-        let (lo, hi) = GAP_MS;
-        while self.stamps.len() < self.want && self.next <= now {
-            let due = self.next;
-            self.next = due + Duration::from_millis((lo + self.rng.below(hi - lo + 1)) as u64);
+        while let Some(&due) = self.schedule.get(self.stamps.len())
+            && due <= now
+        {
             self.stamps
                 .push([ns - (now - due).as_nanos() as u64, ns, 0, 0]);
             let button = Button::Primary;
@@ -130,7 +146,7 @@ impl Probe {
             if let Some(id) = ui.hit_test(x, y).filter(|&id| fill(ui, id) == 0xff) {
                 self.target = Some(id);
                 self.progress = Instant::now();
-                self.next = self.progress + Duration::from_secs(1);
+                self.start(self.progress + Duration::from_secs(1));
             }
         }
         let now = now_ns();
@@ -140,11 +156,32 @@ impl Probe {
         self.presented = self.applied;
     }
 
-    /// When every click is drawn, or nothing happened for `TIMEOUT` (no
-    /// marker, or no answer): writes the results, closes the session,
-    /// and returns true.
+    /// Schedules every click from `first`, and the thread that wakes the
+    /// loop for each.
+    fn start(&mut self, first: Instant) {
+        let mut rng = Rng::new(0xE19);
+        let (lo, hi) = GAP_MS;
+        let mut due = first;
+        for _ in 0..self.want {
+            self.schedule.push(due);
+            due += Duration::from_millis((lo + rng.below(hi - lo + 1)) as u64);
+        }
+        if let Some(wake) = self.wake.clone() {
+            let schedule = self.schedule.clone();
+            std::thread::spawn(move || {
+                for due in schedule {
+                    std::thread::sleep(due.saturating_duration_since(Instant::now()));
+                    wake.wake();
+                }
+            });
+        }
+    }
+
+    /// When every click is drawn, or nothing happened for the timeout
+    /// (no marker, or no answer): writes the results, closes the
+    /// session, and returns true.
     pub fn finish(&self, session: &Session) -> bool {
-        let over = self.presented == self.want || self.progress.elapsed() > TIMEOUT;
+        let over = self.presented == self.want || self.progress.elapsed() > self.timeout();
         if over && !session.is_closed() {
             let mut csv = String::from("seq,due,dispatched,applied,presented\n");
             for (i, [u, d, a, p]) in self.stamps.iter().enumerate() {

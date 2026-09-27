@@ -12,9 +12,11 @@ pnpm build:native:release
 pnpm --dir bench/e19 build
 out=${TMPDIR:-/tmp}/craie-e19
 mkdir -p "$out"
-mode=$(uname -sm)${CRAIE_HEADLESS:+, headless}
+frame=${CRAIE_HEADLESS:+headless}
+frame=${frame:-windowed}
 for load in ${LOADS:-idle stream gc stream,gc}; do
   name=$(echo "$load" | tr , +)
+  rm -f "$out/$name.csv" "$out/$name"-*.csv
   E19_LOAD=$load CRAIE_E19="$out/$name.csv" node bench/e19/dist/host.mjs
-  python3 bench/e19/report.py "$out/$name.csv" "$load ($mode)"
+  python3 bench/e19/report.py "$out/$name.csv" "$load ($(uname -sm), $frame)" $frame
 done

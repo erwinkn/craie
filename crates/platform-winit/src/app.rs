@@ -180,6 +180,16 @@ impl HostApp {
         }
     }
 
+    /// Dispatches the E19 probe's due clicks as platform input.
+    fn probe_clicks(&mut self, window: &Window) {
+        for e in &self.probe.as_mut().map(Probe::clicks).unwrap_or_default() {
+            self.event(window, e);
+        }
+        if let Some(p) = &self.probe {
+            p.finish(&self.session);
+        }
+    }
+
     /// Sets the UI clock to now; called at the top of every callback.
     fn tick(&mut self) {
         let t = self.start.elapsed().as_secs_f64();
@@ -326,6 +336,9 @@ impl App for HostApp {
         ui.inputs.clipboard = Box::new(SystemClipboard);
         let poke = wake.clone();
         self.session.install_wake(Arc::new(move || poke.wake()));
+        if let Some(p) = &mut self.probe {
+            p.wake_with(wake.clone());
+        }
         let mut inner = Inner {
             gpu,
             surface,
@@ -356,7 +369,6 @@ impl App for HostApp {
             inner.sync(window, &self.session, true);
             if let Some(p) = &mut self.probe {
                 p.applied(&inner.ui);
-                p.finish(&self.session);
             }
             // Assistive-tech action requests arrive through the shared
             // queue; drain them on the UI thread like input events.
@@ -389,6 +401,8 @@ impl App for HostApp {
                 return true;
             }
         }
+        // The probe's waker may have fired for a click.
+        self.probe_clicks(window);
         false
     }
 
@@ -438,12 +452,7 @@ impl App for HostApp {
         if inner.ui.settle() {
             window.request_redraw();
         }
-        for e in &self.probe.as_mut().map(Probe::clicks).unwrap_or_default() {
-            self.event(window, e);
-        }
-        if let Some(p) = &self.probe {
-            p.finish(&self.session);
-        }
+        self.probe_clicks(window);
     }
 
     fn redraw(&mut self, window: &Window) {

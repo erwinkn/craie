@@ -264,3 +264,17 @@ Reviewer minors and nitpicks not fixed yet.
   Linux is not shipped, and its failure names `cargo fetch`; the
   last-resort font test covers the by-name tie-break on every platform;
   comment accuracy): fixed in the PR #1 review (Linux-host test fixes).
+- PR2-01..09 (E19 review): the react phase ends at the layout effect,
+  so encode and send count as apply (relabelled; a direct `js` phase,
+  native to committed, replaces summed p99s); a batch of presses now
+  renders between presses (`flushSyncWork` after each discrete event,
+  tested with a toggle pressed twice in one batch); windowed clicks are
+  woken by a thread at their due time, not a loop timer that can fire
+  late; the windowed frame ends when `present` returns, and the report
+  says so; unanswered clicks count as infinite round trips and stale CSVs
+  are removed before each load; nearest-rank percentiles use `ceil`; GC
+  overlap counts pauses during [dispatched, committed]; the probe allows
+  30 s before the marker shows. Fixed in the PR #2 review. PR2-10
+  (tests for continuous priority and a throwing handler) left: in Node a
+  continuous update and a default one both commit in a later scheduler
+  task, so a test cannot tell them apart without React's internals.
