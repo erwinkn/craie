@@ -321,6 +321,10 @@ export interface HostNode {
   sentBits?: bigint
   /** The signature of the variant table last sent ("" none). */
   sentVariants?: string
+  /** Each variant path seen (`_hover._selected`) and its block number:
+   * its animations' identity, kept while the node lives, so blocks
+   * coming and going (`_busy: busy && {...}`) move no other. */
+  variantBlocks?: Map<string, number>
   /** The transitions last sent, after the reduced-motion policy ("":
    * none). */
   sentTransitions?: string
@@ -690,9 +694,10 @@ function hasVariantKeys(props: Record<string, any>): boolean {
   return false
 }
 
-/** A variant with its scopes unresolved: its `_` path's terms and
- * environment, and the block of values at the end of the path. */
+/** A variant with its scopes unresolved: its `_` path (`_hover._selected`),
+ * the path's terms and environment, and the block of values at its end. */
 interface PathVariant {
+  path: string
   terms: Map<ScopeRef, bigint>
   env: number
   block: Record<string, any>
@@ -708,6 +713,7 @@ function flattenVariants(
   terms = new Map<ScopeRef, bigint>(),
   env = 0,
   scope = chain,
+  prefix = "",
 ): PathVariant[] {
   for (const key in props) {
     const block = props[key]
@@ -734,8 +740,9 @@ function flattenVariants(
       }
       s = c
     }
-    out.push({ terms: t, env: e, block })
-    flattenVariants(block, chain, out, t, e, s)
+    const path = prefix + key
+    out.push({ path, terms: t, env: e, block })
+    flattenVariants(block, chain, out, t, e, s, path + ".")
   }
   return out
 }
@@ -1037,9 +1044,7 @@ export class CraieHost {
       if (!n.mounted || n.textParent) continue
       const list: VariantIn[] = []
       const hidden = !!(n.props.hidden || n.suspended)
-      // A block's position counts the blocks not sent: it keys the
-      // variant's animations, so others coming and going leave them be.
-      for (const [block, p] of flattenVariants(n.props, n.props.__scopes ?? null).entries()) {
+      for (const p of flattenVariants(n.props, n.props.__scopes ?? null)) {
         const values = variantValues(n, p.block, hidden)
         const motion = variantMotion(n, p.block, this.reducedMotion)
         if (!values && !motion.transitions && !motion.animations) continue
@@ -1048,7 +1053,16 @@ export class CraieHost {
           if (!ref.node?.mounted) break
           terms.push({ scope: ref.node.id, mask })
         }
-        if (terms.length === p.terms.size) list.push({ terms, env: p.env, values: values ?? {}, ...motion, block })
+        if (terms.length !== p.terms.size) continue
+        // The path's number keys the variant's animations: other blocks
+        // appearing, going falsy or unsent leave them running.
+        let block: number | undefined
+        if (motion.animations) {
+          const blocks = (n.variantBlocks ??= new Map())
+          block = blocks.get(p.path)
+          if (block === undefined) blocks.set(p.path, (block = blocks.size))
+        }
+        list.push({ terms, env: p.env, values: values ?? {}, ...motion, block })
       }
       const key = variantsKey(list)
       if (key !== (n.sentVariants ?? "")) {
@@ -1296,6 +1310,7 @@ export class CraieHost {
     n.claims = undefined
     n.sentBits = undefined
     n.sentVariants = undefined
+    n.variantBlocks = undefined
     n.sentTransitions = undefined
     n.sentAnimation = undefined
     this.nodes.set(n.id, n)

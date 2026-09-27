@@ -120,8 +120,8 @@ pub mod op {
     /// removes. The values' mask may carry `value_field::TRANSITIONS`
     /// (then count u8 × (prop u8, timing): the list that replaces the
     /// node's while the variant holds; count 0: none) and `ANIMATIONS`
-    /// (block u16, the variant's position among the node's flattened
-    /// blocks | count u8 × animation), in that order, after the values.
+    /// (block u16, the variant's number, stable per `_` path for the
+    /// node's life | count u8 × animation), in that order, after the values.
     pub const VARIANTS: u8 = 0xB1;
     /// narrow_max f32 | compact_max f32
     pub const ENVIRONMENT: u8 = 0xB2;

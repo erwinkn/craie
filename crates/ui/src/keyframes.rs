@@ -654,8 +654,8 @@ impl Trigger {
 }
 
 /// An animation's identity: its trigger, the variant block declaring it
-/// (its position among the node's flattened blocks, before any was
-/// skipped) and its index in the author's list (`Animation::index`).
+/// (a number JS keeps per variant path for the node's life, unique in
+/// its table) and its index in the author's list (`Animation::index`).
 /// The low 32 bits are its `ANIMATION_END` key without the reason:
 /// index | (trigger + 1) << 16.
 pub(crate) fn key(trigger: Trigger, block: u16, index: u8) -> u64 {

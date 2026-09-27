@@ -209,25 +209,30 @@ test("a negative delay starts partway, within 600 s", () => {
   expect(() => enc.animation(1, 1, false, [a(0), a(0)])).toThrow(/indices/)
 })
 
-test("variants: blocks keep their positions, and a transition list replaces", async () => {
+test("variants: a path keeps its block, and a transition list replaces", async () => {
   const t = new FakeTransport()
   const root = createRoot(t)
   const render = (busy: boolean) =>
     root.renderSync(createElement(View, {
       group: true,
       style: { transition: { opacity: { duration: 100 } } },
-      _pressed: busy ? { style: { opacity: 0.5 } } : {},
+      _pressed: busy && { animation: loop(spin, 1000) },
       _hover: { style: { scale: 1.02, transition: "none" } },
-      _selected: { animation: loop(pulse, 400) },
+      _selected: { animation: loop(pulse, 400), _hover: { animation: loop(pulse, 200) } },
     }))
+  const sent = () => tagged(t.ops(), 0xb1)[0]!.variants!
   render(false)
   await tick()
-  const sent = () => tagged(t.ops(), 0xb1)[0]!.variants!
-  // The empty `_pressed` block goes unsent but keeps its position: the
-  // loop is block 2 either way. `"none"` sends an empty list.
-  let [hover, selected] = sent()
-  expect([hover!.transitions, hover!.block, selected!.block]).toEqual([[], undefined, 2])
+  // Blocks number the animated paths as first seen; `"none"` sends an
+  // empty list.
+  const [hover] = sent()
+  expect([hover!.transitions, hover!.block]).toEqual([[], undefined])
+  expect(sent().map(v => v.block)).toEqual([undefined, 0, 1])
+  // The conditional block before them comes and goes: theirs stay.
   render(true)
   await tick()
-  expect(sent().map(v => v.block)).toEqual([undefined, undefined, 2])
+  expect(sent().map(v => v.block)).toEqual([2, undefined, 0, 1])
+  render(false)
+  await tick()
+  expect(sent().map(v => v.block)).toEqual([undefined, 0, 1])
 })

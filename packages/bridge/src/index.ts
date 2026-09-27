@@ -309,8 +309,10 @@ export interface VariantStyle {
  * `defineStates` state), an environment condition (`_narrow`,
  * `_compact`, `_touch`, `_reducedMotion`), or a `group` up the tree
  * (`_row`, whose states the block then reads). Nesting ANDs; of the
- * variants that hold, the more specific one wins per property. */
-export type Variants = { [key: `_${string}`]: (VariantStyle & Variants) | undefined }
+ * variants that hold, the more specific one wins per property. A
+ * falsy block (`_pressed: busy && {...}`) declares nothing, and moves
+ * no other block's animations. */
+export type Variants = { [key: `_${string}`]: (VariantStyle & Variants) | false | null | undefined }
 
 /** The states a scope sets (hover, press and focus are native's).
  * The accessibility tree carries them too: `checked` on the check roles

@@ -323,8 +323,8 @@ pub struct VariantDecl {
     pub env: u8,
     pub values: Values,
     pub transitions: Option<Vec<Transition>>,
-    /// Its position among the node's flattened variant blocks, before
-    /// any was left out: its animations' identity.
+    /// Its number, which JS keeps per `_` path for the node's life:
+    /// its animations' identity.
     pub block: u16,
     pub animations: Vec<Animation>,
 }

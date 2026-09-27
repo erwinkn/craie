@@ -942,8 +942,8 @@ export interface VariantIn {
   transitions?: Transitions
   /** Keyframe animations that run while the variant is active. */
   animations?: readonly AnimationIn[]
-  /** The variant's position among the node's declared variant blocks,
-   * counting those not sent: its animations' identity. */
+  /** Its animations' identity: a number per `_` path, stable for the
+   * node's life (host.ts `variantBlocks`), unique in the table. */
   block?: number
 }
 

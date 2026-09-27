@@ -800,7 +800,7 @@ Reviewer minors and nitpicks not fixed yet.
   unreported, because native starts and stops variant animations
   without JS and sends them with notify off.
 - Why deferred: nothing waits on one. Kit variant motion is loops and
-  presses. The key already carries the variant's block position
+  presses. The key already carries the variant's block number
   (review #21), so reporting needs only notify and a JS lookup.
 - Resolves in: the first consumer that chains work on a state's
   animation.
@@ -1211,3 +1211,4 @@ Reviewer minors and nitpicks not fixed yet.
 - PR21-08 (animations review, m6): native reports the environment once when a session starts (its first transaction), so a host created late learns reduced motion; later reports come only on change (`the_session_starts_with_the_environment`).
 - PR21-09 (animations review, m7): delays in [-600, 600] s are accepted on both sides and start partway through, as CSS (`a_negative_delay_starts_partway`, and the facade's delay test).
 - PR21-10 (animations review, nits): steps take CSS's before flag (jump-start and jump-both show 0 during a backwards-filled delay); the `AnimationEndEvt` JSDoc drops `removed` (a removed node reports nothing; `animate` resolves `removed` in JS on release); the Rust encoder checks its keyframes table index (`the_encoder_checks_its_keyframes_table`); `the_more_specific_variant_animation_wins` ranks two variants animating one property; topic 7 says a changed entry's keyframes restart it, not its position; DF-59 records a running `enter` continuing after reduced motion turns on.
+- PR21-11 (lead, after review #21): variant animations were keyed by the block's position among the node's flattened blocks, so a falsy block (`_pressed: busy && {...}`), which flattening skips, still shifted the blocks after it and restarted their loops. The host now gives each animated `_` path (`_selected._hover`) a block number when it first sees it and keeps it for the node's life (`HostNode.variantBlocks`, reset with the id); no wire change. The `Variants` type takes falsy blocks. The bun test puts a conditional animated block before two animated ones and checks theirs stay 0 and 1 as it comes and goes (numbering by position fails it).

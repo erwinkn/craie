@@ -1233,9 +1233,11 @@ JS.
   stays as a tombstone while it is listed: it covers nothing and isn't
   sampled, and a re-send (a longer list, a reduced-motion flip that
   re-times it) replays nothing and reports no second end. A variant's
-  `animation` travels in its VARIANTS entry, keyed by the variant
-  block's position among the node's flattened blocks (sent or not), so
-  a block appearing or going empty leaves the others' loops alone.
+  `animation` travels in its VARIANTS entry, keyed by a block number
+  the host gives each animated `_` path (`_selected._hover`) when it
+  first sees it and keeps for the node's life. So a block coming and
+  going (`_pressed: busy && {...}`), before or after, leaves the others'
+  loops alone.
   Native starts them when the variant starts applying, and they go
   when it stops.
 - **Drawn nodes only.** On a node that isn't drawn (`display: none`,
@@ -1318,8 +1320,8 @@ JS.
   (0 default, 1 Bézier, 2 steps, 3 linear points, 4 spring) and its
   payload. A VARIANTS entry's mask gains bit 13 TRANSITIONS (count u8 ×
   (prop u8, timing); set with count 0, the variant's list is empty
-  and times nothing) and bit 14 ANIMATIONS (block u16, the flattened
-  block position, then count u8 × entry), after the values. Limits
+  and times nothing) and bit 14 ANIMATIONS (block u16, the path's
+  number, then count u8 × entry), after the values. Limits
   (native and the facade's encoder check the same): 16 animations per
   list, 256 frames, 256 linear points, delays in ±600 s, durations to
   600 s. Offsets must rise in [0, 1], and an infinite animation needs
@@ -1343,7 +1345,7 @@ JS.
   messages. `packages/bridge/test/motion.test.ts` covers the example's
   encoding, easings, validation (unknown keyframe keys, delays),
   reduced motion live (skip, fade, keep, and back off), end indices
-  and variant block positions. The
+  and variant paths keeping their blocks. The
   cross-language fixture carries keyframes, both triggers and variant
   motion. `harness/invariants` checks that loop frames (an infinite
   spin, a 100-iteration pulse) allocate nothing on and off their
