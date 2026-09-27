@@ -133,6 +133,7 @@ fn on(scope: u32, bits: u64, values: Values) -> VariantDecl {
         terms: vec![TermDecl { scope, mask: bits }],
         env: 0,
         values,
+        ..Default::default()
     }
 }
 
@@ -141,6 +142,7 @@ fn env(bits: u8, values: Values) -> VariantDecl {
         terms: Vec::new(),
         env: bits,
         values,
+        ..Default::default()
     }
 }
 
@@ -1202,6 +1204,7 @@ fn touch_masks_hover_in_touch_variants() {
                     }],
                     env: env_bit::TOUCH,
                     values: fill(C),
+                    ..Default::default()
                 },
             ],
         );

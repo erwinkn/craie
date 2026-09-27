@@ -17,9 +17,10 @@ use craie_core::dirty::DirtyQueue;
 use craie_layout::LayoutRow;
 use taffy::Style;
 
-use crate::animation::{Prop, Value};
+use crate::animation::{Prop, Timing, Transition, Value};
 use crate::geom::Size;
 use crate::host::{NodeId, Parts, SpatialPatch};
+use crate::keyframes::{Animation, Trigger};
 use crate::mutation::NodeKind;
 use crate::ui::Ui;
 
@@ -83,6 +84,12 @@ pub mod value_field {
     /// Every transform part.
     pub const PARTS: u16 = TRANSFORM | TRANSLATE_X | TRANSLATE_Y | ROTATE | SCALE_X | SCALE_Y;
     pub const ALL: u16 = BOX | COLOR | OPACITY | LAYOUT | PARTS;
+    /// Wire only (`op::VARIANTS`): the variant's transitions follow its
+    /// values.
+    pub const TRANSITIONS: u16 = 1 << 13;
+    /// Wire only: then its animations.
+    pub const ANIMATIONS: u16 = 1 << 14;
+    pub const MOTION: u16 = TRANSITIONS | ANIMATIONS;
 }
 
 /// Layout keys: one per property, axis and side, so two variants that
@@ -306,12 +313,16 @@ pub struct TermDecl {
 }
 
 /// A variant as sent: its values apply while every term holds and the
-/// environment has every bit of `env`.
-#[derive(Clone, Debug, PartialEq)]
+/// environment has every bit of `env`. Its transitions time the changes
+/// into it (the style being entered, as CSS); its animations run while
+/// it holds.
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct VariantDecl {
     pub terms: Vec<TermDecl>,
     pub env: u8,
     pub values: Values,
+    pub transitions: Vec<Transition>,
+    pub animations: Vec<Animation>,
 }
 
 /// A term as stored: the scope's generation when the table was applied,
@@ -330,6 +341,10 @@ struct Variant {
     values: Values,
     /// The layout values as a style, when there are any.
     layout: Option<Style>,
+    /// Its index in the declared list: its animations' identity.
+    decl: usize,
+    transitions: Vec<Transition>,
+    animations: Vec<Animation>,
 }
 
 /// A node's variant table.
@@ -349,6 +364,10 @@ pub(crate) struct Table {
     /// Not resolved yet: its first values go to the rows directly, with
     /// no transition (nothing was on screen to move from).
     fresh: bool,
+    /// Some variant has transitions.
+    transitioned: bool,
+    /// Some variant has animations.
+    animated: bool,
 }
 
 /// A scope: its bits, and the nodes whose tables read them (exact).
@@ -468,6 +487,38 @@ impl States {
         out
     }
 
+    /// The transition for `prop` of the most specific active variant of
+    /// `id`'s table that has one.
+    pub(crate) fn variant_transition(&self, id: u32, prop: Prop) -> Option<Timing> {
+        let t = self.tables.get(&id).filter(|t| t.transitioned)?;
+        t.variants
+            .iter()
+            .rev()
+            .filter(|v| !v.transitions.is_empty() && self.active(v))
+            .find_map(|v| v.transitions.iter().find(|t| t.prop == prop))
+            .map(|t| t.timing)
+    }
+
+    /// The animations of `id`'s active variants, in composite order:
+    /// (key, rank, animation).
+    pub(crate) fn variant_animations(&self, id: u32) -> Vec<(u32, u32, Animation)> {
+        let Some(t) = self.tables.get(&id).filter(|t| t.animated) else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        for (pos, v) in t.variants.iter().enumerate() {
+            if v.animations.is_empty() || !self.active(v) {
+                continue;
+            }
+            for (i, a) in v.animations.iter().enumerate() {
+                let key = crate::keyframes::key(Trigger::Variant, v.decl, i);
+                let rank = crate::keyframes::rank(Trigger::Variant, pos, i);
+                out.push((key, rank, a.clone()));
+            }
+        }
+        out
+    }
+
     /// Removes `id` from the dependents of the scopes `t` reads (those
     /// still the occupant it read).
     fn unlink(&mut self, id: u32, t: &Table) {
@@ -565,6 +616,7 @@ impl Ui {
                 self.declare_values(NodeId(id), &prev, &next);
                 self.states.snapping = false;
             }
+            self.sync_variant_animations(id);
         }
         self.states.scratch = ids;
     }
@@ -705,6 +757,7 @@ impl Ui {
             if let Some(t) = old {
                 self.declare_values(NodeId(id), &t.resolved, &t.base);
             }
+            self.sync_variant_animations(id);
             return;
         }
         let (base, resolved, fresh) = match old {
@@ -716,7 +769,8 @@ impl Ui {
         };
         let mut keyed: Vec<((u32, u32), Variant)> = decls
             .iter()
-            .map(|d| {
+            .enumerate()
+            .map(|(decl, d)| {
                 let terms = d
                     .terms
                     .iter()
@@ -733,6 +787,9 @@ impl Ui {
                     env: d.env,
                     values: d.values,
                     layout,
+                    decl,
+                    transitions: d.transitions.clone(),
+                    animations: d.animations.clone(),
                 };
                 (specificity(d), v)
             })
@@ -750,6 +807,8 @@ impl Ui {
             st.scope(t.scope, t.generation).dependents.push(id);
         }
         let uses_env = variants.iter().any(|v| v.env != 0);
+        let transitioned = variants.iter().any(|v| !v.transitions.is_empty());
+        let animated = variants.iter().any(|v| !v.animations.is_empty());
         let uses_hover = variants
             .iter()
             .flat_map(|v| &v.terms)
@@ -765,13 +824,16 @@ impl Ui {
                 uses_env,
                 uses_hover,
                 fresh,
+                transitioned,
+                animated,
             },
         );
         st.queue.push(id);
     }
 
     /// The node's values as its own ops declared them: the rows, except
-    /// that a running animation's target replaces the value in flight.
+    /// that what lies under a keyframe animation replaces its sample and
+    /// a running tween's target the value in flight.
     fn capture_base(&self, node: NodeId) -> Values {
         use value_field::*;
         let i = node.index();
@@ -796,6 +858,14 @@ impl Ui {
             v.fill = p.fill;
             v.border = (p.border_color, p.border_width);
             v.radius = p.radius;
+        }
+        for prop in Prop::ALL {
+            if self.motion.under(node, prop).is_some() {
+                match prop {
+                    Prop::Color => v.color = self.inherited_color(node),
+                    p => set_base(&mut v, p, self.row_value(node, p)),
+                }
+            }
         }
         for prop in Prop::ALL {
             if let Some(d) = declared(prop) {
@@ -860,6 +930,12 @@ impl Ui {
         self.states.env = env;
         self.states.queue_env(changed);
         self.force_paint = true;
+        // JS applies each animation's reduced-motion policy.
+        if changed & env_bit::REDUCED_MOTION != 0 {
+            let mut e = self.event(crate::events::out_kind::ENVIRONMENT, NodeId::NIL);
+            e.key = env as u32;
+            self.pending_events.push(e);
+        }
     }
 
     /// Sets the breakpoints (`ENVIRONMENT`); the next frame applies them.

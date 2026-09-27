@@ -548,6 +548,16 @@ pub enum Mutation<'a> {
         value: crate::animation::Value,
         timing: crate::animation::Timing,
     },
+    /// Keyframe animations (`keyframes.rs`). `Enter` starts them only
+    /// in the transaction that creates the node; `Base` replaces the
+    /// node's list (equal entries keep running, changed ones restart).
+    /// `notify` reports finite ones' ends (`ANIMATION_END`).
+    Animation {
+        id: u32,
+        trigger: crate::keyframes::Trigger,
+        notify: bool,
+        animations: Cow<'a, [crate::keyframes::Animation]>,
+    },
     // state styles
     /// Sets scope `id`'s app state bits (`states::state_bit`); the node
     /// becomes a scope.
@@ -604,6 +614,7 @@ impl Mutation<'_> {
             | Mutation::ScrollAnchor { id, .. }
             | Mutation::Transition { id, .. }
             | Mutation::Animate { id, .. }
+            | Mutation::Animation { id, .. }
             | Mutation::States { id, .. }
             | Mutation::Variants { id, .. }
             | Mutation::Color { id, .. } => id,
@@ -803,6 +814,22 @@ impl<'a> Transaction<'a> {
             prop,
             value,
             timing,
+        })
+    }
+
+    /// Declares the node's `enter` or own keyframe animations.
+    pub fn animation(
+        &mut self,
+        id: u32,
+        trigger: crate::keyframes::Trigger,
+        notify: bool,
+        animations: &[crate::keyframes::Animation],
+    ) -> &mut Self {
+        self.push(Mutation::Animation {
+            id,
+            trigger,
+            notify,
+            animations: animations.to_vec().into(),
         })
     }
 

@@ -251,7 +251,7 @@ impl Timing {
 
 /// CSS cubic-bezier: y at x, solving x(s) = x by Newton steps with a
 /// bisection fallback.
-fn bezier(x: f64, x1: f64, y1: f64, x2: f64, y2: f64) -> f64 {
+pub(crate) fn bezier(x: f64, x1: f64, y1: f64, x2: f64, y2: f64) -> f64 {
     let coord = |s: f64, p1: f64, p2: f64| {
         let r = 1.0 - s;
         3.0 * r * r * s * p1 + 3.0 * r * s * s * p2 + s * s * s
@@ -290,14 +290,14 @@ fn bezier(x: f64, x1: f64, y1: f64, x2: f64, y2: f64) -> f64 {
 }
 
 /// A damped harmonic oscillator released from offset 1 at rest.
-struct Spring {
+pub(crate) struct Spring {
     /// Undamped angular frequency and damping ratio.
     w0: f64,
     zeta: f64,
 }
 
 impl Spring {
-    fn new(stiffness: f32, damping: f32, mass: f32) -> Spring {
+    pub(crate) fn new(stiffness: f32, damping: f32, mass: f32) -> Spring {
         let (k, c, m) = (stiffness as f64, damping as f64, mass as f64);
         Spring {
             w0: (k / m).sqrt(),
@@ -306,7 +306,7 @@ impl Spring {
     }
 
     /// Offset from the target at `t` (1 at t = 0).
-    fn offset(&self, t: f64) -> f64 {
+    pub(crate) fn offset(&self, t: f64) -> f64 {
         let (w0, z) = (self.w0, self.zeta);
         if z < 1.0 {
             let wd = w0 * (1.0 - z * z).sqrt();
@@ -323,7 +323,7 @@ impl Spring {
     /// Time after which the offset stays within `SPRING_EPS`: from the
     /// envelope when underdamped; otherwise the offset falls
     /// monotonically, so bisection finds it.
-    fn settle(&self) -> f64 {
+    pub(crate) fn settle(&self) -> f64 {
         let (w0, z) = (self.w0, self.zeta);
         if z < 1.0 {
             let wd = w0 * (1.0 - z * z).sqrt();
@@ -446,7 +446,7 @@ impl Decomposed {
 }
 
 /// Colors interpolate premultiplied (as CSS), channels clamped.
-fn lerp_color(a: u32, b: u32, p: f32) -> u32 {
+pub(crate) fn lerp_color(a: u32, b: u32, p: f32) -> u32 {
     let ch = |c: u32, s: u32| ((c >> s) & 0xFF) as f32;
     let (aa, ba) = (ch(a, 0), ch(b, 0));
     let alpha = (aa + (ba - aa) * p).clamp(0.0, 255.0);
@@ -603,9 +603,10 @@ fn lp_length(d: LengthPercentage) -> Option<f32> {
 }
 
 impl Ui {
-    /// Whether animations are running: each frame advances them.
+    /// Whether animations are running: each frame advances them (a
+    /// keyframe loop keeps frames coming).
     pub fn animating(&self) -> bool {
-        !self.animations.is_empty()
+        !self.animations.is_empty() || self.motion.busy()
     }
 
     /// Running tweens (declared transitions and `animate` calls).
@@ -622,8 +623,12 @@ impl Ui {
             .max_by(f64::total_cmp)
     }
 
-    /// The node's declared transition for `prop`.
+    /// The node's transition for `prop`: the most specific active
+    /// variant's that has one (the style being entered), else its own.
     fn transition(&self, node: NodeId, prop: Prop) -> Option<Timing> {
+        if let Some(t) = self.states.variant_transition(node.0, prop) {
+            return Some(t);
+        }
         self.host
             .transitions
             .get(&node.0)?
@@ -632,8 +637,20 @@ impl Ui {
             .map(|t| t.timing)
     }
 
-    /// The value in the node's row.
+    /// The value in the node's row, or under the keyframe animation
+    /// that covers it.
     pub(crate) fn row_value(&self, node: NodeId, prop: Prop) -> Value {
+        if let Some(u) = self.motion.under(node, prop) {
+            return match prop {
+                Prop::Opacity => Value::Opacity(u.opacity),
+                Prop::Fill => Value::Color(u.fill),
+                Prop::BorderColor => Value::Color(u.border),
+                Prop::Translate => Value::Translate(u.translate),
+                Prop::Rotate => Value::Rotate(u.rotate),
+                Prop::Scale => Value::Scale(u.scale),
+                _ => Value::Color(u.color.unwrap_or(0)),
+            };
+        }
         let i = node.index();
         let s = &self.host.layout[i];
         match prop {
@@ -662,7 +679,7 @@ impl Ui {
     /// when there is none to start from (never laid out, a percent
     /// padding or gap).
     fn current_num(&self, node: NodeId, prop: Prop) -> Option<Num> {
-        if prop == Prop::Color && !self.host.colors.contains_key(&node.0) {
+        if prop == Prop::Color && self.inherited_color(node).is_none() {
             return None;
         }
         Some(match self.row_value(node, prop) {
@@ -934,9 +951,21 @@ impl Ui {
         self.write_value(node, prop, value);
     }
 
+    /// The node's own inherited color, under any keyframe animation.
+    pub(crate) fn inherited_color(&self, node: NodeId) -> Option<u32> {
+        match self.motion.under(node, Prop::Color) {
+            Some(u) => u.color,
+            None => self.host.colors.get(&node.0).copied(),
+        }
+    }
+
     /// The one row writer for animated values: the same invalidation as
-    /// the mutation that sets the property.
+    /// the mutation that sets the property. Under a keyframe animation
+    /// the value goes under it.
     pub(crate) fn write_value(&mut self, node: NodeId, prop: Prop, v: Value) {
+        if self.absorb(node, prop, Some(v)) {
+            return;
+        }
         let mut patch = SpatialPatch::default();
         match v {
             Value::Transform(t) => patch.matrix = Some(t),

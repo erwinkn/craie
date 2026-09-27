@@ -178,6 +178,7 @@ fn hover_tree(n: u32, scopes: bool) -> Ui {
             fill: 0x3434_4AFF,
             ..Values::default()
         },
+        ..Default::default()
     }];
     let cell = sized(6.0, 6.0);
     for id in 2..2 + n {
@@ -219,6 +220,7 @@ fn color_tree(n: u32, icons: bool) -> Ui {
                 color: Some(0xFFFF_FFFF),
                 ..Values::default()
             },
+            ..Default::default()
         }],
     );
     let icon = Drawing {
@@ -280,6 +282,7 @@ fn breakpoint_tree(variants: bool) -> Ui {
             layout: LayoutRow::from(&tall),
             ..Values::default()
         },
+        ..Default::default()
     }];
     for id in 1..=1000 {
         t.create(id, NodeKind::View)

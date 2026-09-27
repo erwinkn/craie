@@ -21,6 +21,8 @@
 //! serves both. Op tags group by family (high nibble).
 
 use crate::animation::{Prop, Timing, Transition, Value};
+use crate::keyframes::{Animation, Direction, Easing, Fill, Frame, Keyframes, Sample, Trigger};
+use std::sync::Arc;
 use taffy::{
     AlignContent, AlignItems, Dimension, Display, ExpandedDimension, ExpandedLengthPercentage,
     ExpandedLengthPercentageAuto, FlexDirection, FlexWrap, LengthPercentage, LengthPercentageAuto,
@@ -42,7 +44,7 @@ use crate::mutation::{
 pub use crate::mutation::{group_flag, interaction_flag, trap_flag};
 
 pub const MAGIC: u32 = 0x3257_5243; // "CRW2"
-pub const VERSION: u16 = 10;
+pub const VERSION: u16 = 11;
 
 pub mod op {
     // structure
@@ -101,11 +103,23 @@ pub mod op {
     // animation
     pub const TRANSITION: u8 = 0xA0;
     pub const ANIMATE: u8 = 0xA1;
+    /// Defines the transaction's next keyframes table entry (ANIMATION
+    /// ops and VARIANTS refer to it by index): count u16 | count × (at
+    /// f32 | easing | mask u16 | values by mask, `put_sample`).
+    pub const KEYFRAMES: u8 = 0xA2;
+    /// id u32 | trigger u8 (0 enter, 1 the node's list) | flags u8 (bit
+    /// 0: report ends) | count u8 | count × animation (`put_animation`).
+    /// Replaces that list; `enter` applies only in the transaction that
+    /// creates the node.
+    pub const ANIMATION: u8 = 0xA3;
     // state styles
     /// id u32 | bits u64 (app bits; input bits reject)
     pub const STATES: u8 = 0xB0;
     /// id u32 | count u16 | count × (term_count u8 | env u8 |
-    /// term_count × (scope u32, mask u64) | values); count 0 removes
+    /// term_count × (scope u32, mask u64) | values | motion); count 0
+    /// removes. The values' mask may carry `value_field::TRANSITIONS`
+    /// (then count u8 × (prop u8, timing)) and `ANIMATIONS` (count u8 ×
+    /// animation), in that order, after the values.
     pub const VARIANTS: u8 = 0xB1;
     /// narrow_max f32 | compact_max f32
     pub const ENVIRONMENT: u8 = 0xB2;
@@ -404,6 +418,9 @@ pub fn encode(txn: &Transaction<'_>) -> Vec<u8> {
         ix: std::collections::HashMap::new(),
     };
     let mut ops: Vec<u8> = Vec::with_capacity(txn.mutations.len() * 12);
+    // Keyframes table entries, by the shared list they encode.
+    let mut keyframes: std::collections::HashMap<*const Keyframes, u16> =
+        std::collections::HashMap::new();
     let u32le = |ops: &mut Vec<u8>, v: u32| ops.extend_from_slice(&v.to_le_bytes());
     let f32le = |ops: &mut Vec<u8>, v: f32| ops.extend_from_slice(&v.to_le_bytes());
     for m in &txn.mutations {
@@ -704,12 +721,31 @@ pub fn encode(txn: &Transaction<'_>) -> Vec<u8> {
                 put_anim_value(&mut ops, value);
                 put_timing(&mut ops, timing);
             }
+            Mutation::Animation {
+                id,
+                trigger,
+                notify,
+                animations,
+            } => {
+                intern_keyframes(&mut ops, &mut keyframes, animations);
+                ops.push(op::ANIMATION);
+                u32le(&mut ops, *id);
+                ops.push(*trigger as u8);
+                ops.push(*notify as u8);
+                ops.push(animations.len() as u8);
+                for a in animations.iter() {
+                    put_animation(&mut ops, &keyframes, a);
+                }
+            }
             Mutation::States { id, bits } => {
                 ops.push(op::STATES);
                 u32le(&mut ops, *id);
                 ops.extend_from_slice(&bits.to_le_bytes());
             }
             Mutation::Variants { id, variants } => {
+                for v in variants.iter() {
+                    intern_keyframes(&mut ops, &mut keyframes, &v.animations);
+                }
                 ops.push(op::VARIANTS);
                 u32le(&mut ops, *id);
                 ops.extend_from_slice(&(variants.len() as u16).to_le_bytes());
@@ -720,7 +756,29 @@ pub fn encode(txn: &Transaction<'_>) -> Vec<u8> {
                         u32le(&mut ops, t.scope);
                         ops.extend_from_slice(&t.mask.to_le_bytes());
                     }
-                    put_values(&mut ops, &v.values);
+                    let motion = if v.transitions.is_empty() {
+                        0
+                    } else {
+                        value_field::TRANSITIONS
+                    } | if v.animations.is_empty() {
+                        0
+                    } else {
+                        value_field::ANIMATIONS
+                    };
+                    put_values(&mut ops, &v.values, motion);
+                    if !v.transitions.is_empty() {
+                        ops.push(v.transitions.len() as u8);
+                        for t in &v.transitions {
+                            ops.push(t.prop as u8);
+                            put_timing(&mut ops, &t.timing);
+                        }
+                    }
+                    if !v.animations.is_empty() {
+                        ops.push(v.animations.len() as u8);
+                        for a in &v.animations {
+                            put_animation(&mut ops, &keyframes, a);
+                        }
+                    }
                 }
             }
             Mutation::Environment {
@@ -989,9 +1047,48 @@ pub fn decode(buf: &[u8]) -> Result<Transaction<'_>, WireError> {
             .ok_or(WireError::BadRef("string"))
     };
 
+    // The keyframes table, as KEYFRAMES ops define it.
+    let mut keyframes: Vec<Arc<Keyframes>> = Vec::new();
     while r.pos < buf.len() {
         let tag = r.u8()?;
         let m = match tag {
+            op::KEYFRAMES => {
+                let count = r.u16()? as usize;
+                if count > crate::keyframes::MAX_FRAMES || keyframes.len() > u16::MAX as usize {
+                    return Err(WireError::BadRef("keyframes count"));
+                }
+                let mut frames = Vec::with_capacity(count);
+                for _ in 0..count {
+                    let at = r.f32()?;
+                    let easing = r.easing()?;
+                    let (mask, values) = r.sample()?;
+                    frames.push(Frame {
+                        at,
+                        easing,
+                        mask,
+                        values,
+                    });
+                }
+                keyframes.push(Arc::new(Keyframes::new(frames)));
+                continue;
+            }
+            op::ANIMATION => {
+                let id = r.u32()?;
+                let trigger =
+                    Trigger::from_u8(r.u8()?).ok_or(WireError::BadRef("animation trigger"))?;
+                let notify = match r.u8()? {
+                    0 => false,
+                    1 => true,
+                    _ => return Err(WireError::BadRef("animation flags")),
+                };
+                let animations = r.animations(&keyframes)?;
+                Mutation::Animation {
+                    id,
+                    trigger,
+                    notify,
+                    animations: animations.into(),
+                }
+            }
             op::CREATE => {
                 let id = r.u32()?;
                 let kind = NodeKind::from_u8(r.u8()?).ok_or(WireError::BadRef("kind"))?;
@@ -1335,8 +1432,36 @@ pub fn decode(buf: &[u8]) -> Result<Transaction<'_>, WireError> {
                             mask: r.u64()?,
                         });
                     }
-                    let values = r.values()?;
-                    variants.push(VariantDecl { terms, env, values });
+                    let mut values = r.values(value_field::MOTION)?;
+                    let motion = values.mask & value_field::MOTION;
+                    values.mask &= !value_field::MOTION;
+                    let mut transitions = Vec::new();
+                    if motion & value_field::TRANSITIONS != 0 {
+                        let count = r.u8()? as usize;
+                        if count > Prop::COUNT {
+                            return Err(WireError::BadRef("transition count"));
+                        }
+                        for _ in 0..count {
+                            let prop = Prop::from_u8(r.u8()?)
+                                .ok_or(WireError::BadRef("animation property"))?;
+                            transitions.push(Transition {
+                                prop,
+                                timing: r.timing()?,
+                            });
+                        }
+                    }
+                    let animations = if motion & value_field::ANIMATIONS != 0 {
+                        r.animations(&keyframes)?
+                    } else {
+                        Vec::new()
+                    };
+                    variants.push(VariantDecl {
+                        terms,
+                        env,
+                        values,
+                        transitions,
+                        animations,
+                    });
                 }
                 Mutation::Variants {
                     id,
@@ -1442,9 +1567,9 @@ fn put_anim_value(out: &mut Vec<u8>, v: &Value) {
 /// (u64 layout keys, then the style fields they fall in, in schema
 /// order), BORDER_WIDTH f32, TRANSLATE_X 2 f32 (points, fraction),
 /// TRANSLATE_Y 2 f32, ROTATE f32, SCALE_X f32, SCALE_Y f32.
-fn put_values(out: &mut Vec<u8>, v: &Values) {
+fn put_values(out: &mut Vec<u8>, v: &Values, motion: u16) {
     use value_field::*;
-    out.extend_from_slice(&v.mask.to_le_bytes());
+    out.extend_from_slice(&(v.mask | motion).to_le_bytes());
     if v.mask & FILL != 0 {
         u32le(out, v.fill);
     }
@@ -1485,12 +1610,218 @@ fn put_values(out: &mut Vec<u8>, v: &Values) {
     }
 }
 
+/// Easing kinds on the wire.
+pub mod easing_kind {
+    /// A frame's: the animation's easing.
+    pub const DEFAULT: u8 = 0;
+    /// 4 f32: x1, y1, x2, y2.
+    pub const BEZIER: u8 = 1;
+    /// n u32 | jump u8 (`keyframes::jump`).
+    pub const STEPS: u8 = 2;
+    /// count u16 | count × (input f32, output f32).
+    pub const LINEAR: u8 = 3;
+    /// stiffness, damping, mass f32.
+    pub const SPRING: u8 = 4;
+}
+
+fn put_easing(out: &mut Vec<u8>, e: Option<&Easing>) {
+    match e {
+        None => out.push(easing_kind::DEFAULT),
+        Some(Easing::Bezier(v)) => {
+            out.push(easing_kind::BEZIER);
+            v.iter().for_each(|&x| f32le(out, x));
+        }
+        Some(Easing::Steps { n, jump }) => {
+            out.push(easing_kind::STEPS);
+            u32le(out, *n);
+            out.push(*jump);
+        }
+        Some(Easing::Linear(points)) => {
+            out.push(easing_kind::LINEAR);
+            out.extend_from_slice(&(points.len() as u16).to_le_bytes());
+            points.iter().flatten().for_each(|&x| f32le(out, x));
+        }
+        Some(Easing::Spring {
+            stiffness,
+            damping,
+            mass,
+            ..
+        }) => {
+            out.push(easing_kind::SPRING);
+            [*stiffness, *damping, *mass]
+                .iter()
+                .for_each(|&x| f32le(out, x));
+        }
+    }
+}
+
+/// A frame's channels: mask u16, then by bit FILL u32, BORDER_COLOR
+/// u32, COLOR u32, OPACITY f32, TRANSLATE_X 2 f32 (points, fraction),
+/// TRANSLATE_Y 2 f32, ROTATE f32, SCALE_X f32, SCALE_Y f32.
+fn put_sample(out: &mut Vec<u8>, mask: u16, s: &Sample) {
+    use value_field::*;
+    out.extend_from_slice(&mask.to_le_bytes());
+    let t = s.translate;
+    for (bit, c) in [
+        (FILL, s.fill),
+        (BORDER_COLOR, s.border),
+        (COLOR, s.color.unwrap_or(0)),
+    ] {
+        if mask & bit != 0 {
+            u32le(out, c);
+        }
+    }
+    for (bit, x) in [
+        (OPACITY, &[s.opacity][..]),
+        (TRANSLATE_X, &[t[0], t[2]]),
+        (TRANSLATE_Y, &[t[1], t[3]]),
+        (ROTATE, &[s.rotate]),
+        (SCALE_X, &[s.scale[0]]),
+        (SCALE_Y, &[s.scale[1]]),
+    ] {
+        if mask & bit != 0 {
+            x.iter().for_each(|&x| f32le(out, x));
+        }
+    }
+}
+
+/// Writes a KEYFRAMES op for each list `anims` use that the table does
+/// not hold yet.
+fn intern_keyframes(
+    ops: &mut Vec<u8>,
+    table: &mut std::collections::HashMap<*const Keyframes, u16>,
+    anims: &[Animation],
+) {
+    for a in anims {
+        let key = Arc::as_ptr(&a.keyframes);
+        if table.contains_key(&key) {
+            continue;
+        }
+        table.insert(key, table.len() as u16);
+        ops.push(op::KEYFRAMES);
+        let frames = a.keyframes.frames();
+        ops.extend_from_slice(&(frames.len() as u16).to_le_bytes());
+        for f in frames {
+            f32le(ops, f.at);
+            put_easing(ops, f.easing.as_ref());
+            put_sample(ops, f.mask, &f.values);
+        }
+    }
+}
+
+/// An animation: keyframes u16 (the table index) | delay f32 | duration
+/// f32 (ignored with a spring easing: its settle time) | easing |
+/// iterations f32 (inf: infinite) | direction u8 | fill u8
+/// (`keyframes::Direction`, `Fill`).
+fn put_animation(
+    out: &mut Vec<u8>,
+    table: &std::collections::HashMap<*const Keyframes, u16>,
+    a: &Animation,
+) {
+    out.extend_from_slice(&table[&Arc::as_ptr(&a.keyframes)].to_le_bytes());
+    f32le(out, a.delay);
+    f32le(out, a.duration);
+    put_easing(out, Some(&a.easing));
+    f32le(out, a.iterations);
+    out.push(a.direction as u8);
+    out.push(a.fill as u8);
+}
+
 struct Reader<'a> {
     buf: &'a [u8],
     pos: usize,
 }
 
 impl Reader<'_> {
+    /// An easing; `None` for `DEFAULT`.
+    fn easing(&mut self) -> Result<Option<Easing>, WireError> {
+        Ok(Some(match self.u8()? {
+            easing_kind::DEFAULT => return Ok(None),
+            easing_kind::BEZIER => Easing::Bezier(self.f32s()?),
+            easing_kind::STEPS => Easing::Steps {
+                n: self.u32()?,
+                jump: self.u8()?,
+            },
+            easing_kind::LINEAR => {
+                let count = self.u16()? as usize;
+                if count > crate::keyframes::MAX_POINTS {
+                    return Err(WireError::BadRef("linear easing points"));
+                }
+                let mut points = Vec::with_capacity(count);
+                for _ in 0..count {
+                    points.push(self.f32s()?);
+                }
+                Easing::Linear(points.into())
+            }
+            easing_kind::SPRING => {
+                let [k, c, m] = self.f32s()?;
+                Easing::spring(k, c, m)
+            }
+            _ => return Err(WireError::BadRef("easing")),
+        }))
+    }
+
+    fn sample(&mut self) -> Result<(u16, Sample), WireError> {
+        use value_field::*;
+        let mask = self.u16()?;
+        if mask & !crate::keyframes::CHANNELS != 0 {
+            return Err(WireError::BadRef("keyframe channel"));
+        }
+        let mut s = Sample::default();
+        let has = |bit: u16| mask & bit != 0;
+        if has(FILL) {
+            s.fill = self.u32()?;
+        }
+        if has(BORDER_COLOR) {
+            s.border = self.u32()?;
+        }
+        if has(COLOR) {
+            s.color = Some(self.u32()?);
+        }
+        if has(OPACITY) {
+            s.opacity = self.f32()?;
+        }
+        if has(TRANSLATE_X) {
+            [s.translate[0], s.translate[2]] = self.f32s()?;
+        }
+        if has(TRANSLATE_Y) {
+            [s.translate[1], s.translate[3]] = self.f32s()?;
+        }
+        if has(ROTATE) {
+            s.rotate = self.f32()?;
+        }
+        if has(SCALE_X) {
+            s.scale[0] = self.f32()?;
+        }
+        if has(SCALE_Y) {
+            s.scale[1] = self.f32()?;
+        }
+        Ok((mask, s))
+    }
+
+    /// count u8 × animation, keyframes from `table`.
+    fn animations(&mut self, table: &[Arc<Keyframes>]) -> Result<Vec<Animation>, WireError> {
+        let count = self.u8()? as usize;
+        let mut out = Vec::with_capacity(count);
+        for _ in 0..count {
+            let keyframes = table
+                .get(self.u16()? as usize)
+                .ok_or(WireError::BadRef("keyframes"))?
+                .clone();
+            let delay = self.f32()?;
+            let duration = self.f32()?;
+            let easing = self.easing()?.ok_or(WireError::BadRef("easing"))?;
+            let mut a = Animation::new(keyframes, duration, easing);
+            a.delay = delay;
+            a.iterations = self.f32()?;
+            a.direction =
+                Direction::from_u8(self.u8()?).ok_or(WireError::BadRef("animation direction"))?;
+            a.fill = Fill::from_u8(self.u8()?).ok_or(WireError::BadRef("animation fill"))?;
+            out.push(a);
+        }
+        Ok(out)
+    }
+
     fn timing(&mut self) -> Result<Timing, WireError> {
         let kind = self.u8()?;
         let mut v = [0.0f32; 6];
@@ -1537,13 +1868,14 @@ impl Reader<'_> {
         })
     }
 
-    fn values(&mut self) -> Result<Values, WireError> {
+    /// Values whose mask may also hold the bits of `extra`.
+    fn values(&mut self, extra: u16) -> Result<Values, WireError> {
         use value_field::*;
         let mut v = Values {
             mask: self.u16()?,
             ..Values::default()
         };
-        if v.mask & !value_field::ALL != 0 {
+        if v.mask & !(value_field::ALL | extra) != 0 {
             return Err(WireError::BadRef("value field"));
         }
         if v.mask & FILL != 0 {
