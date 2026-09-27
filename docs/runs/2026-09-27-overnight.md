@@ -74,6 +74,7 @@ Times are UTC.
 | [#17](https://github.com/erwinkn/craie/pull/17) | Evening: presses and activation (work item 3, part 2): innermost press, one native activate, keep focus on press; protocol 7 | Merged |
 | [#18](https://github.com/erwinkn/craie/pull/18) | Evening: focus traps, `modal` and `inert` (work item 3, part 1); layers owned by the trap they open from; protocol 8 | Merged |
 | [#19](https://github.com/erwinkn/craie/pull/19) | Evening: transform parts (work item 6, part 1): translate, rotate and scale stored, tweened and overridden apart from the free matrix; protocol 9 | Merged |
+| [#20](https://github.com/erwinkn/craie/pull/20) | Evening: focus groups (work item 3, part 3): one Tab stop, arrows, Home and End, `selectOnFocus`; `KEY_DOWN` goes to the node it left; protocol 10 | Merged |
 
 ## Numbers
 
@@ -481,6 +482,10 @@ groups follow, since they activate through #17's event. exe1's load was
 | 20:11 | PR #19 review: no blockers or majors; 3 minors (a variant's `translateY` could overwrite the base `translateX` with no test failing; a 180° or 360° rotation left float noise, so the subtree never snapped to pixels again; a percentage in an RN transform list sent NaN), 3 nits |
 | 20:19 | PR #19 review fixed (PR19-01..06), verified at its head, which is `main` plus the PR (CI, 456 Rust tests, 112 bun tests, smoke, macOS type-check) |
 | 20:21 | PR #19 merged; keyframe animations and motion in variants (item 6, part 2) start |
+| 20:28 | PR #20 (focus groups) opened, rebased on #19 with protocol 10, and sent to review |
+| 20:38 | PR #20 review: no blockers, 1 major (each group re-sorted Tab's skip list, so one Tab over 4,000 small groups took 12.5 ms), 3 minors (an arrow's `KEY_DOWN` went to the member it focused; a focused but disabled member fell out of the Tab order; `selectOnFocus` passed the arrow's Shift to `onPress`), 3 mutations no test caught, 5 nits |
+| 21:50 | PR #20 review fixed (PR20-01..10), verified at its head, which is `main` plus the PR (CI, 479 Rust tests, 116 bun tests, smoke, macOS type-check); one Tab over 1,000 groups of 3 at 100k nodes went from 2.3 to 2.8 ms down to 0.9 to 1.1 ms |
+| 21:52 | PR #20 merged: work item 3 is done |
 
 ### Decisions
 
@@ -555,6 +560,22 @@ groups follow, since they activate through #17's event. exe1's load was
 - **Half and full turns snap back to pixels.** Float noise from `sin`
   left a 360° rotation 1.7e-7 away from the identity, so the subtree
   drew unsnapped forever; composition now rounds terms within 1e-6.
+- **A focus group is one Tab stop, and arrows move inside it.** In a
+  vertical radio group with Medium checked and Large disabled, Tab
+  lands on Medium and the next Tab leaves; ↓ skips Large, wraps to
+  Small and, with `selectOnFocus`, activates it once per move, with no
+  modifiers (Shift+↓ isn't a Shift+click). The stop is the focused
+  member, else the checked one, else the last focused (kept natively
+  per group, by id and generation), else the first. A nested group is
+  one member of its parent: ↑↓ move between horizontal toolbars and
+  ←→ within one. Arrows stay with a text input's caret, and a key
+  claim on the same arrow wins.
+- **`KEY_DOWN` now goes to the node focused when the key went down**,
+  as on the web: ↓ from Small reaches Small's `onKeyDown`, then focus
+  moves. This changes `main` for Tab too, and Enter's activation now
+  follows its `KEY_DOWN` instead of preceding it.
+- Deferred: ←→ don't flip right to left (DF-50); `orientation="both"`
+  is one line in tree order, not a grid (DF-51).
 
 ## The `paths` crash
 
@@ -615,7 +636,6 @@ In Marbre:
   assistive technology.
 
 Work items not started:
-- The rest of item 3: focus groups (in progress).
 - Item 6: keyframe animations, loops, `enter`, and transitions and
   animations inside variants (DF-22, in progress); then exits.
 - The second half of item 4: anchor and geometry expressions.
