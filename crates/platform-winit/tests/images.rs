@@ -19,6 +19,13 @@ const BLUE: [u8; 4] = [0, 0, 255, 255];
 const WHITE: [u8; 4] = [255; 4];
 const CLEAR: [u8; 4] = [0, 0, 0, 255];
 
+/// One device for the whole binary: the Vulkan validation layer crashes
+/// when test threads create and destroy devices concurrently.
+fn gpu() -> Option<&'static Gpu> {
+    static GPU: std::sync::OnceLock<Option<Gpu>> = std::sync::OnceLock::new();
+    GPU.get_or_init(Gpu::try_headless).as_ref()
+}
+
 /// 40 x 20: four 10 px vertical stripes, red, green, blue, white.
 fn stripes() -> Vec<u8> {
     let rgba: Vec<u8> = (0..20)
@@ -162,7 +169,7 @@ fn draw(gpu: &Gpu, r: &mut Renderer, ui: &mut Ui) -> Vec<[u8; 4]> {
 /// meet.
 #[test]
 fn each_fit_draws_its_part_of_the_image() {
-    let Some(gpu) = Gpu::try_headless() else {
+    let Some(gpu) = gpu() else {
         eprintln!("no GPU adapter: skipped");
         return;
     };
@@ -215,7 +222,7 @@ fn each_fit_draws_its_part_of_the_image() {
 /// avatar clips them in a parent: radius and `overflow: hidden`.
 #[test]
 fn a_rounded_parent_clips_an_image() {
-    let Some(gpu) = Gpu::try_headless() else {
+    let Some(gpu) = gpu() else {
         eprintln!("no GPU adapter: skipped");
         return;
     };
@@ -269,7 +276,7 @@ fn a_rounded_parent_clips_an_image() {
 /// edge fades from red to white with no darker pixel between.
 #[test]
 fn transparent_edges_have_no_dark_rim() {
-    let Some(gpu) = Gpu::try_headless() else {
+    let Some(gpu) = gpu() else {
         eprintln!("no GPU adapter: skipped");
         return;
     };

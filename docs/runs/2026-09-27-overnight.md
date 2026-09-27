@@ -46,7 +46,10 @@ Times are UTC.
 | 04:52 | PR #8 review fixed (`LEDGER.md` PR8-01..17: decoding is bounded at 64 MP and 512 MiB before any buffer exists, the old image stays until the new one is ready, no dark edges, a 64 MB pixel budget, a panicking codec fails only its image), main merged in twice, reverified (CI, 395 workspace tests, smoke, macOS type-check). The blocker was about memory, so a fresh thread re-reviews the fix commit |
 | 05:02 | PR #8 re-review: the blocker is closed; 1 new major (a 78-byte WebP whose EXIF chunk claims 4 GiB aborts the app where memory is committed up front), 4 minors |
 | 05:10 | The intermittent `paths` crash characterised (below): the Vulkan validation layer, triggered by tests creating devices in parallel |
-| 05:13 | PR #8 re-review fixed (`LEDGER.md` PR8-18..25), reverified (CI, 398 workspace tests, bun 87, smoke, macOS type-check) and merged |
+| 05:15 | PR #8 re-review fixed (`LEDGER.md` PR8-18..25), reverified (CI, 398 workspace tests, bun 87, smoke, macOS type-check) and merged |
+| 05:18 | PR #9 opened: the GPU tests share a device; after it, `paths` crashed 0 times in 200 runs |
+| 05:22 | PR #9 review: 2 majors (two more test binaries still opened devices in parallel), 4 minors and nits |
+| 05:30 | PR #9 review fixed (`LEDGER.md` PR9-01..06: those tests take a lock), reverified (CI, 398 workspace tests, bun 87, smoke, macOS type-check) and merged. End of the run |
 
 ## PRs
 
@@ -60,6 +63,7 @@ Times are UTC.
 | [#6](https://github.com/erwinkn/craie/pull/6) | Sibling z and layers (work item 4, first half): `zIndex` among siblings, layer containers that never sort below their owner | Merged |
 | [#7](https://github.com/erwinkn/craie/pull/7) | State styles (work item 5): hover, press, focus, app states and breakpoints restyle natively; inherited color | Merged |
 | [#8](https://github.com/erwinkn/craie/pull/8) | Images (work item 8, part 2): decoded off-thread at the drawn size, drawn from the glyph atlas | Merged |
+| [#9](https://github.com/erwinkn/craie/pull/9) | GPU tests share one device per binary: fixes the intermittent `paths` crash | Merged |
 
 ## Numbers
 
@@ -208,12 +212,21 @@ bug). A helper looped it on exe1 and read 13 core dumps:
 
 Every core's top frame is in the Khronos Vulkan validation layer
 (1.3.275, Ubuntu 24.04), which wgpu loads in debug builds. Each test
-made and dropped its own device, and while one thread was inside the
-layer's `vkCreateDevice` or `vkDestroyDevice`, another's call on its
-own device read freed layer state. So it's neither Craie's rendering
-code nor wgpu nor llvmpipe. The fix is in the tests: each GPU test
-binary shares one device, and validation stays on. That's the PR after
-#8. On the Mac, wgpu uses Metal, which has no such layer.
+made and dropped its own device. Most likely, while one thread was
+inside the layer's `vkCreateDevice` or `vkDestroyDevice`, another's
+call on its own device read freed layer state: one core catches a
+create and a destroy in flight around the crash, but it isn't matched
+to an upstream bug. It isn't Craie's rendering code, wgpu or llvmpipe.
+
+The fix is in the tests (PR #9), and validation stays on:
+- `paths`, `gpu_uploads` and `images` share one device per binary.
+- `allocations` and platform-winit's own tests take a lock, so their
+  devices never overlap. `allocations` measures allocations per phase,
+  and a shared queue could finish the other test's work inside one.
+
+After the fix, on exe1: `paths` 0 crashes in 200 runs, `gpu_uploads` 0
+in 100, `images` 0 in 100. On the Mac, wgpu uses Metal, which has no
+such layer.
 
 ## Next steps
 
