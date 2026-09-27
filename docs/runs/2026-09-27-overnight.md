@@ -46,7 +46,10 @@ Times are UTC.
 | 04:52 | PR #8 review fixed (`LEDGER.md` PR8-01..17: decoding is bounded at 64 MP and 512 MiB before any buffer exists, the old image stays until the new one is ready, no dark edges, a 64 MB pixel budget, a panicking codec fails only its image), main merged in twice, reverified (CI, 395 workspace tests, smoke, macOS type-check). The blocker was about memory, so a fresh thread re-reviews the fix commit |
 | 05:02 | PR #8 re-review: the blocker is closed; 1 new major (a 78-byte WebP whose EXIF chunk claims 4 GiB aborts the app where memory is committed up front), 4 minors |
 | 05:10 | The intermittent `paths` crash characterised (below): the Vulkan validation layer, triggered by tests creating devices in parallel |
-| 05:13 | PR #8 re-review fixed (`LEDGER.md` PR8-18..25), reverified (CI, 398 workspace tests, bun 87, smoke, macOS type-check) and merged |
+| 05:15 | PR #8 re-review fixed (`LEDGER.md` PR8-18..25), reverified (CI, 398 workspace tests, bun 87, smoke, macOS type-check) and merged |
+| 05:18 | PR #9 opened: the GPU tests share a device; after it, `paths` crashed 0 times in 200 runs |
+| 05:22 | PR #9 review: 2 majors (two more test binaries still opened devices in parallel), 4 minors and nits |
+| 05:30 | PR #9 review fixed (`LEDGER.md` PR9-01..06: those tests take a lock), reverified (CI, 398 workspace tests, bun 87, smoke, macOS type-check) and merged. End of the run |
 
 ## PRs
 
