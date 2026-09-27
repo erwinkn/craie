@@ -513,8 +513,9 @@ function roleOf(props: Record<string, any>): number {
 }
 
 /** The states a scope reports while false: `expanded` and `selected`
- * when the prop was given, so `expanded={false}` reads "collapsed" and a
- * plain button reads neither. (`checked` goes with the check roles.) */
+ * when the prop was given, so `expanded={false}` is collapsed and a
+ * plain button is neither. (`checked` goes with the check roles, and
+ * native reports `selected` on selectable roles only.) */
 function reportedOf(props: Record<string, any>): number {
   if (!props.__scope) return 0
   return (props.expanded !== undefined ? REPORTED.expanded : 0) |

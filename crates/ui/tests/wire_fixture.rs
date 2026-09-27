@@ -72,6 +72,7 @@ fn js_fixture_decodes_and_executes() {
     // The root: a switch reporting expanded and selected while clear.
     let r = host.interaction(NodeId(0));
     assert_eq!((r.role, r.reported), (Role::Switch, reported::ALL));
+    assert_eq!(host.interaction(NodeId(7)).role, Role::RadioGroup);
     // `setText` leaves the caret at the start, so the insert lands first.
     assert_eq!(ui.inputs.text(2), "!seed");
     assert_eq!(ui.inputs.get(2).unwrap().submit, SubmitKey::ModEnter);

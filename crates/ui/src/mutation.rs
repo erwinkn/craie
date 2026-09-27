@@ -98,6 +98,7 @@ pub enum Role {
     Group = 13,
     Switch = 14,
     RadioButton = 15,
+    RadioGroup = 16,
 }
 
 impl Role {
@@ -119,6 +120,7 @@ impl Role {
             13 => Role::Group,
             14 => Role::Switch,
             15 => Role::RadioButton,
+            16 => Role::RadioGroup,
             _ => return None,
         })
     }
@@ -126,9 +128,10 @@ impl Role {
 
 /// States a node reports to assistive technology even while clear:
 /// the facade sets a bit when the state prop was given at all, so
-/// `expanded={false}` reads "collapsed" and a node without `expanded`
-/// reads neither. `checked` needs no bit: the check roles always report
-/// it, other roles never do.
+/// `expanded={false}` is "collapsed" and a node without `expanded` is
+/// neither. `checked` needs no bit: the check roles always report it,
+/// other roles never do. `a11y.rs` reports `SELECTED` on selectable
+/// roles only.
 pub mod reported {
     pub const EXPANDED: u8 = 1 << 0;
     pub const SELECTED: u8 = 1 << 1;

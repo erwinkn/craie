@@ -612,6 +612,40 @@ Reviewer minors and nitpicks not fixed yet.
   elements) that emits `Paint::Current` for the affected paints, or at
   least a report note at import.
 
+### DF-40: `expanded` is silent on macOS and Linux
+
+- Source: PR #14 review (a11y states), M1.
+- Where: crates/ui/src/a11y.rs (`set_expanded`); upstream
+  accesskit_macos 0.27 and accesskit_atspi_common 0.20.
+- Claim: Craie puts `expanded` in the AccessKit tree where the prop was
+  given, but only the Windows (UIA ExpandCollapse) and iOS adapters read
+  `is_expanded()`. On the Mac, `<Pressable expanded={open}>` is "button"
+  to VoiceOver, never "collapsed" or "expanded"; Orca on Linux hears
+  the same.
+- Why deferred: the gap is upstream; Craie's tree is right and serves
+  Windows today.
+- Resolves in: AccessKit support (macOS `AXExpanded`, AT-SPI
+  `State::Expandable` and `State::Expanded`), upstreamed or patched, and
+  an AccessKit bump.
+
+### DF-41: accessibility states and roles the kit uses that Craie lacks
+
+- Source: PR #14 review (a11y states), m5 and n1.
+- Where: crates/ui/src/mutation.rs (`Role`), crates/ui/src/a11y.rs,
+  packages/bridge/src/wire.ts (`ROLE`).
+- Claim: `pressed` (toggle buttons), `mixed` (indeterminate checkboxes)
+  and `highlighted` don't reach assistive technology, and the menu roles
+  (`menu`, `menuitem`, `menuitemcheckbox`, `menuitemradio`) don't exist.
+  The kit's select (`select.native.tsx`) builds `menuitemradio` with
+  `aria-checked`, so on Craie an adapter falls back to `button` and the
+  item's checked state is styling only.
+- Why deferred: out of PR #14's scope (check roles and three states);
+  `CheckInputProps` has no indeterminate.
+- Resolves in: the accessibility pass (ARCHITECTURE-update §13): the
+  roles append after `radiogroup` (a protocol bump), check menu items
+  report toggled like the check roles, `pressed` on a button is toggled
+  (AccessKit's toggle button), and `mixed` needs a value past one bit.
+
 ## Closed
 
 - DF-8 (2026-09-24, same day): `native_reflow_publishes_after_the_frame`
@@ -865,3 +899,11 @@ Reviewer minors and nitpicks not fixed yet.
 - PR13-06 (run-log review): an "Open risks" list: inputs inherit color silently, CRV1 kind 3 with no bump, clippy on macOS and wasm cfgs not in CI, the winit SIGSEGV at exit.
 - PR13-07 (run-log review): DF-39 moved from the profile deferrals to "Known gaps" with TextInput `disabled`; EXPERIMENTS.md carries the pre-R12-04 caveat.
 - PR13-08 (run-log review, nits): clippy's `bad_bit_mask` wording (checks that can't fire), the target-dir rule scoped to parallel agent runs, Erwin's go-ahead paraphrased from the message, jargon replaced (conflicts, reaching across a layer, color records, scene rebuilds), DF-29's reason spelled out, "Marbre web and native" narrowed to Marbre web (here and in topic 5), test counts named alike in the timeline, #12's macOS check placed.
+- PR14-01 (a11y review): the PR and §13 said `expanded={false}` reads "collapsed", but the macOS and AT-SPI adapters never read `expanded` (Windows and iOS do): the code stays, the PR body, §13 and the `expanded` JSDoc say where it's heard, and DF-40 tracks the upstream gap.
+- PR14-02 (a11y review): `selected` was reported on every role, and the kit styles checkboxes and radios with `selected` (a checkbox would read "checked, selected" on Linux): `a11y.rs` reports it on selectable roles only, Marbre web's `aria-selected` rule, which is the list row among Craie's roles. `selected_check_roles_report_checked_only` fails without the gate.
+- PR14-03 (a11y review): a ROLE op that changed only the reported byte was untested (an executor comparing the role alone kept every test green): `reported_alone_updates` gives a button `expanded` and takes it back.
+- PR14-04 (a11y review): the facade's scope gate on reported states was untested: the bun case has a scope-less `View` with `expanded` and expects no ROLE op; deleting the gate fails it.
+- PR14-05 (a11y review): the PR said the widened dirty mask is why a toggle reaches the tree, but every transaction republishes it: the mask stays (it mirrors DISABLED), the docs and the tests' header say it's bookkeeping, and the tests assert the semantic revision for each of the four bits, so dropping any of them from `state_bit::A11Y` fails a test.
+- PR14-06 (a11y review): the PR said a TextInput isn't a scope; it is (since #11): "What's left" is corrected, and the bun case checks a TextInput sends `[textInput, expanded | selected]`.
+- PR14-07 (a11y review): the deferred states and roles weren't in this file: DF-41 (pressed, mixed, highlighted, the menu roles) and DF-40.
+- PR14-08 (a11y review, nits): `radiogroup` is role 16 (still protocol 6; the fixture's layer container carries it), and ARCHITECTURE.md's §14 paragraph is rewrapped.

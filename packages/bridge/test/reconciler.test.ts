@@ -205,7 +205,9 @@ test("facade components send explicit roles", async () => {
 
 // The kit's check inputs and menu triggers: check roles carry `checked`
 // in the state bits; `expanded` and `selected` are reported only where
-// given, so a plain Pressable reads neither.
+// given on a scope (a TextInput is one), so a plain Pressable reports
+// neither, and a View that is no scope, whose states never reach native,
+// reports nothing.
 test("check roles and reported states", async () => {
   const t = new FakeTransport()
   const root = createRoot(t)
@@ -214,21 +216,32 @@ test("check roles and reported states", async () => {
       createElement(Pressable, { accessibilityRole: "checkbox", checked: false }),
       createElement(Pressable, { accessibilityRole: "switch", checked: true }),
       createElement(Pressable, { accessibilityRole: "radio" }),
+      createElement(View, { accessibilityRole: "radiogroup" }),
       createElement(Pressable, { expanded: open, selected: false }),
-      createElement(Pressable, { onPress: () => {} }))
+      createElement(Pressable, { onPress: () => {} }),
+      createElement(TextInput, { expanded: false, selected: true }),
+      createElement(View, { expanded: open }))
   }
-  root.renderSync(createElement(App, { open: false }))
-  await tick()
+  const log = console.error
+  console.error = () => {} // the scope-less View's warning
+  try {
+    root.renderSync(createElement(App, { open: false }))
+    await tick()
+  } finally {
+    console.error = log
+  }
   const roles = t.ops(0).filter(o => o.tag === 0x50).map(o => o.f)
   expect(roles).toEqual([
     [ROLE.checkbox, 0],
     [ROLE.switch, 0],
     [ROLE.radio, 0],
+    [ROLE.radiogroup, 0],
     [ROLE.button, REPORTED.expanded | REPORTED.selected],
     [ROLE.button, 0],
+    [ROLE.textInput, REPORTED.expanded | REPORTED.selected],
   ])
-  expect([ROLE.switch, ROLE.radio]).toEqual([14, 15])
-  const trigger = t.ops(0).filter(o => o.tag === 0x50)[3]!.id
+  expect([ROLE.switch, ROLE.radio, ROLE.radiogroup]).toEqual([14, 15, 16])
+  const trigger = t.ops(0).filter(o => o.tag === 0x50)[4]!.id
 
   // Opening changes the bits alone; dropping the prop stops reporting.
   root.renderSync(createElement(App, { open: true }))

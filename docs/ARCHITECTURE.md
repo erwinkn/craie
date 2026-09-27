@@ -1155,8 +1155,9 @@ Roles come from the explicit role field; the facade sets defaults
 (Pressable, TextInput, ScrollView, Text, List, list rows) and a plain
 View has none. States come from a scope's bits: the check roles report
 `checked`, and `expanded` and `selected` appear where the facade says
-the prop was given (ARCHITECTURE-update §13). A list row reports its position among all items and the
-item count; rows appear in item order, and rows layout hides are not
+the prop was given, `selected` on list rows only (ARCHITECTURE-update
+§13). A list row reports its position among all items and the item
+count; rows appear in item order, and rows layout hides are not
 published.
 Bounds are transform-aware. The whole tree still republishes on any
 a11y-observable change; the semantic dirty queue exists but does not
@@ -1260,8 +1261,8 @@ ids at once and mirrors each slot's generation; events carry the
 generation and JS drops stale ones; the ack resolves `flush()`.
 Payload ops copy typed-array bytes once. Protocol version 6 (36-byte
 event records and claims since 4; inherited color in drawings and
-inputs since 5; the `switch` and `radio` roles and the ROLE op's
-reported states since 6). The session hands JS its output in native
+inputs since 5; the `switch`, `radio` and `radiogroup` roles and the
+ROLE op's reported states since 6). The session hands JS its output in native
 order: acks sit between event frames where they happened, so the ack
 of a transaction never overtakes an event raised before it applied,
 and the facade retires a claim set's old handlers on that ack.

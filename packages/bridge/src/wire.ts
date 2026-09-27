@@ -189,6 +189,7 @@ export const ROLE = {
   group: 13,
   switch: 14,
   radio: 15,
+  radiogroup: 16,
 } as const
 export type AccessibilityRole = keyof typeof ROLE
 

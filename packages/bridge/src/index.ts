@@ -205,15 +205,17 @@ export interface VariantStyle {
 export type Variants = { [key: `_${string}`]: (VariantStyle & Variants) | undefined }
 
 /** The states a scope sets (hover, press and focus are native's).
- * Assistive technology reads them too: `checked` on the check roles
- * (`checkbox`, `switch`, `radio`; absent reads unchecked), `expanded`
- * and `selected` wherever the prop is given (`expanded={false}` reads
- * collapsed; without the prop, neither), and `disabled`. */
+ * The accessibility tree carries them too: `checked` on the check roles
+ * (`checkbox`, `switch`, `radio`; absent is unchecked), `expanded`
+ * wherever the prop is given (`false` is collapsed; without the prop,
+ * neither), `selected` where given on a list row, and `disabled`. */
 export interface StateProps {
-  /** Selected, or not when given `false` (a tab, a list option). */
+  /** Selected, or not when given `false`, on a list row; elsewhere a
+   * styling state only (a selected checkbox is just checked or not). */
   selected?: boolean
   /** Expanded, or collapsed when given `false` (a menu trigger, a
-   * disclosure). */
+   * disclosure). Screen readers hear it on Windows only so far: the
+   * macOS and Linux adapters don't read it (LEDGER.md DF-40). */
   expanded?: boolean
   /** Checked, on the check roles; on others a styling state only. */
   checked?: boolean
@@ -246,7 +248,8 @@ export interface ViewProps extends ListenerProps, StateProps, Variants {
   accessibilityLabel?: string
   /** Accessibility role; a plain View has none, a Pressable is a
    * `button`. The check roles (`checkbox`, `switch`, `radio`) report
-   * `checked` and take a click, like `button` and `link`. */
+   * `checked` and take a click, like `button` and `link`; a
+   * `radiogroup` holds radios. */
   accessibilityRole?: AccessibilityRole
   /** Sends `display: none`. */
   hidden?: boolean

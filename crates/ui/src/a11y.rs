@@ -42,7 +42,16 @@ fn ak_role(role: UiRole) -> Role {
         UiRole::Group => Role::Group,
         UiRole::Switch => Role::Switch,
         UiRole::RadioButton => Role::RadioButton,
+        UiRole::RadioGroup => Role::RadioGroup,
     }
+}
+
+/// Whether assistive technology reads `selected` on `role`: of Marbre
+/// web's selectable roles (tab, option, row, gridcell, treeitem, and
+/// the headers), Craie has the list row, which stands in for option and
+/// row. Add the others as they become roles.
+fn selectable(role: UiRole) -> bool {
+    role == UiRole::ListItem
 }
 
 /// The window root's accessibility id.
@@ -166,11 +175,14 @@ impl Ui {
             _ => {}
         }
         // Expanded and selected only where the prop was given: a plain
-        // button is neither collapsed nor unselected.
+        // button is neither collapsed nor unselected. Selected only on a
+        // selectable role too (Marbre web's `aria-selected` rule): the
+        // kit styles checkboxes and radios with `selected`, which must
+        // not read "checked, selected".
         if props.reported & reported::EXPANDED != 0 {
             an.set_expanded(bits & state_bit::EXPANDED != 0);
         }
-        if props.reported & reported::SELECTED != 0 {
+        if props.reported & reported::SELECTED != 0 && selectable(props.role) {
             an.set_selected(bits & state_bit::SELECTED != 0);
         }
         if let Some(p) = self.host.paragraph(id) {

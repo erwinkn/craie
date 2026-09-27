@@ -1173,19 +1173,25 @@ no scrollbars and scrolls only on wheel events.
 
 Changes: §14. Related: `LEDGER.md` DF-1 (per-cluster text runs).
 
-**Current.** Roles up to `switch` and `radio` (protocol 6). States come
-from a scope's bits: the check roles (`checkbox`, `switch`, `radio`)
-always report `checked` as AccessKit toggled, and take a click, so
-`<Pressable accessibilityRole="checkbox" checked={on}>` reads "checkbox,
-unchecked" until `on`. `expanded` and `selected` are reported where the
-prop was given: the ROLE op carries a `reported` byte the facade sets
-from `props.expanded !== undefined` and `props.selected !== undefined`,
-so `expanded={false}` reads "collapsed" and a plain button reads
-neither (a bit alone can't tell `false` from absent). `checked` on other
-roles stays a styling state; `disabled` reads disabled. A change to any
-of these bits marks the node semantic-dirty like a label change. Not
-yet: mixed (the kit's `CheckInputProps` has none), pressed (toggle
-buttons), and the other states below.
+**Current.** Roles up to `switch`, `radio` and `radiogroup` (protocol
+6). States come from a scope's bits. The check roles (`checkbox`,
+`switch`, `radio`) always report `checked` as AccessKit toggled, and
+take a click, so `<Pressable accessibilityRole="checkbox" checked={on}>`
+reads "checkbox, unchecked" until `on`. `expanded` and `selected` are
+reported where the prop was given: the ROLE op carries a `reported`
+byte the facade sets from `props.expanded !== undefined` and
+`props.selected !== undefined` (a bit alone can't tell `false` from
+absent), so `expanded={false}` is collapsed in the tree and a plain
+button is neither. Only the Windows and iOS adapters read `expanded`:
+on macOS and Linux a menu trigger is a plain button (`LEDGER.md`
+DF-40). `selected` is reported on selectable roles only, as Marbre web
+gates `aria-selected`: of Craie's roles, the list row. The kit styles
+checkboxes and radios with `selected`, and they must not read "checked,
+selected". `checked` on other roles stays a styling state; `disabled`
+reads disabled. Every transaction republishes the whole tree, so a
+state change reaches the next update; the semantic revision these bits
+bump is bookkeeping, as for labels. Not yet: pressed, mixed,
+highlighted and the menu roles (DF-41), and the other states below.
 
 **Target.** Roles for the kit's full role set. States: checked (and
 mixed), selected, expanded, pressed, disabled, busy, invalid, required,

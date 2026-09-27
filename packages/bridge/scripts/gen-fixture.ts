@@ -126,6 +126,7 @@ enc.payload(6, asset)
 enc.place(0, 6, NIL)
 enc.create(7, 0)                                    // a layer container
 enc.layer(7, 6)                                     // owned from the vector
+enc.role(7, ROLE.radiogroup)                        // the last role
 enc.spatial(7, undefined, undefined, 50)            // z alone
 enc.place(NIL, 7, NIL)
 // A runtime drawing: a dashed arc path and an even-odd polygon filled
