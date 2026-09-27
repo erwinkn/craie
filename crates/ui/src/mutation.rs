@@ -456,7 +456,8 @@ pub enum Mutation<'a> {
         narrow_max: f32,
         compact_max: f32,
     },
-    /// Sets or clears the color the node's text descendants inherit.
+    /// Sets or clears the color the node's text, inputs and `currentColor`
+    /// drawings inherit (its own and its descendants').
     Color {
         id: u32,
         color: Option<u32>,
@@ -673,7 +674,8 @@ impl<'a> Transaction<'a> {
         })
     }
 
-    /// Sets or clears the node's inherited text color.
+    /// Sets or clears the node's inherited color (text, inputs and
+    /// `currentColor` drawings).
     pub fn color(&mut self, id: u32, color: Option<u32>) -> &mut Self {
         self.push(Mutation::Color { id, color })
     }

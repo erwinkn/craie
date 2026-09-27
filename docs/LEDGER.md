@@ -603,6 +603,22 @@ Reviewer minors and nitpicks not fixed yet.
 - Resolves in: planning the decode for the new natural size when the
   node's size depends on it, if the double decode shows.
 
+### DF-39: imported SVGs bake `currentColor`
+
+- Source: PR #12 review (inherited color), R12-03.
+- Where: tools/svg-import/src/lib.rs (`paint`: usvg resolves
+  `currentColor` before the tree reaches us).
+- Claim: usvg resolves `currentColor` at import against the SVG's own
+  `color`, black by default. An icon imported as CRV1 with
+  `stroke="currentColor"` draws black on a dark UI and ignores
+  `_hover={{ color }}`, with no warning. The same icon sent as runtime
+  shapes (`<Path>` and the other elements) inherits the node's `COLOR`.
+- Why deferred: out of PR #12's scope (runtime drawings); the kit's
+  icons are runtime shapes.
+- Resolves in: a pre-scan for `currentColor` (as the one for dropped
+  elements) that emits `Paint::Current` for the affected paints, or at
+  least a report note at import.
+
 ## Closed
 
 - DF-8 (2026-09-24, same day): `native_reflow_publishes_after_the_frame`
@@ -835,3 +851,9 @@ Reviewer minors and nitpicks not fixed yet.
 - PR10-04 (clippy review, nit): `lists.rs` sliced `reference[..n]`, whose length is `n` by construction: `reference.iter()`.
 - PR10-05 (clippy review, nit): `bleed` allowed `manual_checked_ops` for its `n > 0` check: `NonZeroU32::new(n)` guards the three divisions instead, lint-free.
 - DF-14 (no inherited color in drawings) and DF-24 (input color and vector `currentColor`): fixed in PR #12 (inherited color). A `currentColor` with no `color` on a `G` above no longer throws: the facade flags the shape's fill or stroke (a `current` byte in each DRAWING shape, protocol 5) and native paints it with the node's inherited `COLOR` (its own, else the nearest ancestor's, else white, as a span) times the shape's opacity. A `Vector`'s `color` is its node's `COLOR`, so its variants and transitions apply; a `G`'s stays in the drawing. A change patches one paint slot per shape: a hover recoloring 1,000 icons is a paint patch each, with no layout, chunk rebuild, tessellation or allocation (EXPERIMENTS.md, state styles). A TextInput's color is its `COLOR` the same way: INPUT_CONFIG no longer carries one, its variants apply, and the facade's warning is gone. The kit's token colors (`'ink-3'`) still resolve before they reach a prop.
+- PR12-01 (color review): the runtime handshake still said protocol 4 (`craie_runtime_version`, `loadBindings`), so a stale `craie-node.node` passed the load check and failed at its first transaction: each side now answers with its own wire `VERSION`, and a bun test holds the cross-language fixture's header to the JS `VERSION` (Rust's `wire_fixture` decodes it only at the Rust one), so the two can't drift apart unnoticed.
+- PR12-02 (color review): no test had more than one `currentColor` item, so a patch that stopped after the first slot survived: `current_color_resolves_nearest` now has a stroke, a solid, and a shape whose fill and stroke both inherit with different tints, and the harness drawing inherits on its square's fill (non-white tint) and its ring's stroke. With that mutant, the unit test and the incremental-vs-rebuild oracle fail.
+- PR12-03 (color review): svg-import baking `currentColor` was untracked: DF-39.
+- PR12-04 (color review, nit): a color patch walked every prepared item, and `inherits_color` every asset item per lookup: the cached meshes keep their `currentColor` tints beside them (`Meshes::tints`), so a patch walks only those, and a vector's `inherits` is found once per `set_vector`.
+- PR12-05 (color review, nit): "text inherits" wording where inputs and drawings now inherit too: reworded at the listed sites and at four more (animation.rs, host.rs, states_tests.rs, ARCHITECTURE.md).
+- PR12-06 (color review, nit): the GPU test covered `Scene::set_paint` only: `inherited_color_reaches_drawing_pixels` (harness gpu_uploads.rs) renders a Ui on a device: a `currentColor` square paints its parent's `COLOR`, and a new `COLOR` reaches the pixels with no chunk rebuilt.

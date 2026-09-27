@@ -14,7 +14,7 @@
 // across transactions.
 
 const MAGIC = 0x3257_5243 // "CRW2" little-endian
-const VERSION = 5
+export const VERSION = 5
 export const NIL = 0xffff_ffff // no node / append / default style
 
 const enum Op {
@@ -103,7 +103,8 @@ export const ANIM_PROP = {
   height: 5,
   padding: 6,
   gap: 7,
-  /** The inherited text color: tweens between two set colors. */
+  /** The inherited color (text, inputs, `currentColor` drawings):
+   * tweens between two set colors. */
   color: 8,
 } as const
 export type AnimProp = keyof typeof ANIM_PROP
@@ -690,7 +691,8 @@ export interface VariantValues {
   borderColor?: number
   borderWidth?: number
   radius?: number
-  /** The inherited text color; `null` clears it. */
+  /** The inherited color (text, inputs, `currentColor` drawings);
+   * `null` clears it. */
   color?: number | null
   opacity?: number
   transform?: Affine
@@ -1246,7 +1248,8 @@ export class Encoder {
     this.ops.f32(compactMax)
   }
 
-  /** Sets (or with `null` clears) the color a node's text inherits. */
+  /** Sets (or with `null` clears) the color a node's text, inputs and
+   * `currentColor` drawings inherit. */
   color(id: number, color: number | null) {
     this.ops.u8(Op.Color)
     this.ops.u32(id)

@@ -12,6 +12,7 @@ import { fileURLToPath } from "node:url"
 import { format } from "node:util"
 import { createRoot, type Root } from "./index.js"
 import type { Transport } from "./host.js"
+import { VERSION } from "./wire.js"
 
 export interface NativeHostHandle {
   readonly id: number
@@ -71,7 +72,9 @@ export function loadBindings(path?: string): Bindings {
     process.env.CRAIE_NODE ??
     fileURLToPath(new URL("../../../craie-node.node", import.meta.url))
   const bindings = require(resolved) as Bindings
-  if (bindings.craieRuntimeVersion() !== 4) throw Error("Craie native bridge protocol mismatch")
+  // The native side answers with its wire VERSION, so a stale
+  // craie-node.node fails here, not at its first transaction.
+  if (bindings.craieRuntimeVersion() !== VERSION) throw Error("Craie native bridge protocol mismatch")
   return bindings
 }
 

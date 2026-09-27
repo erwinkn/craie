@@ -683,7 +683,8 @@ impl Ui {
                 }
                 self.host
                     .insert_before(NodeId(*parent), child, NodeId(*before));
-                // Its text may inherit another color now.
+                // Its text, inputs and drawings may inherit another color
+                // now.
                 if !self.host.colors.is_empty() && !self.host.colors.contains_key(&child.0) {
                     self.repaint_inheritors(child, None);
                 }
@@ -1091,12 +1092,12 @@ impl Ui {
             return;
         }
         let (bytes, asset) = self.host.vector_source(source, share, build);
-        let inherited = self.host.vector_inherits(NodeId(id));
+        let inherits = asset.as_ref().is_some_and(|a| a.inherits_color());
         let v = self.host.vectors.entry(id).or_default();
         v.bytes = bytes;
         v.asset = asset;
         // Starting or stopping `currentColor` changes the inheritors.
-        if self.host.vector_inherits(NodeId(id)) != inherited {
+        if std::mem::replace(&mut v.inherits, inherits) != inherits {
             self.color_bounds += 1;
         }
         self.host.copied_bytes += source.len() as u64;

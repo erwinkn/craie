@@ -44,10 +44,25 @@ pub(crate) struct Prepared {
 
 enum Prepaint {
     Solid(u32),
-    /// The inherited color times this tint (the item's opacity folded
-    /// into its alpha).
-    Current(u32),
+    /// The inherited color, times the item's tint in `Meshes::tints`.
+    Current,
     Gradient(GradientPaint),
+}
+
+/// A drawing's prepared items, and the tints of its `currentColor`
+/// items in item order (the item's opacity folded into the alpha), so
+/// a color change walks only those.
+pub(crate) struct Meshes {
+    items: Vec<Prepared>,
+    tints: Vec<u32>,
+}
+
+impl std::ops::Deref for Meshes {
+    type Target = [Prepared];
+
+    fn deref(&self) -> &[Prepared] {
+        &self.items
+    }
 }
 
 /// (content box, display scale) bits and the asset's address.
@@ -57,10 +72,10 @@ type MeshKey = ([u32; 5], usize);
 #[derive(Default)]
 pub(crate) struct VectorCache {
     /// Each node's meshes and the key they were made for.
-    nodes: HashMap<u32, (MeshKey, Arc<[Prepared]>)>,
+    nodes: HashMap<u32, (MeshKey, Arc<Meshes>)>,
     /// Meshes by key, shared between nodes. An entry holds its asset,
     /// so the address in its key stays that asset's.
-    shared: HashMap<MeshKey, (Arc<Asset>, Arc<[Prepared]>)>,
+    shared: HashMap<MeshKey, (Arc<Asset>, Arc<Meshes>)>,
     /// `shared` entries after the last sweep of unused ones.
     swept: usize,
 }
@@ -68,7 +83,7 @@ pub(crate) struct VectorCache {
 impl VectorCache {
     /// A node's meshes, if built (tests).
     #[cfg(test)]
-    pub(crate) fn items(&self, id: u32) -> Option<&Arc<[Prepared]>> {
+    pub(crate) fn items(&self, id: u32) -> Option<&Arc<Meshes>> {
         self.nodes.get(&id).map(|(_, items)| items)
     }
 
@@ -84,8 +99,8 @@ impl VectorCache {
         id: u32,
         key: MeshKey,
         asset: &Arc<Asset>,
-        build: impl FnOnce() -> Vec<Prepared>,
-    ) -> Arc<[Prepared]> {
+        build: impl FnOnce() -> Meshes,
+    ) -> Arc<Meshes> {
         if let Some((k, items)) = self.nodes.get(&id)
             && *k == key
         {
@@ -94,7 +109,7 @@ impl VectorCache {
         let items = match self.shared.get(&key) {
             Some((_, items)) => items.clone(),
             None => {
-                let items: Arc<[Prepared]> = build().into();
+                let items = Arc::new(build());
                 self.shared.insert(key, (asset.clone(), items.clone()));
                 items
             }
@@ -284,7 +299,7 @@ fn chunk_tolerance(scale: f32, bounds: Rect) -> f32 {
     (TOLERANCE_PX / scale).max(bounds.size.width.hypot(bounds.size.height) / MAX_DETAIL)
 }
 
-fn prepare(asset: &Asset, content: Rect, scale: f32) -> Vec<Prepared> {
+fn prepare(asset: &Asset, content: Rect, scale: f32) -> Meshes {
     let place = fit(asset.view_box, content);
     // The view box in chunk space: the drawing's viewport.
     let [vx, vy, vw, vh] = asset.view_box;
@@ -292,6 +307,7 @@ fn prepare(asset: &Asset, content: Rect, scale: f32) -> Vec<Prepared> {
     let p1 = place.apply(craie_core::geom::Point::new(vx + vw, vy + vh));
     let viewport = Rect::new(p0.x, p0.y, p1.x - p0.x, p1.y - p0.y);
     let mut out = Vec::with_capacity(asset.items.len());
+    let mut tints = Vec::new();
     // One dash budget for the whole drawing.
     let mut dash_budget = craie_vector::MAX_DASH_SEGMENTS;
     for it in &asset.items {
@@ -377,7 +393,10 @@ fn prepare(asset: &Asset, content: Rect, scale: f32) -> Vec<Prepared> {
         }
         let paint = match &asset.paints[it.paint] {
             Paint::Solid(c) => Prepaint::Solid(fade(*c, it.opacity)),
-            Paint::Current(t) => Prepaint::Current(fade(*t, it.opacity)),
+            Paint::Current(t) => {
+                tints.push(fade(*t, it.opacity));
+                Prepaint::Current
+            }
             Paint::Linear {
                 start,
                 end,
@@ -419,7 +438,7 @@ fn prepare(asset: &Asset, content: Rect, scale: f32) -> Vec<Prepared> {
         };
         out.push(Prepared { mesh, paint });
     }
-    out
+    Meshes { items: out, tints }
 }
 
 impl Ui {
@@ -451,19 +470,15 @@ impl Ui {
         // The inherited color's slots first, in item order, after the
         // box's: `patch_vector_paint` finds them there.
         let current = self.host.current_color(id);
-        let mut next = CURRENT_SLOTS;
-        for it in items.iter() {
-            if let Prepaint::Current(t) = it.paint {
-                let slot = w.paint(tint(current, t));
-                debug_assert_eq!(slot, PaintSlot(next));
-                next += 1;
-            }
+        for (i, &t) in items.tints.iter().enumerate() {
+            let slot = w.paint(tint(current, t));
+            debug_assert_eq!(slot, PaintSlot(CURRENT_SLOTS + i as u32));
         }
         let mut next = CURRENT_SLOTS;
         for it in items.iter() {
             let (slot, gradient) = match &it.paint {
                 Prepaint::Solid(c) => (w.paint(*c), false),
-                Prepaint::Current(_) => {
+                Prepaint::Current => {
                     next += 1;
                     (PaintSlot(next - 1), false)
                 }
@@ -480,13 +495,9 @@ impl Ui {
             return;
         };
         let current = self.host.current_color(id);
-        let mut slot = CURRENT_SLOTS;
-        for it in items.iter() {
-            if let Prepaint::Current(t) = it.paint {
-                self.scene
-                    .set_paint(id.0, PaintSlot(slot), tint(current, t));
-                slot += 1;
-            }
+        for (i, &t) in items.tints.iter().enumerate() {
+            let slot = PaintSlot(CURRENT_SLOTS + i as u32);
+            self.scene.set_paint(id.0, slot, tint(current, t));
         }
     }
 }
@@ -1282,7 +1293,10 @@ mod drawing_tests {
     #[test]
     fn current_color_resolves_nearest() {
         use craie_scene::PaintSlot;
-        use craie_vector::svg::CURRENT_STROKE;
+        use craie_vector::svg::{CURRENT_FILL, CURRENT_STROKE};
+        // A currentColor stroke, a solid square, then a shape whose fill
+        // and stroke both inherit, with different tints: slots 2, 3, 4
+        // in item order, the solid after them.
         let mut d = ring("");
         d.shapes[0].stroke = 0xFFFF_FF80;
         d.shapes[0].current = CURRENT_STROKE;
@@ -1291,29 +1305,49 @@ mod drawing_tests {
             fill: 0x0000_FFFF,
             ..Shape::default()
         });
+        d.shapes.push(Shape {
+            geometry: "M12 12H20V20H12Z".into(),
+            fill: 0xFFFF_FF40,
+            stroke: 0xFFFF_FFFF,
+            current: CURRENT_FILL | CURRENT_STROKE,
+            line: Stroke {
+                width: 1.0,
+                ..Stroke::default()
+            },
+            ..Shape::default()
+        });
         let mut ui = ui_with(&d, 1);
-        let paints = |ui: &Ui| [2, 3].map(|s| ui.scene().paint(1, PaintSlot(s)).unwrap());
-        assert_eq!(paints(&ui), [0xFFFF_FF80, 0x0000_FFFF], "white, as a span");
+        let paints = |ui: &Ui| [2, 3, 4, 5].map(|s| ui.scene().paint(1, PaintSlot(s)).unwrap());
+        assert_eq!(
+            paints(&ui),
+            [0xFFFF_FF80, 0xFFFF_FF40, 0xFFFF_FFFF, 0x0000_FFFF],
+            "white, as a span"
+        );
         let step = |ui: &mut Ui, id: u32, color: Option<u32>| {
             let mut t = Transaction::new(2);
             t.color(id, color);
             ui.apply_txn(&t).unwrap();
             ui.render(Size::new(200.0, 400.0));
-            paints(ui)[0]
+            paints(ui)
         };
         assert_eq!(
             step(&mut ui, 0, Some(0x9AA0_AAFF)),
-            0x9AA0_AA80,
+            [0x9AA0_AA80, 0x9AA0_AA40, 0x9AA0_AAFF, 0x0000_FFFF],
             "the parent's"
         );
         assert_eq!(
             step(&mut ui, 1, Some(0xFF00_00FF)),
-            0xFF00_0080,
+            [0xFF00_0080, 0xFF00_0040, 0xFF00_00FF, 0x0000_FFFF],
             "its own wins"
         );
-        assert_eq!(step(&mut ui, 1, None), 0x9AA0_AA80);
-        assert_eq!(step(&mut ui, 0, None), 0xFFFF_FF80);
-        assert_eq!(paints(&ui)[1], 0x0000_FFFF);
+        assert_eq!(
+            step(&mut ui, 1, None)[..3],
+            [0x9AA0_AA80, 0x9AA0_AA40, 0x9AA0_AAFF]
+        );
+        assert_eq!(
+            step(&mut ui, 0, None)[..3],
+            [0xFFFF_FF80, 0xFFFF_FF40, 0xFFFF_FFFF]
+        );
     }
 
     /// A drawing that starts using `currentColor` after the inheritors of

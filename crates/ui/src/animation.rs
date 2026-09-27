@@ -35,7 +35,7 @@ pub enum Prop {
     Padding = 6,
     /// Both axes.
     Gap = 7,
-    /// The inherited text color (`COLOR`). Tweens only between two set
+    /// The inherited color (`COLOR`). Tweens only between two set
     /// colors: setting or clearing it jumps.
     Color = 8,
 }

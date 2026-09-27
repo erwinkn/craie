@@ -188,7 +188,7 @@ export interface VariantStyle {
   borderColor?: string | number
   borderWidth?: number
   borderRadius?: number
-  /** The color text inherits. */
+  /** The color text, inputs and `currentColor` drawings inherit. */
   color?: string | number
   /** Layout, `opacity` and `transform`. Keys that share a wire field
    * with ones the variant sets (`width` with `height`, the sides of
@@ -221,7 +221,8 @@ export interface ViewProps extends ListenerProps, StateProps, Variants {
    * descendants' read; a name also addresses it (`_name`) from further
    * down. Adding or removing it remounts the children. */
   group?: boolean | string
-  /** The color descendant text inherits. */
+  /** The color descendant text, inputs and `currentColor` drawings
+   * inherit. */
   color?: string | number
   /** The View's text descendants form one selection domain: drag to
    * select across them, Cmd/Ctrl+C copies in tree order. */

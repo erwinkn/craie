@@ -1,6 +1,6 @@
 //! State styles through `Ui`: which variants apply (specificity, the
 //! bits native owns, the environment), what a restyle declares (rows,
-//! transitions, inherited text color), the base a tabled node's own ops
+//! transitions, inherited color), the base a tabled node's own ops
 //! set, scope lifetimes, hover at rest, and the wire.
 
 use craie_layout::LayoutRow;

@@ -243,6 +243,9 @@ pub struct VectorData {
     /// `None` until a source arrives, and for a drawing that does not
     /// parse (it draws nothing).
     pub asset: Option<std::sync::Arc<craie_vector::asset::Asset>>,
+    /// Whether `asset` paints with the inherited color, found once per
+    /// source (`Asset::inherits_color` walks the items).
+    pub inherits: bool,
 }
 
 /// An image node's source. Decode state lives in `Ui::images`.
@@ -321,7 +324,8 @@ pub struct Host {
     vector_sources_swept: usize,
     /// Claim sets (`claims.rs`), id-keyed; NIL keys the window list.
     pub claims: HashMap<u32, crate::claims::ClaimSet>,
-    /// Inherited text colors (`COLOR`), id-keyed: few nodes set one.
+    /// Inherited colors (`COLOR`) of text, inputs and `currentColor`
+    /// drawings, id-keyed: few nodes set one.
     pub colors: HashMap<u32, u32>,
     /// Item index of a list row (a child of a List node); NIL otherwise.
     pub list_index: Vec<u32>,
@@ -424,10 +428,7 @@ impl Host {
 
     /// Whether a vector node's asset paints with its inherited color.
     pub fn vector_inherits(&self, id: NodeId) -> bool {
-        self.vectors
-            .get(&id.0)
-            .and_then(|v| v.asset.as_ref())
-            .is_some_and(|a| a.inherits_color())
+        self.vectors.get(&id.0).is_some_and(|v| v.inherits)
     }
 
     /// The table's copy of a source, if it holds one (nodes of the same

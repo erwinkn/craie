@@ -450,16 +450,18 @@ const WORDS: &[&str] = &[
     "of",
 ];
 
-/// A runtime drawing: a dashed ring in the node's inherited color over
-/// a filled square.
+/// A runtime drawing: a dashed ring over a filled square, both in the
+/// node's inherited color (two `currentColor` slots, in item order),
+/// the square's through a non-white tint.
 fn vector_drawing() -> craie_vector::svg::Drawing<'static> {
-    use craie_vector::svg::{CURRENT_STROKE, Drawing, Shape};
+    use craie_vector::svg::{CURRENT_FILL, CURRENT_STROKE, Drawing, Shape};
     Drawing {
         view_box: "0 0 24 24".into(),
         shapes: vec![
             Shape {
                 geometry: "M4 4h16v16H4z".into(),
                 fill: 0x3366_99FF,
+                current: CURRENT_FILL,
                 ..Shape::default()
             },
             Shape {

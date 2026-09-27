@@ -391,3 +391,58 @@ fn settled_scroll_content_is_crisp() {
         );
     }
 }
+
+/// DF-24 on a device: a `currentColor` drawing paints its parent's
+/// `COLOR`, and a change of that color reaches the pixels through the
+/// drawing's paint slot, with no chunk rebuilt.
+#[test]
+fn inherited_color_reaches_drawing_pixels() {
+    use craie_vector::svg::{CURRENT_FILL, Drawing, Shape};
+    let Some(gpu) = gpu() else {
+        eprintln!("no GPU adapter: skipped");
+        return;
+    };
+    let mut ui = Ui::new(1.0);
+    ui.clear = 0x0000_00FF;
+    let mut s = taffy::Style::default();
+    s.size = taffy::Size {
+        width: taffy::Dimension::length(40.0),
+        height: taffy::Dimension::length(40.0),
+    };
+    let square = Drawing {
+        view_box: "0 0 24 24".into(),
+        shapes: vec![Shape {
+            geometry: "M0 0H24V24H0Z".into(),
+            fill: 0xFFFF_FFFF,
+            current: CURRENT_FILL,
+            ..Shape::default()
+        }],
+    };
+    let mut t = Transaction::new(1);
+    t.create(0, NodeKind::View)
+        .layout(0, &s)
+        .color(0, Some(0x9AA0_AAFF))
+        .append(NIL, 0);
+    t.create(1, NodeKind::Vector)
+        .layout(1, &s)
+        .drawing(1, square)
+        .append(0, 1);
+    ui.apply_txn(&t).unwrap();
+    assert_eq!(
+        pixel(gpu, &mut ui, 64, 64, (20, 20)),
+        [0x9A, 0xA0, 0xAA, 255]
+    );
+    let built = ui.counters().chunks_built;
+    let mut t = Transaction::new(2);
+    t.color(0, Some(0x3366_99FF));
+    ui.apply_txn(&t).unwrap();
+    assert_eq!(
+        pixel(gpu, &mut ui, 64, 64, (20, 20)),
+        [0x33, 0x66, 0x99, 255]
+    );
+    assert_eq!(
+        ui.counters().chunks_built,
+        built,
+        "a paint patch, no rebuild"
+    );
+}

@@ -194,7 +194,7 @@ item 5): `STATES` sets a scope's app bits (u64; the input bits are
 native's, and setting one fails validation); `VARIANTS` replaces a
 node's variant table (per variant: terms of a scope id and a u64 mask,
 environment bits, then values under a u8 mask: fill, border color,
-radius, text color, opacity, transform, layout, border width; layout
+radius, color, opacity, transform, layout, border width; layout
 is a u64 of keys, one per property, axis and side, then the style
 fields that hold them, so `_narrow: { padding: { left: 4 } }` and
 `_compact: { padding: { top: 6 } }` both apply), and a count of 0
@@ -269,7 +269,7 @@ State styles (`states.rs`, work item 5) keep id-keyed stores of their
 own: scopes (app bits, input bits, the ids of the tables that read
 them) and variant tables (the base, which the node's own ops set; the
 variants, sorted by specificity; the values last resolved), and a
-queue of tables to resolve again. Inherited text colors are an
+queue of tables to resolve again. Inherited colors are an
 id-keyed map (`Host::colors`).
 
 **Target.** The same arena shape with per-usage stores:
@@ -1024,7 +1024,7 @@ resolved, through the mutation's own interception, so a declared
 transition tweens a hover fill. A table's first resolution, and the
 first frame's environment, write directly (a row mounted selected
 does not fade in), and cancel an animation on the same property. The
-inherited text color (prop 8) tweens between two set colors; from none
+inherited color (prop 8) tweens between two set colors; from none
 it jumps.
 
 **Target.** A native transition driver on the UI thread.
