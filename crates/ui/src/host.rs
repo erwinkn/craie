@@ -220,11 +220,13 @@ pub struct SurfaceData {
 }
 
 /// A vector node's asset: its source (payload bytes as sent, or a
-/// drawing's key) and their decoding.
+/// drawing's key), shared with the source table and other nodes, and
+/// their decoding.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct VectorData {
-    pub bytes: Vec<u8>,
-    /// `None` until a payload arrives.
+    pub bytes: std::sync::Arc<[u8]>,
+    /// `None` until a source arrives, and for a drawing that does not
+    /// parse (it draws nothing).
     pub asset: Option<std::sync::Arc<craie_vector::asset::Asset>>,
 }
 
@@ -283,7 +285,7 @@ pub struct Host {
     pub vectors: HashMap<u32, VectorData>,
     /// Decoded vector sources by source bytes: nodes with the same
     /// source share one asset (and so its tessellation).
-    vector_sources: HashMap<Box<[u8]>, std::sync::Weak<craie_vector::asset::Asset>>,
+    vector_sources: HashMap<std::sync::Arc<[u8]>, std::sync::Weak<craie_vector::asset::Asset>>,
     /// `vector_sources` entries after the last sweep of dead ones.
     vector_sources_swept: usize,
     /// Claim sets (`claims.rs`), id-keyed; NIL keys the window list.
@@ -367,25 +369,49 @@ impl Host {
             .is_some_and(|w| w.strong_count() > 0)
     }
 
-    /// The shared decoding of a vector source, built on a miss (`None`:
-    /// it does not build). Dead entries are swept when the table has
-    /// doubled since the last sweep.
+    /// The table's copy of a source, if it holds one (nodes of the same
+    /// source share one copy).
+    pub fn vector_source_key(&self, source: &[u8]) -> Option<std::sync::Arc<[u8]>> {
+        self.vector_sources
+            .get_key_value(source)
+            .map(|(k, _)| k.clone())
+    }
+
+    /// Vector source table entries, live or not yet swept (tests).
+    pub fn vector_sources_len(&self) -> usize {
+        self.vector_sources.len()
+    }
+
+    /// The shared copy and decoding of a vector source: the table's, or
+    /// `share()` and `build()` on a miss (`None`: it does not build, and
+    /// is not kept). Dead entries are swept when the table has doubled
+    /// since the last sweep.
     pub fn vector_source(
         &mut self,
         source: &[u8],
+        share: impl FnOnce() -> std::sync::Arc<[u8]>,
         build: impl FnOnce() -> Option<craie_vector::asset::Asset>,
-    ) -> Option<std::sync::Arc<craie_vector::asset::Asset>> {
-        if let Some(a) = self.vector_sources.get(source).and_then(|w| w.upgrade()) {
-            return Some(a);
+    ) -> (
+        std::sync::Arc<[u8]>,
+        Option<std::sync::Arc<craie_vector::asset::Asset>>,
+    ) {
+        if let Some((k, w)) = self.vector_sources.get_key_value(source)
+            && let Some(a) = w.upgrade()
+        {
+            return (k.clone(), Some(a));
         }
-        let a = std::sync::Arc::new(build()?);
+        let key = share();
+        let Some(a) = build().map(std::sync::Arc::new) else {
+            return (key, None);
+        };
+        self.vector_sources.remove(source);
         self.vector_sources
-            .insert(source.into(), std::sync::Arc::downgrade(&a));
+            .insert(key.clone(), std::sync::Arc::downgrade(&a));
         if self.vector_sources.len() > 2 * self.vector_sources_swept + 64 {
             self.vector_sources.retain(|_, w| w.strong_count() > 0);
             self.vector_sources_swept = self.vector_sources.len();
         }
-        Some(a)
+        (key, Some(a))
     }
 
     pub fn kind(&self, id: NodeId) -> Option<NodeKind> {

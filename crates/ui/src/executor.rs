@@ -8,6 +8,7 @@
 //! Events produced by commands (focus, blur) are queued, not delivered.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use craie_core::geom::Affine;
 use craie_layout::LayoutRow;
@@ -226,12 +227,25 @@ impl Overlay<'_> {
     }
 }
 
-/// Vector sources new to the host that validation decoded, by source
-/// bytes (asset payloads, drawing keys): apply takes them instead of
-/// decoding again.
+/// What validation built for apply: vector sources new to the host, by
+/// source bytes (asset payloads, drawing keys; `None`: a drawing that
+/// does not build, drawn as nothing), and each drawing's key by step,
+/// built once and shared by the nodes drawing it.
 #[derive(Default)]
 pub struct Validated {
-    vectors: HashMap<Box<[u8]>, craie_vector::asset::Asset>,
+    vectors: HashMap<Arc<[u8]>, Option<craie_vector::asset::Asset>>,
+    keys: HashMap<usize, Arc<[u8]>>,
+}
+
+impl Validated {
+    /// A source's build, if validation made one: a drawing that failed
+    /// stays for other nodes of the batch; an asset moves out.
+    fn take(&mut self, source: &[u8]) -> Option<Option<craie_vector::asset::Asset>> {
+        match self.vectors.get(source)? {
+            None => Some(None),
+            Some(_) => self.vectors.remove(source),
+        }
+    }
 }
 
 /// Validates the whole transaction. O(mutations); no host mutation.
@@ -392,12 +406,18 @@ pub fn validate(host: &Host, txn: &Transaction<'_>) -> Result<Validated, WireErr
             }
             Mutation::Payload { id, bytes } => match o.kind(*id) {
                 Some(NodeKind::Surface) => {}
-                // A vector's payload is its asset: it must decode.
+                // A vector's payload is its asset: it must decode. Its
+                // magic tags it in the source table ("CRV1"; drawing
+                // keys start "CRVS"), so it is checked before a lookup.
                 Some(NodeKind::Vector) => {
+                    let magic = craie_vector::asset::MAGIC.to_le_bytes();
+                    if !bytes.starts_with(&magic) {
+                        return Err(invalid("vector asset does not decode"));
+                    }
                     if !host.has_vector_source(bytes) && !done.vectors.contains_key(&bytes[..]) {
                         let asset = craie_vector::asset::decode(bytes)
                             .map_err(|_| invalid("vector asset does not decode"))?;
-                        done.vectors.insert(bytes[..].into(), asset);
+                        done.vectors.insert(bytes[..].into(), Some(asset));
                     }
                 }
                 _ => return Err(invalid("payload on a node without one")),
@@ -406,14 +426,23 @@ pub fn validate(host: &Host, txn: &Transaction<'_>) -> Result<Validated, WireErr
                 if o.kind(*id) != Some(NodeKind::Vector) {
                     return Err(invalid("drawing on a non-vector node"));
                 }
-                // Every string must parse (bounded work: `svg` limits).
+                // Past the structural limits the drawing is refused; the
+                // key is bounded once they hold. A value that does not
+                // parse draws nothing instead (app data: a NaN in a chart
+                // must not close the window).
+                drawing
+                    .check()
+                    .map_err(|_| invalid("vector drawing too large"))?;
                 let key = drawing.key();
-                if !host.has_vector_source(&key) && !done.vectors.contains_key(&key[..]) {
-                    let asset = drawing
-                        .build()
-                        .map_err(|_| invalid("vector drawing does not parse"))?;
-                    done.vectors.insert(key.into(), asset);
+                let key = host
+                    .vector_source_key(&key)
+                    .or_else(|| done.vectors.get_key_value(&key[..]).map(|(k, _)| k.clone()))
+                    .unwrap_or_else(|| key.into());
+                let current = host.vectors.get(id).is_some_and(|v| v.bytes == key);
+                if !current && !host.has_vector_source(&key) && !done.vectors.contains_key(&key) {
+                    done.vectors.insert(key.clone(), drawing.build().ok());
                 }
+                done.keys.insert(step, key);
             }
             Mutation::Command { id, cmd } => {
                 // The clipboard is the window's: NIL may write it.
@@ -558,14 +587,20 @@ impl Ui {
     /// nothing changes.
     pub fn execute(&mut self, txn: &Transaction<'_>) -> Result<(), WireError> {
         let mut done = validate(&self.host, txn)?;
-        for m in &txn.mutations {
-            self.apply_mutation(txn, m, &mut done);
+        for (step, m) in txn.mutations.iter().enumerate() {
+            self.apply_mutation(txn, step, m, &mut done);
         }
         self.seq = txn.seq;
         Ok(())
     }
 
-    fn apply_mutation(&mut self, txn: &Transaction<'_>, m: &Mutation<'_>, done: &mut Validated) {
+    fn apply_mutation(
+        &mut self,
+        txn: &Transaction<'_>,
+        step: usize,
+        m: &Mutation<'_>,
+        done: &mut Validated,
+    ) {
         match m {
             Mutation::Create { id, kind } => {
                 let node = NodeId(*id);
@@ -830,20 +865,27 @@ impl Ui {
             {
                 // Validated: it decodes (a node dropped earlier in the
                 // batch may have released its interned copy).
-                self.set_vector(*id, bytes, || {
-                    done.vectors
-                        .remove(&bytes[..])
-                        .or_else(|| craie_vector::asset::decode(bytes).ok())
-                });
+                self.set_vector(
+                    *id,
+                    bytes,
+                    || bytes[..].into(),
+                    || {
+                        done.take(bytes)
+                            .unwrap_or_else(|| craie_vector::asset::decode(bytes).ok())
+                    },
+                );
             }
             Mutation::Drawing { id, drawing } => {
-                // Validated: it parses.
-                let key = drawing.key();
-                self.set_vector(*id, &key, || {
-                    done.vectors
-                        .remove(&key[..])
-                        .or_else(|| drawing.build().ok())
-                });
+                // Validated: the key is built; the asset is built, or
+                // `None` if it does not parse.
+                let key = done.keys.remove(&step).expect("validated drawing");
+                let share = key.clone();
+                self.set_vector(
+                    *id,
+                    &key,
+                    || share,
+                    || done.take(&key).unwrap_or_else(|| drawing.build().ok()),
+                );
             }
             Mutation::Payload { id, bytes } => {
                 let s = self.host.surfaces.entry(*id).or_default();
@@ -914,12 +956,14 @@ impl Ui {
     }
 
     /// Sets a vector node's source (asset bytes or a drawing's key),
-    /// shared with other nodes of the same source; `build` decodes it
-    /// when no node has it.
+    /// shared with other nodes of the same source; `share` makes the
+    /// source's shared copy and `build` decodes it when no node has it
+    /// (`None`: it draws nothing).
     fn set_vector(
         &mut self,
         id: u32,
         source: &[u8],
+        share: impl FnOnce() -> Arc<[u8]>,
         build: impl FnOnce() -> Option<craie_vector::asset::Asset>,
     ) {
         if self
@@ -930,10 +974,9 @@ impl Ui {
         {
             return;
         }
-        let asset = self.host.vector_source(source, build);
+        let (bytes, asset) = self.host.vector_source(source, share, build);
         let v = self.host.vectors.entry(id).or_default();
-        v.bytes.clear();
-        v.bytes.extend_from_slice(source);
+        v.bytes = bytes;
         v.asset = asset;
         self.host.copied_bytes += source.len() as u64;
         self.host.revs.resource.bump();

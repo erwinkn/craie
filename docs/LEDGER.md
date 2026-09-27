@@ -267,14 +267,16 @@ Reviewer minors and nitpicks not fixed yet.
 - Resolves in: shape-level animation targets, or dashes in the shader
   (E07).
 
-### DF-14: no `currentColor` in drawings
+### DF-14: no inherited color in drawings
 
 - Source: runtime vector shapes (work item 8) implementation (own
-  finding).
+  finding); narrowed in the PR #5 review (PR5-06).
 - Where: packages/bridge/src/shapes.ts (`paint`).
-- Claim: a shape's fill and stroke are resolved colors; `currentColor`
-  throws in the facade, so a Lucide icon needs its color passed as
-  `stroke`.
+- Claim: `currentColor` resolves to the `color` prop of the `Vector` or
+  a `G` above the shape, as `<svg color>` does; it does not inherit a
+  color from the node's ancestors (there is none to inherit), and
+  without a `color` prop it throws. The kit's token colors (`'ink-3'`)
+  must be resolved to colors before they reach a shape.
 - Why deferred: the color a node inherits comes with state styles and
   paint sources (topic 5).
 - Resolves in: topic 5.
@@ -287,25 +289,27 @@ Reviewer minors and nitpicks not fixed yet.
 - Claim: `Vector` reads its children as elements (`Path`, `G`, arrays,
   fragments); a component that returns shapes (`<MyArrow />`) throws.
   The kit's icon registry passes `[tag, attrs]` data, which maps to
-  direct elements.
+  direct elements; the kit's own `Path` and `Circle` are components
+  using hooks, and throw.
 - Why deferred: rendering shapes through the reconciler would give each
   a host node; flattening at render keeps one op per drawing.
 - Resolves in: host shape nodes if a consumer composes shapes from
   components.
 
-### DF-16: dash corners and group opacity in drawings
+### DF-16: group opacity and fill-under-stroke overlap in drawings
 
 - Source: runtime vector shapes (work item 8) implementation (own
-  finding).
-- Where: crates/vector/src/lib.rs (`dashed`), packages/bridge/src/shapes.ts.
-- Claim: two small differences from a browser. A dash that runs across
-  a closed subpath's start is two open pieces with caps, not one joined
-  corner. A `G`'s opacity multiplies into each shape, so overlapping
-  shapes in a translucent group show their overlap (the importer's
-  DF-6 case).
-- Why deferred: neither shows on icons or charts at their usual sizes;
-  the corner needs a join-aware dasher, the group an isolated layer.
-- Resolves in: a lyon-side dasher or E07; group layers (DF-6).
+  finding); corrected in the PR #5 review (PR5-03, PR5-04).
+- Where: packages/bridge/src/shapes.ts, crates/vector/src/svg.rs.
+- Claim: two differences from a browser remain. A `G`'s opacity
+  multiplies into each shape inside, so overlapping shapes in a faded
+  group show their overlap (the importer's DF-6 case). A shape's own
+  `opacity` multiplies into its fill and its stroke separately, so a
+  faded shape with both shows its fill under the inner half of its
+  stroke. `Vector`'s `opacity` is the node's (one layer) and has
+  neither problem; dash corners at a closed subpath's start are joined.
+- Why deferred: both need an isolated layer per group or shape.
+- Resolves in: group layers (DF-6).
 
 ## Closed
 
@@ -455,3 +459,66 @@ Reviewer minors and nitpicks not fixed yet.
     (a NUL character key is now invalid), the platform's key
     translation (`us_char`, F13 to F24), the drop fallback, the window
     list's old versions pruned on ack, and submit key `none`.
+- PR5-01..13 (vectors review), fixed in the PR #5 review:
+  - PR5-01: a bad value in a drawing closed the session: a drawing whose
+    strings or numbers do not parse now applies and draws nothing
+    (`asset: None`, zero intrinsic size), as SVG draws nothing for an
+    empty view box. Structural errors still reject (bad refs, a drawing
+    on another kind, too many shapes, a malformed op, the byte cap). The
+    facade coerces with `Number()` and drops a shape with a number that
+    is not finite (warned once), clamps `opacity`, gives a negative
+    `strokeWidth` or a miter limit under 1 its default, draws no shape
+    for a size of zero or less, and takes `strokeDasharray` as a number,
+    an array or a string (a negative length draws solid).
+  - PR5-02: the bounds were per string: they are per drawing now.
+    `check` caps the shapes' string references at 4 MiB (`MAX_BYTES`)
+    before the key is built; `build` parses each distinct string once,
+    charges path commands per shape, transform functions and points to
+    one `MAX_VERBS` budget, and shares one dash budget. The key is
+    built once per transaction and shared as `Arc<[u8]>` by the
+    executor, the source table and every node drawing it.
+  - PR5-03: zero-length dashes at a subpath's start and end are drawn
+    (dots at 0, 4, 8 and 12 for "0 4" on a 12-unit line, as Chrome), and
+    a closed subpath that starts and ends inside a dash emits its last
+    piece first, so the corner gets a join.
+  - PR5-04: `Vector`'s `opacity` is the node's (`style.opacity`: one
+    layer, animatable); only `G` and shape opacity multiply into shapes.
+    DF-16 is corrected: what remains is `G` opacity and fill under
+    stroke.
+  - PR5-05: tessellation is bounded by what shows: items whose bounds
+    miss the viewport are skipped, the tolerance is at least the item's
+    size over 2^16 (a circle of radius 4e6 through a 24-unit icon
+    flattens to under 2,000 vertices instead of over 5,000, and the
+    count no longer grows with the radius), and a shape at opacity 0 is
+    not tessellated.
+    A node at opacity 0 still is: its opacity is a layer patch, so a
+    fade-in does not tessellate on its first visible frame.
+  - PR5-06: `fillOpacity` and `strokeOpacity` scale the color's alpha;
+    `currentColor` paints with a `color` prop on `Vector` or `G` and
+    throws without one. DF-14 is narrowed to "no inherited color".
+  - PR5-07: `flattenShapes` throws past 4,096 shapes, or 4 MiB of
+    strings, saying why, instead of a wrapped count or a closed session.
+  - PR5-08: the docs say what the bounds are, list the kit's remaining
+    differences (token colors, hook-using wrappers; DF-14, DF-15), and
+    label the benchmark as the Rust direct API. The host node keeps the
+    drawing it last sent, so a resend stringifies once, not twice; the
+    JS side of a resend is measured (EXPERIMENTS.md).
+  - PR5-09: the test gaps are filled: dots, offsets past a period, a
+    closed subpath starting inside a dash; packed arc flags, skews,
+    negative view boxes, T and S after other commands; sweeps shrinking
+    both tables after churn, scale changes, a source removed and reused
+    in one transaction, id recycling while shared; unknown kind, rule,
+    join and cap bytes and a bad string ref; Ellipse and Polyline,
+    asset and shapes switching, a view-box-only resend, an inherited
+    dash array, and the numeric-string and NaN cases.
+  - PR5-10 (nit): a payload must start with the `CRV1` magic, checked
+    before the source table (drawing keys start `CRVS`), so a payload
+    cannot take a drawing's asset. The rebuild oracle relied on that
+    hole (it replayed a drawing's key as a payload); it replays the
+    drawing now (`Drawing::from_key`), and its random sequences create
+    drawings as well as assets.
+  - PR5-11 (nit): a Vector going from shapes or an asset to neither
+    sends an empty drawing, which draws nothing.
+  - PR5-12 (nit): opacity 0 does not tessellate (PR5-05).
+  - PR5-13 (nit): `VectorProps` is a union: an asset Vector's type has
+    no shape props, and `asset` is dropped when `viewBox` is given.

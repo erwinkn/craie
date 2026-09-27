@@ -356,24 +356,44 @@ export function Surface(props: SurfaceProps) {
   return createElement("surface", props)
 }
 
-export interface VectorProps extends ListenerProps, ShapeProps {
+interface VectorBase extends ListenerProps {
   style?: StyleProps
   backgroundColor?: string | number
   borderRadius?: number
   borderColor?: string | number
   borderWidth?: number
-  /** A prepared asset: the bytes `craie-svg in.svg out.crv` writes (SVG
-   * documents import at build time). */
-  asset?: Uint8Array
-  /** Runtime shapes instead of an asset: "minX minY width height", with
-   * `Path`, `Circle`, ... children. The paint props (`fill`, `stroke`,
-   * ...) are defaults the shapes inherit. */
-  viewBox?: string
-  children?: ReactNode
   accessibilityLabel?: string
   accessibilityRole?: AccessibilityRole
   hidden?: boolean
 }
+
+/** A prepared asset: the bytes `craie-svg in.svg out.crv` writes (SVG
+ * documents import at build time). Its paint is baked in. */
+export interface VectorAssetProps extends VectorBase {
+  asset: Uint8Array
+  viewBox?: undefined
+  children?: undefined
+}
+
+/** Runtime shapes: `Path`, `Circle`, ... children in a view box. The
+ * paint props (`fill`, `stroke`, ...) are defaults the shapes inherit;
+ * `opacity` is the node's (as `style.opacity`: the drawing fades as one
+ * layer, and animates). */
+export interface VectorShapeProps extends VectorBase, ShapeProps {
+  asset?: undefined
+  /** "minX minY width height". Empty or zero-size draws nothing. */
+  viewBox: string
+  children?: ReactNode
+}
+
+/** A Vector with neither draws nothing. */
+export interface VectorEmptyProps extends VectorBase {
+  asset?: undefined
+  viewBox?: undefined
+  children?: undefined
+}
+
+export type VectorProps = VectorAssetProps | VectorShapeProps | VectorEmptyProps
 
 /** A vector drawing (icons, illustrations, charts). Its view box is the
  * node's intrinsic size; the drawing fits its content box, centered,
@@ -385,18 +405,24 @@ export interface VectorProps extends ListenerProps, ShapeProps {
  *     <Path d="m9 12 2 2 4-4" />
  *   </Vector>
  */
-export function Vector({ children, viewBox, ...props }: VectorProps) {
-  if (viewBox === undefined) {
-    return createElement("vector", { accessibilityRole: "image", ...props })
+export function Vector(props: VectorProps) {
+  if (props.viewBox === undefined) {
+    const { children: _, ...rest } = props
+    return createElement("vector", { accessibilityRole: "image", ...rest })
   }
   const {
-    fill, fillRule, stroke, strokeWidth, strokeLinecap, strokeLinejoin, strokeMiterlimit,
-    strokeDasharray, strokeDashoffset, opacity, transform, ...rest
-  } = props
+    children, viewBox, asset: _, fill, fillOpacity, fillRule, stroke, strokeOpacity,
+    strokeWidth, strokeLinecap, strokeLinejoin, strokeMiterlimit, strokeDasharray,
+    strokeDashoffset, color, opacity, transform, ...rest
+  } = props as VectorShapeProps
   const shapes = flattenShapes(children, {
-    fill, fillRule, stroke, strokeWidth, strokeLinecap, strokeLinejoin, strokeMiterlimit,
-    strokeDasharray, strokeDashoffset, opacity, transform,
-  })
+    fill, fillOpacity, fillRule, stroke, strokeOpacity, strokeWidth, strokeLinecap,
+    strokeLinejoin, strokeMiterlimit, strokeDasharray, strokeDashoffset, color, transform,
+  }, viewBox)
+  if (opacity !== undefined) {
+    const o = Math.min(Math.max(Number(opacity), 0), 1)
+    rest.style = { ...rest.style, opacity: (rest.style?.opacity ?? 1) * (Number.isNaN(o) ? 1 : o) }
+  }
   return createElement("vector", { accessibilityRole: "image", ...rest, viewBox, shapes })
 }
 

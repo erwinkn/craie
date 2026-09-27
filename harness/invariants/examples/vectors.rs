@@ -8,8 +8,13 @@
 //!   and meshes shared), and the same drawings sent again to the same
 //!   nodes (a byte compare).
 //! - A 2,000-point sparkline (a polyline, 600 x 100), solid and dashed.
+//! - The per-drawing bounds' worst case: 4,096 shapes (`MAX_SHAPES`)
+//!   sharing one 1 KiB path, 4 MiB of string references (`MAX_BYTES`).
 //!
-//! Display scale 2. Times are medians of `RUNS` fresh `Ui`s.
+//! These measure the Rust direct API: transactions built in Rust and
+//! applied with `apply_txn`, no wire encode or decode and no JS (the JS
+//! side of a resend is in EXPERIMENTS.md). Display scale 2. Times are
+//! medians of `RUNS` fresh `Ui`s.
 //!
 //!   cargo run --release -p craie-harness --example vectors
 
@@ -277,7 +282,8 @@ fn main() {
         (ha + hf - base_apply - base_frame) / 200.0
     );
     println!(
-        "same drawings resent to the same nodes: apply {:.0} µs, frame {:.0} µs",
+        "same drawings resent to the same nodes (key built, compared): apply {:.0} µs, \
+         frame {:.0} µs",
         median(same_apply),
         median(same_frame)
     );
@@ -303,4 +309,28 @@ fn main() {
              first frame {frame:.0} µs"
         );
     }
+
+    // Worst case within the bounds: one path of 1 KiB, referenced by
+    // 4,096 shapes. It parses once; the key holds all 4 MiB.
+    let path = "M2 2".to_string() + &"l.004.004".repeat(113);
+    let worst = Drawing {
+        view_box: "0 0 24 24".into(),
+        shapes: vec![
+            Shape {
+                geometry: path.into(),
+                ..Shape::default()
+            };
+            craie_vector::svg::MAX_SHAPES
+        ],
+    };
+    worst.check().unwrap();
+    let (apply, frame) = mount_cost(|| {
+        let mut t = Transaction::new(2);
+        mount(&mut t, 1..2, 24.0, 24.0, |_| worst.clone());
+        t
+    });
+    println!(
+        "4,096 shapes sharing one 1 KiB path (4 MiB of references): apply {apply:.0} µs, \
+         first frame {frame:.0} µs"
+    );
 }

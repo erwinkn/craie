@@ -6,12 +6,24 @@
 //!
 //! A `Drawing` (a view box and shapes, as the wire carries them) builds
 //! the same `Asset` a `CRV1` payload decodes to, so layout, fitting and
-//! tessellation serve both. Input is untrusted: every parse is one pass
-//! over its string, and a drawing stops at `MAX_VERBS` commands in all.
-//! Anything malformed is an error, not a partial drawing (the executor
-//! rejects the transaction).
+//! tessellation serve both. Input is untrusted, and work is bounded per
+//! drawing, not per string:
+//!
+//! - `check` (structural; the executor rejects the transaction past it):
+//!   at most `MAX_SHAPES` shapes, whose string references add up to at
+//!   most `MAX_BYTES` (a string shared by 100 shapes counts 100 times).
+//!   The key is built only after it.
+//! - `build` parses each distinct string once, in one pass (white space
+//!   included, so scanning is bounded by `MAX_BYTES`), and stops at
+//!   `MAX_VERBS` of work: path commands per shape that draws them, plus
+//!   transform functions and points.
+//!
+//! A value that does not parse fails `build`, and the node draws nothing
+//! (as SVG draws nothing for an empty view box); the session goes on.
 
 use std::borrow::Cow;
+use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 
 use craie_core::geom::Affine;
 
@@ -20,8 +32,10 @@ use crate::{Dash, FillRule, Paint, Path, Stroke};
 
 /// Shapes per drawing.
 pub const MAX_SHAPES: usize = 1 << 12;
-/// Path commands a drawing's shapes expand to together (an arc counts
-/// up to four cubics).
+/// Bytes a drawing's string references add up to (4 MiB).
+pub const MAX_BYTES: usize = 4 << 20;
+/// Work units per drawing: path commands (an arc counts up to four
+/// cubics) for every shape that draws them, transform functions, points.
 pub const MAX_VERBS: usize = 1 << 20;
 /// Numbers in one dash array.
 pub const MAX_DASHES: usize = 64;
@@ -31,7 +45,7 @@ pub const MAX_DASHES: usize = 64;
 pub struct SvgError(pub &'static str);
 
 /// What a shape's geometry string is.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 #[repr(u8)]
 pub enum ShapeKind {
     /// Path data (`d`).
@@ -99,17 +113,34 @@ pub struct Drawing<'a> {
 }
 
 impl Drawing<'_> {
-    /// Canonical bytes: equal drawings, equal keys (the host shares one
-    /// parse and one tessellation between nodes drawing the same thing).
-    /// Distinct from any `CRV1` payload (they start with "CRV1").
-    pub fn key(&self) -> Vec<u8> {
-        let strings = self.view_box.len()
+    /// The structural limits, checked before anything else: at most
+    /// `MAX_SHAPES` shapes, and at most `MAX_BYTES` of string references
+    /// (the view box and each shape's geometry, transform and dashes).
+    pub fn check(&self) -> Result<(), SvgError> {
+        if self.shapes.len() > MAX_SHAPES {
+            return Err(SvgError("too many shapes"));
+        }
+        if self.string_bytes() > MAX_BYTES {
+            return Err(SvgError("drawing strings too long"));
+        }
+        Ok(())
+    }
+
+    fn string_bytes(&self) -> usize {
+        self.view_box.len()
             + self
                 .shapes
                 .iter()
                 .map(|s| s.geometry.len() + s.transform.len() + s.dashes.len())
-                .sum::<usize>();
-        let mut out = Vec::with_capacity(8 + strings + self.shapes.len() * 48);
+                .sum::<usize>()
+    }
+
+    /// Canonical bytes: equal drawings, equal keys (the host shares one
+    /// parse and one tessellation between nodes drawing the same thing).
+    /// Distinct from any `CRV1` payload (they start with "CRV1"). At most
+    /// `MAX_BYTES` plus 48 bytes a shape once `check` passes.
+    pub fn key(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(8 + self.string_bytes() + self.shapes.len() * 48);
         out.extend_from_slice(b"CRVS");
         let put = |out: &mut Vec<u8>, s: &str| {
             out.extend_from_slice(&(s.len() as u32).to_le_bytes());
@@ -136,16 +167,68 @@ impl Drawing<'_> {
         out
     }
 
-    /// Parses every string and builds the asset: per shape, its fill
-    /// then its stroke (SVG paint order), each an item.
-    pub fn build(&self) -> Result<Asset, SvgError> {
-        if self.shapes.len() > MAX_SHAPES {
-            return Err(SvgError("too many shapes"));
+    /// The drawing `key` was made from, `None` if it is not a key (a
+    /// clean rebuild replays a node's drawing from its source bytes).
+    pub fn from_key(key: &[u8]) -> Option<Drawing<'_>> {
+        let mut r = KeyReader(key.strip_prefix(b"CRVS")?);
+        let view_box = r.string()?;
+        let mut shapes = Vec::new();
+        while !r.0.is_empty() {
+            let [kind, rule, join, cap] = r.take(4)?.try_into().ok()?;
+            let (fill, stroke) = (r.word()?, r.word()?);
+            let [width, miter_limit, dash_offset, opacity] =
+                [r.float()?, r.float()?, r.float()?, r.float()?];
+            shapes.push(Shape {
+                kind: ShapeKind::from_u8(kind)?,
+                fill_rule: FillRule::from_u8(rule)?,
+                fill,
+                stroke,
+                line: Stroke {
+                    width,
+                    join: crate::LineJoin::from_u8(join)?,
+                    cap: crate::LineCap::from_u8(cap)?,
+                    miter_limit,
+                },
+                dash_offset,
+                opacity,
+                geometry: r.string()?,
+                transform: r.string()?,
+                dashes: r.string()?,
+            });
         }
+        Some(Drawing { view_box, shapes })
+    }
+
+    /// The same drawing, owning its strings.
+    pub fn into_owned(self) -> Drawing<'static> {
+        let own = |s: Cow<'_, str>| Cow::Owned(s.into_owned());
+        Drawing {
+            view_box: own(self.view_box),
+            shapes: self
+                .shapes
+                .into_iter()
+                .map(|s| Shape {
+                    geometry: own(s.geometry),
+                    transform: own(s.transform),
+                    dashes: own(s.dashes),
+                    ..s
+                })
+                .collect(),
+        }
+    }
+
+    /// Checks, parses every distinct string once, and builds the asset:
+    /// per shape, its fill then its stroke (SVG paint order), each an
+    /// item.
+    pub fn build(&self) -> Result<Asset, SvgError> {
+        self.check()?;
         let view_box = view_box(&self.view_box)?;
         let mut paints = Vec::new();
         let mut items = Vec::new();
-        let mut verbs = 0usize;
+        let mut work = MAX_VERBS;
+        let mut geometries: HashMap<(ShapeKind, &str), Path> = HashMap::new();
+        let mut transforms: HashMap<&str, Affine> = HashMap::new();
+        let mut dashes: HashMap<&str, Option<Vec<f32>>> = HashMap::new();
         for s in &self.shapes {
             let ok = |v: f32| v.is_finite();
             if !(ok(s.line.width) && s.line.width >= 0.0) {
@@ -157,15 +240,32 @@ impl Drawing<'_> {
             if !(0.0..=1.0).contains(&s.opacity) || !ok(s.dash_offset) {
                 return Err(SvgError("opacity or dash offset"));
             }
-            let budget = MAX_VERBS - verbs;
-            let path = match s.kind {
-                ShapeKind::Path => path_data(&s.geometry, budget)?,
-                ShapeKind::Polyline => points(&s.geometry, false, budget)?,
-                ShapeKind::Polygon => points(&s.geometry, true, budget)?,
+            let fills = s.fill & 0xFF != 0;
+            let strokes = s.stroke & 0xFF != 0 && s.line.width > 0.0;
+            if !(fills || strokes) {
+                continue;
+            }
+            let path = match geometries.entry((s.kind, &*s.geometry)) {
+                Entry::Occupied(e) => e.into_mut(),
+                Entry::Vacant(e) => e.insert(match s.kind {
+                    ShapeKind::Path => path_data(&s.geometry, work)?,
+                    ShapeKind::Polyline => points(&s.geometry, false, work)?,
+                    ShapeKind::Polygon => points(&s.geometry, true, work)?,
+                }),
             };
-            verbs += path.verbs.len();
-            let transform = transform(&s.transform)?;
-            let dash = dash_array(&s.dashes)?.map(|array| Dash {
+            // Each shape drawing a path copies it: the copy is work too.
+            work = work
+                .checked_sub(path.verbs.len())
+                .ok_or(SvgError("too much path data"))?;
+            let transform = match transforms.entry(&*s.transform) {
+                Entry::Occupied(e) => *e.get(),
+                Entry::Vacant(e) => *e.insert(transform_counted(&s.transform, &mut work)?),
+            };
+            let dash = match dashes.entry(&*s.dashes) {
+                Entry::Occupied(e) => e.into_mut(),
+                Entry::Vacant(e) => e.insert(dash_array(&s.dashes)?),
+            };
+            let dash = dash.clone().map(|array| Dash {
                 array,
                 offset: s.dash_offset,
             });
@@ -180,10 +280,10 @@ impl Drawing<'_> {
                     dash,
                 });
             };
-            if s.fill & 0xFF != 0 {
+            if fills {
                 push(ItemStyle::Fill(s.fill_rule), s.fill, None);
             }
-            if s.stroke & 0xFF != 0 && s.line.width > 0.0 {
+            if strokes {
                 push(ItemStyle::Stroke(s.line), s.stroke, dash);
             }
         }
@@ -303,6 +403,30 @@ impl Scan<'_> {
 
 fn add(a: [f32; 2], b: [f32; 2]) -> [f32; 2] {
     [a[0] + b[0], a[1] + b[1]]
+}
+
+/// Reads a drawing key (`Drawing::key`'s layout).
+struct KeyReader<'a>(&'a [u8]);
+
+impl<'a> KeyReader<'a> {
+    fn take(&mut self, n: usize) -> Option<&'a [u8]> {
+        let (head, rest) = self.0.split_at_checked(n)?;
+        self.0 = rest;
+        Some(head)
+    }
+
+    fn word(&mut self) -> Option<u32> {
+        Some(u32::from_le_bytes(self.take(4)?.try_into().ok()?))
+    }
+
+    fn float(&mut self) -> Option<f32> {
+        self.word().map(f32::from_bits)
+    }
+
+    fn string(&mut self) -> Option<Cow<'a, str>> {
+        let n = self.word()? as usize;
+        std::str::from_utf8(self.take(n)?).ok().map(Cow::Borrowed)
+    }
 }
 
 /// Path data (SVG 2 `d`): every command, absolute and relative, arcs as
@@ -512,9 +636,18 @@ pub fn points(s: &str, close: bool, limit: usize) -> Result<Path, SvgError> {
 /// `rotate` (degrees, optional center), `skewX` and `skewY`, applied
 /// right to left as SVG composes them. Empty is the identity.
 pub fn transform(s: &str) -> Result<Affine, SvgError> {
+    let mut work = usize::MAX;
+    transform_counted(s, &mut work)
+}
+
+/// `transform`, each function taking one unit of `work`.
+fn transform_counted(s: &str, work: &mut usize) -> Result<Affine, SvgError> {
     let mut sc = Scan::new(s);
     let mut m = Affine::IDENTITY;
     while !sc.done() {
+        *work = work
+            .checked_sub(1)
+            .ok_or(SvgError("too many transform functions"))?;
         let name_start = sc.i;
         while sc.peek().is_some_and(|c| c.is_ascii_alphabetic()) {
             sc.i += 1;
@@ -864,13 +997,110 @@ mod tests {
         assert_eq!(other.key(), drawing.key());
         other.shapes[0].dash_offset = 2.0;
         assert_ne!(other.key(), drawing.key());
-        // One bad string fails the drawing.
+        // A key reads back into its drawing; anything else does not.
+        let key = drawing.key();
+        assert_eq!(Drawing::from_key(&key), Some(drawing.clone()));
+        assert_eq!(Drawing::from_key(&key[..key.len() - 1]), None);
+        assert_eq!(Drawing::from_key(b"CRV1"), None);
+        // A shape that paints nothing is not parsed; one bad string in a
+        // painted shape fails the drawing.
         other.shapes[1].geometry = "0 0 24".into();
+        assert!(other.build().is_ok());
+        other.shapes[1].stroke = 0xFFFF_FFFF;
         assert!(other.build().is_err());
         let wide = Drawing {
             view_box: "0 0 1 1".into(),
             shapes: vec![Shape::default(); MAX_SHAPES + 1],
         };
+        assert!(wide.check().is_err());
         assert!(wide.build().is_err());
+    }
+
+    /// PR5-09: the parser cases the review tried by hand.
+    #[test]
+    fn packed_numbers_skews_and_smooth_chains() {
+        // Packed flags then packed coordinates: "0 0 0 1 0 .5 .5".
+        let v = d("M0 0a1 1 0 00.5.5");
+        let CubicTo(_, _, end) = v[v.len() - 1] else {
+            panic!("{v:?}")
+        };
+        assert_eq!(end, [0.5, 0.5]);
+        // skewX(45) maps (0, 1) to (1, 1); skewY(45) maps (1, 0) to (1, 1).
+        let p = |m: Affine, x: f32, y: f32| {
+            let p = m.apply(craie_core::geom::Point::new(x, y));
+            [p.x, p.y]
+        };
+        assert!(close(
+            p(transform("skewX(45)").unwrap(), 0.0, 1.0),
+            [1.0, 1.0]
+        ));
+        assert!(close(
+            p(transform("skewY(45)").unwrap(), 1.0, 0.0),
+            [1.0, 1.0]
+        ));
+        // A negative size is no view box.
+        assert!(view_box("0 0 -24 24").is_err());
+        assert!(view_box("0 0 24 -1").is_err());
+        // T after a line: its control point is the current point; a T
+        // after that T reflects the implied one.
+        assert_eq!(
+            d("M0 0L2 0T4 0T6 2"),
+            [
+                MoveTo([0.0, 0.0]),
+                LineTo([2.0, 0.0]),
+                QuadTo([2.0, 0.0], [4.0, 0.0]),
+                QuadTo([6.0, 0.0], [6.0, 2.0])
+            ]
+        );
+        // S after a Q: no reflection either.
+        assert_eq!(
+            d("M0 0Q1 1 2 0S3 1 4 0")[2],
+            CubicTo([2.0, 0.0], [3.0, 1.0], [4.0, 0.0])
+        );
+    }
+
+    /// PR5-02: bounds hold per drawing. Strings referenced past 4 MiB in
+    /// all fail `check` before any key is built (4,096 shapes sharing one
+    /// 2 KiB path: 8 MiB); a shared path counts once per shape drawing
+    /// it; transform functions take work.
+    #[test]
+    fn bounds_hold_per_drawing() {
+        let big = "M0 0".to_string() + &" ".repeat(2040);
+        let shared = Drawing {
+            view_box: "0 0 1 1".into(),
+            shapes: vec![
+                Shape {
+                    geometry: big.clone().into(),
+                    ..Shape::default()
+                };
+                MAX_SHAPES
+            ],
+        };
+        assert_eq!(shared.check(), Err(SvgError("drawing strings too long")));
+        let half = Drawing {
+            shapes: shared.shapes[..MAX_SHAPES / 2].to_vec(),
+            ..shared.clone()
+        };
+        assert!(half.check().is_ok());
+        assert_eq!(half.build().unwrap().items.len(), MAX_SHAPES / 2);
+        // 4,096 shapes sharing a 256-command path: exactly the budget;
+        // one more command and the drawing fails.
+        let path = |n: usize| "M0 0".to_string() + &"h1".repeat(n - 1);
+        let many = |n: usize| Drawing {
+            view_box: "0 0 1 1".into(),
+            shapes: vec![
+                Shape {
+                    geometry: path(n).into(),
+                    ..Shape::default()
+                };
+                MAX_SHAPES
+            ],
+        };
+        assert!(many(256).build().is_ok());
+        assert!(many(257).build().is_err());
+        let mut work = 3;
+        assert!(transform_counted("scale(1) scale(1) scale(1)", &mut work).is_ok());
+        assert_eq!(work, 0);
+        assert!(transform_counted("scale(1)", &mut work).is_err());
     }
 }

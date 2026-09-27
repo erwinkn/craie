@@ -91,10 +91,14 @@ pub fn snapshot(ui: &Ui) -> Transaction<'static> {
         if let Some(label) = host.label(id) {
             t.label(id.0, label.to_string());
         }
+        // A vector's source: payload bytes, or a drawing's key.
         if let Some(v) = host.vectors.get(&id.0)
             && !v.bytes.is_empty()
         {
-            t.payload(id.0, v.bytes.clone());
+            match craie_vector::svg::Drawing::from_key(&v.bytes) {
+                Some(d) => t.drawing(id.0, d.into_owned()),
+                None => t.payload(id.0, v.bytes.to_vec()),
+            };
         }
         if let Some(sd) = host.surfaces.get(&id.0) {
             t.surface(id.0, sd.kind, sd.params);
@@ -436,6 +440,32 @@ const WORDS: &[&str] = &[
     "of",
 ];
 
+/// A runtime drawing: a dashed ring over a filled square.
+fn vector_drawing() -> craie_vector::svg::Drawing<'static> {
+    use craie_vector::svg::{Drawing, Shape};
+    Drawing {
+        view_box: "0 0 24 24".into(),
+        shapes: vec![
+            Shape {
+                geometry: "M4 4h16v16H4z".into(),
+                fill: 0x3366_99FF,
+                ..Shape::default()
+            },
+            Shape {
+                geometry: "M22 12A10 10 0 0 1 2 12A10 10 0 0 1 22 12Z".into(),
+                fill: 0,
+                stroke: 0xFFFF_FFFF,
+                line: craie_vector::Stroke {
+                    width: 2.0,
+                    ..craie_vector::Stroke::default()
+                },
+                dashes: "4 2".into(),
+                ..Shape::default()
+            },
+        ],
+    }
+}
+
 /// One of three small vector assets: a filled square with a hole
 /// (even-odd), a stroked circle, and a gradient triangle.
 fn vector_asset(which: u32) -> Vec<u8> {
@@ -718,8 +748,11 @@ impl Gen {
                 t.paragraph(id, text, &spans);
             }
             NodeKind::Vector => {
-                let asset = vector_asset(self.rng.below(3));
-                t.payload(id, asset);
+                // Three assets, or a runtime drawing (dashed ring).
+                match self.rng.below(4) {
+                    3 => t.drawing(id, vector_drawing()),
+                    which => t.payload(id, vector_asset(which)),
+                };
                 if self.rng.chance(0.5) {
                     let mut s = taffy::Style::default();
                     s.size.width = length(16.0 + self.rng.below(64) as f32);

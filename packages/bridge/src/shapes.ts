@@ -1,7 +1,10 @@
 // Runtime vector shapes: SVG-like elements (`<Path>`, `<Circle>`, ...)
-// under a `<Vector>`, flattened here into wire shapes. The strings (path
-// data, points, transforms, dash arrays) go over as written; the native
-// side parses and validates them.
+// under a `<Vector>`, flattened here into wire shapes. Numbers are
+// coerced and checked here, as SVG treats them: a size of zero or less
+// draws no shape, a number that is not finite drops its shape (warned
+// once), an opacity clamps. The strings (path data, points, transforms)
+// go over as written; the native side parses them, and a drawing with
+// one that does not parse draws nothing.
 //
 //   <Vector viewBox="0 0 24 24" fill="none" stroke="#fff" strokeWidth={2}>
 //     <Circle cx={12} cy={12} r={10} strokeDasharray="4 2" />
@@ -9,38 +12,57 @@
 //   </Vector>
 
 import { Fragment, isValidElement, type ReactNode } from "react"
-import { color } from "./host.js"
+import { color as parseColor, utf8Length, warnOnce } from "./host.js"
 import type { WireShape } from "./wire.js"
 
+/** Shapes one drawing may hold (native `svg::MAX_SHAPES`). */
+export const MAX_SHAPES = 4096
+/** Bytes a drawing's strings may add up to, a string shared by several
+ * shapes counting once for each (native `svg::MAX_BYTES`, 4 MiB). */
+export const MAX_BYTES = 4 << 20
+
+type Num = number | string
+
 /** Paint and stroke attributes; on a `Vector` or `G` they are defaults
- * every shape inside inherits, as in SVG. */
+ * every shape inside inherits, as in SVG. Numbers may be numeric
+ * strings, as SVG attributes are. */
 export interface ShapeProps {
-  /** A color, or "none". Default black. */
+  /** A color, "none", or "currentColor" (`color`). Default black. */
   fill?: string | number
+  /** Multiplies the fill color's alpha, 0 to 1. */
+  fillOpacity?: Num
   fillRule?: "nonzero" | "evenodd"
-  /** A color, or "none" (the default). */
+  /** A color, "none" (the default), or "currentColor" (`color`). */
   stroke?: string | number
-  strokeWidth?: number
+  /** Multiplies the stroke color's alpha, 0 to 1. */
+  strokeOpacity?: Num
+  strokeWidth?: Num
   strokeLinecap?: "butt" | "round" | "square"
   strokeLinejoin?: "miter" | "round" | "bevel"
-  strokeMiterlimit?: number
-  /** Dash and gap lengths: "4 2", or [4, 2]. */
-  strokeDasharray?: string | readonly number[]
-  strokeDashoffset?: number
-  opacity?: number
+  strokeMiterlimit?: Num
+  /** Dash and gap lengths: "4 2", [4, 2], or 4. */
+  strokeDasharray?: Num | readonly Num[]
+  strokeDashoffset?: Num
+  /** What "currentColor" paints with. craie has no inherited text
+   * color, so a drawing that uses it must set one. */
+  color?: string | number
+  /** On a shape or `G`: multiplies into each shape's paint (overlapping
+   * shapes in a faded `G` show through each other; DF-16). On `Vector`,
+   * the node's opacity instead. */
+  opacity?: Num
   /** An SVG transform list: "translate(4 0) rotate(45 12 12)". */
   transform?: string
 }
 
-type Pts = string | readonly number[]
+type Pts = string | readonly Num[]
 
 export interface PathProps extends ShapeProps { d: string }
-export interface CircleProps extends ShapeProps { cx?: number; cy?: number; r: number }
-export interface EllipseProps extends ShapeProps { cx?: number; cy?: number; rx: number; ry: number }
+export interface CircleProps extends ShapeProps { cx?: Num; cy?: Num; r: Num }
+export interface EllipseProps extends ShapeProps { cx?: Num; cy?: Num; rx: Num; ry: Num }
 export interface RectProps extends ShapeProps {
-  x?: number; y?: number; width: number; height: number; rx?: number; ry?: number
+  x?: Num; y?: Num; width: Num; height: Num; rx?: Num; ry?: Num
 }
-export interface LineProps extends ShapeProps { x1?: number; y1?: number; x2?: number; y2?: number }
+export interface LineProps extends ShapeProps { x1?: Num; y1?: Num; x2?: Num; y2?: Num }
 export interface PolyProps extends ShapeProps { points: Pts }
 export interface GProps extends ShapeProps { children?: ReactNode }
 
@@ -59,11 +81,44 @@ const RULE = { nonzero: 0, evenodd: 1 }
 const JOIN = { miter: 0, round: 1, bevel: 2 }
 const CAP = { butt: 0, round: 1, square: 2 }
 
-function paint(v: string | number | undefined, fallback: number): number {
-  if (v === undefined) return fallback
+/** `v` as a number (`Number`, as SVG reads attributes), or `fallback`
+ * when absent. */
+const num = (v: unknown, fallback: number): number =>
+  v === undefined || v === null ? fallback : Number(v)
+
+/** An opacity: clamped to 0..1, `fallback` when absent or NaN. */
+function unit(v: unknown, fallback = 1): number {
+  const n = num(v, fallback)
+  return Number.isNaN(n) ? fallback : Math.min(Math.max(n, 0), 1)
+}
+
+/** `color`'s alpha scaled by `opacity` (0xRRGGBBAA). */
+const fade = (c: number, opacity: number) =>
+  opacity === 1 ? c : ((c & ~0xff) | Math.round((c & 0xff) * opacity)) >>> 0
+
+function paint(v: string | number | undefined, fallback: number, p: ShapeProps, opacity: number) {
+  if (v === undefined) return fade(fallback, opacity)
   if (v === "none") return 0
-  if (v === "currentColor") throw Error("currentColor is not supported yet: pass a color")
-  return color(v)
+  if (v === "currentColor") {
+    if (p.color === undefined) {
+      throw Error(
+        'Vector: "currentColor" needs a `color` prop on the Vector or a G above ' +
+        "(craie has no inherited text color)")
+    }
+    return fade(parseColor(p.color), opacity)
+  }
+  return fade(parseColor(v), opacity)
+}
+
+/** A dash array as the native side reads it, or "" (solid) when a
+ * length is negative or not a number, as SVG ignores such an array. */
+function dashes(v: ShapeProps["strokeDasharray"]): string {
+  if (v === undefined || v === "" || v === "none") return ""
+  const parts = typeof v === "string" ? v.trim().split(/[\s,]+/) : typeof v === "object" ? v : [v]
+  const ns = parts.map(Number)
+  if (ns.every(n => Number.isFinite(n) && n >= 0)) return ns.join(" ")
+  warnOnce(`Vector: strokeDasharray ${JSON.stringify(v)} is not a list of lengths; drawing solid`)
+  return ""
 }
 
 /** An ellipse as two half arcs, starting at its rightmost point and
@@ -74,10 +129,7 @@ function ellipse(cx: number, cy: number, rx: number, ry: number): string {
 }
 
 /** SVG's rect path: from (x + rx, y), clockwise, corners as arcs. */
-function rect(p: RectProps): string {
-  const { x = 0, y = 0, width: w, height: h } = p
-  let rx = p.rx ?? p.ry ?? 0
-  let ry = p.ry ?? p.rx ?? 0
+function rect(x: number, y: number, w: number, h: number, rx: number, ry: number): string {
   rx = Math.min(Math.max(rx, 0), w / 2)
   ry = Math.min(Math.max(ry, 0), h / 2)
   if (rx === 0 || ry === 0) return `M${x} ${y}H${x + w}V${y + h}H${x}Z`
@@ -88,15 +140,66 @@ function rect(p: RectProps): string {
   )
 }
 
-const pts = (p: Pts) => (typeof p === "string" ? p : p.join(" "))
+const NAMES = "Path, Circle, Ellipse, Rect, Line, Polyline, Polygon or G"
+
+/** A shape element's kind and geometry string, or null when it draws
+ * nothing: a size of zero or less (as in SVG), or a number that is not
+ * finite (`<Circle r={NaN}>`, a chart's missing point), warned once. */
+function geometry(type: unknown, props: Record<string, any>): [number, string] | null {
+  const bad = (name: string) => {
+    warnOnce(`Vector: a ${name} with a number that is not finite is not drawn`)
+    return null
+  }
+  const ok = (...ns: number[]) => ns.every(Number.isFinite)
+  switch (type) {
+    case Path: return [0, typeof props.d === "string" ? props.d : ""]
+    case Circle:
+    case Ellipse: {
+      const cx = num(props.cx, 0), cy = num(props.cy, 0)
+      const rx = num(type === Circle ? props.r : props.rx, 0)
+      const ry = num(type === Circle ? props.r : props.ry, 0)
+      if (!ok(cx, cy, rx, ry)) return bad(type === Circle ? "Circle" : "Ellipse")
+      return rx > 0 && ry > 0 ? [0, ellipse(cx, cy, rx, ry)] : null
+    }
+    case Rect: {
+      const x = num(props.x, 0), y = num(props.y, 0)
+      const w = num(props.width, 0), h = num(props.height, 0)
+      // SVG: a missing corner radius takes the other's.
+      const rx = num(props.rx ?? props.ry, 0), ry = num(props.ry ?? props.rx, 0)
+      if (!ok(x, y, w, h, rx, ry)) return bad("Rect")
+      return w > 0 && h > 0 ? [0, rect(x, y, w, h, rx, ry)] : null
+    }
+    case Line: {
+      const [x1, y1, x2, y2] = [props.x1, props.y1, props.x2, props.y2].map(v => num(v, 0))
+      if (!ok(x1!, y1!, x2!, y2!)) return bad("Line")
+      return [0, `M${x1} ${y1}L${x2} ${y2}`]
+    }
+    case Polyline:
+    case Polygon: {
+      const kind = type === Polyline ? 1 : 2
+      const p = props.points
+      if (typeof p === "string") return [kind, p]
+      const ns: number[] = Array.isArray(p) ? p.map(Number) : []
+      if (!ok(...ns)) return bad(kind === 1 ? "Polyline" : "Polygon")
+      // SVG drops an odd trailing number.
+      return [kind, ns.slice(0, ns.length & ~1).join(" ")]
+    }
+    default:
+      throw Error(`Vector: children must be ${NAMES}`)
+  }
+}
 
 /** The shapes under a `Vector`, in paint order. Fragments, arrays and
  * `G` groups flatten; `G` attributes are inherited defaults, its
  * transform wraps its children's, and its opacity multiplies theirs.
  * Anything else (text, other components) is an error: shapes must be
- * direct elements. */
-export function flattenShapes(children: ReactNode, inherited: ShapeProps = {}): WireShape[] {
+ * direct elements. So is a drawing past `MAX_SHAPES` shapes or
+ * `MAX_BYTES` of strings, which the native side would reject. */
+export function flattenShapes(
+  children: ReactNode, inherited: ShapeProps = {}, viewBox = "",
+): WireShape[] {
   const out: WireShape[] = []
+  let chars = viewBox.length
   const walk = (node: ReactNode, up: ShapeProps) => {
     if (node === null || node === undefined || typeof node === "boolean") return
     if (Array.isArray(node)) { for (const c of node) walk(c, up); return }
@@ -108,40 +211,49 @@ export function flattenShapes(children: ReactNode, inherited: ShapeProps = {}): 
     const p: ShapeProps & Record<string, any> = { ...up }
     for (const k in own) if ((own as any)[k] !== undefined) (p as any)[k] = (own as any)[k]
     p.transform = [up.transform, own.transform].filter(Boolean).join(" ")
-    p.opacity = (up.opacity ?? 1) * (own.opacity ?? 1)
+    p.opacity = unit(up.opacity) * unit(own.opacity)
     if (node.type === G) { walk(props.children, p); return }
-    let kind = 0
-    let geometry: string
-    switch (node.type) {
-      case Path: geometry = props.d; break
-      case Circle: geometry = ellipse(props.cx ?? 0, props.cy ?? 0, props.r, props.r); break
-      case Ellipse: geometry = ellipse(props.cx ?? 0, props.cy ?? 0, props.rx, props.ry); break
-      case Rect: geometry = rect(props as RectProps); break
-      case Line:
-        geometry = `M${props.x1 ?? 0} ${props.y1 ?? 0}L${props.x2 ?? 0} ${props.y2 ?? 0}`
-        break
-      case Polyline: kind = 1; geometry = pts(props.points); break
-      case Polygon: kind = 2; geometry = pts(props.points); break
-      default:
-        throw Error("Vector: children must be Path, Circle, Ellipse, Rect, Line, Polyline, Polygon or G")
+    const g = geometry(node.type, props)
+    if (g === null) return
+    if (out.length === MAX_SHAPES) {
+      throw Error(
+        `Vector: more than ${MAX_SHAPES} shapes; one drawing holds at most that many ` +
+        "(split it across several Vectors)")
     }
-    const dashes = p.strokeDasharray
-    out.push({
-      kind,
-      geometry: geometry ?? "",
-      transform: p.transform ?? "",
-      dashes: dashes === undefined ? "" : typeof dashes === "string" ? dashes : dashes.join(" "),
-      fill: paint(p.fill, 0x0000_00ff),
+    const width = num(p.strokeWidth, 1)
+    const miter = num(p.strokeMiterlimit, 4)
+    const offset = num(p.strokeDashoffset, 0)
+    const shape: WireShape = {
+      kind: g[0],
+      geometry: g[1],
+      transform: p.transform,
+      dashes: dashes(p.strokeDasharray),
+      fill: paint(p.fill, 0x0000_00ff, p, unit(p.fillOpacity)),
       fillRule: RULE[p.fillRule ?? "nonzero"],
-      stroke: paint(p.stroke, 0),
-      strokeWidth: p.strokeWidth ?? 1,
+      stroke: paint(p.stroke, 0, p, unit(p.strokeOpacity)),
+      // SVG: a negative width or a miter limit under 1 is an error,
+      // and the attribute takes its default.
+      strokeWidth: Number.isFinite(width) && width >= 0 ? width : 1,
       join: JOIN[p.strokeLinejoin ?? "miter"],
       cap: CAP[p.strokeLinecap ?? "butt"],
-      miterLimit: p.strokeMiterlimit ?? 4,
-      dashOffset: p.strokeDashoffset ?? 0,
-      opacity: p.opacity ?? 1,
-    })
+      miterLimit: Number.isFinite(miter) && miter >= 1 ? miter : 4,
+      dashOffset: Number.isFinite(offset) ? offset : 0,
+      opacity: p.opacity,
+    }
+    chars += shape.geometry.length + shape.transform.length + shape.dashes.length
+    out.push(shape)
   }
   walk(children, inherited)
+  // UTF-16 units undercount UTF-8 bytes at most threefold: count exactly
+  // only near the limit.
+  if (chars * 3 > MAX_BYTES) {
+    let bytes = utf8Length(viewBox)
+    for (const s of out) bytes += utf8Length(s.geometry) + utf8Length(s.transform) + utf8Length(s.dashes)
+    if (bytes > MAX_BYTES) {
+      throw Error(
+        `Vector: ${bytes} bytes of path data, points and transforms; one drawing holds ` +
+        `at most ${MAX_BYTES} (a string shared by several shapes counts for each)`)
+    }
+  }
   return out
 }

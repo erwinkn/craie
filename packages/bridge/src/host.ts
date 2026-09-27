@@ -129,7 +129,7 @@ const APPLE = typeof process !== "undefined" && process.platform === "darwin"
 const warned = new Set<string>()
 /** Logs a bad prop once: a typo should not take the app down, nor
  * flood the console on every render. */
-function warnOnce(msg: string) {
+export function warnOnce(msg: string) {
   if (warned.has(msg)) return
   warned.add(msg)
   console.error(`craie: ${msg}`)
@@ -264,6 +264,9 @@ export interface HostNode {
   spanOwners?: HostNode[]
   sentParagraph?: string
   sentInteraction?: string
+  /** Vector nodes: the drawing last sent, as JSON of [viewBox, shapes],
+   * "" for none; undefined after an asset. */
+  sentDrawing?: string
   /** Paragraph ops sent for this node, wrapping at 2^32 (mirrors native
    * `Paragraph::revision`): a span event from another revision was
    * hit-tested against an older span table. */
@@ -335,7 +338,7 @@ const isLow = (c: number) => c >= 0xdc00 && c < 0xe000
 /** UTF-8 byte length of `s` as the encoder writes it (span starts are
  * byte offsets natively): a surrogate pair is 4 bytes, a lone surrogate
  * becomes U+FFFD, 3 bytes. */
-function utf8Length(s: string): number {
+export function utf8Length(s: string): number {
   let n = 0
   for (let i = 0; i < s.length; i++) {
     const c = s.charCodeAt(i)
@@ -1105,19 +1108,27 @@ export class CraieHost {
       }
     }
 
+    if (n.kind === 5 && !mounted) n.sentDrawing = undefined
     if (n.kind === 5 && props.asset !== undefined && props.asset !== oldProps.asset) {
       // Vector: the asset bytes (`craie-svg` output), copied once per
       // change (identity compare).
       enc.payload(id, props.asset)
+      n.sentDrawing = undefined
     }
     if (n.kind === 5 && props.shapes !== undefined) {
       // Vector: runtime shapes, flattened by `Vector` on every render;
-      // sent when their content changes. Native interns by content too,
-      // so equal drawings parse and tessellate once.
-      const same =
-        mounted && props.viewBox === oldProps.viewBox && oldProps.shapes !== undefined &&
-        JSON.stringify(props.shapes) === JSON.stringify(oldProps.shapes)
-      if (!same) enc.drawing(id, props.viewBox, props.shapes)
+      // sent when their content changes (one stringify a render, compared
+      // with the last one sent). Native interns by content too, so equal
+      // drawings parse and tessellate once.
+      const drawing = JSON.stringify([props.viewBox, props.shapes])
+      if (drawing !== n.sentDrawing) {
+        enc.drawing(id, props.viewBox, props.shapes)
+        n.sentDrawing = drawing
+      }
+    } else if (n.kind === 5 && props.asset === undefined && n.sentDrawing !== "") {
+      // Neither: an empty drawing (an empty view box draws nothing).
+      if (mounted) enc.drawing(id, "", [])
+      n.sentDrawing = ""
     }
 
     if (n.kind === 4) {

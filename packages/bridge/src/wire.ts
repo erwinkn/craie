@@ -62,7 +62,7 @@ export interface WireShape {
   kind: number
   geometry: string
   transform: string
-  /** `stroke-dasharray` as written. */
+  /** `stroke-dasharray` as lengths ("4 2"), or "" for solid. */
   dashes: string
   fill: number
   /** 0 nonzero, 1 evenodd. */

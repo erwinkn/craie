@@ -6,7 +6,11 @@
 //! pixel, then maps into the chunk. Meshes are cached per asset, content
 //! box and display scale, and shared by the nodes drawing that asset in
 //! a box of that size (a list of rows with the same icon tessellates it
-//! once). Opacity multiplies each paint's alpha.
+//! once). An item's opacity (a shape's, or a `G`'s folded in) multiplies
+//! its paint's alpha; the node's own opacity is its layer's (group
+//! opacity). Items outside the viewport are skipped before tessellating,
+//! and flattening never goes finer than an item's size over
+//! `MAX_DETAIL`, so a huge shape costs no more than a small one.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -224,6 +228,39 @@ fn fade(color: u32, opacity: f32) -> u32 {
     (color & !0xFF) | a
 }
 
+/// The bounds of `path`'s points and control points under `m` (they
+/// hold the curve), `None` if empty or not finite.
+fn bounds(path: &craie_vector::Path, m: &Affine) -> Option<Rect> {
+    let (mut lo, mut hi) = ([f32::INFINITY; 2], [f32::NEG_INFINITY; 2]);
+    for v in &path.verbs {
+        let pts: &[[f32; 2]] = match v {
+            craie_vector::Verb::MoveTo(p) | craie_vector::Verb::LineTo(p) => {
+                std::slice::from_ref(p)
+            }
+            craie_vector::Verb::QuadTo(c, p) => &[*c, *p],
+            craie_vector::Verb::CubicTo(a, b, p) => &[*a, *b, *p],
+            craie_vector::Verb::Close => &[],
+        };
+        for &[x, y] in pts {
+            let p = m.apply(craie_core::geom::Point::new(x, y));
+            lo = [lo[0].min(p.x), lo[1].min(p.y)];
+            hi = [hi[0].max(p.x), hi[1].max(p.y)];
+        }
+    }
+    let r = Rect::new(lo[0], lo[1], hi[0] - lo[0], hi[1] - lo[1]);
+    (r.size.width.is_finite() && r.size.height.is_finite()).then_some(r)
+}
+
+/// Finest flattening, as a fraction of an item's size: past it, a shape
+/// far larger than its viewport gets coarser, not more vertices.
+const MAX_DETAIL: f32 = 65_536.0;
+
+/// The chunk-space tolerance for an item with chunk-space `bounds`: a
+/// quarter device px, or its size over `MAX_DETAIL` if coarser.
+fn chunk_tolerance(scale: f32, bounds: Rect) -> f32 {
+    (TOLERANCE_PX / scale).max(bounds.size.width.hypot(bounds.size.height) / MAX_DETAIL)
+}
+
 fn prepare(asset: &Asset, content: Rect, scale: f32) -> Vec<Prepared> {
     let place = fit(asset.view_box, content);
     // The view box in chunk space: the drawing's viewport.
@@ -232,22 +269,51 @@ fn prepare(asset: &Asset, content: Rect, scale: f32) -> Vec<Prepared> {
     let p1 = place.apply(craie_core::geom::Point::new(vx + vw, vy + vh));
     let viewport = Rect::new(p0.x, p0.y, p1.x - p0.x, p1.y - p0.y);
     let mut out = Vec::with_capacity(asset.items.len());
+    // One dash budget for the whole drawing.
+    let mut dash_budget = craie_vector::MAX_DASH_SEGMENTS;
     for it in &asset.items {
+        if !(it.opacity > 0.0) {
+            continue;
+        }
         let m = place.mul(&it.transform);
         let det = m.determinant().abs();
         if !(det > 1e-12 && det.is_finite()) {
             continue;
         }
+        // Items entirely outside the viewport are clipped away: skip
+        // them before tessellating (a stroke reaches half its width out,
+        // times the miter or a square cap's corner).
+        let stretch = max_stretch(&m);
+        let reach = match it.style {
+            ItemStyle::Fill(_) => 0.0,
+            ItemStyle::Stroke(s) => s.width * 0.5 * stretch * s.miter_limit.max(1.5),
+        };
+        let Some(b) = bounds(&it.path, &m) else {
+            continue;
+        };
+        let b = Rect::new(
+            b.origin.x - reach,
+            b.origin.y - reach,
+            b.size.width + 2.0 * reach,
+            b.size.height + 2.0 * reach,
+        );
+        let outside = b.max_x() < viewport.origin.x
+            || b.origin.x > viewport.max_x()
+            || b.max_y() < viewport.origin.y
+            || b.origin.y > viewport.max_y();
+        if outside || !b.size.width.is_finite() || !b.size.height.is_finite() {
+            continue;
+        }
         // Fills (and strokes under a similarity: equal axes, no shear)
         // tessellate in chunk space, where the tolerance is a quarter
-        // device px whatever the asset's units. Other strokes must
-        // tessellate in item space (a stroke's width follows the
-        // transform): there the tolerance is a quarter device px over
-        // the transform's largest stretch.
-        let [a, b, c, d, _, _] = m.0;
-        let k = (a * a + b * b).sqrt();
-        let similar = (a - d).abs() <= 1e-4 * k && (b + c).abs() <= 1e-4 * k;
-        let chunk_tolerance = TOLERANCE_PX / scale;
+        // device px whatever the asset's units, or the item's size over
+        // `MAX_DETAIL` if coarser. Other strokes must tessellate in item
+        // space (a stroke's width follows the transform): there the
+        // tolerance is that over the transform's largest stretch.
+        let [a, b_, c, d, _, _] = m.0;
+        let k = (a * a + b_ * b_).sqrt();
+        let similar = (a - d).abs() <= 1e-4 * k && (b_ + c).abs() <= 1e-4 * k;
+        let chunk_tolerance = chunk_tolerance(scale, b);
         let mesh = match it.style {
             ItemStyle::Fill(rule) => {
                 craie_vector::fill(&it.path.transformed(&m), rule, chunk_tolerance)
@@ -260,18 +326,17 @@ fn prepare(asset: &Asset, content: Rect, scale: f32) -> Vec<Prepared> {
                     ..s
                 };
                 let path = it.path.transformed(&m);
-                let dashed = it
-                    .dash
-                    .as_ref()
-                    .and_then(|d| craie_vector::dashed(&path, &d.scaled(k), chunk_tolerance));
+                let dashed = it.dash.as_ref().and_then(|d| {
+                    craie_vector::dashed(&path, &d.scaled(k), chunk_tolerance, &mut dash_budget)
+                });
                 craie_vector::stroke(dashed.as_ref().unwrap_or(&path), &s, chunk_tolerance)
             }
             ItemStyle::Stroke(s) => {
-                let tolerance = chunk_tolerance / max_stretch(&m);
+                let tolerance = chunk_tolerance / stretch;
                 let dashed = it
                     .dash
                     .as_ref()
-                    .and_then(|d| craie_vector::dashed(&it.path, d, tolerance));
+                    .and_then(|d| craie_vector::dashed(&it.path, d, tolerance, &mut dash_budget));
                 let path = dashed.as_ref().unwrap_or(&it.path);
                 craie_vector::stroke(path, &s, tolerance).map(|mut mesh| {
                     for v in &mut mesh.vertices {
@@ -917,12 +982,12 @@ mod drawing_tests {
         );
     }
 
-    /// Bad strings, bad numbers, and drawings on other kinds reject the
-    /// whole transaction, on the wire as in the direct API.
+    /// PR5-01: a drawing whose strings or values do not parse draws
+    /// nothing, on the wire as in the direct API; the transaction
+    /// applies and the session goes on. A good drawing then draws again.
     #[test]
-    fn bad_drawings_reject() {
+    fn bad_values_draw_nothing() {
         let mut ui = ui_with(&ring(""), 1);
-        let seq = ui.seq;
         let with = |f: &dyn Fn(&mut Shape<'static>)| {
             let mut d = ring("");
             f(&mut d.shapes[0]);
@@ -930,29 +995,227 @@ mod drawing_tests {
         };
         let cases = [
             with(&|s| s.geometry = "M1 2L".into()),
-            with(&|s| s.geometry = "M NaN 0".into()),
+            // A chart point that is NaN, and `<Circle r={undefined}>`.
+            with(&|s| s.geometry = "M0 0 L1 NaN".into()),
+            with(&|s| s.geometry = "MNaN 12ANaN NaN 0 1 1 NaN 12Z".into()),
             with(&|s| s.transform = "rotate(".into()),
             with(&|s| s.dashes = "4 -2".into()),
-            with(&|s| s.kind = ShapeKind::Polygon),
+            with(&|s| {
+                s.kind = ShapeKind::Polyline;
+                s.geometry = "0 0 1".into();
+            }),
             with(&|s| s.line.width = f32::INFINITY),
-            with(&|s| s.opacity = 2.0),
+            with(&|s| s.line.width = -1.0),
+            with(&|s| s.opacity = 1.2),
             with(&|s| s.line.miter_limit = 0.5),
+            // A chart whose values are all equal: an empty view box.
             Drawing {
-                view_box: "0 0 0 24".into(),
+                view_box: "0 0 600 0".into(),
                 ..ring("")
             },
         ];
         for (k, d) in cases.into_iter().enumerate() {
-            let mut t = Transaction::new(seq + 1);
+            let mut t = Transaction::new(ui.seq + 1);
             t.drawing(1, d);
-            assert!(ui.apply(&wire::encode(&t)).is_err(), "case {k} on the wire");
-            assert!(ui.apply_txn(&t).is_err(), "case {k}");
+            assert!(ui.apply(&wire::encode(&t)).is_ok(), "case {k} on the wire");
+            ui.render(Size::new(200.0, 400.0));
+            assert!(ui.host.vectors[&1].asset.is_none(), "case {k}");
+            let mut t = Transaction::new(ui.seq + 1);
+            t.drawing(1, ring(""));
+            ui.apply_txn(&t).unwrap();
+            ui.render(Size::new(200.0, 400.0));
+            assert!(ui.vector_meshes.items(1).is_some_and(|i| !i.is_empty()));
+        }
+    }
+
+    /// PR5-01, PR5-02: structural errors still reject: a drawing on
+    /// another kind of node, more than `MAX_SHAPES` shapes, and strings
+    /// adding up past `MAX_BYTES` (4,096 shapes sharing one 2 KiB path,
+    /// which the wire's string table sends once).
+    #[test]
+    fn structural_errors_reject() {
+        use craie_vector::svg::{MAX_BYTES, MAX_SHAPES};
+        let mut ui = ui_with(&ring(""), 1);
+        let seq = ui.seq;
+        let wide = Drawing {
+            view_box: "0 0 1 1".into(),
+            shapes: vec![ring("").shapes[0].clone(); MAX_SHAPES + 1],
+        };
+        let path = "M0 0".to_string() + &" ".repeat(2044);
+        let long = Drawing {
+            view_box: "0 0 1 1".into(),
+            shapes: vec![
+                Shape {
+                    geometry: path.into(),
+                    ..Shape::default()
+                };
+                MAX_SHAPES
+            ],
+        };
+        assert!(MAX_SHAPES * 2048 > MAX_BYTES);
+        let buf = {
+            let mut t = Transaction::new(seq + 1);
+            t.drawing(1, long.clone());
+            wire::encode(&t)
+        };
+        assert!(buf.len() < 256 * 1024, "{} wire bytes", buf.len());
+        for (id, d) in [(1, wide), (1, long), (0, ring(""))] {
+            let mut t = Transaction::new(seq + 1);
+            t.drawing(id, d);
+            assert!(ui.apply(&wire::encode(&t)).is_err());
+            assert!(ui.apply_txn(&t).is_err());
             assert_eq!(ui.seq, seq);
         }
-        let mut t = Transaction::new(seq + 1);
-        t.drawing(0, ring(""));
+        assert!(ui.host.vectors[&1].asset.is_some());
+    }
+
+    /// PR5-02: a drawing's key is built once and shared: nodes drawing
+    /// the same shapes hold one copy, in the same batch or a later one.
+    #[test]
+    fn equal_drawings_share_one_key() {
+        let mut ui = ui_with(&ring("4 2"), 3);
+        let bytes = |ui: &Ui, id: u32| ui.host.vectors[&id].bytes.clone();
+        assert!(std::sync::Arc::ptr_eq(&bytes(&ui, 1), &bytes(&ui, 3)));
+        let mut t = Transaction::new(2);
+        t.create(4, NodeKind::Vector)
+            .drawing(4, ring("4 2"))
+            .place(0, 4, NIL);
+        ui.apply_txn(&t).unwrap();
+        assert!(std::sync::Arc::ptr_eq(&bytes(&ui, 1), &bytes(&ui, 4)));
+    }
+
+    /// PR5-10: a payload is tagged by its magic in the source table: one
+    /// whose bytes equal a live drawing's key does not take its asset.
+    #[test]
+    fn payloads_cannot_pose_as_drawings() {
+        let mut ui = ui_with(&ring(""), 2);
+        let key = ui.host.vectors[&1].bytes.to_vec();
+        assert!(key.starts_with(b"CRVS"));
+        let mut t = Transaction::new(ui.seq + 1);
+        t.payload(2, key);
         assert!(ui.apply_txn(&t).is_err());
-        assert_eq!(ui.seq, seq);
+    }
+
+    /// PR5-09: churn sweeps both tables: 1,000 drawings in turn on one
+    /// node leave each table bounded by its sweep threshold (twice what
+    /// the last sweep kept, plus 64; meshes keep their asset alive until
+    /// their own sweep), not by the churn.
+    #[test]
+    fn churn_sweeps_the_tables() {
+        let mut ui = ui_with(&ring(""), 1);
+        for i in 0..1_000 {
+            let mut t = Transaction::new(ui.seq + 1);
+            t.drawing(1, ring(&format!("{} 1", i + 1)));
+            ui.apply_txn(&t).unwrap();
+            ui.render(Size::new(200.0, 400.0));
+        }
+        let (sources, meshes) = (ui.host.vector_sources_len(), ui.vector_meshes.shared_len());
+        assert!(
+            sources < 200 && meshes < 200,
+            "{sources} sources, {meshes} meshes"
+        );
+    }
+
+    /// PR5-09: a display-scale change re-tessellates a shared drawing,
+    /// and its nodes still share the new meshes.
+    #[test]
+    fn scale_changes_retessellate_shared_drawings() {
+        let mut ui = ui_with(&ring(""), 2);
+        let items = |ui: &Ui, id: u32| ui.vector_meshes.items(id).unwrap().clone();
+        let before = items(&ui, 1);
+        ui.scale = 2.0;
+        ui.render(Size::new(200.0, 400.0));
+        let (a, b) = (items(&ui, 1), items(&ui, 2));
+        assert!(!std::sync::Arc::ptr_eq(&a, &before));
+        assert!(std::sync::Arc::ptr_eq(&a, &b));
+        assert!(a[0].mesh.vertices.len() > before[0].mesh.vertices.len());
+    }
+
+    /// PR5-09: when the only node holding a source is removed earlier in
+    /// the batch, a new node with that source builds it again.
+    #[test]
+    fn a_removed_source_rebuilds_for_a_new_node() {
+        let mut ui = ui_with(&ring("4 2"), 1);
+        let mut t = Transaction::new(2);
+        t.remove(1)
+            .create(2, NodeKind::Vector)
+            .drawing(2, ring("4 2"))
+            .place(0, 2, NIL);
+        ui.apply_txn(&t).unwrap();
+        ui.render(Size::new(200.0, 400.0));
+        assert!(ui.host.vectors[&2].asset.is_some());
+        assert!(ui.vector_meshes.items(2).is_some_and(|i| !i.is_empty()));
+    }
+
+    /// PR5-09: an id recycled while its meshes were shared starts clean:
+    /// the new node draws its own drawing, the other keeps the old one.
+    #[test]
+    fn recycled_ids_start_clean() {
+        let mut ui = ui_with(&ring(""), 2);
+        let before = ui.vector_meshes.items(1).unwrap().clone();
+        let mut t = Transaction::new(2);
+        t.remove(2);
+        ui.apply_txn(&t).unwrap();
+        let mut t = Transaction::new(3);
+        t.create(2, NodeKind::Vector)
+            .drawing(2, ring("4 2"))
+            .place(0, 2, NIL);
+        ui.apply_txn(&t).unwrap();
+        ui.render(Size::new(200.0, 400.0));
+        let (a, b) = (
+            ui.vector_meshes.items(1).unwrap().clone(),
+            ui.vector_meshes.items(2).unwrap().clone(),
+        );
+        assert!(std::sync::Arc::ptr_eq(&a, &before));
+        assert!(!std::sync::Arc::ptr_eq(&a, &b));
+        assert!(area(&ui, 2) < area(&ui, 1));
+    }
+
+    /// PR5-05: a shape far larger than its viewport flattens coarser
+    /// rather than into more vertices: a circle of radius 1e6 or 4e6
+    /// tessellates to over 5,000 vertices at the pixel tolerance for
+    /// the larger, and to under 2,000 for both at its size over 2^16. The
+    /// mesh is clipped to the viewport after, so this counts before the
+    /// clip. One through the view box draws; one outside is skipped.
+    #[test]
+    fn huge_shapes_stay_cheap() {
+        let geometry = |x: f32, r: f32| {
+            format!(
+                "M{x} 12A{r} {r} 0 1 1 {} 12A{r} {r} 0 1 1 {x} 12Z",
+                x - 2.0 * r
+            )
+        };
+        for r in [1e6, 4e6] {
+            let path = craie_vector::svg::path_data(&geometry(18.0, r), 64).unwrap();
+            let b = super::bounds(&path, &craie_core::geom::Affine::IDENTITY).unwrap();
+            let fill =
+                |tol| craie_vector::fill(&path, craie_vector::FillRule::NonZero, tol).unwrap();
+            let n = fill(super::chunk_tolerance(1.0, b)).vertices.len();
+            assert!((100..2_000).contains(&n), "r {r}: {n} vertices");
+            if r == 4e6 {
+                assert!(fill(super::TOLERANCE_PX).vertices.len() > 5_000);
+            }
+        }
+        let circle = |x: f32, r: f32| Drawing {
+            view_box: "0 0 24 24".into(),
+            shapes: vec![Shape {
+                geometry: geometry(x, r).into(),
+                ..Shape::default()
+            }],
+        };
+        let ui = ui_with(&circle(18.0, 4e6), 1);
+        assert_eq!(ui.vector_meshes.items(1).unwrap().len(), 1);
+        let ui = ui_with(&circle(1e6, 10.0), 1);
+        assert!(ui.vector_meshes.items(1).unwrap().is_empty());
+    }
+
+    /// PR5-05: a shape at opacity 0 does not tessellate.
+    #[test]
+    fn transparent_shapes_do_not_tessellate() {
+        let mut d = ring("");
+        d.shapes[0].opacity = 0.0;
+        let ui = ui_with(&d, 1);
+        assert!(ui.vector_meshes.items(1).unwrap().is_empty());
     }
 
     /// The wire carries every field of every shape.
@@ -985,5 +1248,21 @@ mod drawing_tests {
             let cut = wire::decode(&buf[..n]);
             assert!(cut.map_or(true, |c| c.mutations.is_empty()), "{n}");
         }
+        // PR5-09: unknown kind, rule, join or cap bytes, and a string ref
+        // past the table, fail to decode. The first shape follows the op
+        // byte, the id, the view box ref and the count.
+        let op = buf
+            .windows(5)
+            .position(|w| w == [wire::op::DRAWING, 5, 0, 0, 0])
+            .unwrap();
+        let shape = op + 1 + 4 + 4 + 2;
+        for at in [shape, shape + 1, shape + 2, shape + 3] {
+            let mut bad = buf.clone();
+            bad[at] = 9;
+            assert!(wire::decode(&bad).is_err(), "byte {}", at - shape);
+        }
+        let mut bad = buf.clone();
+        bad[shape + 4..shape + 8].copy_from_slice(&0xFFFFu32.to_le_bytes());
+        assert!(wire::decode(&bad).is_err());
     }
 }

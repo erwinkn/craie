@@ -791,13 +791,24 @@ op (0x72) carries a view box and shapes: path data or points, a
 transform list, a dash array, and resolved paint (plain colors, fill
 rule, stroke width, joins, caps, dash offset, opacity).
 `craie_vector::svg` parses them into the same asset a `CRV1` payload
-decodes to; every string is bounded (4,096 shapes, a million path
-verbs, 64 dashes) and any error rejects the transaction. Strokes take
+decodes to. Work is bounded per drawing: at most 4,096 shapes whose
+string references add up to at most 4 MiB, checked first; each
+distinct string parses once, against one budget of 2^20 path commands,
+transform functions and points; 64 numbers per dash array and 65,536
+dashes per drawing. Past the shape or byte bound the transaction is
+rejected; a value that does not parse draws nothing (the node has no
+drawing and no intrinsic size) and the session goes on. Strokes take
 dashes (`craie_vector::dashed`: the flattened path cut by length,
-restarting on each subpath). Sources, payload bytes or a drawing's
-canonical key, are interned by content, and meshes are cached per
+restarting on each subpath, zero-length dashes as dots, a closed
+subpath joined through its start). Sources, payload bytes (starting
+`CRV1`) or a drawing's canonical key (starting `CRVS`, built once per
+transaction), are interned by content, and meshes are cached per
 asset, content box and display scale, so 200 nodes showing one icon
-parse once and tessellate once. JS:
+parse once and tessellate once. Tessellation skips shapes outside the
+view box or at opacity 0 and flattens no finer than a shape's size
+over 2^16. The facade resolves `currentColor` to a `color` prop, and
+`Vector`'s `opacity` is the node's opacity (one layer, animatable);
+a `G`'s multiplies into its shapes. JS:
 
 ```tsx
 <Vector viewBox="0 0 24 24" fill="none" stroke="#fff" strokeWidth={2}>
