@@ -5,11 +5,13 @@
 #
 # The wasm32 check keeps the portable crates free of desktop-only
 # facilities (ARCHITECTURE.md §1, §19). The harness tests include the
-# release-graph and layer-map checks.
+# release-graph and layer-map checks; the release graph is the macOS
+# one on any host, so fetch every target's packages first.
 set -e
 cd "$(dirname "$0")/.."
 
 cargo fmt --all --check
+cargo fetch --locked
 cargo build --workspace --all-targets
 cargo test
 cargo check --target wasm32-unknown-unknown \

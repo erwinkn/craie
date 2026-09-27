@@ -10,6 +10,10 @@ use std::process::Command;
 /// Crates that ship.
 const RELEASE: &[&str] = &["craie-node", "craie-platform-winit"];
 
+/// The shipped target: its graph, whatever the host. Linux graphs differ
+/// (winit draws Wayland decorations with tiny-skia).
+const TARGET: &str = "aarch64-apple-darwin";
+
 /// Crates that must never appear in a release graph.
 const REFERENCE_ONLY: &[&str] = &[
     "craie-harness",
@@ -41,6 +45,8 @@ fn release_graphs_exclude_reference_libraries() {
                 "none",
                 "--format",
                 "{p}",
+                "--target",
+                TARGET,
                 "-p",
                 krate,
             ])
