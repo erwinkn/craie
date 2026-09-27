@@ -33,8 +33,10 @@ fn in_rounded(p: Point, r: &Rect, radius: f32) -> bool {
     if rad <= 0.0 {
         return true;
     }
-    let cx = p.x.clamp(r.origin.x + rad, r.max_x() - rad);
-    let cy = p.y.clamp(r.origin.y + rad, r.max_y() - rad);
+    // Not `clamp`: at a radius of half the size, rounding can put the
+    // low bound a hair above the high one, and `clamp` panics then.
+    let cx = p.x.max(r.origin.x + rad).min(r.max_x() - rad);
+    let cy = p.y.max(r.origin.y + rad).min(r.max_y() - rad);
     let (dx, dy) = (p.x - cx, p.y - cy);
     dx * dx + dy * dy <= rad * rad
 }

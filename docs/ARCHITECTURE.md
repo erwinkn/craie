@@ -963,7 +963,8 @@ zero layouts and zero shapes (asserted, `EXPERIMENTS.md` Step 4).
 **Current.** Platform events normalize into `Event`s. `Ui::dispatch`
 hit tests through border boxes, ancestor clips, and scroll offsets,
 skipping any subtree whose reach (a box around everything it can hit,
-kept lazily; `reach.rs`, E15) misses the point, then walks the
+kept lazily and refreshed after each frame's layout; `reach.rs`, E15)
+misses the point, then walks the
 propagation path with listener-relative coordinates. Pointer
 capture holds a drag on the pressed node. Tab traverses focusable nodes
 in tree order. Clipboard via arboard. IME with cursor-area tracking.
@@ -1000,8 +1001,9 @@ movement without a React round trip.
 
 **Decisions.**
 - Listener-relative coordinates stay.
-- No BVH or R-tree for ordinary UI: a reach box per subtree prunes the
-  hit test 12 to 236 times (E15), and the full walk stays as its oracle.
+- No separate spatial index (R-tree, rebuilt BVH): the node tree
+  carries a bounding box per subtree, which makes the hit test 12x to
+  236x faster (E15). The full walk stays as its oracle.
 
 ## 14. Accessibility
 

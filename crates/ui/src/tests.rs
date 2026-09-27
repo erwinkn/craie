@@ -298,6 +298,105 @@ fn wheel_scrolls_and_reports() {
     assert_eq!(ui.scroll_offset(container), [0.0, 200.0]);
 }
 
+/// Enter and leave go to each side's chain below the common ancestor,
+/// deepest first; a subtree that leaves the tree under the pointer
+/// hands the hover to its parent, so the ancestors that stay hovered
+/// get no second enter.
+#[test]
+fn pointer_enter_leave_sequences() {
+    // Roots A at (0, 0) and D at (0, 300); in A, B | C side by side;
+    // in B, B1 | B2, and E in B2's corner; C1 in C's corner.
+    let (a, b, b1, b2, e, c, c1, d) = (1, 2, 3, 4, 5, 6, 7, 8);
+    let at = |x: f32, y: f32, w: f32, h: f32| taffy::Style {
+        position: taffy::Position::Absolute,
+        inset: taffy::Rect {
+            left: taffy::LengthPercentageAuto::length(x),
+            top: taffy::LengthPercentageAuto::length(y),
+            ..taffy::Rect::auto()
+        },
+        size: taffy::Size {
+            width: taffy::Dimension::length(w),
+            height: taffy::Dimension::length(h),
+        },
+        ..taffy::Style::default()
+    };
+    let mut t = Transaction::new(1);
+    for (id, parent, style) in [
+        (a, NIL, at(0.0, 0.0, 400.0, 200.0)),
+        (b, a, at(0.0, 0.0, 200.0, 200.0)),
+        (b1, b, at(0.0, 0.0, 100.0, 100.0)),
+        (b2, b, at(100.0, 0.0, 100.0, 100.0)),
+        (e, b2, at(0.0, 0.0, 50.0, 50.0)),
+        (c, a, at(200.0, 0.0, 200.0, 200.0)),
+        (c1, c, at(0.0, 0.0, 100.0, 100.0)),
+        (d, NIL, at(0.0, 0.0, 100.0, 100.0)),
+    ] {
+        t.create(id, NodeKind::View)
+            .layout(id, &style)
+            .interaction(id, mask::POINTER_ENTER_LEAVE, false)
+            .append(parent, id);
+    }
+    // A root sits at the window's origin; D moves down by a transform.
+    t.transform(d, craie_core::geom::Affine::translate(0.0, 300.0));
+    let mut ui = Ui::new(1.0);
+    ui.apply_txn(&t).unwrap();
+    let view = Size::new(800.0, 600.0);
+    ui.render(view);
+
+    const IN: u8 = out_kind::POINTER_ENTER;
+    const OUT: u8 = out_kind::POINTER_LEAVE;
+    let to = |ui: &mut Ui, x: f32, y: f32| -> Vec<(u8, u32)> {
+        ui.dispatch(&crate::events::Event::PointerMove { x, y });
+        ui.take_events()
+            .iter()
+            .filter(|e| e.kind == IN || e.kind == OUT)
+            .map(|e| (e.kind, e.node))
+            .collect()
+    };
+    let edit = |ui: &mut Ui, f: &dyn Fn(&mut Transaction)| {
+        let mut t = Transaction::new(2);
+        f(&mut t);
+        ui.apply_txn(&t).unwrap();
+        ui.render(view);
+    };
+
+    assert_eq!(to(&mut ui, 50.0, 50.0), [(IN, b1), (IN, b), (IN, a)]);
+    // Siblings.
+    assert_eq!(to(&mut ui, 175.0, 75.0), [(OUT, b1), (IN, b2)]);
+    assert_eq!(to(&mut ui, 125.0, 25.0), [(IN, e)]);
+    // Cousins.
+    assert_eq!(
+        to(&mut ui, 250.0, 50.0),
+        [(OUT, e), (OUT, b2), (OUT, b), (IN, c1), (IN, c)]
+    );
+    // Separate roots, both ways.
+    assert_eq!(
+        to(&mut ui, 50.0, 350.0),
+        [(OUT, c1), (OUT, c), (OUT, a), (IN, d)]
+    );
+    assert_eq!(
+        to(&mut ui, 125.0, 25.0),
+        [(OUT, d), (IN, e), (IN, b2), (IN, b), (IN, a)]
+    );
+    // The hovered node's parent is removed: B and A stay hovered.
+    edit(&mut ui, &|t| {
+        t.remove(b2);
+    });
+    assert_eq!(to(&mut ui, 50.0, 150.0), []);
+    assert_eq!(to(&mut ui, 50.0, 50.0), [(IN, b1)]);
+    // The hovered node's grandparent is detached: A stays hovered.
+    edit(&mut ui, &|t| {
+        t.detach(b);
+    });
+    assert_eq!(to(&mut ui, 300.0, 150.0), [(IN, c)]);
+    // The hovered node itself is removed.
+    edit(&mut ui, &|t| {
+        t.remove(c);
+    });
+    assert_eq!(to(&mut ui, 50.0, 150.0), []);
+    assert_eq!(to(&mut ui, 50.0, 350.0), [(OUT, a), (IN, d)]);
+}
+
 /// Clipped children are not hit outside the clip rect.
 #[test]
 fn hit_test_respects_clip() {

@@ -434,7 +434,7 @@ impl Host {
         let generation = self.nodes[i].generation;
         self.nodes[i] = NodeHeader {
             kind,
-            flags: NodeFlags(NodeFlags::LIVE.0 | NodeFlags::REACH.0),
+            flags: NodeFlags::LIVE,
             generation,
             ..NodeHeader::EMPTY
         };

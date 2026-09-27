@@ -456,6 +456,10 @@ impl Ui {
         self.run_animations(size);
         self.layout(size);
         self.sync_lists(size);
+        // The frame's geometry is final: refresh the hit-test index here,
+        // so the next event does not pay for it (`dispatch` still
+        // refreshes whatever changed since).
+        self.refresh_reach();
         // Geometry that assistive technology reports moved in this frame
         // (a layout pass, an animation sample): the tree is stale even
         // with no commit.

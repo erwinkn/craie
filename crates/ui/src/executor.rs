@@ -532,17 +532,25 @@ impl Ui {
                 child,
                 before,
             } => {
+                let child = NodeId(*child);
+                if self.host.parent(child) != NodeId(*parent) {
+                    self.unhover(child);
+                }
                 self.host
-                    .insert_before(NodeId(*parent), NodeId(*child), NodeId(*before));
+                    .insert_before(NodeId(*parent), child, NodeId(*before));
             }
-            Mutation::Detach { id } => self.host.detach(NodeId(*id)),
+            Mutation::Detach { id } => {
+                self.unhover(NodeId(*id));
+                self.host.detach(NodeId(*id));
+            }
             Mutation::Remove { id } => {
                 let node = NodeId(*id);
                 // Its tweens end before the slot's generation moves.
                 self.end_animations_of(node, crate::animation::end_reason::REMOVED);
+                self.unhover(node);
                 self.host.remove(node);
                 self.forget_node_state(node);
-                for slot in [&mut self.focus, &mut self.hover, &mut self.pressed] {
+                for slot in [&mut self.focus, &mut self.pressed] {
                     if *slot == Some(node) {
                         *slot = None;
                     }
@@ -833,6 +841,18 @@ impl Ui {
 
     /// Drops per-node state held outside the host when a slot is created
     /// or freed: a recycled id must start clean.
+    /// `node` leaves its place in the tree: if the pointer is over it or
+    /// inside it, the hover falls back to its parent. Its ancestors stay
+    /// hovered (no second enter on the next move); the subtree gets no
+    /// leave, as a removed DOM element gets no `mouseleave`.
+    fn unhover(&mut self, node: NodeId) {
+        if let Some(h) = self.hover
+            && self.ancestors(h).any(|n| n == node)
+        {
+            self.hover = Some(self.host.parent(node)).filter(|p| p.is_node());
+        }
+    }
+
     fn forget_node_state(&mut self, node: NodeId) {
         if let Some(t) = self.texts.get_mut(node.index()) {
             *t = None;

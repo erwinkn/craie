@@ -278,3 +278,38 @@ Reviewer minors and nitpicks not fixed yet.
   (tests for continuous priority and a throwing handler) left: in Node a
   continuous update and a default one both commit in a later scheduler
   task, so a test cannot tell them apart without React's internals.
+- PR3-01..10 (E15 review), fixed in the PR #3 review:
+  - PR3-01: upkeep is 2 to 7 percent of the layout pass that stales the
+    index (9.1 of 450 µs to 297 of 4,172 µs), not 3 to 30, in
+    EXPERIMENTS, ARCHITECTURE-update and the run log.
+  - PR3-02: the index table has the walk from its own run; the older
+    walk-only table is labelled as such; every quoted ratio comes from
+    one run.
+  - PR3-03: §13's decision reads "no separate spatial index (R-tree,
+    rebuilt BVH): the node tree carries a bounding box per subtree"
+    in ARCHITECTURE and its update table.
+  - PR3-04: the randomized test reuses freed ids at once and randomizes
+    borders and padding (fixed and percentage); a new test covers a
+    clip that moves inside an unchanged box, the one case the layout
+    pass's clip term catches alone. Deleting each of the six hooks in
+    turn fails at least one reach test. `create`'s stale bit was
+    redundant (inserting touches) and is gone. Borders found an older
+    crash: `in_rounded` used `f32::clamp` with bounds that rounding can
+    cross.
+  - PR3-05: `pointer_enter_leave_sequences` asserts the exact enter and
+    leave sequence across siblings, cousins, separate roots, a removed
+    parent, a detached grandparent and a removed hovered node.
+  - PR3-06: `Ui::render` refreshes the index once layout is done;
+    `dispatch` keeps its refresh as a backstop; the probe's hit test
+    after a frame is pruned too.
+  - PR3-07: made true rather than softened: the pad scales with the
+    transform's condition number (‖A‖²/2|det A|), and a transform with
+    no inverse has an empty reach. A new test aims a million points at
+    the edges and corners of boxes squashed up to 100,000-fold; the old
+    pad fails it.
+  - PR3-08: the title and docs say walking a propagation path no longer
+    allocates; the events themselves still do.
+  - PR3-09: two reruns put wide 10k's refresh after one transform at
+    12.9 and 11.9 µs: the 92 was noise, now marked in the table.
+  - PR3-10: removing or detaching the hovered node or an ancestor hands
+    the hover to the subtree's parent, so ancestors get no second enter.
