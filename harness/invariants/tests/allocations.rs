@@ -121,10 +121,11 @@ fn steady_frames_do_not_allocate() {
     }
 }
 
-/// wgpu's own allocations in `Renderer::encode_frame` on this machine
-/// (Metal, wgpu 27): per frame, and per render pass after the first.
-/// Craie code in that phase holds no containers. A change here is a
-/// visible cost change: re-measure and update with the reason.
+/// wgpu's own allocations in `Renderer::encode_frame`, measured on Metal
+/// (M5 Max, wgpu 30) with 8 draws in one pass: per frame, and per render
+/// pass after the first. Craie code in that phase holds no containers. A
+/// change here is a visible cost change: re-measure and update with the
+/// reason.
 const WGPU_FRAME: usize = 56;
 const WGPU_PASS: usize = 23;
 /// wgpu's staging allocations for one small buffer write in
@@ -142,6 +143,7 @@ struct Frame {
     plan: usize,
     encode: usize,
     passes: u32,
+    draws: u32,
 }
 
 /// A real device, an offscreen target, and a renderer: runs whole frames
@@ -219,12 +221,21 @@ impl GpuFrames {
             plan,
             encode,
             passes: r.stats.passes,
+            draws: r.stats.draw_calls,
         }
     }
 }
 
-fn budget(passes: u32) -> usize {
-    WGPU_FRAME + WGPU_PASS * (passes as usize - 1)
+/// Plus wgpu-core's command recording: each pass records its commands
+/// into a fresh `Vec` that doubles as it fills, so one more reallocation
+/// per doubling of the pass's commands. The base above covers 8 draws; a
+/// pass has at most the frame's draws, so each pass may double once more
+/// per doubling of the frame's draws past 8 (16 or 17 list draws on
+/// Metal: 57, one over the base). Logarithmic in the draws, never linear.
+fn budget(f: &Frame) -> usize {
+    let growth = f.draws.div_ceil(8).next_power_of_two().ilog2() as usize;
+    let passes = f.passes as usize;
+    WGPU_FRAME + WGPU_PASS * (passes - 1) + growth * passes
 }
 
 /// The whole frame on a real device: UI render, renderer prepare
@@ -260,7 +271,7 @@ fn whole_frame_budgets() {
             "opacity {opacity}: {first:?}"
         );
         assert!(
-            first.encode <= budget(first.passes),
+            first.encode <= budget(&first),
             "opacity {opacity}: {first:?}"
         );
         for _ in 0..8 {
@@ -281,7 +292,7 @@ fn whole_frame_budgets() {
         }
         assert_eq!((f.render, f.collect, f.plan), (0, 0, 0), "{f:?}");
         assert!(f.upload <= WGPU_WRITE, "{f:?}");
-        assert!(f.encode <= budget(f.passes) + WGPU_WRITE_SUBMIT, "{f:?}");
+        assert!(f.encode <= budget(&f) + WGPU_WRITE_SUBMIT, "{f:?}");
         assert_eq!(
             (idle.render, idle.collect, idle.upload, idle.plan),
             (0, 0, 0, 0),
@@ -408,7 +419,7 @@ fn list_frames_do_not_allocate() {
         );
         assert!(f.upload <= WGPU_WRITE, "scroll to {y}: {f:?}");
         assert!(
-            f.encode <= budget(f.passes) + WGPU_WRITE_SUBMIT,
+            f.encode <= budget(&f) + WGPU_WRITE_SUBMIT,
             "scroll to {y}: {f:?}"
         );
         let idle = g.frame(&mut ui, |_| {});
@@ -417,7 +428,7 @@ fn list_frames_do_not_allocate() {
             (0, 0, 0, 0),
             "idle after scroll to {y}: {idle:?}"
         );
-        assert!(idle.encode <= budget(idle.passes), "{idle:?}");
+        assert!(idle.encode <= budget(&idle), "{idle:?}");
     }
     assert!(
         !ui.take_events()
@@ -431,8 +442,5 @@ fn list_frames_do_not_allocate() {
     let f = g.frame(&mut ui, |_| {});
     assert_eq!((f.render, f.collect, f.plan), (0, 0, 0), "settle: {f:?}");
     assert!(f.upload <= WGPU_WRITE, "settle: {f:?}");
-    assert!(
-        f.encode <= budget(f.passes) + WGPU_WRITE_SUBMIT,
-        "settle: {f:?}"
-    );
+    assert!(f.encode <= budget(&f) + WGPU_WRITE_SUBMIT, "settle: {f:?}");
 }
