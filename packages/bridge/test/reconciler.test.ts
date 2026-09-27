@@ -7,7 +7,7 @@ import {
 import { CraieHost } from "../src/host.js"
 import { flattenShapes, MAX_BYTES, MAX_SHAPES } from "../src/shapes.js"
 import type { HostNode, Transport, UiEvent } from "../src/host.js"
-import { readFrame } from "./crw2.js"
+import { readFrame, type Op } from "./crw2.js"
 import { decodeEvents } from "../src/native.js"
 import { STATE_BIT } from "../src/wire.js"
 
@@ -623,19 +623,26 @@ test("a text root mounted hidden keeps its text", async () => {
     return createElement(View, null,
       createElement(Activity, { mode, children: createElement(Text, null, "content ", word) }))
   }
-  root.renderSync(createElement(App, { mode: "hidden", word: "one" }))
-  await tick()
   const all = () => t.frames.splice(0).flatMap(f => readFrame(f).ops)
-  let ops = all()
+  // Hidden work commits at idle priority: on a loaded machine that can
+  // be later than one tick, so wait (a bounded number of ticks) for it.
+  const settle = async (done: (ops: Op[]) => boolean) => {
+    const ops: Op[] = []
+    for (let i = 0; i < 100 && !done(ops); i++) {
+      await tick()
+      ops.push(...all())
+    }
+    return ops
+  }
+  root.renderSync(createElement(App, { mode: "hidden", word: "one" }))
+  let ops = await settle(ops => ops.some(o => o.tag === 0x40))
   const id = ops.find(o => o.tag === 0x40)!.id // the only text node
   const text = (list: typeof ops) => list.filter(o => o.tag === 0x40 && o.id === id).map(o => o.s).at(-1)
   expect(text(ops)).toBe("content one")
   root.renderSync(createElement(App, { mode: "hidden", word: "two" }))
-  await tick()
-  expect(text(all())).toBe("content two")
+  expect(text(await settle(ops => text(ops) !== undefined))).toBe("content two")
   root.renderSync(createElement(App, { mode: "visible", word: "two" }))
-  await tick()
-  ops = all()
+  ops = await settle(ops => ops.some(o => o.tag === 0x10 && o.id === id))
   expect(text(ops)).toBe(undefined) // unchanged: not resent
   expect(ops.some(o => o.tag === 0x10 && o.id === id)).toBe(true) // layout: shown
 })
