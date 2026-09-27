@@ -12,9 +12,10 @@ if [ "$1" = "--release" ]; then
 else
   cargo build -p craie-node
 fi
+dir=${CARGO_TARGET_DIR:-target}/$profile
 case "$(uname -s)" in
-  Darwin) src=target/$profile/libcraie_node.dylib ;;
-  Linux)  src=target/$profile/libcraie_node.so ;;
+  Darwin) src=$dir/libcraie_node.dylib ;;
+  Linux)  src=$dir/libcraie_node.so ;;
   *)      echo "unsupported platform: $(uname -s)" >&2; exit 1 ;;
 esac
 cp "$src" craie-node.node

@@ -12,6 +12,9 @@ use crate::wire::{self, WireError};
 
 const NIL: u32 = u32::MAX;
 
+/// A named edit that must make a transaction fail.
+type BadOp = (&'static str, fn(&mut Transaction));
+
 /// Every drawn primitive in draw order, in device space.
 fn resolved(scene: &Scene) -> Vec<Resolved> {
     scene.resolve(&|r| r.0 as u64)
@@ -495,7 +498,7 @@ fn input_typing_changes_buffer() {
     let st1 = t.style(&s);
     t.create(0, NodeKind::Input);
     t.push(Mutation::Layout { id: 0, style: st1 });
-    t.input_config(0, 16.0, 0xFFFF_FFFF, "", false);
+    t.input_config(0, 16.0, "", false);
     t.interaction(0, mask::INPUT, true);
     t.place(NIL, 0, NIL);
     t.seq = 1;
@@ -632,7 +635,7 @@ fn a11y_tree_maps_roles_names_focus() {
     t.role(1, crate::mutation::Role::Label);
     t.place(0, 1, NIL);
     t.create(2, NodeKind::Input);
-    t.input_config(2, 14.0, 0xFFFF_FFFF, "type here", false);
+    t.input_config(2, 14.0, "type here", false);
     t.role(2, crate::mutation::Role::TextInput);
     t.place(0, 2, NIL);
     t.seq = 1;
@@ -818,7 +821,7 @@ fn wire_roundtrip_is_exact() {
                 },
             ],
         )
-        .input_config(2, 15.0, 0xFFFF_FFFF, "type", true)
+        .input_config(2, 15.0, "type", true)
         .role(2, Role::TextInput)
         .label(0, "root")
         .interaction(0, mask::POINTER_DOWN, true)
@@ -1338,7 +1341,7 @@ fn set_text_command_needs_paint() {
     let mut t = Transaction::new(1);
     t.create(0, NodeKind::Input)
         .layout(0, &sized(200.0, 30.0))
-        .input_config(0, 16.0, 0xFFFF_FFFF, "", false)
+        .input_config(0, 16.0, "", false)
         .append(NIL, 0);
     ui.apply_txn(&t).unwrap();
     ui.render(Size::new(300.0, 100.0));
@@ -1806,7 +1809,7 @@ fn list_ops_validate_atomically() {
     ui.apply_txn(&t).unwrap();
     assert_eq!(ui.host.lists.get(1).unwrap().len(), 2);
     let seq = ui.seq;
-    let bad: [(&str, fn(&mut Transaction)); 6] = [
+    let bad: [BadOp; 6] = [
         // The valid first op leaves 3 items.
         ("splice past the end", |t| {
             t.list_splice(1, 4, 0, &[]);
@@ -1929,7 +1932,7 @@ fn list_identities_are_unique() {
                 ui.apply_txn(t).map(|_| ())
             }
         };
-        let bad: [(&str, fn(&mut Transaction)); 4] = [
+        let bad: [BadOp; 4] = [
             ("twice in one insertion", |t| {
                 t.list_splice(1, 0, 0, &[item(9), item(9)]);
             }),
@@ -2084,7 +2087,7 @@ fn focused_input(text: &str, width: f32, multiline: bool) -> Ui {
     let st1 = t.style(&s);
     t.create(0, NodeKind::Input);
     t.push(Mutation::Layout { id: 0, style: st1 });
-    t.input_config(0, 16.0, 0xFFFF_FFFF, "", multiline);
+    t.input_config(0, 16.0, "", multiline);
     t.interaction(0, mask::INPUT, true);
     t.place(NIL, 0, NIL);
     t.seq = 1;

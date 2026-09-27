@@ -40,7 +40,7 @@ static MAIN_THREAD: OnceLock<std::thread::ThreadId> = OnceLock::new();
 fn is_main_thread() -> bool {
     #[cfg(target_os = "macos")]
     unsafe {
-        return libc::pthread_main_np() != 0;
+        libc::pthread_main_np() != 0
     }
     #[cfg(not(target_os = "macos"))]
     {
@@ -229,9 +229,12 @@ impl NativeClient {
 }
 
 #[napi]
-/// Bridge protocol version: 4 = CRW2 transactions with claims,
-/// generation-stamped events with a paragraph revision (36-byte
-/// records), key records with modifiers and the physical key.
+/// Bridge protocol version, the wire's own (`wire::VERSION`), so the
+/// load-time check and the transaction header can't disagree. 5 = 4
+/// (CRW2 transactions with claims, generation-stamped 36-byte event
+/// records, key records with modifiers and the physical key) plus
+/// inherited color: 45-byte drawing shapes with a `current` byte, and
+/// INPUT_CONFIG without a color.
 pub fn craie_runtime_version() -> u32 {
-    4
+    u32::from(craie_ui::wire::VERSION)
 }

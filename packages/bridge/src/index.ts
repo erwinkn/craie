@@ -26,6 +26,7 @@ import {
 import {
   CraieHost,
   onFrameStats as onFrameStatsInternal,
+  warnOnce,
   type ClipboardEvt,
   type ContextMenuEvt,
   type DropEvt,
@@ -188,7 +189,7 @@ export interface VariantStyle {
   borderColor?: string | number
   borderWidth?: number
   borderRadius?: number
-  /** The color text inherits. */
+  /** The color text, inputs and `currentColor` drawings inherit. */
   color?: string | number
   /** Layout, `opacity` and `transform`. Keys that share a wire field
    * with ones the variant sets (`width` with `height`, the sides of
@@ -219,9 +220,10 @@ export interface ViewProps extends ListenerProps, StateProps, Variants {
   style?: StyleProps
   /** Makes the View a scope whose states its variants and its
    * descendants' read; a name also addresses it (`_name`) from further
-   * down. Adding or removing it remounts the children. */
+   * down. */
   group?: boolean | string
-  /** The color descendant text inherits. */
+  /** The color descendant text, inputs and `currentColor` drawings
+   * inherit. */
   color?: string | number
   /** The View's text descendants form one selection domain: drag to
    * select across them, Cmd/Ctrl+C copies in tree order. */
@@ -298,7 +300,9 @@ export interface BarsProps extends Omit<SurfaceProps, "kind" | "params" | "paylo
   /** Gap between bars, logical points (default 2). */
   gap?: number
 }
-export interface TextInputProps extends ListenerProps, Variants {
+/** A TextInput is a scope: its own `_hover` and `_focusVisible` read
+ * its own states. `disabled` waits for a read-only input natively. */
+export interface TextInputProps extends ListenerProps, Omit<StateProps, "disabled">, Variants {
   accessibilityRole?: AccessibilityRole
   style?: StyleProps
   backgroundColor?: string | number
@@ -306,6 +310,8 @@ export interface TextInputProps extends ListenerProps, Variants {
   borderColor?: string | number
   borderWidth?: number
   fontSize?: number
+  /** The text color, as a Text's: without it the input inherits its
+   * ancestors' color (white at the root), and variants apply to it. */
   color?: string | number
   placeholder?: string
   multiline?: boolean
@@ -332,9 +338,9 @@ const ScopeContext = createContext<ScopeChain | null>(null)
 
 /** A host element with the scope chain its variants read. A scope
  * heads the chain it and its children see; children get it through
- * context, so a Portal's content keeps its owner's scopes. The
- * Provider is there even when the element is no scope, so toggling
- * `group` keeps the children mounted. */
+ * context, and a Portal or Layer starts a new chain. The Provider is
+ * there even when the element is no scope, so toggling `group` keeps
+ * the children mounted. */
 function useHost(type: string, props: Record<string, any>, scope = false) {
   const outer = useContext(ScopeContext)
   const [ref] = useState<ScopeRef>(() => ({ node: null }))
@@ -354,10 +360,17 @@ function useHost(type: string, props: Record<string, any>, scope = false) {
 
 /** Renders `children` as a window root, above the app (overlays,
  * menus, tooltips). They keep the context of where the Portal sits,
- * scopes included. */
+ * except scopes: native hover and focus follow the native tree, where
+ * the content is not inside its owner, so state keys in it read scopes
+ * inside it only (as on web, and as inherited color does). */
 export function Portal({ children }: { children?: ReactNode }) {
   const host = useContext(HostContext)
-  return host ? reconciler.createPortal(children, host, null, null) : null
+  return host ? reconciler.createPortal(unscoped(children), host, null, null) : null
+}
+
+/** `children` with an empty scope chain (Portal, Layer). */
+function unscoped(children: ReactNode) {
+  return createElement(ScopeContext.Provider, { value: null }, children)
 }
 
 /** Window-level shortcuts, matched after every claim on the focus path
@@ -452,7 +465,8 @@ export interface VectorAssetProps extends VectorBase {
 /** Runtime shapes: `Path`, `Circle`, ... children in a view box. The
  * paint props (`fill`, `stroke`, ...) are defaults the shapes inherit;
  * `opacity` is the node's (as `style.opacity`: the drawing fades as one
- * layer, and animates). */
+ * layer, and animates), and so is `color` (the inherited color
+ * `currentColor` paints with, as a Text's: variants apply to it). */
 export interface VectorShapeProps extends VectorBase, ShapeProps {
   asset?: undefined
   /** "minX minY width height". Empty or zero-size draws nothing. */
@@ -487,11 +501,11 @@ export function Vector(props: VectorProps) {
   const {
     children, viewBox, asset: _, fill, fillOpacity, fillRule, stroke, strokeOpacity,
     strokeWidth, strokeLinecap, strokeLinejoin, strokeMiterlimit, strokeDasharray,
-    strokeDashoffset, color, opacity, transform, ...rest
+    strokeDashoffset, opacity, transform, ...rest
   } = props as VectorShapeProps
   const shapes = flattenShapes(children, {
     fill, fillOpacity, fillRule, stroke, strokeOpacity, strokeWidth, strokeLinecap,
-    strokeLinejoin, strokeMiterlimit, strokeDasharray, strokeDashoffset, color, transform,
+    strokeLinejoin, strokeMiterlimit, strokeDasharray, strokeDashoffset, transform,
   }, viewBox)
   if (opacity !== undefined) {
     const o = Math.min(Math.max(Number(opacity), 0), 1)
@@ -642,7 +656,8 @@ export interface LayerProps {
  *   </Dialog></Layer>
  *
  * The container is transparent to hit testing: a press where its
- * children are not reaches whatever is below. */
+ * children are not reaches whatever is below. As in a Portal, state
+ * keys inside read scopes inside the layer only. */
 export function Layer({ z = 0, children }: LayerProps) {
   const host = useContext(HostContext)
   const owner = useContext(LayerOwner)
@@ -656,7 +671,7 @@ export function Layer({ z = 0, children }: LayerProps) {
     else container.props = props
   }, [z])
   return reconciler.createPortal(
-    createElement(LayerOwner.Provider, { value: container }, children),
+    createElement(LayerOwner.Provider, { value: container }, unscoped(children)),
     container, null, null,
   )
 }
@@ -736,13 +751,17 @@ function keyIndex<T>(items: readonly T[], keyOf: (item: T, i: number) => unknown
 }
 
 export function TextInput(props: TextInputProps) {
+  // Left out at runtime too (a kit's props may carry it): it would report
+  // a field that still edits as disabled, and mask hover and focus.
+  const { disabled, ...rest } = props as TextInputProps & { disabled?: boolean }
+  if (disabled) warnOnce("TextInput takes no disabled yet")
   // focusable by default; a Tab ring that skips the only editable field
   // would surprise.
   return useHost("input", {
     focusable: true,
     accessibilityRole: props.multiline ? "multilineTextInput" : "textInput",
-    ...props,
-  })
+    ...rest,
+  }, true)
 }
 
 function flattenText(children: ReactNode): string | undefined {

@@ -71,6 +71,10 @@ pub fn default_style() -> LayoutRow {
     LayoutRow::default()
 }
 
+/// What inherits where no node sets a color: white, the fallback the
+/// facade gives a span (`Host::current_color`).
+pub const DEFAULT_COLOR: u32 = 0xFFFF_FFFF;
+
 /// Node ids index dense stores, so they are bounded: 2^24 slots. The
 /// bridge allocates ids densely from zero and recycles them.
 pub const MAX_NODES: u32 = 1 << 24;
@@ -239,6 +243,9 @@ pub struct VectorData {
     /// `None` until a source arrives, and for a drawing that does not
     /// parse (it draws nothing).
     pub asset: Option<std::sync::Arc<craie_vector::asset::Asset>>,
+    /// Whether `asset` paints with the inherited color, found once per
+    /// source (`Asset::inherits_color` walks the items).
+    pub inherits: bool,
 }
 
 /// An image node's source. Decode state lives in `Ui::images`.
@@ -317,7 +324,8 @@ pub struct Host {
     vector_sources_swept: usize,
     /// Claim sets (`claims.rs`), id-keyed; NIL keys the window list.
     pub claims: HashMap<u32, crate::claims::ClaimSet>,
-    /// Inherited text colors (`COLOR`), id-keyed: few nodes set one.
+    /// Inherited colors (`COLOR`) of text, inputs and `currentColor`
+    /// drawings, id-keyed: few nodes set one.
     pub colors: HashMap<u32, u32>,
     /// Item index of a list row (a child of a List node); NIL otherwise.
     pub list_index: Vec<u32>,
@@ -416,6 +424,11 @@ impl Host {
         self.vector_sources
             .get(source)
             .is_some_and(|w| w.strong_count() > 0)
+    }
+
+    /// Whether a vector node's asset paints with its inherited color.
+    pub fn vector_inherits(&self, id: NodeId) -> bool {
+        self.vectors.get(&id.0).is_some_and(|v| v.inherits)
     }
 
     /// The table's copy of a source, if it holds one (nodes of the same
@@ -783,6 +796,12 @@ impl Host {
             cur = self.parent(cur);
         }
         None
+    }
+
+    /// The color an input's text and a drawing's `currentColor` paint
+    /// with: the nearest inherited color, else `DEFAULT_COLOR`.
+    pub fn current_color(&self, id: NodeId) -> u32 {
+        self.inherited_color(id).unwrap_or(DEFAULT_COLOR)
     }
 
     /// The color a span of text node `id` draws in.

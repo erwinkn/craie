@@ -6,6 +6,12 @@
 // go over as written; the native side parses them, and a drawing with
 // one that does not parse draws nothing.
 //
+// `currentColor` takes the nearest `color` on a `G` above the shape, as
+// SVG does; without one it is left to native, which paints the node's
+// inherited color (the Vector's own `color`, else an ancestor's, else
+// white, as a span), so a Pressable's `_hover={{ color }}` recolors its
+// icons with no JS.
+//
 //   <Vector viewBox="0 0 24 24" fill="none" stroke="#fff" strokeWidth={2}>
 //     <Circle cx={12} cy={12} r={10} strokeDasharray="4 2" />
 //     <Path d="m9 12 2 2 4-4" />
@@ -13,7 +19,7 @@
 
 import { Fragment, isValidElement, type ReactNode } from "react"
 import { color as parseColor, utf8Length, warnOnce } from "./host.js"
-import type { WireShape } from "./wire.js"
+import { CURRENT, type WireShape } from "./wire.js"
 
 /** Shapes one drawing may hold (native `svg::MAX_SHAPES`). */
 export const MAX_SHAPES = 4096
@@ -27,12 +33,12 @@ type Num = number | string
  * every shape inside inherits, as in SVG. Numbers may be numeric
  * strings, as SVG attributes are. */
 export interface ShapeProps {
-  /** A color, "none", or "currentColor" (`color`). Default black. */
+  /** A color, "none", or "currentColor". Default black. */
   fill?: string | number
   /** Multiplies the fill color's alpha, 0 to 1. */
   fillOpacity?: Num
   fillRule?: "nonzero" | "evenodd"
-  /** A color, "none" (the default), or "currentColor" (`color`). */
+  /** A color, "none" (the default), or "currentColor". */
   stroke?: string | number
   /** Multiplies the stroke color's alpha, 0 to 1. */
   strokeOpacity?: Num
@@ -43,8 +49,10 @@ export interface ShapeProps {
   /** Dash and gap lengths: "4 2", [4, 2], or 4. */
   strokeDasharray?: Num | readonly Num[]
   strokeDashoffset?: Num
-  /** What "currentColor" paints with. craie has no inherited text
-   * color, so a drawing that uses it must set one. */
+  /** What "currentColor" paints with. On a `G`, for the shapes inside
+   * it. On `Vector`, the node's inherited color (as a Text's `color`):
+   * variants and transitions apply to it, and without it the drawing
+   * inherits its ancestors' color. */
   color?: string | number
   /** On a shape or `G`: multiplies into each shape's paint (overlapping
    * shapes in a faded `G` show through each other; DF-16). On `Vector`,
@@ -96,18 +104,19 @@ function unit(v: unknown, fallback = 1): number {
 const fade = (c: number, opacity: number) =>
   opacity === 1 ? c : ((c & ~0xff) | Math.round((c & 0xff) * opacity)) >>> 0
 
-function paint(v: string | number | undefined, fallback: number, p: ShapeProps, opacity: number) {
-  if (v === undefined) return fade(fallback, opacity)
-  if (v === "none") return 0
+/** A paint as [color, whether it is the node's inherited color]. An
+ * unresolved `currentColor`'s color is the tint native multiplies the
+ * inherited color by: white, with the opacity as alpha. */
+function paint(
+  v: string | number | undefined, fallback: number, p: ShapeProps, opacity: number,
+): [number, boolean] {
+  if (v === undefined) return [fade(fallback, opacity), false]
+  if (v === "none") return [0, false]
   if (v === "currentColor") {
-    if (p.color === undefined) {
-      throw Error(
-        'Vector: "currentColor" needs a `color` prop on the Vector or a G above ' +
-        "(craie has no inherited text color)")
-    }
-    return fade(parseColor(p.color), opacity)
+    if (p.color === undefined) return [fade(0xffff_ffff, opacity), true]
+    return [fade(parseColor(p.color), opacity), false]
   }
-  return fade(parseColor(v), opacity)
+  return [fade(parseColor(v), opacity), false]
 }
 
 /** A dash array as the native side reads it, or "" (solid) when a
@@ -223,14 +232,17 @@ export function flattenShapes(
     const width = num(p.strokeWidth, 1)
     const miter = num(p.strokeMiterlimit, 4)
     const offset = num(p.strokeDashoffset, 0)
+    const [fill, fillCurrent] = paint(p.fill, 0x0000_00ff, p, unit(p.fillOpacity))
+    const [stroke, strokeCurrent] = paint(p.stroke, 0, p, unit(p.strokeOpacity))
     const shape: WireShape = {
       kind: g[0],
       geometry: g[1],
       transform: p.transform,
       dashes: dashes(p.strokeDasharray),
-      fill: paint(p.fill, 0x0000_00ff, p, unit(p.fillOpacity)),
+      fill,
       fillRule: RULE[p.fillRule ?? "nonzero"],
-      stroke: paint(p.stroke, 0, p, unit(p.strokeOpacity)),
+      stroke,
+      current: (fillCurrent ? CURRENT.fill : 0) | (strokeCurrent ? CURRENT.stroke : 0),
       // SVG: a negative width or a miter limit under 1 is an error,
       // and the attribute takes its default.
       strokeWidth: Number.isFinite(width) && width >= 0 ? width : 1,

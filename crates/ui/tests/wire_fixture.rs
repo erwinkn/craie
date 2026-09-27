@@ -266,6 +266,8 @@ fn js_fixture_decodes_and_executes() {
         (craie_vector::LineJoin::Round, craie_vector::LineCap::Square)
     );
     assert_eq!(drawing.paints[0], craie_vector::Paint::Solid(0x1122_33ff));
+    // The polygon fills with the inherited color at half alpha.
+    assert_eq!(drawing.paints[1], craie_vector::Paint::Current(0xffff_ff80));
     assert_eq!(
         tri.style,
         craie_vector::asset::ItemStyle::Fill(craie_vector::FillRule::EvenOdd)

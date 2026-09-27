@@ -363,8 +363,10 @@ bits). This is probably a new subsection of §3.
   `defineStates`), core states first, then each plugin's in priority order.
 - **Scope references are resolved by the facade.** A variant names the
   scopes it reads by node id and generation. The facade resolves "nearest"
-  and named scopes (`_row`) through the React tree, so content portaled into
-  a layer keeps its owner's scope. Native keeps a list of dependents per
+  and named scopes (`_row`) through the React tree, up to the nearest
+  portal or layer: content there reads scopes inside it only, since the
+  hover and focus bits come from the native tree, where it is not inside
+  its opener (as on Marbre web). Native keeps a list of dependents per
   scope, so a bit change restyles exactly those nodes.
 - **Variant tables.** A node with state styles carries its base values and
   its variants. A condition is a conjunction of terms: a scope reference
@@ -430,7 +432,7 @@ defineStates(["unread", "streaming"])
 </Pressable>
 ```
 
-- Four ops in family 0xB0, still protocol 4: `STATES` (a scope's app
+- Four ops in family 0xB0, added in protocol 4: `STATES` (a scope's app
   bits), `VARIANTS` (a node's table; empty removes it and restores the
   base), `ENVIRONMENT` (breakpoints, default 1,023 and 639 pt as the
   kit's) and `COLOR` (the inherited color). A node becomes a scope with
@@ -473,27 +475,44 @@ defineStates(["unread", "streaming"])
   the span's own color. A span inherits unless its Text sets `color`,
   and a Text's own `color` travels as `COLOR` (its spans send white as
   the fallback), so a new color or a tween repaints spans without a
-  paragraph op, a shape or a layout. An input keeps its config color,
-  and vector `currentColor` reads the Vector's or a `G`'s `color` prop,
-  not `COLOR` (DF-24). Inherited color follows the native tree, while
-  scopes follow React's: a Text in a `Portal` under a colored Pressable
-  keeps the Pressable's scope but draws its own color (white).
+  paragraph op, a shape or a layout. Inputs and drawings inherit the
+  same way (protocol 5, DF-14 and DF-24 closed): a TextInput's `color`
+  is its `COLOR` (INPUT_CONFIG carries none), and a vector shape's
+  `currentColor` with no `color` on a `G` above paints the node's
+  inherited color, white if none, times the shape's opacity; a
+  Vector's own `color` is its `COLOR`. So
+  `<Pressable color="#9aa0aa" _hover={{ color: "#fff" }}>` recolors a
+  `stroke="currentColor"` icon exactly as its label, with no JS: one
+  paint patch per shape, no tessellation (1,000 icons: EXPERIMENTS.md,
+  state styles). A `Portal` or `Layer` starts fresh for both inherited
+  color and scopes: a Text in a `Portal` under a colored Pressable reads
+  neither its color nor its scope.
 - The facade (`@craie/bridge`, re-exported by `@craie/react`):
-  `defineStates`; `Pressable` is always a scope, a View with `group`
-  (a name makes `_name` address it) is one, and both take `selected`,
-  `expanded`, `checked`, `highlighted`, `disabled` and `states`. A
-  disabled Pressable stops `onPress`, leaves the Tab order and reads
-  as disabled to assistive technology. A `_` key is a state of the
-  nearest scope, an environment key, or a group up the tree; other `_`
-  keys and every value key a variant does not apply (`pointerEvents`,
-  `zIndex`, ...) are logged once and left out. Scopes flow through
-  React context, so a `Portal` (new: its children are window roots)
-  keeps its owner's; the context Provider is always there, so toggling
-  `group` keeps the children mounted. Variant tables resolve to ids
-  and go out at the seal, when their signature changed.
+  `defineStates`; `Pressable` and `TextInput` are always scopes, a
+  View with `group` (a name makes `_name` address it) is one, and all
+  take `selected`, `expanded`, `checked`, `highlighted` and `states`.
+  All but `TextInput` take `disabled` (a read-only input is not native
+  yet; an input given one logs it and leaves it out). A disabled
+  Pressable stops `onPress`, leaves the Tab order and reads as disabled
+  to assistive technology. A `_` key is a state of the nearest scope,
+  an environment key, or a group up the tree; other `_` keys and every
+  value key a variant does not apply (`pointerEvents`, `zIndex`, ...)
+  are logged once and left out. Scopes flow through React context,
+  which a `Portal` (new: its children are window roots) or a `Layer`
+  resets. Otherwise the item in `<Pressable expanded><Layer><Text
+  _hover={{ color: "red" }} /></Layer></Pressable>` would turn red with
+  the pointer on the trigger, not on the item. The context Provider is
+  always there, so toggling `group` keeps the children mounted.
+  Variant tables resolve to ids and go out at the seal, when their
+  signature changed.
 - `_hover` on an element that is no scope means the nearest scope's
-  hover, where Marbre web means the element's own (`<Text _hover>`);
-  inside a Pressable the two agree (DF-29).
+  hover, as on Marbre web: in
+  `<Pressable><Text _hover={{ color: "red" }} /></Pressable>` the text
+  turns red with the pointer on the Pressable's padding. A state key
+  with no scope above is logged once and left out; Marbre logs it in
+  development (branch `ui/state-scopes`). Marbre's spec still says
+  layer content keeps its opener's scope (`ui-kit.md`, and that
+  branch's D28 draft); Craie cuts at the layer as web does.
 - Layout values apply per key: one per property, axis and side. With
   `padding` 16/12, `_narrow: { padding: { left: 4, right: 4 } }` and
   `_compact: { padding: { top: 6, bottom: 6 } }`, a compact window gets
@@ -847,9 +866,10 @@ and that the core owns `ImageId`, dimensions, format and residency).
 choices:
 
 - One op, `DRAWING` (0x72), replaces a Vector node's whole drawing: a
-  view box and up to 4,096 shapes of 44 bytes (kind, fill rule, join,
-  cap, three string refs, fill and stroke colors, width, miter limit,
-  dash offset, opacity). The strings stay SVG syntax and native parses
+  view box and up to 4,096 shapes of 45 bytes (kind, fill rule, join,
+  cap, `current` flags, three string refs, fill and stroke colors,
+  width, miter limit, dash offset, opacity; protocol 5 added the
+  flags). The strings stay SVG syntax and native parses
   them (`craie_vector::svg`, about 600 lines, no dependency). A drawing
   whose strings or numbers do not parse draws nothing (zero intrinsic
   size) and the session goes on, as SVG draws nothing for an empty view
@@ -876,11 +896,15 @@ choices:
 - The dash offset is a plain value, not animatable: `ANIMATE` (0xA1)
   animates node properties, and an offset belongs to a shape, so a
   spinner ring rotates the node instead (`LEDGER.md` DF-13).
-- Paints are plain colors. `currentColor` resolves in the facade to a
-  `color` prop on the `Vector` or a `G`, as `<svg color>` does, and
-  throws without one; inheriting a color from ancestors waits for
-  topic 5 (DF-14). `fillOpacity` and `strokeOpacity` scale the alpha.
-  Gradients stay build-time.
+- Paints are plain colors, or the node's inherited color. The facade
+  resolves `currentColor` to the `color` of the nearest `G` above, as
+  SVG does; without one it sets the shape's `current` flag for that
+  paint and sends a tint (white, alpha the paint's opacity), and native
+  paints `COLOR` (the Vector's own, else the nearest ancestor's, else
+  white) times the tint (topic 5; DF-14 closed). Each such paint has its
+  own slot in the node's chunk, so a color change patches slots and
+  tessellates nothing. `fillOpacity` and `strokeOpacity` scale the
+  alpha. Gradients stay build-time.
 - The facade flattens children into shapes: `Path`, `Circle`,
   `Ellipse`, `Rect`, `Line`, `Polyline`, `Polygon` and `G` (attributes
   inherited, transforms nested, a `G`'s opacity multiplied into its
@@ -888,9 +912,9 @@ choices:
   an `<svg>` element. The Vector's `opacity` is the node's: one layer,
   animatable. Numbers are coerced as SVG reads attributes; a shape with
   one that is not finite is dropped, with a warning. The kit's shapes
-  differ in three ways: token colors must be resolved first, its
+  differ in two ways: token colors must be resolved first, its
   `Path` and `Circle` wrappers use hooks and so throw (shapes must be
-  direct elements, DF-15), and inherited color needs `color` (DF-14).
+  direct elements, DF-15).
 - Cost (exe1, loaded; `cargo run --release -p craie-harness --example
   vectors`, the Rust direct API: no wire, no JS): 200 distinct 24 px
   icons parse in about 0.4 ms and mount in about 2 ms more than 200

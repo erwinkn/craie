@@ -267,20 +267,6 @@ Reviewer minors and nitpicks not fixed yet.
 - Resolves in: shape-level animation targets, or dashes in the shader
   (E07).
 
-### DF-14: no inherited color in drawings
-
-- Source: runtime vector shapes (work item 8) implementation (own
-  finding); narrowed in the PR #5 review (PR5-06).
-- Where: packages/bridge/src/shapes.ts (`paint`).
-- Claim: `currentColor` resolves to the `color` prop of the `Vector` or
-  a `G` above the shape, as `<svg color>` does; it does not inherit a
-  color from the node's ancestors (there is none to inherit), and
-  without a `color` prop it throws. The kit's token colors (`'ink-3'`)
-  must be resolved to colors before they reach a shape.
-- Why deferred: the color a node inherits comes with state styles and
-  paint sources (topic 5).
-- Resolves in: topic 5.
-
 ### DF-15: shapes must be direct children of a Vector
 
 - Source: runtime vector shapes (work item 8) implementation (own
@@ -394,22 +380,6 @@ Reviewer minors and nitpicks not fixed yet.
 - Resolves in: when a component needs a responsive type size; the
   facade can re-render with a different variant meanwhile.
 
-### DF-24: input color and vector currentColor
-
-- Source: work item 5.
-- Where: crates/ui/src/host.rs (`Host::colors`), the text input config,
-  the vector path.
-- Claim: `COLOR` reaches spans only. A TextInput keeps its config
-  color (the facade warns on `color` in its variants). A vector's
-  `currentColor` resolves in the facade to the `color` prop of the
-  `Vector` or a `G` above (PR #5, DF-14), not to the inherited `COLOR`:
-  `<Pressable color="#9aa0aa" _hover={{ color: "#fff" }}>` recolors its
-  label but not an icon drawn with `currentColor`.
-- Why deferred: the input's color lives in its editor config, and a
-  drawing's colors are resolved before they reach native.
-- Resolves in: one lookup of `Host::colors` at paint for both, which
-  closes DF-14 too.
-
 ### DF-25: no platform source for touch and reduced motion
 
 - Source: work item 5.
@@ -466,7 +436,7 @@ Reviewer minors and nitpicks not fixed yet.
 
 ### DF-29: kit values variants do not apply
 
-- Source: work item 5; the PR #7 review (PR7-12, PR7-16).
+- Source: work item 5; the PR #7 review (PR7-12).
 - Where: packages/bridge/src/host.ts (`variantValues`).
 - Claim: Marbre's variants also set `z`, `pointerEvents`,
   `visibility`, elevation and the focus ring, and percent translates;
@@ -474,18 +444,11 @@ Reviewer minors and nitpicks not fixed yet.
   `_hover={{ pointerEvents: "none" }}` or `style: { zIndex: 2 }` in a
   variant is logged once and left out, as is every other key a variant
   does not apply.
-- Also: `_hover` on an element that is no scope means the nearest
-  scope's hover in Craie, the element's own on Marbre web (`<Text
-  _hover>` in questions.tsx, Icon `_hover` in tool-run.tsx). Inside a
-  Pressable they agree; a bare `<Text _hover>` outside one logs "needs
-  a scope" and does nothing.
 - Why deferred: each needs its own native value in the table (z
   re-sorts the parent, pointer events and visibility change hit
   testing, the focus ring and elevation are paint sources), and none
-  is on a screen the kit ports first. An implicit scope per `_hover`
-  element would make every such node a scope.
-- Resolves in: when a ported component needs one; the Marbre port
-  flags the `_hover` difference.
+  is on a screen the kit ports first.
+- Resolves in: when a ported component needs one.
 ### DF-30: images are decoded per node, and fetched per mount
 
 - Source: images (work item 8) implementation (own finding).
@@ -632,6 +595,22 @@ Reviewer minors and nitpicks not fixed yet.
   decode is the cost of no jump.
 - Resolves in: planning the decode for the new natural size when the
   node's size depends on it, if the double decode shows.
+
+### DF-39: imported SVGs bake `currentColor`
+
+- Source: PR #12 review (inherited color), R12-03.
+- Where: tools/svg-import/src/lib.rs (`paint`: usvg resolves
+  `currentColor` before the tree reaches us).
+- Claim: usvg resolves `currentColor` at import against the SVG's own
+  `color`, black by default. An icon imported as CRV1 with
+  `stroke="currentColor"` draws black on a dark UI and ignores
+  `_hover={{ color }}`, with no warning. The same icon sent as runtime
+  shapes (`<Path>` and the other elements) inherits the node's `COLOR`.
+- Why deferred: out of PR #12's scope (runtime drawings); the kit's
+  icons are runtime shapes.
+- Resolves in: a pre-scan for `currentColor` (as the one for dropped
+  elements) that emits `Paint::Current` for the affected paints, or at
+  least a report note at import.
 
 ## Closed
 
@@ -820,13 +799,13 @@ Reviewer minors and nitpicks not fixed yet.
 - PR7-13 (states review): a disabled Pressable was half disabled: it is not focusable, reads as disabled to assistive technology, and native masks pressed and focus-visible under `disabled` as it did hover (tested natively and in bun).
 - PR7-14 (states review): toggling `group` remounted the children: the scope Provider is always rendered (bun test).
 - PR7-15 (states review): specificity compared every rank: it is depth, then the latest rank tested, then declaration order, as the spec says. `_selected._pressed` against `_hover._pressed`, both on, tie at pressed, so the later declared wins where the full compare picked selected (tested).
-- PR7-16 (states review, nit): `_hover` on a non-scope element differs from Marbre web: recorded in DF-29 and topic 5.
-- PR7-17 (states review, nit): inherited color follows the native tree and scopes React's, so Portal content under a colored Pressable draws its own color: documented in topic 5 and tested in bun.
+- PR7-16 (states review, nit): `_hover` on a non-scope element differs from Marbre web: recorded in DF-29 and topic 5. Wrong: Marbre web also reads the nearest scope; corrected in topic 5 by PR #11.
+- PR7-17 (states review, nit): inherited color follows the native tree and scopes React's, so Portal content under a colored Pressable draws its own color: documented in topic 5 and tested in bun. Reversed by PR #11: a Portal or Layer starts a new scope chain too.
 - PR7-18 (states review, nit): DF-28 says what cancels an animation on a tabled node, per key (tested).
 - PR7-19 (states review): the harness's one allocation per hover was its own event vector: events drain into a kept buffer (`Ui::drain_events`), and a "hover, no scopes" row gives the reference (0 allocations; 116 µs for 1,000 dependents against 4.2 µs for none).
 - PR7-20 (states review): the breakpoint delta was not restyle alone: a row that sends the 1,000 heights directly with no tables splits it (about 200 µs of layout the heights cause anyway, 130 µs of restyle).
 - PR7-21 (states review): ARCHITECTURE §13 said restyle recomputes every scope's input bits: it says the three ancestor chains, and when.
-- PR7-22 (states review): the untested items have tests: StrictMode and Suspense with scopes, a group toggle, a Text with no color above (white), `COLOR` and scopes through a Portal, table limits, `_touch` with hover masking, and a Text moved under another `COLOR`.
+- PR7-22 (states review): the untested items have tests: StrictMode and Suspense with scopes, a group toggle, a Text with no color above (white), `COLOR` and scopes through a Portal (reversed by PR #11: neither crosses), table limits, `_touch` with hover masking, and a Text moved under another `COLOR`.
 - PR8-01 (images review): the decoder did not bound memory (a 249 KB PNG took 1.25 GB): the probe and the decode reject over 64 megapixels (`MAX_PIXELS`) before any buffer, the codecs check 32,768 px a side, and `decode` reserves the decoded buffer, plus the RGBA copy for a format that needs one, against 512 MiB (`MAX_ALLOC`) before `from_decoder`. The rotation copy is gone: the decoder crops and shrinks in the stored orientation and turns the small result. A probe over the budget fails the image, so no huge intrinsic size is set. The false "512 MiB" comment is replaced. Tests: a 4 x 4 PNG claiming 20,000 x 20,000 fails in both, and the reserve fails one byte short for RGBA and gray.
 - PR8-02 (images review): a new `src` blanked the image and collapsed its layout until the decode landed: the old bitmap and natural size stay until the new image's first pixels or failure. An unsized image with a new aspect decodes twice as a result (DF-38).
 - PR8-03 (images review): a failed fetch left the previous `src`'s image on screen: the facade sends empty bytes, which clear it, and fires `onError`.
@@ -859,3 +838,30 @@ Reviewer minors and nitpicks not fixed yet.
 - PR9-04 (gpu-tests review): the mechanism was stated as fact: it is "most likely" in the LEDGER and the run log, which name the binaries fixed.
 - PR9-05 (gpu-tests review, nit): the run log marked #9 merged while open: it merges with this text.
 - PR9-06 (gpu-tests review, nit): one shared `Gpu` helper in craie-render instead of three local copies: not done. It would be public API for tests in a crate checked for wasm32, where `Gpu` is not `Sync`; the copies are four lines each and say why.
+- PR10-01 (clippy review): the `field_reassign_with_default` allow's reason and the PR body said 19 sites, all in ui's tests: it fires at 32, across ui's tests, platform-winit, the harness and `examples/vector` (the deny-by-default `bad_bit_mask` error in craie-ui had stopped clippy before the crates that depend on it). The reason and counts are corrected; the allow stays workspace-wide.
+- PR10-02 (clippy review, nit): `Values::valid`'s `bad_bit_mask` allow also covered the live `layout_keys` check: narrowed to one `let` holding the dead `value_field` check, which stays for when the mask widens.
+- PR10-03 (clippy review, nit): `value_field::ALL` was the literal `0xFF`, so a retired flag would still count as known: it is the OR of the flags (0xFF today).
+- PR10-04 (clippy review, nit): `lists.rs` sliced `reference[..n]`, whose length is `n` by construction: `reference.iter()`.
+- PR10-05 (clippy review, nit): `bleed` allowed `manual_checked_ops` for its `n > 0` check: `NonZeroU32::new(n)` guards the three divisions instead, lint-free.
+- PR11-01 (scopes review): the Layer cut was untested (undoing it kept every test green, since the Layer's Text read its inner Pressable either way): a bare `_expanded` directly in the Layer now logs "needs a scope" and sends no table.
+- PR11-02 (scopes review): the bridge suite still flaked under load, in `layers.test.ts` ("reopens on top" failed 2 of 7 runs at load 35-50), which ticked once after a state update: a shared `settle` (tick until an op shows, at most 100 ticks, then once more) replaces every such single tick there and the text-root test's own helper.
+- PR11-03 (scopes review): `disabled` was left out of `TextInput`'s types only, and a kit's props spread through still set DISABLED (an editable field read as disabled): `TextInput` drops it at runtime and logs it once (bun test).
+- PR11-04 (scopes review): the smoke's Portal case read `_row` across the Portal, now dead (it logged "unknown variant key"): its View is a scope with `selected` and reads its own.
+- PR11-05 (scopes review): a named group used across a layer logged only "unknown variant key": it says no group of that name is above, and that a Portal or Layer starts a new chain.
+- PR11-06 (scopes review): the docs said a missing scope is a dev-time error in Marbre: it is a development log, on the unmerged `ui/state-scopes` branch, and Marbre's spec still says layer content keeps its opener's scope (topic 5 says so; the planning thread flips D28).
+- PR11-07 (scopes review, nits): the TextInput JSDoc named `_focus` (not a key; `_focusVisible`); the text-root test's last step ticks once more past its predicate, so a later resend would show; the scope rules left DF-29 (kit values) for topic 5 only, and PR7-16, PR7-17 and PR7-22 say what #11 reversed; topic 5's facade bullet is reflowed; `ViewProps.group` no longer says toggling it remounts the children (PR7-14).
+- DF-14 (no inherited color in drawings) and DF-24 (input color and vector `currentColor`): fixed in PR #12 (inherited color). A `currentColor` with no `color` on a `G` above no longer throws: the facade flags the shape's fill or stroke (a `current` byte in each DRAWING shape, protocol 5) and native paints it with the node's inherited `COLOR` (its own, else the nearest ancestor's, else white, as a span) times the shape's opacity. A `Vector`'s `color` is its node's `COLOR`, so its variants and transitions apply; a `G`'s stays in the drawing. A change patches one paint slot per shape: a hover recoloring 1,000 icons is a paint patch each, with no layout, chunk rebuild, tessellation or allocation (EXPERIMENTS.md, state styles). A TextInput's color is its `COLOR` the same way: INPUT_CONFIG no longer carries one, its variants apply, and the facade's warning is gone. The kit's token colors (`'ink-3'`) still resolve before they reach a prop.
+- PR12-01 (color review): the runtime handshake still said protocol 4 (`craie_runtime_version`, `loadBindings`), so a stale `craie-node.node` passed the load check and failed at its first transaction: each side now answers with its own wire `VERSION`, and a bun test holds the cross-language fixture's header to the JS `VERSION` (Rust's `wire_fixture` decodes it only at the Rust one), so the two can't drift apart unnoticed.
+- PR12-02 (color review): no test had more than one `currentColor` item, so a patch that stopped after the first slot survived: `current_color_resolves_nearest` now has a stroke, a solid, and a shape whose fill and stroke both inherit with different tints, and the harness drawing inherits on its square's fill (non-white tint) and its ring's stroke. With that mutant, the unit test and the incremental-vs-rebuild oracle fail.
+- PR12-03 (color review): svg-import baking `currentColor` was untracked: DF-39.
+- PR12-04 (color review, nit): a color patch walked every prepared item, and `inherits_color` every asset item per lookup: the cached meshes keep their `currentColor` tints beside them (`Meshes::tints`), so a patch walks only those, and a vector's `inherits` is found once per `set_vector`.
+- PR12-05 (color review, nit): "text inherits" wording where inputs and drawings now inherit too: reworded at the listed sites and at four more (animation.rs, host.rs, states_tests.rs, ARCHITECTURE.md).
+- PR12-06 (color review, nit): the GPU test covered `Scene::set_paint` only: `inherited_color_reaches_drawing_pixels` (harness gpu_uploads.rs) renders a Ui on a device: a `currentColor` square paints its parent's `COLOR`, and a new `COLOR` reaches the pixels with no chunk rebuilt.
+- PR13-01 (run-log review): "the planning thread flips it" read as under way, while the planning thread is on the offline MacBook too: a "Waiting on the MacBook" part lists the allocation fix, the benchmark reruns, and Marbre's spec and native renderer cutting scopes at layers (#11's "What's left").
+- PR13-02 (run-log review): "two tests deflaked, not loosened" was wrong: three fixes, and 5 to 30 s loosens a bound (justified: the test only checks the frame arrives); the 1.6 s is the whole test run alone.
+- PR13-03 (run-log review): "all three are answered below" skipped gdb: each question is answered in one line.
+- PR13-04 (run-log review): the overnight Decisions on protocol 4 and DF-14 say what #12 changed; Next steps says the two allocation tests fail on the Mac until the fix, and names them.
+- PR13-05 (run-log review): 127 against 125 is two over: one allocation per pass that crosses 16 draws (+1 list, +2 four passes); "measured at 8 draws" is the Mac thread's reading.
+- PR13-06 (run-log review): an "Open risks" list: inputs inherit color silently, CRV1 kind 3 with no bump, clippy on macOS and wasm cfgs not in CI, the winit SIGSEGV at exit.
+- PR13-07 (run-log review): DF-39 moved from the profile deferrals to "Known gaps" with TextInput `disabled`; EXPERIMENTS.md carries the pre-R12-04 caveat.
+- PR13-08 (run-log review, nits): clippy's `bad_bit_mask` wording (checks that can't fire), the target-dir rule scoped to parallel agent runs, Erwin's go-ahead paraphrased from the message, jargon replaced (conflicts, reaching across a layer, color records, scene rebuilds), DF-29's reason spelled out, "Marbre web and native" narrowed to Marbre web (here and in topic 5), test counts named alike in the timeline, #12's macOS check placed.

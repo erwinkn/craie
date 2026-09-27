@@ -756,7 +756,7 @@ mod publish_tests {
         t.create(0, NodeKind::View).append(NIL, 0);
         t.create(1, NodeKind::Input)
             .layout(1, &input)
-            .input_config(1, 16.0, 0xFFFF_FFFF, "", true)
+            .input_config(1, 16.0, "", true)
             .append(0, 1);
         t.create(2, NodeKind::View)
             .layout(2, &button)

@@ -428,6 +428,39 @@ per change:
   the restyle. The first table (load 27 to 30) put the whole
   difference on the restyle.
 
+#### Inherited color: `currentColor` icons (DF-24)
+
+Two more hover cases in the same example: the root colored `#9aa0aa`
+with `_row: { _hover: { color: "#fff" } }`, over 1,000 icons 12 pt
+square, each stroking `currentColor` (one shared drawing, one
+tessellation), or over 1,000 one-word labels whose spans inherit. A
+change is the same pointer move and frame as the fill rows; every icon
+or label repaints one paint slot.
+
+exe1 (Linux VM, loaded), release, 2026-09-27. The load average was 36
+to 55, and one row's mean swung up to five times between runs, so the
+table gives the median and the best of 14 runs, the three rows run
+back to back in each; compare within a column, not with the table
+above (116 µs was measured at load 10):
+
+| case (1,000 of each)                  | median µs | best µs | allocs | paints patched | layouts |
+|---------------------------------------|-----------|---------|--------|----------------|---------|
+| hover, fill dependents (116 µs above) | 380       | 134     | 0      | 1,000          | 0       |
+| hover color, `currentColor` icons     | 250       | 89      | 0      | 1,000          | 0       |
+| hover color, inheriting labels        | 146       | 47      | 0      | 1,000          | 0       |
+
+- An icon recolors for about two thirds of what a fill hover costs per
+  dependent, in both columns: one paint record per `currentColor`
+  shape, no layout, no chunk rebuilt (the example asserts it), so no
+  tessellation, and no allocation. Scaled to the load of the table
+  above, about 75 µs for 1,000 icons.
+- Labels cost less than icons, most likely because an icon also looks
+  up its meshes in the vector cache (a hash map) to find its
+  `currentColor` items; not profiled. Neither is a concern at this
+  size.
+- Measured before R12-04 moved each drawing's tints beside its
+  meshes, and not rerun: the icon row is an upper bound.
+
 ## Step 1 — crate split, CRW2, retained scene (2026-09-23)
 
 Conditions: the shared M5 Max ran under heavy load (load average 12 to

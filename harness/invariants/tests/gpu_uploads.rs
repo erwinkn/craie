@@ -27,7 +27,7 @@ fn gpu_uploads_follow_changes() {
         return;
     };
     let format = wgpu::TextureFormat::Rgba8UnormSrgb;
-    let mut renderer = Renderer::new(&gpu, format);
+    let mut renderer = Renderer::new(gpu, format);
     let (w, h) = (640, 480);
     let target = gpu.device.create_texture(&wgpu::TextureDescriptor {
         label: None,
@@ -74,8 +74,8 @@ fn gpu_uploads_follow_changes() {
 
     let mut frame = |ui: &mut Ui| {
         ui.render(VIEW);
-        renderer.prepare(&gpu, ui.scene_mut());
-        renderer.draw(&gpu, &view, w, h, ui.scene_mut());
+        renderer.prepare(gpu, ui.scene_mut());
+        renderer.draw(gpu, &view, w, h, ui.scene_mut());
         renderer.stats.upload_bytes
     };
     assert!(frame(&mut ui) > 0);
@@ -188,7 +188,7 @@ fn identity_world_renders_at_1x() {
             .append(NIL, 0);
         ui.apply_txn(&t).unwrap();
         let px = pixel(
-            &gpu,
+            gpu,
             &mut ui,
             100,
             100,
@@ -244,22 +244,22 @@ fn half_pixel_edges_match_resolver() {
         let red = [255, 0, 0, 255];
         let y = 10;
         assert_eq!(
-            pixel(&gpu, &mut ui, 200, 200, (x0, y)),
+            pixel(gpu, &mut ui, 200, 200, (x0, y)),
             red,
             "x {x}: first column {x0}"
         );
         assert_ne!(
-            pixel(&gpu, &mut ui, 200, 200, (x0 - 1, y)),
+            pixel(gpu, &mut ui, 200, 200, (x0 - 1, y)),
             red,
             "x {x}: before {x0}"
         );
         assert_eq!(
-            pixel(&gpu, &mut ui, 200, 200, (x1 - 1, y)),
+            pixel(gpu, &mut ui, 200, 200, (x1 - 1, y)),
             red,
             "x {x}: last column"
         );
         assert_ne!(
-            pixel(&gpu, &mut ui, 200, 200, (x1, y)),
+            pixel(gpu, &mut ui, 200, 200, (x1, y)),
             red,
             "x {x}: after {x1}"
         );
@@ -307,18 +307,18 @@ fn oversized_glyph_draws_full_size() {
         b.max_y() - b.size.height / 6.0,
     ] {
         assert_eq!(
-            pixel(&gpu, &mut ui, 400, 700, at(c.0, y)),
+            pixel(gpu, &mut ui, 400, 700, at(c.0, y)),
             white,
             "stem at y {y}"
         );
     }
     // Outside the quad stays clear.
     assert_eq!(
-        pixel(&gpu, &mut ui, 400, 700, at(c.0, b.max_y() + 8.0)),
+        pixel(gpu, &mut ui, 400, 700, at(c.0, b.max_y() + 8.0)),
         black
     );
     assert_eq!(
-        pixel(&gpu, &mut ui, 400, 700, at(b.max_x() + 8.0, c.1)),
+        pixel(gpu, &mut ui, 400, 700, at(b.max_x() + 8.0, c.1)),
         black
     );
 }
@@ -370,7 +370,7 @@ fn settled_scroll_content_is_crisp() {
         // The block's top edge sits at 20*scale - 0.5 device px: the
         // pixel row above 20*scale is half covered.
         let row = (20.0 * scale) as u32 - 1;
-        let moving = pixel(&gpu, &mut ui, w, h, (10, row));
+        let moving = pixel(gpu, &mut ui, w, h, (10, row));
         assert!(
             moving[0] > 40 && moving[0] < 230,
             "scale {scale}: moving edge half covered, got {moving:?}"
@@ -380,14 +380,69 @@ fn settled_scroll_content_is_crisp() {
         // Ties to even: -0.5 snaps to 0, so the row above is clear and
         // the edge row is fully white.
         assert_eq!(
-            pixel(&gpu, &mut ui, w, h, (10, row)),
+            pixel(gpu, &mut ui, w, h, (10, row)),
             [0, 0, 0, 255],
             "scale {scale}"
         );
         assert_eq!(
-            pixel(&gpu, &mut ui, w, h, (10, row + 1)),
+            pixel(gpu, &mut ui, w, h, (10, row + 1)),
             [255, 255, 255, 255],
             "scale {scale}"
         );
     }
+}
+
+/// DF-24 on a device: a `currentColor` drawing paints its parent's
+/// `COLOR`, and a change of that color reaches the pixels through the
+/// drawing's paint slot, with no chunk rebuilt.
+#[test]
+fn inherited_color_reaches_drawing_pixels() {
+    use craie_vector::svg::{CURRENT_FILL, Drawing, Shape};
+    let Some(gpu) = gpu() else {
+        eprintln!("no GPU adapter: skipped");
+        return;
+    };
+    let mut ui = Ui::new(1.0);
+    ui.clear = 0x0000_00FF;
+    let mut s = taffy::Style::default();
+    s.size = taffy::Size {
+        width: taffy::Dimension::length(40.0),
+        height: taffy::Dimension::length(40.0),
+    };
+    let square = Drawing {
+        view_box: "0 0 24 24".into(),
+        shapes: vec![Shape {
+            geometry: "M0 0H24V24H0Z".into(),
+            fill: 0xFFFF_FFFF,
+            current: CURRENT_FILL,
+            ..Shape::default()
+        }],
+    };
+    let mut t = Transaction::new(1);
+    t.create(0, NodeKind::View)
+        .layout(0, &s)
+        .color(0, Some(0x9AA0_AAFF))
+        .append(NIL, 0);
+    t.create(1, NodeKind::Vector)
+        .layout(1, &s)
+        .drawing(1, square)
+        .append(0, 1);
+    ui.apply_txn(&t).unwrap();
+    assert_eq!(
+        pixel(gpu, &mut ui, 64, 64, (20, 20)),
+        [0x9A, 0xA0, 0xAA, 255]
+    );
+    let built = ui.counters().chunks_built;
+    let mut t = Transaction::new(2);
+    t.color(0, Some(0x3366_99FF));
+    ui.apply_txn(&t).unwrap();
+    assert_eq!(
+        pixel(gpu, &mut ui, 64, 64, (20, 20)),
+        [0x33, 0x66, 0x99, 255]
+    );
+    assert_eq!(
+        ui.counters().chunks_built,
+        built,
+        "a paint patch, no rebuild"
+    );
 }

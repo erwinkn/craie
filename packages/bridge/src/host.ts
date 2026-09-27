@@ -639,7 +639,7 @@ function flattenVariants(
     const bit = stateBit(name)
     if (bit !== undefined) {
       if (!scope) {
-        warnOnce(`${key} needs a scope: a Pressable or a View with group above`)
+        warnOnce(`${key} needs a scope: a Pressable or a View with group above, inside any Portal or Layer`)
         continue
       }
       t = new Map(terms)
@@ -650,7 +650,8 @@ function flattenVariants(
       let c = chain
       while (c && c.name !== name) c = c.parent
       if (!c) {
-        warnOnce(`unknown variant key "${key}"`)
+        warnOnce(`unknown variant key "${key}": not a state or environment, and no group "${name}" above`
+          + " (a Portal or Layer starts a new chain)")
         continue
       }
       s = c
@@ -683,10 +684,7 @@ function variantValues(n: HostNode, block: Record<string, any>, hidden: boolean)
   } else if (["backgroundColor", "borderColor", "borderWidth", "borderRadius"].some(k => k in block)) {
     warnOnce("a Text variant sets no box paint: wrap it in a View")
   }
-  if (block.color !== undefined) {
-    if (n.kind === 2) warnOnce("a TextInput variant sets no color")
-    else v.color = color(block.color)
-  }
+  if (block.color !== undefined) v.color = color(block.color)
   if (style?.opacity !== undefined) v.opacity = style.opacity
   if (style?.transform !== undefined) v.transform = transformMatrix(style.transform)
   if (style?.zIndex !== undefined) warnOnce("a variant does not apply style.zIndex (LEDGER DF-29)")
@@ -1380,8 +1378,9 @@ export class CraieHost {
       }
     }
 
-    // The inherited text color (an input's color is its own config).
-    if (n.kind !== 2 && n.kind !== 3) {
+    // The inherited color: spans, inputs and a drawing's currentColor
+    // paint with the nearest one.
+    if (n.kind !== 3) {
       const oldC = mounted && oldProps.color !== undefined ? color(oldProps.color) : null
       const newC = props.color !== undefined ? color(props.color) : null
       if (oldC !== newC) enc.color(id, newC)
@@ -1539,7 +1538,6 @@ export class CraieHost {
       // go through the `setText` command, so native edits are never
       // overwritten by a stale prop.
       const fs = props.fontSize ?? 14
-      const color32 = color(props.color, 0xffff_ffff)
       const ph = props.placeholder ?? ""
       const multiline = !!props.multiline
       // Enter submits only with `onSubmit`, as in the kit; without it a
@@ -1548,12 +1546,11 @@ export class CraieHost {
       if (
         !mounted ||
         oldProps.fontSize !== props.fontSize ||
-        color(oldProps.color, 0xffff_ffff) !== color32 ||
         (oldProps.placeholder ?? "") !== ph ||
         !!oldProps.multiline !== multiline ||
         submitKeyOf(oldProps) !== submit
       ) {
-        enc.inputConfig(id, fs, color32, ph, multiline, submit)
+        enc.inputConfig(id, fs, ph, multiline, submit)
       }
       if (!mounted && typeof props.value === "string" && props.value !== "") {
         enc.cmdSetText(id, props.value)

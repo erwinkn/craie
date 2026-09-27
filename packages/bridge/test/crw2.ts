@@ -41,7 +41,7 @@ export function readFrame(buf: Uint8Array): Frame {
   const f32 = () => { const v = dv.getFloat32(at, true); at += 4; return v }
   const u64 = () => { const v = dv.getBigUint64(at, true); at += 8; return v }
   if (u32() !== 0x3257_5243) throw Error("bad magic")
-  if (u16() !== 4) throw Error("bad version")
+  if (u16() !== 5) throw Error("bad version")
   u16()
   const seq = dv.getBigUint64(at, true); at += 8
   const nStrings = u32(), nStyles = u32(), nSpans = u32()
@@ -91,7 +91,7 @@ export function readFrame(buf: Uint8Array): Frame {
         break
       }
       case 0x40: op.s = strings[u32()]; op.f.push(u32(), u32()); break // paragraph
-      case 0x41: op.f.push(f32(), u32()); op.s = strings[u32()]; op.f.push(u8()); break
+      case 0x41: op.f.push(f32()); op.s = strings[u32()]; op.f.push(u8()); break
       case 0x50: op.f.push(u8()); break // role
       case 0x51: op.s = strings[u32()]; break // label
       case 0x60: op.f.push(u32(), u8()); break // interaction
@@ -108,12 +108,12 @@ export function readFrame(buf: Uint8Array): Frame {
       }
       case 0x70: op.f.push(u32(), u32(), u32(), u32(), u32()); break // surface
       case 0x71: { const n = u32(); op.bytes = buf.slice(at, at + n); at += n; break }
-      case 0x72: { // drawing: view box, count x 44-byte shapes
+      case 0x72: { // drawing: view box, count x 45-byte shapes
         op.s = strings[u32()]
         const n = u16()
         op.shapes = []
         for (let i = 0; i < n; i++) {
-          const f = [u8(), u8(), u8(), u8()]
+          const f = [u8(), u8(), u8(), u8(), u8()]
           const strs = [strings[u32()]!, strings[u32()]!, strings[u32()]!]
           f.push(u32(), u32(), f32(), f32(), f32(), f32())
           op.shapes.push({ strings: strs, f })

@@ -1,8 +1,8 @@
 import { test, expect } from "bun:test"
 import { createElement, StrictMode, Suspense, useState } from "react"
-import { createRoot, defineStates, Portal, Pressable, Text, View } from "../src/index.js"
+import { createRoot, defineStates, Layer, Path, Portal, Pressable, Text, TextInput, Vector, View } from "../src/index.js"
 import type { Transport, UiEvent } from "../src/host.js"
-import { ENV_BIT, layoutKeys, STATE_BIT } from "../src/wire.js"
+import { CURRENT, ENV_BIT, layoutKeys, STATE_BIT } from "../src/wire.js"
 import { readFrame, type Op } from "./crw2.js"
 
 class FakeTransport implements Transport {
@@ -181,26 +181,68 @@ test("text inherits color: COLOR on the element, INHERIT_COLOR on its spans", as
   expect(t.ops().map(o => [o.tag, ...o.f])).toEqual([[0xb3, 1, 0xff]])
 })
 
-test("a Portal's content keeps its owner's scope", async () => {
+test("a Portal or Layer starts a new scope chain", async () => {
+  const errors: string[] = []
+  const log = console.error
+  console.error = (m: string) => errors.push(m)
   const t = new FakeTransport()
-  function Menu() {
-    const [open] = useState(true)
-    return createElement(Pressable, { group: "menu" },
-      open && createElement(Portal, {},
-        createElement(View, { _menu: { _expanded: { style: { opacity: 1 } } }, _hover: { borderRadius: 2 } })))
+  try {
+    createRoot(t).renderSync(createElement(Pressable, { group: "menu", expanded: true },
+      createElement(Portal, {},
+        // No scope inside: the opener's is not in reach.
+        createElement(View, { _menu: { _expanded: { style: { opacity: 1 } } }, _pressed: { borderRadius: 2 } })),
+      createElement(Layer, { z: 50 },
+        // Nor in a Layer: this reads nothing.
+        createElement(View, { _expanded: { style: { opacity: 1 } } }),
+        createElement(Pressable, {},
+          createElement(Text, { _hover: { color: "#fff" } }, "item")))))
+    await tick()
+  } finally {
+    console.error = log
   }
-  createRoot(t).renderSync(createElement(Menu))
-  await tick()
+  expect(errors.filter(e => e.includes('no group "menu" above')).length).toBe(1)
+  expect(errors.some(e => e.includes("_pressed needs a scope"))).toBe(true)
+  expect(errors.some(e => e.includes("_expanded needs a scope"))).toBe(true)
   const ops = t.ops()
-  // The portal's content commits first; the menu is the scope.
-  const menu = ops.find(o => o.tag === 0xb0)!.id
-  const overlay = created(ops, 0).find(id => id !== menu)
-  // The overlay is a window root, not the menu's child.
-  expect(ops.find(o => o.tag === 0x02 && o.id === overlay)!.f[0]).toBe(0xffff_ffff)
-  const table = ops.find(o => o.tag === 0xb1 && o.id === overlay)!
+  // Two scopes: the expanded opener and the item inside the layer.
+  const states = ops.filter(o => o.tag === 0xb0)
+  expect(states.map(o => o.bits).sort()).toEqual([0n, bit("expanded")])
+  const item = states.find(o => o.bits === 0n)!.id
+  // Only the item's Text has a table, and it reads the item.
+  const tables = ops.filter(o => o.tag === 0xb1)
+  expect(tables.map(o => o.id)).toEqual(created(ops, 1))
+  expect(tables[0]!.variants!.map(v => v.terms.map(x => [x.scope, x.mask]))).toEqual([[[item, bit("hover")]]])
+})
+
+test("a TextInput is its own scope, with no disabled", async () => {
+  const errors: string[] = []
+  const log = console.error
+  console.error = (m: string) => errors.push(m)
+  const t = new FakeTransport()
+  // A kit's props may carry it past the types.
+  const kit = { disabled: true }
+  try {
+    createRoot(t).renderSync(createElement(Pressable, {},
+      createElement(TextInput, {
+        ...kit,
+        states: { unread: true },
+        _focusVisible: { borderColor: "#4c8dff" },
+        _unread: { borderWidth: 2 },
+      })))
+    await tick()
+  } finally {
+    console.error = log
+  }
+  expect(errors.some(e => e.includes("TextInput takes no disabled"))).toBe(true)
+  const ops = t.ops()
+  const input = created(ops, 2)[0]!
+  // The input sends its own app bits, not disabled, and its variants
+  // read only it.
+  expect(ops.find(o => o.tag === 0xb0 && o.id === input)!.bits! & bit("disabled")).toBe(0n)
+  const table = ops.find(o => o.tag === 0xb1 && o.id === input)!
   expect(table.variants!.map(v => v.terms.map(x => [x.scope, x.mask]))).toEqual([
-    [[menu!, bit("expanded")]],
-    [[menu!, bit("hover")]],
+    [[input, bit("focusVisible")]],
+    [[input, 1n << 0n]],
   ])
 })
 
@@ -343,11 +385,17 @@ test("a Text with no color inherits, white when nothing above sets one", async (
   expect(f.ops.filter(o => o.tag === 0xb3)).toEqual([])
 })
 
-test("COLOR stays with the native tree; scopes cross a Portal", async () => {
+test("a Portal's content starts fresh: no COLOR, no scopes", async () => {
+  const log = console.error
+  console.error = () => {} // `_menu` is out of reach
   const t = new FakeTransport()
-  createRoot(t).renderSync(createElement(Pressable, { color: "#9aa0aa", group: "menu" },
-    createElement(Portal, {}, createElement(Text, { _menu: { _hover: { color: "#fff" } } }, "item"))))
-  await tick()
+  try {
+    createRoot(t).renderSync(createElement(Pressable, { color: "#9aa0aa", group: "menu" },
+      createElement(Portal, {}, createElement(Text, { _menu: { _hover: { color: "#fff" } } }, "item"))))
+    await tick()
+  } finally {
+    console.error = log
+  }
   const ops = t.ops()
   const menu = ops.find(o => o.tag === 0xb0)!.id
   // The one COLOR is on the Pressable; the Text is a window root, so
@@ -355,6 +403,63 @@ test("COLOR stays with the native tree; scopes cross a Portal", async () => {
   expect(ops.filter(o => o.tag === 0xb3).map(o => o.id)).toEqual([menu])
   const text = created(ops, 1)[0]!
   expect(ops.find(o => o.tag === 0x02 && o.id === text)!.f[0]).toBe(0xffff_ffff)
-  const table = ops.find(o => o.tag === 0xb1 && o.id === text)!
-  expect(table.variants![0]!.terms.map(x => x.scope)).toEqual([menu])
+  expect(ops.filter(o => o.tag === 0xb1)).toEqual([])
+})
+
+// DF-24: an icon's currentColor is the node's inherited color, resolved
+// natively, so the hover recolors it as it does the label, with no JS.
+test("currentColor inherits: a hover recolors icon and label alike", async () => {
+  const t = new FakeTransport()
+  createRoot(t).renderSync(createElement(Pressable, { color: "#9aa0aa", _hover: { color: "#fff" } },
+    createElement(Vector, { viewBox: "0 0 24 24" }, createElement(Path, { d: "M4 12h16", stroke: "currentColor" })),
+    createElement(Text, {}, "Label")))
+  await tick()
+  const ops = t.ops()
+  const [pressable] = created(ops, 0)
+  expect(ops.filter(o => o.tag === 0xb3).map(o => [o.id, ...o.f])).toEqual([[pressable, 1, 0x9aa0_aaff]])
+  expect(ops.find(o => o.tag === 0xb1 && o.id === pressable)!.variants![0]!.values).toEqual([8, 1, 0xffff_ffff])
+  const shape = ops.find(o => o.tag === 0x72)!.shapes![0]!
+  // kind, rule, join, cap, current, fill, stroke, ...: the stroke is
+  // flagged, its color a white tint.
+  expect([shape.f[4], shape.f[6]]).toEqual([CURRENT.stroke, 0xffff_ffff])
+  // A Vector's own color is its COLOR, variants included.
+  const u = new FakeTransport()
+  createRoot(u).renderSync(createElement(Pressable, {},
+    createElement(Vector, { viewBox: "0 0 24 24", color: "#f00", _hover: { color: "#0f0" } },
+      createElement(Path, { d: "M4 12h16", stroke: "currentColor" }))))
+  await tick()
+  const vops = u.ops()
+  const [vector] = created(vops, 5)
+  expect(vops.filter(o => o.tag === 0xb3).map(o => [o.id, ...o.f])).toEqual([[vector, 1, 0xff00_00ff]])
+  expect(vops.find(o => o.tag === 0xb1 && o.id === vector)!.variants![0]!.values).toEqual([8, 1, 0x00ff_00ff])
+})
+
+// DF-14: an input's text color is its COLOR, own or inherited, so its
+// variants apply; nothing is left in the input config.
+test("a TextInput's color is its COLOR, variants included", async () => {
+  const errors: unknown[] = []
+  const log = console.error
+  console.error = (...a: unknown[]) => { errors.push(a.join(" ")) }
+  try {
+    const t = new FakeTransport()
+    createRoot(t).renderSync(createElement(Pressable, { color: "#9aa0aa" },
+      createElement(TextInput, { color: "#ccc", _hover: { color: "#fff" } }),
+      createElement(TextInput, {})))
+    await tick()
+    const ops = t.ops()
+    const [pressable] = created(ops, 0)
+    const [own, inherits] = created(ops, 2)
+    expect(ops.filter(o => o.tag === 0xb3).map(o => [o.id, ...o.f]))
+      .toEqual([[pressable, 1, 0x9aa0_aaff], [own, 1, 0xcccc_ccff]])
+    // The input is a scope, so its `_hover` reads its own hover.
+    const variant = ops.find(o => o.tag === 0xb1 && o.id === own)!.variants![0]!
+    expect(variant.terms.map(x => [x.scope, x.mask])).toEqual([[own, bit("hover")]])
+    expect(variant.values).toEqual([8, 1, 0xffff_ffff])
+    expect(ops.some(o => o.tag === 0xb1 && o.id === inherits)).toBe(false)
+    // font size, flags: no color.
+    expect(ops.find(o => o.tag === 0x41 && o.id === own)!.f).toEqual([14, 4])
+    expect(errors).toEqual([])
+  } finally {
+    console.error = log
+  }
 })
