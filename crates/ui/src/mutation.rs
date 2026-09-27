@@ -96,6 +96,9 @@ pub enum Role {
     List = 11,
     ListItem = 12,
     Group = 13,
+    Switch = 14,
+    RadioButton = 15,
+    RadioGroup = 16,
 }
 
 impl Role {
@@ -115,9 +118,24 @@ impl Role {
             11 => Role::List,
             12 => Role::ListItem,
             13 => Role::Group,
+            14 => Role::Switch,
+            15 => Role::RadioButton,
+            16 => Role::RadioGroup,
             _ => return None,
         })
     }
+}
+
+/// States a node reports to assistive technology even while clear:
+/// the facade sets a bit when the state prop was given at all, so
+/// `expanded={false}` is "collapsed" and a node without `expanded` is
+/// neither. `checked` needs no bit: the check roles always report it,
+/// other roles never do. `a11y.rs` reports `SELECTED` on selectable
+/// roles only.
+pub mod reported {
+    pub const EXPANDED: u8 = 1 << 0;
+    pub const SELECTED: u8 = 1 << 1;
+    pub const ALL: u8 = EXPANDED | SELECTED;
 }
 
 /// One style span of a paragraph, starting at byte `start` and running
@@ -347,9 +365,11 @@ pub enum Mutation<'a> {
         submit: SubmitKey,
     },
     // semantics
+    /// The role, and the states it reports while clear (`reported`).
     Role {
         id: u32,
         role: Role,
+        reported: u8,
     },
     /// Empty clears.
     Label {
@@ -789,7 +809,12 @@ impl<'a> Transaction<'a> {
     }
 
     pub fn role(&mut self, id: u32, role: Role) -> &mut Self {
-        self.push(Mutation::Role { id, role })
+        self.role_reporting(id, role, 0)
+    }
+
+    /// `role`, also reporting the `reported` states while they are clear.
+    pub fn role_reporting(&mut self, id: u32, role: Role, reported: u8) -> &mut Self {
+        self.push(Mutation::Role { id, role, reported })
     }
 
     pub fn label(&mut self, id: u32, text: impl Into<Cow<'a, str>>) -> &mut Self {

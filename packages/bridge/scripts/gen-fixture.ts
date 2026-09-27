@@ -2,7 +2,7 @@
 // Rust decoder must accept. Regenerate after wire format changes:
 //   bun packages/bridge/scripts/gen-fixture.ts
 import {
-  CHORD_FLAG, CLAIM_KIND, CURRENT, ENV_BIT, Encoder, FIT, NIL, ROLE, STATE_BIT, SUBMIT_KEY, SURFACE,
+  CHORD_FLAG, CLAIM_KIND, CURRENT, ENV_BIT, Encoder, FIT, NIL, REPORTED, ROLE, STATE_BIT, SUBMIT_KEY, SURFACE,
   parseChord, transformMatrix,
 } from "../src/wire.js"
 
@@ -85,6 +85,7 @@ enc.transition(0, {                                 // animation family
 enc.animate(0, "backgroundColor", [0xff00_00ff], { duration: 300, easing: [0.1, 0.2, 0.3, 0.4] })
 enc.animate(0, "gap", [4, 6], { spring: {}, delay: 20 })
 enc.states(0, (1n << BigInt(STATE_BIT.selected)) | 1n) // state styles
+enc.role(0, ROLE.switch, REPORTED.expanded | REPORTED.selected)
 enc.variants(5, [                                  // on the row, scoped by the root
   { terms: [{ scope: 0, mask: 1n << BigInt(STATE_BIT.selected) }], env: 0, values: { fill: 0x2d32_40ff, color: 0xffff_ffff } },
   {
@@ -125,6 +126,7 @@ enc.payload(6, asset)
 enc.place(0, 6, NIL)
 enc.create(7, 0)                                    // a layer container
 enc.layer(7, 6)                                     // owned from the vector
+enc.role(7, ROLE.radiogroup)                        // the last role
 enc.spatial(7, undefined, undefined, 50)            // z alone
 enc.place(NIL, 7, NIL)
 // A runtime drawing: a dashed arc path and an even-odd polygon filled

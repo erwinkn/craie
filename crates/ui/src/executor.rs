@@ -888,10 +888,11 @@ impl Ui {
                     self.host.dirty.semantic.push(*id);
                 }
             }
-            Mutation::Role { id, role } => {
+            Mutation::Role { id, role, reported } => {
                 let i = &mut self.host.interaction[*id as usize];
-                if i.role != *role {
+                if (i.role, i.reported) != (*role, *reported) {
                     i.role = *role;
+                    i.reported = *reported;
                     self.host.revs.semantic.bump();
                     self.host.dirty.semantic.push(*id);
                 }
