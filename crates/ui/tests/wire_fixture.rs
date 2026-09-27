@@ -50,9 +50,15 @@ fn js_fixture_decodes_and_executes() {
     assert_eq!(paint.radius, 6.5);
     assert_eq!((paint.border_color, paint.border_width), (0xff00_00ff, 2.0));
 
-    // Spatial: translateX(3) · scale(2), opacity 0.75, z -2.
+    // Spatial: the matrix translateX(3) · scale(2), the parts, opacity
+    // 0.75, z -2.
     let s = host.spatial[0];
-    assert_eq!(s.transform, Affine([2.0, 0.0, 0.0, 2.0, 3.0, 0.0]));
+    assert_eq!(s.parts.matrix, Affine([2.0, 0.0, 0.0, 2.0, 3.0, 0.0]));
+    assert_eq!(s.parts.translate, [4.0, -1.0, 0.5, 0.0]);
+    assert_eq!(
+        (s.parts.rotate, s.parts.scale),
+        (std::f32::consts::FRAC_PI_2, [1.5, 0.5])
+    );
     assert_eq!(s.opacity, 0.75);
     assert_eq!(s.z, -2);
 
@@ -231,6 +237,9 @@ fn js_fixture_decodes_and_executes() {
                 Value::Gap([LengthPercentage::length(4.0), LengthPercentage::length(6.0)])
             ),
             (Prop::Color, Value::Color(0xffff_ffff)),
+            (Prop::Translate, Value::Translate([1.0, 2.0, 0.5, -0.5])),
+            (Prop::Rotate, Value::Rotate(std::f32::consts::TAU)),
+            (Prop::Scale, Value::Scale([2.0, 3.0])),
         ]
     );
     assert!(ui.animating());
@@ -261,7 +270,16 @@ fn js_fixture_decodes_and_executes() {
         (narrow.border, narrow.radius, narrow.color),
         ((0xff, 1.0), 3.0, None)
     );
-    assert_eq!((narrow.opacity, narrow.transform.0[5]), (0.5, 2.0));
+    assert_eq!((narrow.opacity, narrow.parts.matrix.0[5]), (0.5, 2.0));
+    // Parts, one axis each: translate x, rotate, scale y.
+    use craie_ui::states::value_field;
+    let axes = value_field::TRANSLATE_X | value_field::ROTATE | value_field::SCALE_Y;
+    assert_eq!(
+        narrow.mask & value_field::PARTS,
+        value_field::TRANSFORM | axes
+    );
+    assert_eq!(narrow.parts.translate, [2.0, 0.0, -0.5, 0.0]);
+    assert_eq!((narrow.parts.rotate, narrow.parts.scale[1]), (0.25, 0.5));
     assert_eq!(
         narrow.layout.to_taffy().size.height,
         Dimension::length(44.0)

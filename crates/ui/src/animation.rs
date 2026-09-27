@@ -18,13 +18,14 @@ use craie_layout::LayoutRow;
 use taffy::prelude::{Dimension, LengthPercentage};
 
 use crate::geom::Size;
-use crate::host::NodeId;
+use crate::host::{NodeId, SpatialPatch};
 use crate::ui::Ui;
 
 /// An animatable property.
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Prop {
+    /// The free matrix (`host::Parts::matrix`).
     Transform = 0,
     Opacity = 1,
     Fill = 2,
@@ -38,10 +39,16 @@ pub enum Prop {
     /// The inherited color (`COLOR`). Tweens only between two set
     /// colors: setting or clearing it jumps.
     Color = 8,
+    /// Both axes, points and fractions (`host::Parts::translate`).
+    Translate = 9,
+    /// By angle: 0 to 2π is a full turn.
+    Rotate = 10,
+    /// Both axes.
+    Scale = 11,
 }
 
 impl Prop {
-    pub const COUNT: usize = 9;
+    pub const COUNT: usize = 12;
     pub const ALL: [Prop; Prop::COUNT] = [
         Prop::Transform,
         Prop::Opacity,
@@ -52,6 +59,9 @@ impl Prop {
         Prop::Padding,
         Prop::Gap,
         Prop::Color,
+        Prop::Translate,
+        Prop::Rotate,
+        Prop::Scale,
     ];
 
     pub fn from_u8(v: u8) -> Option<Prop> {
@@ -66,6 +76,9 @@ impl Prop {
             6 => Padding,
             7 => Gap,
             8 => Color,
+            9 => Translate,
+            10 => Rotate,
+            11 => Scale,
             _ => return None,
         })
     }
@@ -344,6 +357,7 @@ pub struct Transition {
 /// A property value as the rows hold it (the declared value).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Value {
+    /// The free matrix.
     Transform(Affine),
     Opacity(f32),
     /// Fill or border color, 0xRRGGBBAA.
@@ -354,6 +368,11 @@ pub enum Value {
     Padding([LengthPercentage; 4]),
     /// column (width), row (height).
     Gap([LengthPercentage; 2]),
+    /// x, y in points, then x, y as fractions of the border box.
+    Translate([f32; 4]),
+    /// Radians.
+    Rotate(f32),
+    Scale([f32; 2]),
 }
 
 /// A value the driver interpolates.
@@ -367,7 +386,7 @@ pub(crate) enum Num {
 
 /// A 2D affine as rotation × upper-triangular × translation, so a
 /// rotation interpolates by angle (the shorter way) and a scale by
-/// factor.
+/// factor. For the free matrix only: the other parts tween as numbers.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct Decomposed {
     angle: f32,
@@ -495,7 +514,7 @@ pub mod end_reason {
 fn clamped(prop: Prop, v: Num) -> Num {
     match v {
         Num::Scalar(o) if prop == Prop::Opacity => Num::Scalar(o.clamp(0.0, 1.0)),
-        Num::Lengths(l) => Num::Lengths(l.map(|x| x.max(0.0))),
+        Num::Lengths(l) if prop.is_layout() => Num::Lengths(l.map(|x| x.max(0.0))),
         v => v,
     }
 }
@@ -618,7 +637,10 @@ impl Ui {
         let i = node.index();
         let s = &self.host.layout[i];
         match prop {
-            Prop::Transform => Value::Transform(self.host.spatial[i].transform),
+            Prop::Transform => Value::Transform(self.host.spatial[i].parts.matrix),
+            Prop::Translate => Value::Translate(self.host.spatial[i].parts.translate),
+            Prop::Rotate => Value::Rotate(self.host.spatial[i].parts.rotate),
+            Prop::Scale => Value::Scale(self.host.spatial[i].parts.scale),
             Prop::Opacity => Value::Opacity(self.host.spatial[i].opacity),
             Prop::Fill => Value::Color(self.host.paint[i].fill),
             Prop::BorderColor => Value::Color(self.host.paint[i].border_color),
@@ -644,9 +666,12 @@ impl Ui {
             return None;
         }
         Some(match self.row_value(node, prop) {
-            Value::Transform(t) => Num::Transform(Decomposed::of(&t)),
-            Value::Opacity(o) => Num::Scalar(o),
-            Value::Color(c) => Num::Color(c),
+            v @ (Value::Transform(_)
+            | Value::Opacity(_)
+            | Value::Color(_)
+            | Value::Translate(_)
+            | Value::Rotate(_)
+            | Value::Scale(_)) => Self::declared_num(&v)?,
             Value::Size(d) => match dim_length(d) {
                 Some(v) => Num::Lengths([v, 0.0, 0.0, 0.0]),
                 None => {
@@ -690,6 +715,9 @@ impl Ui {
                 lp_length(p[3])?,
             ]),
             Value::Gap(g) => Num::Lengths([lp_length(g[0])?, lp_length(g[1])?, 0.0, 0.0]),
+            Value::Translate(t) => Num::Lengths(t),
+            Value::Rotate(r) => Num::Scalar(r),
+            Value::Scale([x, y]) => Num::Lengths([x, y, 0.0, 0.0]),
         })
     }
 
@@ -898,6 +926,9 @@ impl Ui {
                 LengthPercentage::length(l[0]),
                 LengthPercentage::length(l[1]),
             ]),
+            (Prop::Translate, Num::Lengths(l)) => Value::Translate(l),
+            (Prop::Rotate, Num::Scalar(r)) => Value::Rotate(r),
+            (Prop::Scale, Num::Lengths(l)) => Value::Scale([l[0], l[1]]),
             _ => return,
         };
         self.write_value(node, prop, value);
@@ -906,9 +937,13 @@ impl Ui {
     /// The one row writer for animated values: the same invalidation as
     /// the mutation that sets the property.
     pub(crate) fn write_value(&mut self, node: NodeId, prop: Prop, v: Value) {
+        let mut patch = SpatialPatch::default();
         match v {
-            Value::Transform(t) => self.set_spatial(node, Some(t), None),
-            Value::Opacity(o) => self.set_spatial(node, None, Some(o)),
+            Value::Transform(t) => patch.matrix = Some(t),
+            Value::Translate(t) => patch.translate = Some(t),
+            Value::Rotate(r) => patch.rotate = Some(r),
+            Value::Scale(sc) => patch.scale = Some(sc),
+            Value::Opacity(o) => patch.opacity = Some(o),
             Value::Color(c) => match prop {
                 Prop::Fill => self.set_paint(node, Some(c), None, None, None),
                 Prop::BorderColor => self.set_paint(node, None, None, Some(c), None),
@@ -919,6 +954,9 @@ impl Ui {
                 set_row_field(&mut style, prop, v);
                 self.set_layout(node, style);
             }
+        }
+        if !patch.is_empty() {
+            self.set_spatial(node, patch);
         }
     }
 }

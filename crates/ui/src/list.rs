@@ -563,12 +563,6 @@ impl Placement {
 /// Distance under which an anchor correction is noise, not motion.
 const ANCHOR_EPS: f32 = 1e-3;
 
-/// A node's border box -> its parent's border box (as `scene_sync`).
-fn node_local(origin: Point, t: Affine, size: Size) -> Affine {
-    Affine::translate(origin.x, origin.y)
-        .mul(&t.about(Point::new(size.width / 2.0, size.height / 2.0)))
-}
-
 impl crate::host::Host {
     /// Whether list row `row` is laid out and published: its index is in
     /// range, it is displayed, and no earlier displayed row of the list
@@ -600,13 +594,11 @@ impl crate::ui::Ui {
     fn list_placement(&self, list: NodeId, window: Size) -> Option<Placement> {
         self.host.node(list)?;
         let data = self.layouts.data(list);
+        // A node's border box -> its parent's (as `scene_sync`).
         let local = |id: NodeId| {
             let d = self.layouts.data(id);
-            node_local(
-                d.rect.origin,
-                self.host.spatial[id.index()].transform,
-                d.rect.size,
-            )
+            Affine::translate(d.rect.origin.x, d.rect.origin.y)
+                .mul(&self.host.spatial[id.index()].local(d.rect.size))
         };
         let mut to_view = local(list);
         let mut cur = self.host.parent(list);

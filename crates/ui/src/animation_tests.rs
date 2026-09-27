@@ -118,16 +118,19 @@ fn spatial_tweens_neither_lay_out_nor_shape() {
         let want = 0.25 * (k + 1) as f32;
         assert!(near(s.opacity, 1.0 - want), "{time}: {}", s.opacity);
         assert!(
-            near(s.transform.0[4], 100.0 * want),
+            near(s.parts.matrix.0[4], 100.0 * want),
             "{time}: {:?}",
-            s.transform
+            s.parts.matrix
         );
     }
     let spent = ui.counters().since(&before);
     assert_eq!((spent.layout_passes, spent.shapes), (0, 0));
     at(&mut ui, 1.0);
     assert_eq!(ui.host.spatial[3].opacity, 0.0);
-    assert_eq!(ui.host.spatial[3].transform, Affine::translate(100.0, 0.0));
+    assert_eq!(
+        ui.host.spatial[3].parts.matrix,
+        Affine::translate(100.0, 0.0)
+    );
     assert!(!ui.animating());
     let spent = ui.counters().since(&before);
     assert_eq!((spent.layout_passes, spent.shapes), (0, 0));
@@ -291,9 +294,9 @@ fn animate_tweens_once_and_a_set_cancels_it() {
     // Started at the clock of its transaction (0.75).
     assert!((end - (0.75 + spring.run_secs())).abs() < 1e-9);
     at(&mut ui, 1.2);
-    assert_ne!(ui.host.spatial[2].transform, target);
+    assert_ne!(ui.host.spatial[2].parts.matrix, target);
     at(&mut ui, end);
-    assert_eq!(ui.host.spatial[2].transform, target);
+    assert_eq!(ui.host.spatial[2].parts.matrix, target);
     assert!(!ui.animating());
 }
 
@@ -679,12 +682,12 @@ fn large_transforms_stay_finite() {
         );
     });
     at(&mut ui, 0.5);
-    let m = ui.host.spatial[1].transform;
+    let m = ui.host.spatial[1].parts.matrix;
     assert!(m.0.iter().all(|v| v.is_finite()), "{m:?}");
     // Interpolated, not the last frame kept: x scale halfway.
     assert!((m.0[0] / 5e29 - 1.0).abs() < 1e-3, "{m:?}");
     at(&mut ui, 1.0);
-    assert_eq!(ui.host.spatial[1].transform, Affine::scale(1e30, 1.0));
+    assert_eq!(ui.host.spatial[1].parts.matrix, Affine::scale(1e30, 1.0));
 }
 
 /// `Animate` tweens report their end to JS (DF-3, promoted into step 4):

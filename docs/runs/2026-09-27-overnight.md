@@ -73,6 +73,7 @@ Times are UTC.
 | [#16](https://github.com/erwinkn/craie/pull/16) | Afternoon: this run log's afternoon follow-up | Merged |
 | [#17](https://github.com/erwinkn/craie/pull/17) | Evening: presses and activation (work item 3, part 2): innermost press, one native activate, keep focus on press; protocol 7 | Merged |
 | [#18](https://github.com/erwinkn/craie/pull/18) | Evening: focus traps, `modal` and `inert` (work item 3, part 1); layers owned by the trap they open from; protocol 8 | Merged |
+| [#19](https://github.com/erwinkn/craie/pull/19) | Evening: transform parts (work item 6, part 1): translate, rotate and scale stored, tweened and overridden apart from the free matrix; protocol 9 | Merged |
 
 ## Numbers
 
@@ -461,7 +462,7 @@ The planning thread asked for the build-now items still open: work item
 the wire space split between them up front (flag bits and op tags; both
 bump the protocol, and the second to merge takes the next number). Focus
 groups follow, since they activate through #17's event. exe1's load was
-11 to 26. Times are UTC.
+11 to 30. Times are UTC.
 
 | Time | What |
 | --- | --- |
@@ -474,7 +475,12 @@ groups follow, since they activate through #17's event. exe1's load was
 | 17:37 | Transform parts (work item 6, part 1) starts |
 | 17:39 | PR #18 review: no blockers, 2 majors (a `focus()` in the dialog's opening update became the restore target, so closing lost focus; a modal hidden by Suspense kept the app inert), 5 minors, 5 nits |
 | 18:00 | PR #18 rebased on #17 and review fixed (PR18-01..09), verified at its head, which is `main` plus the PR (CI, 447 Rust tests, 105 bun tests, smoke, macOS type-check; hit tests still allocation-free) |
-| 18:05 | PR #18 merged; focus groups (item 3, part 3) start |
+| 18:04 | PR #18 merged; focus groups (item 3, part 3) start |
+| 19:41 | Usage limits (429s) had stopped both running threads (transform parts, focus groups); both resume where they stopped |
+| 19:57 | PR #19 (transform parts) opened and sent to review |
+| 20:11 | PR #19 review: no blockers or majors; 3 minors (a variant's `translateY` could overwrite the base `translateX` with no test failing; a 180° or 360° rotation left float noise, so the subtree never snapped to pixels again; a percentage in an RN transform list sent NaN), 3 nits |
+| 20:19 | PR #19 review fixed (PR19-01..06), verified at its head, which is `main` plus the PR (CI, 456 Rust tests, 112 bun tests, smoke, macOS type-check) |
+| 20:21 | PR #19 merged; keyframe animations and motion in variants (item 6, part 2) start |
 
 ### Decisions
 
@@ -532,6 +538,23 @@ groups follow, since they activate through #17's event. exe1's load was
   closed). Shift+Tab with nothing focused goes to the last focusable.
 - Deferred: a `FocusTrap` is a layout box (DF-47); `autoFocus` outside
   a trap does nothing on mount (DF-48).
+- **Transforms are parts, as in CSS.** A node holds translate, rotate,
+  scale and the free matrix apart, composed in that order about its
+  center. In
+  `<Pressable style={{ rotate: "12deg" }} _hover={{ style: { scale: 1.02 } }} />`,
+  hovering tweens the scale and the rotation stays (DF-21 closed). A
+  variant can set one axis: `_pressed: { translateY: "10%" }` keeps the
+  base `translateX`. Rotate tweens by angle, so 350° to 10° turns back
+  through 180°, as CSS does, and a percentage translate follows the
+  node's size. No new op: the spatial op's mask gains three bits.
+- **A bare-number `rotate` is degrees** (the kit's unit); inside an RN
+  transform list it stays radians, as React Native has it. A percentage
+  in an RN list throws, pointing at `style.translate`: Marbre's native
+  resolver writes some (the `roll-*` presets), so the Craie kit adapter
+  must map them to parts (DF-49).
+- **Half and full turns snap back to pixels.** Float noise from `sin`
+  left a 360° rotation 1.7e-7 away from the identity, so the subtree
+  drew unsnapped forever; composition now rounds terms within 1e-6.
 
 ## The `paths` crash
 
@@ -593,7 +616,8 @@ In Marbre:
 
 Work items not started:
 - The rest of item 3: focus groups (in progress).
-- Item 6: transitions and animations inside variants (DF-22).
+- Item 6: keyframe animations, loops, `enter`, and transitions and
+  animations inside variants (DF-22, in progress); then exits.
 - The second half of item 4: anchor and geometry expressions.
 - Topic 11: text ranges against a revision. This covers paste answers
   with a range (DF-11) and variants on nested Text (DF-26).

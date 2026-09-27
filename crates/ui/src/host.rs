@@ -25,7 +25,7 @@
 use std::collections::HashMap;
 
 use craie_core::dirty::DirtyQueue;
-use craie_core::geom::Affine;
+use craie_core::geom::{Affine, Point, Size};
 use craie_core::rev::Rev;
 use craie_core::span::{Span, SpanPool};
 use craie_layout::LayoutRow;
@@ -152,11 +152,106 @@ impl NodeHeader {
     }
 }
 
+/// A node's transform as CSS's individual transform properties: the
+/// matrix is `translate · rotate · scale · matrix`, applied about the
+/// border-box center. Each part is set, tweened and overridden by a
+/// variant on its own, so a hover `scale` keeps a base `rotate`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Parts {
+    /// x and y in points, then x and y as fractions of the border box
+    /// (`calc(x + 50%)` is `[x, 0, 0.5, 0]`).
+    pub translate: [f32; 4],
+    /// Radians, clockwise on screen, unbounded: 2π is a full turn.
+    pub rotate: f32,
+    pub scale: [f32; 2],
+    /// The free matrix (`transform`), applied first.
+    pub matrix: Affine,
+}
+
+impl Parts {
+    pub const IDENTITY: Parts = Parts {
+        translate: [0.0; 4],
+        rotate: 0.0,
+        scale: [1.0; 2],
+        matrix: Affine::IDENTITY,
+    };
+
+    /// The parts in CSS order, the percent translate aside (it follows
+    /// the size: `Spatial::local`). Rotate's sine and cosine snap to 0
+    /// and ±1 within 1e-6, so quarter turns compose exactly: f32
+    /// `sin(τ)` is 1.7e-7, which would keep a 360deg turn transformed
+    /// (and unsnapped) forever.
+    pub fn compose(&self) -> Affine {
+        let [tx, ty, _, _] = self.translate;
+        let [sx, sy] = self.scale;
+        let mut m = Affine::scale(sx, sy).mul(&self.matrix);
+        if self.rotate != 0.0 {
+            let snap = |v: f32| {
+                if v.abs() < 1e-6 {
+                    0.0
+                } else if (v.abs() - 1.0).abs() < 1e-6 {
+                    v.signum()
+                } else {
+                    v
+                }
+            };
+            let (s, c) = self.rotate.sin_cos();
+            let (s, c) = (snap(s), snap(c));
+            m = Affine([c, s, -s, c, 0.0, 0.0]).mul(&m);
+        }
+        m.0[4] += tx;
+        m.0[5] += ty;
+        m
+    }
+
+    /// Every value finite.
+    pub fn is_finite(&self) -> bool {
+        self.translate.iter().all(|v| v.is_finite())
+            && self.rotate.is_finite()
+            && self.scale.iter().all(|v| v.is_finite())
+            && self.matrix.0.iter().all(|v| v.is_finite())
+    }
+}
+
+impl Default for Parts {
+    fn default() -> Parts {
+        Parts::IDENTITY
+    }
+}
+
+/// Spatial values to write; `None` keeps the row's.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct SpatialPatch {
+    pub translate: Option<[f32; 4]>,
+    pub rotate: Option<f32>,
+    pub scale: Option<[f32; 2]>,
+    /// The free matrix.
+    pub matrix: Option<Affine>,
+    pub opacity: Option<f32>,
+}
+
+impl SpatialPatch {
+    pub fn is_empty(&self) -> bool {
+        *self == SpatialPatch::default()
+    }
+
+    /// Writes the given parts into `p`.
+    pub fn apply(&self, p: &mut Parts) {
+        p.translate = self.translate.unwrap_or(p.translate);
+        p.rotate = self.rotate.unwrap_or(p.rotate);
+        p.scale = self.scale.unwrap_or(p.scale);
+        p.matrix = self.matrix.unwrap_or(p.matrix);
+    }
+}
+
 /// Spatial state: applied after layout, never an input to it.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Spatial {
-    /// Local transform about the border-box center.
-    pub transform: Affine,
+    /// The transform as declared (or tweened), part by part.
+    pub parts: Parts,
+    /// `parts` composed, kept in step by the row writer: readers never
+    /// compose.
+    pub composed: Affine,
     pub opacity: f32,
     /// Content offset of a scroll container (logical points).
     pub scroll: [f32; 2],
@@ -167,7 +262,8 @@ pub struct Spatial {
 impl Default for Spatial {
     fn default() -> Spatial {
         Spatial {
-            transform: Affine::IDENTITY,
+            parts: Parts::IDENTITY,
+            composed: Affine::IDENTITY,
             opacity: 1.0,
             scroll: [0.0; 2],
             z: 0,
@@ -178,7 +274,19 @@ impl Default for Spatial {
 impl Spatial {
     /// Owns a transform record in the scene (drawn in its own space).
     pub fn transformed(&self) -> bool {
-        self.transform != Affine::IDENTITY
+        self.composed != Affine::IDENTITY || self.parts.translate[2..] != [0.0; 2]
+    }
+
+    /// The node's transform for a border box of `size`, about its
+    /// center, with the percent translate resolved.
+    pub fn local(&self, size: Size) -> Affine {
+        if !self.transformed() {
+            return Affine::IDENTITY;
+        }
+        let mut m = self.composed;
+        m.0[4] += self.parts.translate[2] * size.width;
+        m.0[5] += self.parts.translate[3] * size.height;
+        m.about(Point::new(size.width / 2.0, size.height / 2.0))
     }
 
     /// Composites as an isolated group.

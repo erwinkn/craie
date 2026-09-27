@@ -14,13 +14,12 @@
 use std::collections::HashMap;
 
 use craie_core::dirty::DirtyQueue;
-use craie_core::geom::Affine;
 use craie_layout::LayoutRow;
 use taffy::Style;
 
 use crate::animation::{Prop, Value};
 use crate::geom::Size;
-use crate::host::NodeId;
+use crate::host::{NodeId, Parts, SpatialPatch};
 use crate::mutation::NodeKind;
 use crate::ui::Ui;
 
@@ -57,23 +56,33 @@ pub mod env_bit {
     pub const ALL: u8 = 0xF;
 }
 
-/// `Values` presence bits, in wire order.
+/// `Values` presence bits, in wire order. Transform parts go per axis,
+/// as layout keys do: `_hover` setting `translateY` keeps the x that
+/// applies.
 pub mod value_field {
-    pub const FILL: u8 = 1 << 0;
-    pub const BORDER_COLOR: u8 = 1 << 1;
-    pub const RADIUS: u8 = 1 << 2;
+    pub const FILL: u16 = 1 << 0;
+    pub const BORDER_COLOR: u16 = 1 << 1;
+    pub const RADIUS: u16 = 1 << 2;
     /// The inherited color of text, inputs and `currentColor` drawings
     /// (set or cleared).
-    pub const COLOR: u8 = 1 << 3;
-    pub const OPACITY: u8 = 1 << 4;
-    /// The whole matrix.
-    pub const TRANSFORM: u8 = 1 << 5;
+    pub const COLOR: u16 = 1 << 3;
+    pub const OPACITY: u16 = 1 << 4;
+    /// The free matrix (`Parts::matrix`).
+    pub const TRANSFORM: u16 = 1 << 5;
     /// The layout keys in `Values::layout_keys`.
-    pub const LAYOUT: u8 = 1 << 6;
-    pub const BORDER_WIDTH: u8 = 1 << 7;
+    pub const LAYOUT: u16 = 1 << 6;
+    pub const BORDER_WIDTH: u16 = 1 << 7;
+    /// Translate x: points and fraction together.
+    pub const TRANSLATE_X: u16 = 1 << 8;
+    pub const TRANSLATE_Y: u16 = 1 << 9;
+    pub const ROTATE: u16 = 1 << 10;
+    pub const SCALE_X: u16 = 1 << 11;
+    pub const SCALE_Y: u16 = 1 << 12;
     /// Values only nodes with a box hold.
-    pub const BOX: u8 = FILL | BORDER_COLOR | RADIUS | BORDER_WIDTH;
-    pub const ALL: u8 = BOX | COLOR | OPACITY | TRANSFORM | LAYOUT;
+    pub const BOX: u16 = FILL | BORDER_COLOR | RADIUS | BORDER_WIDTH;
+    /// Every transform part.
+    pub const PARTS: u16 = TRANSFORM | TRANSLATE_X | TRANSLATE_Y | ROTATE | SCALE_X | SCALE_Y;
+    pub const ALL: u16 = BOX | COLOR | OPACITY | LAYOUT | PARTS;
 }
 
 /// Layout keys: one per property, axis and side, so two variants that
@@ -149,7 +158,7 @@ pub mod layout_key {
 /// are ignored.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Values {
-    pub mask: u8,
+    pub mask: u16,
     pub fill: u32,
     /// Border color and width.
     pub border: (u32, f32),
@@ -157,7 +166,7 @@ pub struct Values {
     /// `None`: no inherited color of its own.
     pub color: Option<u32>,
     pub opacity: f32,
-    pub transform: Affine,
+    pub parts: Parts,
     /// The keys of `layout` that apply (`layout_key`).
     pub layout_keys: u64,
     pub layout: LayoutRow,
@@ -172,7 +181,7 @@ impl Default for Values {
             radius: 0.0,
             color: None,
             opacity: 1.0,
-            transform: Affine::IDENTITY,
+            parts: Parts::IDENTITY,
             layout_keys: 0,
             layout: crate::host::default_style(),
         }
@@ -182,16 +191,12 @@ impl Default for Values {
 impl Values {
     /// In range: finite, opacity in [0, 1], known bits.
     pub fn valid(&self) -> bool {
-        // `value_field::ALL` fills the `u8` today, so this is always
-        // true; it stays for when the mask widens.
-        #[allow(clippy::bad_bit_mask)]
-        let known = self.mask & !value_field::ALL == 0;
-        known
+        self.mask & !value_field::ALL == 0
             && self.layout_keys & !layout_key::ALL == 0
             && self.border.1.is_finite()
             && self.radius.is_finite()
             && (0.0..=1.0).contains(&self.opacity)
-            && self.transform.0.iter().all(|v| v.is_finite())
+            && self.parts.is_finite()
     }
 
     /// Overlays `v`'s present values, property by property. Layout goes
@@ -217,8 +222,24 @@ impl Values {
         if m & OPACITY != 0 {
             self.opacity = x.opacity;
         }
+        let (p, xp) = (&mut self.parts, &x.parts);
         if m & TRANSFORM != 0 {
-            self.transform = x.transform;
+            p.matrix = xp.matrix;
+        }
+        if m & TRANSLATE_X != 0 {
+            [p.translate[0], p.translate[2]] = [xp.translate[0], xp.translate[2]];
+        }
+        if m & TRANSLATE_Y != 0 {
+            [p.translate[1], p.translate[3]] = [xp.translate[1], xp.translate[3]];
+        }
+        if m & ROTATE != 0 {
+            p.rotate = xp.rotate;
+        }
+        if m & SCALE_X != 0 {
+            p.scale[0] = xp.scale[0];
+        }
+        if m & SCALE_Y != 0 {
+            p.scale[1] = xp.scale[1];
         }
         if let Some(src) = &v.layout {
             let dst = layout.get_or_insert_with(|| self.layout.to_taffy());
@@ -555,15 +576,18 @@ impl Ui {
         if m & LAYOUT != 0 && prev.layout != next.layout {
             self.declare_layout(node, next.layout.to_taffy());
         }
-        let changed = |bit: u8, same: bool| m & bit != 0 && !same;
-        let transform = changed(TRANSFORM, prev.transform == next.transform);
-        let opacity = changed(OPACITY, prev.opacity == next.opacity);
-        if transform || opacity {
-            self.declare_spatial(
-                node,
-                transform.then_some(next.transform),
-                opacity.then_some(next.opacity),
-            );
+        let changed = |bit: u16, same: bool| m & bit != 0 && !same;
+        let (p, n) = (&prev.parts, &next.parts);
+        let patch = SpatialPatch {
+            translate: changed(TRANSLATE_X | TRANSLATE_Y, p.translate == n.translate)
+                .then_some(n.translate),
+            rotate: changed(ROTATE, p.rotate == n.rotate).then_some(n.rotate),
+            scale: changed(SCALE_X | SCALE_Y, p.scale == n.scale).then_some(n.scale),
+            matrix: changed(TRANSFORM, p.matrix == n.matrix).then_some(n.matrix),
+            opacity: changed(OPACITY, prev.opacity == next.opacity).then_some(next.opacity),
+        };
+        if !patch.is_empty() {
+            self.declare_spatial(node, patch);
         }
         let fill = changed(FILL, prev.fill == next.fill);
         let radius = changed(RADIUS, prev.radius == next.radius);
@@ -758,9 +782,9 @@ impl Ui {
         };
         let s = self.host.spatial[i];
         let mut v = Values {
-            mask: TRANSFORM | OPACITY | COLOR | LAYOUT,
+            mask: PARTS | OPACITY | COLOR | LAYOUT,
             layout_keys: layout_key::ALL,
-            transform: s.transform,
+            parts: s.parts,
             opacity: s.opacity,
             color: self.host.colors.get(&node.0).copied(),
             layout: self.host.layout[i],
@@ -894,7 +918,10 @@ fn set_input(st: &mut States, id: u32, bits: u64) {
 /// Sets the base's value of an animated property.
 pub(crate) fn set_base(v: &mut Values, prop: Prop, value: Value) {
     match (prop, value) {
-        (Prop::Transform, Value::Transform(t)) => v.transform = t,
+        (Prop::Transform, Value::Transform(t)) => v.parts.matrix = t,
+        (Prop::Translate, Value::Translate(t)) => v.parts.translate = t,
+        (Prop::Rotate, Value::Rotate(r)) => v.parts.rotate = r,
+        (Prop::Scale, Value::Scale(s)) => v.parts.scale = s,
         (Prop::Opacity, Value::Opacity(o)) => v.opacity = o,
         (Prop::Fill, Value::Color(c)) => v.fill = c,
         (Prop::BorderColor, Value::Color(c)) => v.border.0 = c,

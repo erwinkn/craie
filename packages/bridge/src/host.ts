@@ -29,9 +29,13 @@ import {
   type SubmitKey,
   layoutPart,
   styleKey,
+  partsOf,
+  rotateTarget,
+  scaleTarget,
+  styleParts,
   transformMatrix,
+  translateTarget,
   type AccessibilityRole,
-  type Affine,
   type AnimProp,
   type AnimationEnd,
   type ImageFit,
@@ -327,8 +331,12 @@ export interface HostNode {
   setText(text: string): void
   /** Tweens one property natively to `to` (the value it keeps after,
    * until a commit sets that property again): transform an RN
-   * transform list, colors as in props, padding a number or [left,
-   * right, top, bottom], gap a number or [column, row]. Resolves when
+   * transform list, translate a length or [x, y] ("50%" of the node's
+   * own size), rotate degrees or an angle string, scale a factor or
+   * [x, y], colors as in props, padding a number or [left, right, top,
+   * bottom], gap a number or [column, row]. Each transform part tweens
+   * on its own: `animate("rotate", 360, ...)` turns once while a
+   * variant scales the same node. Resolves when
    * the tween ends: finished, cancelled (a commit set the property),
    * retargeted (another tween replaced it), or removed (with its
    * node). */
@@ -409,6 +417,9 @@ function animValue(prop: AnimProp, to: unknown): number[] {
   }
   switch (prop) {
     case "transform": return [...transformMatrix(to as any)]
+    case "translate": return translateTarget(to)
+    case "rotate": return [rotateTarget(to)]
+    case "scale": return scaleTarget(to)
     case "backgroundColor": case "borderColor": case "color": return [color(to as string | number)]
     case "padding": return nums(to, 4)
     case "gap": return nums(to, 2)
@@ -543,8 +554,8 @@ function zOf(style: StyleProps | undefined): number {
   return i
 }
 
-function sameMatrix(a: Affine, b: Affine): boolean {
-  for (let i = 0; i < 6; i++) if (a[i] !== b[i]) return false
+function same(a: readonly number[], b: readonly number[]): boolean {
+  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false
   return true
 }
 
@@ -746,7 +757,7 @@ function variantValues(n: HostNode, block: Record<string, any>, hidden: boolean)
   }
   if (block.color !== undefined) v.color = color(block.color)
   if (style?.opacity !== undefined) v.opacity = style.opacity
-  if (style?.transform !== undefined) v.transform = transformMatrix(style.transform)
+  Object.assign(v, styleParts(style))
   if (style?.zIndex !== undefined) warnOnce("a variant does not apply style.zIndex (LEDGER DF-29)")
   if (style?.transition !== undefined) warnOnce("a variant does not apply style.transition (LEDGER DF-22)")
   const layout = layoutPart(style)
@@ -1458,21 +1469,22 @@ export class CraieHost {
     const newLayout = layoutOf(props, n.suspended)
     if (styleKey(oldLayout) !== styleKey(newLayout)) enc.layout(id, newLayout)
 
-    // Spatial: transform, opacity and z never touch layout.
-    const oldT = transformMatrix(oldProps.style?.transform)
-    const newT = transformMatrix(props.style?.transform)
+    // Spatial: the transform parts, opacity and z never touch layout.
+    // Only what changed goes: a rotate change leaves a running scale
+    // tween alone.
+    const oldP = partsOf(oldProps.style), newP = partsOf(props.style)
     const oldO = oldProps.style?.opacity ?? 1
     const newO = props.style?.opacity ?? 1
     const oldZ = zOf(oldProps.style), newZ = zOf(props.style)
-    const tChanged = !sameMatrix(oldT, newT)
-    if (tChanged || oldO !== newO || oldZ !== newZ) {
-      enc.spatial(
-        id,
-        tChanged ? newT : undefined,
-        oldO !== newO ? newO : undefined,
-        oldZ !== newZ ? newZ : undefined,
-      )
+    const sp = {
+      transform: same(oldP.matrix, newP.matrix) ? undefined : newP.matrix,
+      translate: same(oldP.translate, newP.translate) ? undefined : newP.translate,
+      rotate: oldP.rotate === newP.rotate ? undefined : newP.rotate,
+      scale: same(oldP.scale, newP.scale) ? undefined : newP.scale,
+      opacity: oldO === newO ? undefined : newO,
+      z: oldZ === newZ ? undefined : newZ,
     }
+    if (Object.values(sp).some(v => v !== undefined)) enc.spatial(id, sp)
 
     if (n.kind === 1) {
       // Paragraph and listeners: composed with nested Text at the seal.

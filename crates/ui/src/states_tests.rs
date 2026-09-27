@@ -783,7 +783,7 @@ fn wire_round_trip() {
     both.values.radius = 4.0;
     both.values.color = None;
     both.values.opacity = 0.25;
-    both.values.transform = craie_core::geom::Affine::rotate(0.5);
+    both.values.parts.matrix = craie_core::geom::Affine::rotate(0.5);
     t.states(1, state_bit::SELECTED | 5)
         .variants(4, &[both, on(1, state_bit::HOVER, color(C))])
         .variants(5, &[])

@@ -19,7 +19,7 @@ use craie_core::rev::Rev;
 use std::time::Instant;
 
 use crate::events::{Mods, UiEvent, activate_source};
-use craie_core::geom::{Affine, Point};
+use craie_core::geom::Affine;
 
 use crate::geom::{Rect, Size};
 use crate::host::{Host, NodeId, Revs};
@@ -675,13 +675,9 @@ impl Ui {
                 m = m.mul(&Affine::translate(-sx, -sy));
             }
             let d = self.layouts.data(n);
-            let t = self.host.spatial[n.index()].transform;
             m = m
                 .mul(&Affine::translate(d.rect.origin.x, d.rect.origin.y))
-                .mul(&t.about(Point::new(
-                    d.rect.size.width / 2.0,
-                    d.rect.size.height / 2.0,
-                )));
+                .mul(&self.host.spatial[n.index()].local(d.rect.size));
             parent = Some(n);
         }
         m

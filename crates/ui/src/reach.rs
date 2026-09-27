@@ -186,9 +186,10 @@ impl Ui {
                 reach = reach.union(kids);
             }
         }
-        let t = self.host.spatial[id.index()].transform;
+        let s = &self.host.spatial[id.index()];
         let mut k = 1.0;
-        if t != Affine::IDENTITY {
+        if s.transformed() {
+            let t = s.local(size);
             let det = t.determinant();
             if det == 0.0 || !det.is_finite() {
                 // No inverse: `hit_node` finds nothing here.
@@ -197,7 +198,7 @@ impl Ui {
             // ‖A‖²/(2|det A|), the Frobenius condition number over 2.
             let [a, b, c, d, _, _] = t.0;
             k = ((a * a + b * b + c * c + d * d) / (2.0 * det.abs())).max(1.0);
-            reach = reach.map(&t.about(Point::new(size.width / 2.0, size.height / 2.0)));
+            reach = reach.map(&t);
         }
         reach
             .offset(data.rect.origin.x, data.rect.origin.y)

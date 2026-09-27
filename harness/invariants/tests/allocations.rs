@@ -8,6 +8,7 @@ use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
 
 use craie_core::geom::{Affine, Size};
+use craie_ui::animation::{Prop, Timing, Value};
 use craie_ui::mutation::{NIL, NodeKind, Transaction};
 use craie_ui::ui::Ui;
 
@@ -119,6 +120,40 @@ fn steady_frames_do_not_allocate() {
         let bound = if k == 6 { 1 } else { 0 };
         assert!(n <= bound, "transform patch {k} allocated {n} times");
     }
+
+    // Transform parts: patches, a running rotate tween's frames and hit
+    // tests through the turned node allocate nothing (each composes once
+    // per change, in place).
+    for k in 9..12u64 {
+        let mut t = Transaction::new(k);
+        t.rotate(3, 0.1 * k as f32)
+            .scale(3, 1.5, 1.0)
+            .translate(3, [0.0, 0.0, 0.5, 0.0]);
+        let n = allocs(|| {
+            ui.apply_txn(&t).unwrap();
+            ui.render(VIEW);
+        });
+        assert_eq!(n, 0, "parts patch {k} allocated {n} times");
+    }
+    let mut t = Transaction::new(12);
+    t.animate(
+        3,
+        Prop::Rotate,
+        Value::Rotate(6.0),
+        Timing::curve(1.0, [0.0, 0.0, 1.0, 1.0]),
+    );
+    ui.apply_txn(&t).unwrap();
+    ui.render(VIEW);
+    let n = allocs(|| {
+        for f in 1..10 {
+            ui.set_time(f as f64 * 0.05);
+            ui.render(VIEW);
+            for x in 0..10 {
+                ui.hit_test(x as f32 * 20.0, 60.0);
+            }
+        }
+    });
+    assert_eq!(n, 0, "rotate tween frames allocated {n} times");
 }
 
 /// wgpu's own allocations in `Renderer::encode_frame` (wgpu 30), besides

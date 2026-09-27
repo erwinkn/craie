@@ -24,7 +24,7 @@ use craie_core::geom::{Affine, Point, Rect, Size};
 use craie_core::rev::Rev;
 use craie_scene::{ChunkWriter, ClipRecord, NONE, OrderItem, PaintSlot, Placement, RasterId};
 
-use crate::host::{NodeFlags, NodeId, ROOT};
+use crate::host::{NodeFlags, NodeId, ROOT, Spatial};
 use crate::layout::{LayoutData, MeasuredText};
 use crate::mutation::NodeKind;
 use crate::text::paragraph::{SpanStyle, TextSpec, TextStyle};
@@ -158,10 +158,9 @@ fn layout_key(d: &LayoutData) -> [f32; 6] {
     ]
 }
 
-/// A node's own transform, applied about its border-box center.
-fn self_local(origin: [f32; 2], t: Affine, size: Size) -> Affine {
-    Affine::translate(origin[0], origin[1])
-        .mul(&t.about(Point::new(size.width / 2.0, size.height / 2.0)))
+/// A node's own transform (`Spatial::local`) placed at its origin.
+fn self_local(origin: [f32; 2], s: &Spatial, size: Size) -> Affine {
+    Affine::translate(origin[0], origin[1]).mul(&s.local(size))
 }
 
 impl Ui {
@@ -517,10 +516,7 @@ impl Ui {
         // The node's own space.
         let (space, offset) = if s.self_rec != NONE {
             self.scene.transforms.set_parent(s.self_rec, ctx.space);
-            self.set_moving_local(
-                s.self_rec,
-                self_local(origin, spatial.transform, data.rect.size),
-            );
+            self.set_moving_local(s.self_rec, self_local(origin, &spatial, data.rect.size));
             if topo {
                 out.records.push(s.self_rec);
             }
@@ -605,7 +601,7 @@ impl Ui {
             let size = self.layouts.data(node).rect.size;
             let mut base = s.origin;
             if s.self_rec != NONE {
-                self.set_moving_local(s.self_rec, self_local(s.origin, spatial.transform, size));
+                self.set_moving_local(s.self_rec, self_local(s.origin, &spatial, size));
                 base = [0.0, 0.0];
             }
             if s.content_rec != NONE {

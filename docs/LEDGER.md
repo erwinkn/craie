@@ -331,19 +331,6 @@ Reviewer minors and nitpicks not fixed yet.
   if reordering or inserting in large trees shows up in a frame
   profile (it would serve inserts and moves too).
 
-### DF-21: a variant's transform replaces the whole matrix
-
-- Source: work item 5 (state styles).
-- Where: crates/ui/src/states.rs (`Values::transform`).
-- Claim: a variant carries one 2D affine, as `TRANSFORM` does. With
-  `style={{ transform: rotate }}` and `_hover={{ style: { transform:
-  scale(1.02) } }}`, hovering drops the rotation. Marbre's `scale`,
-  `rotate` and `translateX/Y` are separate keys that compose.
-- Why deferred: parts need a transform made of parts on the wire, for
-  the base and the animation driver too, not only in variants.
-- Resolves in: when a Marbre component overrides one transform part in
-  a variant; until then the facade author writes the composed matrix.
-
 ### DF-22: transitions and animations inside a variant
 
 - Source: work item 5.
@@ -427,8 +414,9 @@ Reviewer minors and nitpicks not fixed yet.
 - Source: work item 5; the PR #7 review (PR7-12).
 - Where: packages/bridge/src/host.ts (`variantValues`).
 - Claim: Marbre's variants also set `z`, `pointerEvents`,
-  `visibility`, elevation and the focus ring, and percent translates;
-  Craie's apply paint, opacity, a transform matrix and layout only.
+  `visibility`, elevation and the focus ring; Craie's apply paint,
+  opacity, transform parts (percent translates included, since work
+  item 6) and layout only.
   `_hover={{ pointerEvents: "none" }}` or `style: { zIndex: 2 }` in a
   variant is logged once and left out, as is every other key a variant
   does not apply.
@@ -741,7 +729,41 @@ Reviewer minors and nitpicks not fixed yet.
 - Resolves in: focus on mount for any `AUTO_FOCUS` node (the settle
   pass already sees each one mount), if the kit needs it.
 
+### DF-49: no percentages in an RN transform list
+
+- Source: work item 6 (transform parts).
+- Where: packages/bridge/src/wire.ts (`transformMatrix`).
+- Claim: React Native accepts `{ translateX: "50%" }` in a transform
+  list; Craie's list takes points only, because it folds into the free
+  matrix, which has no size-relative part. A percentage (or any
+  non-number) in a list's translate or scale throws "percentages go in
+  style.translate (DF-49)". `style.translate: ["50%", 0]` does the same
+  and follows the size.
+- Why deferred: the wire's fractions add straight to the translation,
+  so a list's percent step maps onto them only when no rotate, scale or
+  skew comes before it in the list; anything else needs a size-relative
+  term per matrix column.
+- Marbre does write them: its native resolver emits the `roll-up`,
+  `roll-down`, `roll-left` and `roll-right` enter presets as
+  `translateY`/`translateX` "±100%" list steps
+  (packages/ui/src/style/resolve.native.ts:186-189), and turns the
+  kit's `translateX`, `translateY`, `scale` and `rotate` style keys
+  into a list (:317-321; `translateX: '50%'` included). So the Craie
+  kit adapter must map those keys and presets to parts (`translateX`,
+  `translateY`, `scale`, `rotate`), not to `transform`. The list's
+  order there is translate, scale, rotate; the kit's scale is one
+  number, which commutes with rotate, so parts' translate, rotate,
+  scale draws the same.
+- Resolves in: the kit adapter mapping (above); the list itself only
+  if a ported component writes a percent step by hand.
+
 ## Closed
+
+- DF-21 (work item 6, transform parts): a variant's transform replaced
+  the whole matrix. The spatial row now holds translate, rotate, scale
+  and the free matrix as parts, and a variant sets only the parts it
+  names, per axis: `_hover: { style: { scale: 1.02 } }` keeps the base
+  `rotate`.
 
 - DF-19 (work item 3, focus traps): layers owned coarsely. A `Layer`
   opened inside a `FocusTrap` is owned by the trap's node, found through
@@ -1050,3 +1072,9 @@ Reviewer minors and nitpicks not fixed yet.
 - PR18-07 (traps review, m5): tests for the gate following a layer opened and unowned later, a path node not hit (an inline modal), Shift+Tab from nothing, the accessibility tree after closing, and a bridge Layer opening in a later commit than its trap; restore order and the new rules each fail a test when mutated. Two are not tested: auto-focus order is equivalent either way (an outer trap's target inside an inner trap is the inner trap's target too), and the path node's inert check in the accessibility tree is removed, unreachable now that a hidden or inert trap is inactive.
 - PR18-08 (traps review, nits): `reported`'s doc comment is back on it; the modal flag goes on the trap's first `dialog` or `alertdialog` (roles 17 and 18, new in protocol 8), else the trap; the gate reuses its buffers and the focus chain its Vec; Tab walks a hidden or inert subtree only down to owners of layers; the Built cost bullet has the deep-walk row.
 - PR18-09 (lead, rebase on #17): protocol 8, DF-47 and DF-48 after #17's DF-42 to DF-46, and a press on a node turning inert or falling outside a new modal cancels with #17's `PRESS` cancel, Space's press too (`a_blocked_node_loses_its_press`), where this branch had filed it as a DF.
+- PR19-01 (parts review, m1): the per-axis variant merge was untested (a `TRANSLATE_X` or `SCALE_Y` that copied the whole pair survived): `variants_merge_parts_per_axis` puts a hover `translateX` + `scaleX` beside a selected `rotate` over a base translate `[5, 7, 0, 0.1]`, then gives the selected one `translateY` + `scaleY`, then drops the hover. Each of the four whole-pair mutations now fails it (checked).
+- PR19-02 (parts review, m2): quarter turns left f32 residue (rotate(π) had b = -8.7e-8, rotate(τ) 1.7e-7), so a 360deg `animate` or a chevron at 180deg stayed transformed and drawn unsnapped: `Parts::compose` snaps sine and cosine within 1e-6 of 0 or ±1. rotate(τ) composes to exactly identity, the transform record goes and the subtree snaps again; rotate(π) is exactly `[-1, 0, 0, -1]`. π/2 and 3π/2 are exact too but not `is_axis_aligned()`, which means b = c = 0 (they swap the axes). With the snap removed, both new tests fail. The 1e-6 tolerance covers every multiple of π up to 10π (five turns); from 11π on, the f32 angle's own rounding is larger, so a sixth consecutive full turn ends 1e-6 off (an app that spins forever should wrap its angle).
+- PR19-03 (parts review, m3): a percentage in an RN list's translate sent `[1,0,0,1,NaN,NaN]` and native rejected the transaction: `transformMatrix` throws on a non-number translate or scale ("percentages go in style.translate (DF-49)"), bun test. DF-49 said no ported screen writes one; Marbre's native resolver does (the `roll-*` presets, `translateX: '50%'`): DF-49 now says the kit adapter must map those keys and presets to parts.
+- PR19-04 (parts review, nit): lengths, percentages and angles parsed with `Number`, so "%" was 0%, "0x10%" 16% and "0x1deg" 1deg: a strict CSS-number pattern (sign, digits, fraction, exponent) replaces it; units are case-insensitive, as in CSS (bun tests).
+- PR19-05 (parts review, nit): "a composition that overflows leaves the row unchanged" held for the row but not the base the variants resolve over: docs fix, not a validation. `validate` sees the host but not the base values, and a variant's scale over a valid base can still overflow at resolve time, so validation couldn't keep the promise either. The docs and `set_spatial`'s comment say only the row is guarded, and the base keeps the part.
+- PR19-06 (parts review, nit): topic 7's Built paragraph gains a Cost line with the review's E15 numbers (load 22 to 30).

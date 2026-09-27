@@ -24,6 +24,7 @@ use craie_core::geom::Affine;
 use taffy::Style;
 
 pub use crate::claims::Claim;
+pub use crate::host::SpatialPatch;
 pub use crate::input::SubmitKey;
 
 /// `u32::MAX`: no node / append / root / default style.
@@ -385,11 +386,11 @@ pub enum Mutation<'a> {
         style: u32,
     },
     // spatial
-    /// `z` orders the node among its siblings (`order.rs`).
+    /// Transform parts and opacity (`host::Parts`); `z` orders the node
+    /// among its siblings (`order.rs`).
     Spatial {
         id: u32,
-        transform: Option<Affine>,
-        opacity: Option<f32>,
+        patch: SpatialPatch,
         z: Option<i32>,
     },
     /// Makes `id` (a View) a layer container: hit testing passes through
@@ -663,29 +664,69 @@ impl<'a> Transaction<'a> {
         self.push(Mutation::Layout { id, style })
     }
 
+    /// Writes transform parts and opacity.
+    pub fn spatial(&mut self, id: u32, patch: SpatialPatch) -> &mut Self {
+        self.push(Mutation::Spatial { id, patch, z: None })
+    }
+
+    /// Sets the free matrix (`transform`).
     pub fn transform(&mut self, id: u32, t: Affine) -> &mut Self {
-        self.push(Mutation::Spatial {
+        self.spatial(
             id,
-            transform: Some(t),
-            opacity: None,
-            z: None,
-        })
+            SpatialPatch {
+                matrix: Some(t),
+                ..SpatialPatch::default()
+            },
+        )
+    }
+
+    /// Sets the translate: x and y in points, then x and y as fractions
+    /// of the node's border box.
+    pub fn translate(&mut self, id: u32, t: [f32; 4]) -> &mut Self {
+        self.spatial(
+            id,
+            SpatialPatch {
+                translate: Some(t),
+                ..SpatialPatch::default()
+            },
+        )
+    }
+
+    /// Sets the rotate, radians clockwise.
+    pub fn rotate(&mut self, id: u32, radians: f32) -> &mut Self {
+        self.spatial(
+            id,
+            SpatialPatch {
+                rotate: Some(radians),
+                ..SpatialPatch::default()
+            },
+        )
+    }
+
+    pub fn scale(&mut self, id: u32, sx: f32, sy: f32) -> &mut Self {
+        self.spatial(
+            id,
+            SpatialPatch {
+                scale: Some([sx, sy]),
+                ..SpatialPatch::default()
+            },
+        )
     }
 
     pub fn opacity(&mut self, id: u32, o: f32) -> &mut Self {
-        self.push(Mutation::Spatial {
+        self.spatial(
             id,
-            transform: None,
-            opacity: Some(o),
-            z: None,
-        })
+            SpatialPatch {
+                opacity: Some(o),
+                ..SpatialPatch::default()
+            },
+        )
     }
 
     pub fn z(&mut self, id: u32, z: i32) -> &mut Self {
         self.push(Mutation::Spatial {
             id,
-            transform: None,
-            opacity: None,
+            patch: SpatialPatch::default(),
             z: Some(z),
         })
     }
