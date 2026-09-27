@@ -24,7 +24,7 @@ use craie_core::geom::{Affine, Point, Rect, Size};
 use craie_core::rev::Rev;
 use craie_scene::{ChunkWriter, ClipRecord, NONE, OrderItem, PaintSlot, Placement, RasterId};
 
-use crate::host::{NodeId, ROOT};
+use crate::host::{NodeFlags, NodeId, ROOT};
 use crate::layout::{LayoutData, MeasuredText};
 use crate::mutation::NodeKind;
 use crate::text::paragraph::{SpanStyle, TextSpec, TextStyle};
@@ -234,6 +234,7 @@ impl Ui {
     /// is logical.
     pub(crate) fn sync_scene(&mut self, viewport: Size, layout_ran: bool) {
         self.scene.begin_frame();
+        self.host.refresh_orders();
         // A frame past a settle time snaps the rested spaces itself.
         self.settle_moving();
         self.scene.scale = self.scale;
@@ -344,7 +345,7 @@ impl Ui {
         if topo {
             out.records.push(self.sync.root_rec);
         }
-        let roots: Vec<NodeId> = self.host.children(ROOT).to_vec();
+        let roots: Vec<NodeId> = self.host.paint_order(ROOT).into_owned();
         let ctx = Ctx {
             space: self.sync.root_rec,
             offset: [0.0; 2],
@@ -423,9 +424,20 @@ impl Ui {
         let Some(child_ctx) = self.visit_node(id, ctx, topo, out) else {
             return;
         };
-        for i in 0..self.host.child_count(id) {
-            let child = self.host.child_at(id, i);
-            self.visit(child, child_ctx, topo, out);
+        // Children draw in paint order (`order.rs`), sorted before the
+        // frame: a sorted parent lends its order to the walk, uncopied;
+        // most parents keep tree order.
+        debug_assert!(!self.host.order_flags(id).contains(NodeFlags::ORDER));
+        if let Some(order) = self.host.orders.get_mut(&id.0).map(std::mem::take) {
+            for &child in &order {
+                self.visit(child, child_ctx, topo, out);
+            }
+            self.host.orders.insert(id.0, order);
+        } else {
+            for i in 0..self.host.child_count(id) {
+                let child = self.host.child_at(id, i);
+                self.visit(child, child_ctx, topo, out);
+            }
         }
         if topo && self.sync.spaces[id.index()].layer != NONE {
             out.order.push(OrderItem::EndLayer);

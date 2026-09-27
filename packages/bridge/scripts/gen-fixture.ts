@@ -35,7 +35,7 @@ enc.layout(0, {
   inset: { left: 4 },
   margin: { top: "auto" as const },
 })
-enc.spatial(0, transformMatrix([{ translateX: 3 }, { scale: 2 }]), 0.75)
+enc.spatial(0, transformMatrix([{ translateX: 3 }, { scale: 2 }]), 0.75, -2)
 enc.paint(0, 0x1122_33ff, 6.5, { color: 0xff00_00ff, width: 2 })
 enc.create(2, 2)                                    // input
 enc.inputConfig(2, 15, 0xffff_ffff, "type here", true, SUBMIT_KEY["mod+enter"])
@@ -107,6 +107,10 @@ const asset = (() => {
 enc.create(6, 5)                                    // vector
 enc.payload(6, asset)
 enc.place(0, 6, NIL)
+enc.create(7, 0)                                    // a layer container
+enc.layer(7, 6)                                     // owned from the vector
+enc.spatial(7, undefined, undefined, 50)            // z alone
+enc.place(NIL, 7, NIL)
 // A runtime drawing: a dashed arc path and an even-odd polygon.
 const shape = {
   kind: 0, geometry: "M2 12a10 10 0 0 1 20 0", transform: "", dashes: "4 2",

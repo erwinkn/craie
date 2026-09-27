@@ -344,6 +344,7 @@ pub fn validate(host: &Host, txn: &Transaction<'_>) -> Result<Validated, WireErr
                 id,
                 transform,
                 opacity,
+                ..
             } => {
                 need_live(&o, *id, "spatial on an absent node")?;
                 if transform.is_some_and(|t| !t.0.iter().all(|v| v.is_finite())) {
@@ -351,6 +352,18 @@ pub fn validate(host: &Host, txn: &Transaction<'_>) -> Result<Validated, WireErr
                 }
                 if opacity.is_some_and(|v| !(0.0..=1.0).contains(&v)) {
                     return Err(invalid("opacity outside [0, 1]"));
+                }
+            }
+            Mutation::Layer { id, owner } => {
+                need_live(&o, *id, "layer on an absent node")?;
+                if o.kind(*id) != Some(NodeKind::View) {
+                    return Err(invalid("layer on a non-view node"));
+                }
+                if *owner != NIL {
+                    need_live(&o, *owner, "layer owned by an absent node")?;
+                    if owner == id {
+                        return Err(invalid("layer owned by itself"));
+                    }
                 }
             }
             Mutation::Paint {
@@ -659,13 +672,21 @@ impl Ui {
                 id,
                 transform,
                 opacity,
+                z,
             } => {
                 let node = NodeId(*id);
+                // Not animatable: a z change reorders at once.
+                if let Some(z) = z {
+                    self.host.set_z(node, *z);
+                }
                 let transform = transform
                     .filter(|t| self.intercept(node, Prop::Transform, Value::Transform(*t)));
                 let opacity =
                     opacity.filter(|o| self.intercept(node, Prop::Opacity, Value::Opacity(*o)));
                 self.set_spatial(node, transform, opacity);
+            }
+            Mutation::Layer { id, owner } => {
+                self.host.set_layer(NodeId(*id), *owner);
             }
             Mutation::Paint {
                 id,

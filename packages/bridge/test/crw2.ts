@@ -72,8 +72,10 @@ export function readFrame(buf: Uint8Array): Frame {
         const m = u8(); op.f.push(m)
         if (m & 1) for (let i = 0; i < 6; i++) op.f.push(f32())
         if (m & 2) op.f.push(f32())
+        if (m & 4) op.f.push(u32() | 0)
         break
       }
+      case 0x22: op.f.push(u32()); break // layer owner
       case 0x30: { // paint
         const m = u8(); op.f.push(m)
         if (m & 1) op.f.push(u32())

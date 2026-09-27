@@ -19,6 +19,7 @@ export {
   Text,
   TextInput,
   ScrollView,
+  Layer,
   List,
   Surface,
   Bars,
@@ -46,6 +47,7 @@ export {
 export type {
   ListProps,
   ScrollViewProps,
+  LayerProps,
   ListTemplate,
   ItemDesc,
   ScrollAnchor,
