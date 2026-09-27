@@ -130,7 +130,12 @@ under Xvfb (300 clicks, still llvmpipe), round trip to `present`:
 idle 7.8 / 16.3 / 21.5, stream 39.0 / 63.4 / 77.0; js p50 / p99 0.46 /
 4.7 and 0.26 / 4.2. Runs move by 20 to 40 percent on this host; an
 earlier set had idle at 15.6 / 34.0 / 44.2 and stream at 70.9 / 105.6 /
-127.5.
+127.5. The PR #15 review reran it headless with the probe spinning to
+every deadline, as it does on the Mac (5c33852; load average 14 to 27):
+idle 12.85 / 27.10 / 38.47, stream 50.15 / 81.65 / 105.78, gc 11.53 /
+25.38 / 51.71, stream+gc 61.99 / 90.07 / 110.51, deliver p50 0.10 to
+0.38, every click answered. That is within this host's spread, so the
+two machines' tables compare; Linux keeps its timed waits.
 
 Mac (M5 Max, macOS 26.6.2, release, AC power), after the two probe
 fixes. Headless, the same 1800x1400 at 120 Hz, load average 3.0 to 3.6,

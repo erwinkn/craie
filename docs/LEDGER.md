@@ -895,7 +895,7 @@ Reviewer minors and nitpicks not fixed yet.
 - PR13-02 (run-log review): "two tests deflaked, not loosened" was wrong: three fixes, and 5 to 30 s loosens a bound (justified: the test only checks the frame arrives); the 1.6 s is the whole test run alone.
 - PR13-03 (run-log review): "all three are answered below" skipped gdb: each question is answered in one line.
 - PR13-04 (run-log review): the overnight Decisions on protocol 4 and DF-14 say what #12 changed; Next steps says the two allocation tests fail on the Mac until the fix, and names them.
-- PR13-05 (run-log review): 127 against 125 is two over: one allocation per pass that crosses 16 draws (+1 list, +2 four passes); "measured at 8 draws" is the Mac thread's reading.
+- PR13-05 (run-log review): 127 against 125 is two over: one allocation per pass that crosses 16 draws (+1 list, +2 four passes); "measured at 8 draws" is the Mac thread's reading. Wrong, as PR15-01 found: the +2 is per-pass work in wgpu, not command lists.
 - PR13-06 (run-log review): an "Open risks" list: inputs inherit color silently, CRV1 kind 3 with no bump, clippy on macOS and wasm cfgs not in CI, the winit SIGSEGV at exit.
 - PR13-07 (run-log review): DF-39 moved from the profile deferrals to "Known gaps" with TextInput `disabled`; EXPERIMENTS.md carries the pre-R12-04 caveat.
 - PR13-08 (run-log review, nits): clippy's `bad_bit_mask` wording (checks that can't fire), the target-dir rule scoped to parallel agent runs, Erwin's go-ahead paraphrased from the message, jargon replaced (conflicts, reaching across a layer, color records, scene rebuilds), DF-29's reason spelled out, "Marbre web and native" narrowed to Marbre web (here and in topic 5), test counts named alike in the timeline, #12's macOS check placed.
@@ -916,3 +916,4 @@ Reviewer minors and nitpicks not fixed yet.
 - PR15-04 (Mac review): "ruled out" cited QoS, a latency-critical activity and `mach_wait_until` with no numbers: it gives the late-wake medians (37, 55, 141 and 87 ms, each up to 150) and says the loops weren't kept.
 - PR15-05 (Mac review): the exe1 E19 rows used the old probe; the lead adds the reviewer's exe1 rerun.
 - PR15-06 (Mac review, nits): `report.py` fails on any negative skew, not just the median; the probe doc is rewrapped; the images range is 1.65 to 2.55 (JPEG 80 x 80 cover) and vectors 1.36 to 4.3.
+- PR15-07 (lead, exe1): Linux gets its own wgpu constants, measured on Vulkan (llvmpipe, wgpu 30): 49 per frame and 54 per layer (50 for the first, 47 to 54 up to 5 layers). The command-list model fits there exactly (52 at 8 draws, 53 at 16 and 17, 106 for opacity 0.5). Under Metal's 53 and 70, one allocation per frame or per pass went uncaught on Linux; now each of the three mutations fails both tests there too.

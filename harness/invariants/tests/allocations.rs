@@ -121,16 +121,27 @@ fn steady_frames_do_not_allocate() {
     }
 }
 
-/// wgpu's own allocations in `Renderer::encode_frame`, measured on Metal
-/// (M5 Max, wgpu 30), besides the command lists (`recorded` below): per
-/// frame with one pass that draws, and per opacity layer (its own pass,
-/// the composite, and the parent's pass resumed after it). The first
-/// layer costs 67 and each further one 62 to 70 (1 to 5 layers), as
-/// wgpu's resource trackers grow; the budget takes the most. Craie code
-/// in that phase holds no containers. A change here is a visible cost
-/// change: re-measure and update with the reason.
+/// wgpu's own allocations in `Renderer::encode_frame` (wgpu 30), besides
+/// the command lists (`recorded` below): per frame with one pass that
+/// draws, and per opacity layer (its own pass, the composite, and the
+/// parent's pass resumed after it). They differ by backend:
+///
+/// | backend | frame | first layer | each further (1 to 5 layers) |
+/// |---|---|---|---|
+/// | Metal (M5 Max) | 53 | 67 | 62 to 70 |
+/// | Vulkan (llvmpipe, exe1) | 49 | 50 | 47 to 54 |
+///
+/// Layers vary as wgpu's resource trackers grow; the budget takes the
+/// most. Craie code in that phase holds no containers. A change here is a
+/// visible cost change: re-measure and update with the reason.
+#[cfg(target_vendor = "apple")]
 const WGPU_FRAME: usize = 53;
+#[cfg(target_vendor = "apple")]
 const WGPU_LAYER: usize = 70;
+#[cfg(not(target_vendor = "apple"))]
+const WGPU_FRAME: usize = 49;
+#[cfg(not(target_vendor = "apple"))]
+const WGPU_LAYER: usize = 54;
 /// wgpu's staging allocations for one small buffer write in
 /// `Renderer::upload`, and the extra tracking cost at the submission that
 /// follows it. Craie's share of prepare (`collect`) is measured apart.
@@ -281,7 +292,8 @@ fn pass_commands(cmds: &[craie_scene::DrawCmd]) -> (Vec<u32>, u32) {
 /// wgpu-core records each pass's commands into a fresh `Vec` (capacity
 /// 4, then doubling): one allocation per capacity it reaches. Measured on
 /// Metal, one pass of 2 to 62 draws (5 to 65 commands) costs exactly
-/// `WGPU_FRAME` plus this, so the frame's encode grows with the log of
+/// `WGPU_FRAME` plus this; on Vulkan, so do the tests' frames (8, 16 and
+/// 17 draws, and 1 to 5 layers). The frame's encode grows with the log of
 /// each pass's draws, never linearly.
 fn command_list_allocs(commands: u32) -> usize {
     match commands {
