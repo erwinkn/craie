@@ -6,6 +6,95 @@ reason it landed. Proposals live in `ARCHITECTURE.md`, in the
 only when it has a measured result. Decisions in `ARCHITECTURE.md`
 override older entries below.
 
+## ARCHITECTURE-update experiments (2026-09-27)
+
+Measured during the overnight run (`docs/runs/2026-09-27-overnight.md`)
+on exe1: a shared Linux VM, 8 CPUs, no GPU (wgpu on llvmpipe, software
+rasterization), load average 13 to 15 from other agents. Times are
+indicative and move about 40 percent run to run; the Mac numbers decide.
+
+### E19: event round trip under load
+
+`sh bench/e19.sh` (windowed; keep the window in front), or
+`CRAIE_HEADLESS=1 sh bench/e19.sh`. The native probe
+(`crates/platform-winit/src/probe.rs`, `CRAIE_E19=<csv>`) clicks a
+40x40 marker 1,000 times per load, 30 to 70 ms apart on a fixed
+schedule, not after each answer, so a stall is sampled as often as it
+lasts. The app (`bench/e19/app.tsx`) answers the n-th click by filling
+the marker with `n << 8 | 0xff`; native sees the answer in the applied
+paint, with no protocol change. Native stamps each click when it was
+due, dispatched, applied and drawn; JS stamps the handler and the
+commit on `process.hrtime`, the same monotonic clock. The phases:
+
+- wait: due → dispatched (native was busy with a frame)
+- deliver: dispatched → handler (event batch, TSFN hop, JS queue)
+- react: handler → commit (render, commit, encode, send)
+- apply: commit → applied (the native thread takes the transaction)
+- paint: applied → drawn (the next frame; headless waits for the GPU)
+
+Loads: idle; stream, a 400-message thread (newest first) whose reply
+grows 60 tokens a second, re-parsed as light markdown on each token; gc,
+a 150 MB heap of records, 1/400 replaced every 10 ms, plus 1 MB of
+short-lived garbage per tick, so the collector runs a major collection
+every few seconds; and both.
+
+Headless, 1800x1400 device px at 120 Hz, release addon, React production
+build, discrete priority (below). Each cell is p50 / p99 in ms:
+
+| load      | round trip p50 / p95 / p99 | wait       | deliver     | react       | apply       | paint       |
+|-----------|----------------------------|------------|-------------|-------------|-------------|-------------|
+| idle      | 15.6 / 34.0 / 44.2         | 0.0 / 10.1 | 0.18 / 4.6  | 0.19 / 2.4  | 0.08 / 3.6  | 13.9 / 37.3 |
+| stream    | 70.9 / 105.6 / 127.5       | 14.0 / 39.2 | 0.13 / 5.0 | 0.08 / 0.84 | 27.4 / 51.4 | 28.0 / 51.8 |
+| gc        | 12.9 / 27.2 / 64.8         | 0.0 / 5.9  | 0.26 / 36.2 | 0.21 / 0.91 | 0.09 / 4.3  | 10.9 / 27.9 |
+| stream+gc | 72.7 / 117.8 / 156.7       | 14.9 / 49.2 | 0.57 / 42.7 | 0.09 / 4.2 | 26.6 / 56.1 | 28.5 / 59.3 |
+
+The gc load ran 7 major collections (up to 125 ms) and 600 minor ones
+(up to 34 ms) in 50 s; 248 of 1,000 clicks overlapped a pause of 2 ms or
+more. Windowed under Xvfb (300 clicks, still llvmpipe): idle 9.0 / 22.4
+/ 44.7, stream 46.0 / 101.5 / 133.3.
+
+What it says:
+
+- JS is fast when its heap is quiet. From native dispatch to the commit
+  leaving JS takes about 0.3 ms at p50 and under 10 ms at p99, streaming
+  or not. A streaming reply does not delay a click's handler.
+- Garbage collection sets the JS tail: a major pause holds every event
+  that arrives during it (deliver p99 36 to 43 ms, max 100 to 150 ms).
+  A claimed chord pressed then waits up to a major pause, and a
+  per-keystroke round trip would drop or reorder typing. This supports
+  topic 1's rules: continuous input is never claimable, and native never
+  blocks on JS.
+- Here native is the bottleneck. Under stream, llvmpipe spends most of
+  each frame rasterizing 2.5 megapixels, so a click waits 14 ms for the
+  native thread, its commit waits 27 ms behind the frame in flight, and
+  the answer takes another 28 ms to be drawn. Frame CPU (prepare and
+  encode) is 1.4 ms, so on a GPU these phases should shrink to about one
+  frame each. That is the prediction the Mac run checks.
+
+Priority. The reconciler scheduled every native event's updates at
+default priority, one scheduler task (a `setImmediate` in Node) after
+the handler. They now take React DOM's priorities: discrete for press,
+key, focus and text events, so the update commits in the event's own
+microtasks; continuous for move, wheel and scroll
+(`packages/bridge/src/index.ts`, tested in `reconciler.test.ts`). A/B,
+same host, react phase p50 / p99 (ms):
+
+| load      | default     | discrete    |
+|-----------|-------------|-------------|
+| idle      | 0.26 / 1.73 | 0.19 / 2.39 |
+| stream    | 0.09 / 1.18 | 0.08 / 0.84 |
+| gc        | 0.23 / 1.43 | 0.21 / 0.91 |
+| stream+gc | 0.12 / 10.7 | 0.09 / 4.2  |
+
+The difference is within the noise: when the Node event loop is free,
+the scheduler hop is well under a millisecond. Discrete priority stays
+for its semantics, as in React DOM. For example, a keyDown that opens a
+menu renders and commits on its own, before the pending streaming-token
+update, not batched into that render.
+
+The harness found one bug: `runApp` held the process for 2 s after the
+window closed (an un-unref'd timeout in a `Promise.race`).
+
 ## Step 1 — crate split, CRW2, retained scene (2026-09-23)
 
 Conditions: the shared M5 Max ran under heavy load (load average 12 to
