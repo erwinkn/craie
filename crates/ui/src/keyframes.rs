@@ -171,8 +171,18 @@ pub const MAX_FRAMES: usize = 256;
 /// variant's).
 pub const MAX_ANIMATIONS: usize = 16;
 
+/// Frame channels past `value_field`'s: the border-box size in points,
+/// in exit frames only (`Trigger::Exit`). A frame mask is its own
+/// namespace: in a `VARIANTS` mask these bits are the wire-only
+/// `TRANSITIONS` and `ANIMATIONS`.
+pub mod frame_field {
+    pub const WIDTH: u16 = 1 << 13;
+    pub const HEIGHT: u16 = 1 << 14;
+    pub const SIZE: u16 = WIDTH | HEIGHT;
+}
+
 /// The channels a frame may set, as `value_field` bits: colors,
-/// opacity, and the transform parts per axis.
+/// opacity, the transform parts per axis, and (exits only) the size.
 pub const CHANNELS: u16 = value_field::FILL
     | value_field::BORDER_COLOR
     | value_field::COLOR
@@ -181,7 +191,8 @@ pub const CHANNELS: u16 = value_field::FILL
     | value_field::TRANSLATE_Y
     | value_field::ROTATE
     | value_field::SCALE_X
-    | value_field::SCALE_Y;
+    | value_field::SCALE_Y
+    | frame_field::SIZE;
 
 /// The keyframe-animatable values of a node, or one frame's (the
 /// channels in its mask).
@@ -198,6 +209,8 @@ pub struct Sample {
     /// Radians.
     pub rotate: f32,
     pub scale: [f32; 2],
+    /// Width, height of the border box in points (exits only).
+    pub size: [f32; 2],
 }
 
 impl Default for Sample {
@@ -210,6 +223,7 @@ impl Default for Sample {
             translate: [0.0; 4],
             rotate: 0.0,
             scale: [1.0, 1.0],
+            size: [0.0; 2],
         }
     }
 }
@@ -225,6 +239,8 @@ impl Sample {
             Prop::Translate => self.translate = src.translate,
             Prop::Rotate => self.rotate = src.rotate,
             Prop::Scale => self.scale = src.scale,
+            Prop::Width => self.size[0] = src.size[0],
+            Prop::Height => self.size[1] = src.size[1],
             _ => {}
         }
     }
@@ -241,6 +257,8 @@ impl Sample {
             TRANSLATE_Y => Ch::Num([t[1], t[3]]),
             ROTATE => Ch::Num([self.rotate, 0.0]),
             SCALE_X => Ch::Num([self.scale[0], 0.0]),
+            frame_field::WIDTH => Ch::Num([self.size[0], 0.0]),
+            frame_field::HEIGHT => Ch::Num([self.size[1], 0.0]),
             _ => Ch::Num([self.scale[1], 0.0]),
         }
     }
@@ -257,11 +275,14 @@ impl Sample {
             (ROTATE, Ch::Num([r, _])) => self.rotate = r,
             (SCALE_X, Ch::Num([s, _])) => self.scale[0] = s,
             (SCALE_Y, Ch::Num([s, _])) => self.scale[1] = s,
+            (frame_field::WIDTH, Ch::Num([w, _])) => self.size[0] = w,
+            (frame_field::HEIGHT, Ch::Num([h, _])) => self.size[1] = h,
             _ => {}
         }
     }
 
-    /// In range: finite, opacity in [0, 1], a color where `mask` has one.
+    /// In range: finite, opacity in [0, 1], sizes in [0, 1e6], a color
+    /// where `mask` has one.
     fn check(&self, mask: u16) -> Result<(), &'static str> {
         if mask & value_field::COLOR != 0 && self.color.is_none() {
             return Err("keyframe color missing");
@@ -275,6 +296,9 @@ impl Sample {
         }
         if !(0.0..=1.0).contains(&self.opacity) {
             return Err("keyframe opacity outside [0, 1]");
+        }
+        if !self.size.iter().all(|v| (0.0..=1e6).contains(v)) {
+            return Err("keyframe size outside [0, 1e6]");
         }
         Ok(())
     }
@@ -313,13 +337,17 @@ pub(crate) fn props_of(channels: u16) -> u16 {
         | any(TRANSLATE_X | TRANSLATE_Y, Prop::Translate)
         | any(ROTATE, Prop::Rotate)
         | any(SCALE_X | SCALE_Y, Prop::Scale)
+        | any(frame_field::WIDTH, Prop::Width)
+        | any(frame_field::HEIGHT, Prop::Height)
 }
 
 /// The props keyframes can cover, in `Prop` order.
-const COVERABLE: [Prop; 7] = [
+const COVERABLE: [Prop; 9] = [
     Prop::Opacity,
     Prop::Fill,
     Prop::BorderColor,
+    Prop::Width,
+    Prop::Height,
     Prop::Color,
     Prop::Translate,
     Prop::Rotate,
@@ -640,6 +668,9 @@ pub enum Trigger {
     Base = 1,
     /// A variant's: runs while the variant holds.
     Variant = 2,
+    /// Declared ahead; starts when the node is detached (`exit.rs`),
+    /// over everything else.
+    Exit = 3,
 }
 
 impl Trigger {
@@ -648,6 +679,7 @@ impl Trigger {
         match v {
             0 => Some(Trigger::Enter),
             1 => Some(Trigger::Base),
+            3 => Some(Trigger::Exit),
             _ => None,
         }
     }
@@ -775,6 +807,8 @@ pub struct Motion {
     structure: Rev,
     /// A node gained a record since: check again.
     recheck: bool,
+    /// The drawn check's node list, reused.
+    scratch: Vec<u32>,
 }
 
 impl Motion {
@@ -853,6 +887,12 @@ impl Ui {
             translate: s.parts.translate,
             rotate: s.parts.rotate,
             scale: s.parts.scale,
+            size: if self.layouts.is_laid_out(node) {
+                let r = self.layouts.data(node).rect.size;
+                [r.width, r.height]
+            } else {
+                [0.0; 2]
+            },
         }
     }
 
@@ -880,6 +920,16 @@ impl Ui {
         }
         if has(Prop::Color) {
             self.set_color(node, s.color);
+        }
+        if has(Prop::Width) || has(Prop::Height) {
+            let mut row = self.host.layout[node.index()];
+            if has(Prop::Width) {
+                row.set_width(taffy::Dimension::length(s.size[0].max(0.0)));
+            }
+            if has(Prop::Height) {
+                row.set_height(taffy::Dimension::length(s.size[1].max(0.0)));
+            }
+            self.set_layout(node, row);
         }
     }
 
@@ -914,6 +964,12 @@ impl Ui {
             (Prop::Translate, Some(Value::Translate(t))) => u.translate = t,
             (Prop::Rotate, Some(Value::Rotate(r))) => u.rotate = r,
             (Prop::Scale, Some(Value::Scale(s))) => u.scale = s,
+            (Prop::Width | Prop::Height, Some(Value::Size(d))) => {
+                // A length; `auto` or a percent keeps the size it had.
+                if let taffy::style::ExpandedDimension::Length(v) = d.expand() {
+                    u.size[(prop == Prop::Height) as usize] = v;
+                }
+            }
             _ => {}
         }
         m.stale = true;
@@ -1029,7 +1085,8 @@ impl Ui {
     }
 
     /// Applies an `ANIMATION` op: `enter` starts only with the node's
-    /// creation; the node's list replaces the one declared.
+    /// creation; the node's list replaces the one declared; an exit
+    /// waits for the node's detach.
     pub(crate) fn declare_animations(
         &mut self,
         node: NodeId,
@@ -1038,6 +1095,13 @@ impl Ui {
         anims: &[Animation],
     ) {
         match trigger {
+            // Kept for the detach that starts it (`exit.rs`).
+            Trigger::Exit if anims.is_empty() => {
+                self.host.exits.remove(&node.0);
+            }
+            Trigger::Exit => {
+                self.host.exits.insert(node.0, anims.into());
+            }
             Trigger::Enter => {
                 if !self.motion.newborn(node) {
                     return;
@@ -1133,9 +1197,9 @@ impl Ui {
     }
 
     /// Whether `node` is drawn: in a root's tree, with no `display: none`
-    /// on it or above. Exits (next) will count an exiting subtree as
-    /// drawn, though it is detached: this is the test, not attachment.
-    fn drawn(&self, node: NodeId) -> bool {
+    /// on it or above. An exiting subtree is drawn: its root stays in its
+    /// parent's child list (`exit.rs`).
+    pub(crate) fn drawn(&self, node: NodeId) -> bool {
         let mut cur = node;
         loop {
             let Some(n) = self.host.node(cur) else {
@@ -1160,8 +1224,10 @@ impl Ui {
     /// CSS does across `display: none`. Runs when the tree's structure or
     /// visibility changed, or a node gained animations.
     fn park_undrawn(&mut self) {
-        let ids: Vec<u32> = self.motion.nodes.keys().copied().collect();
-        for id in ids {
+        let mut ids = std::mem::take(&mut self.motion.scratch);
+        ids.clear();
+        ids.extend(self.motion.nodes.keys().copied());
+        for &id in &ids {
             let node = NodeId(id);
             let drawn = self.drawn(node);
             let Some(m) = self.motion.nodes.get_mut(&id) else {
@@ -1193,8 +1259,32 @@ impl Ui {
             self.force_paint = true;
             self.recover(node);
         }
+        self.motion.scratch = ids;
         self.motion.recheck = false;
         self.motion.structure = self.host.revs.structure;
+    }
+
+    /// Starts `node`'s exit (`exit.rs`), unreported: the exit's end is
+    /// one `EXIT_END` for the whole subtree.
+    pub(crate) fn start_exit_keyframes(&mut self, node: NodeId, anims: Box<[Animation]>) {
+        for a in anims.into_vec() {
+            let (key, rank) = (
+                key(Trigger::Exit, 0, a.index),
+                rank(Trigger::Exit, 0, a.index),
+            );
+            self.start_keyframes(node, key, rank, a, false);
+        }
+    }
+
+    /// Whether an exit animation of `node` is in its delay or active
+    /// phase (and not parked: under a hidden ancestor it cannot run).
+    pub(crate) fn exit_running(&self, node: NodeId) -> bool {
+        self.motion.nodes.get(&node.0).is_some_and(|m| {
+            !m.parked
+                && m.list
+                    .iter()
+                    .any(|r| !r.done && trigger_of(r.key) == Trigger::Exit as u32)
+        })
     }
 
     /// Samples every drawn node with keyframe animations and writes their

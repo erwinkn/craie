@@ -508,6 +508,12 @@ pub mod end_reason {
     pub const RETARGETED: u32 = 2;
     /// Its node was removed.
     pub const REMOVED: u32 = 3;
+    /// An exit's: an ancestor left the tree, detached or removed
+    /// (`exit.rs`).
+    pub const PARENT_GONE: u32 = 4;
+    /// An exit's: it could not run (its root was out of the tree, or a
+    /// list's row).
+    pub const SKIPPED: u32 = 5;
 }
 
 /// The value a row would hold for `v`: the clamps of the row writer.
@@ -645,6 +651,8 @@ impl Ui {
                 Prop::Translate => Value::Translate(u.translate),
                 Prop::Rotate => Value::Rotate(u.rotate),
                 Prop::Scale => Value::Scale(u.scale),
+                Prop::Width => Value::Size(taffy::Dimension::length(u.size[0])),
+                Prop::Height => Value::Size(taffy::Dimension::length(u.size[1])),
                 _ => Value::Color(u.color.unwrap_or(0)),
             };
         }
