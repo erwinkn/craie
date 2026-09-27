@@ -18,9 +18,10 @@ use accesskit::{
 };
 
 use crate::geom::Size;
-use crate::host::{NodeId, ROOT};
+use crate::host::{NodeFlags, NodeId, ROOT};
 use crate::mutation::{NIL, NodeKind, Role as UiRole, reported};
 use crate::states::state_bit;
+use crate::trap::Class;
 use crate::ui::Ui;
 
 /// The AccessKit role for a Craie role.
@@ -43,6 +44,8 @@ fn ak_role(role: UiRole) -> Role {
         UiRole::Switch => Role::Switch,
         UiRole::RadioButton => Role::RadioButton,
         UiRole::RadioGroup => Role::RadioGroup,
+        UiRole::Dialog => Role::Dialog,
+        UiRole::AlertDialog => Role::AlertDialog,
     }
 }
 
@@ -126,13 +129,25 @@ impl Ui {
             y1: viewport.height as f64,
         });
         let mut kids: Vec<A11yId> = Vec::new();
+        let gated = self.traps.gate.modal.is_some();
         for &child in self.host.children(ROOT) {
-            if let Some(n) = self.a11y_node(child, &mut nodes) {
+            if let Some(n) = self.a11y_child(child, &mut nodes, gated) {
                 kids.push(n);
             }
         }
         root.set_children(kids);
         nodes.push((ROOT_AID, root));
+        for m in self
+            .traps
+            .stack
+            .iter()
+            .filter(|a| self.traps.is_modal(a.id))
+        {
+            let m = aid(self.modal_node(m.id));
+            if let Some((_, n)) = nodes.iter_mut().find(|(a, _)| *a == m) {
+                n.set_modal();
+            }
+        }
         let focus = self.focused().map(aid).unwrap_or(ROOT_AID);
         TreeUpdate {
             nodes,
@@ -142,8 +157,57 @@ impl Ui {
         }
     }
 
+    /// The node announced as modal for modal trap `t`: the first
+    /// `dialog` or `alertdialog` in its subtree (ARIA pairs `aria-modal`
+    /// with the dialog), else the trap.
+    fn modal_node(&self, t: NodeId) -> NodeId {
+        let mut stack = vec![t];
+        while let Some(n) = stack.pop() {
+            if matches!(
+                self.host.interaction(n).role,
+                UiRole::Dialog | UiRole::AlertDialog
+            ) {
+                return n;
+            }
+            stack.extend(self.host.children(n).iter().rev());
+        }
+        t
+    }
+
+    /// `a11y_node` under a gated parent (`trap.rs`): outside the top
+    /// modal a node leaves the tree, and one holding the modal (or a
+    /// layer it owns) stays as a bare container.
+    fn a11y_child(&self, id: NodeId, out: &mut Vec<(A11yId, Node)>, gated: bool) -> Option<A11yId> {
+        if !gated {
+            return self.a11y_node(id, out);
+        }
+        match self.traps.gate.class(id) {
+            Class::Root => self.a11y_node(id, out),
+            Class::Out => None,
+            // Never hidden or inert: a trap under such a node is
+            // inactive.
+            Class::Path => {
+                let mut an = Node::new(Role::GenericContainer);
+                let kids: Vec<A11yId> = self
+                    .host
+                    .children(id)
+                    .iter()
+                    .filter_map(|&c| self.a11y_child(c, out, true))
+                    .collect();
+                if kids.is_empty() {
+                    return None;
+                }
+                an.set_children(kids);
+                let a = aid(id);
+                out.push((a, an));
+                Some(a)
+            }
+        }
+    }
+
     /// One retained node -> one semantic node (plus recursed children).
-    /// Returns the node's a11y id, or `None` when the subtree is hidden.
+    /// Returns the node's a11y id, or `None` when the subtree is hidden
+    /// or inert.
     ///
     /// The role comes from the node's role field only; the facade sets
     /// defaults (Pressable, TextInput, ScrollView, Text). Content (text,
@@ -152,7 +216,7 @@ impl Ui {
     fn a11y_node(&self, id: NodeId, out: &mut Vec<(A11yId, Node)>) -> Option<A11yId> {
         let node = self.host.node(id)?;
         let style = self.host.style(id);
-        if style.display() == taffy::Display::None {
+        if style.display() == taffy::Display::None || node.flags.contains(NodeFlags::INERT) {
             return None;
         }
         let props = self.host.interaction(id);

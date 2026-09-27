@@ -11,6 +11,7 @@ use crate::geom::Rect;
 use crate::host::{NodeFlags, NodeId, ROOT};
 use crate::input::{KeyAction, SubmitKey};
 use crate::mutation::{NodeKind, press};
+use crate::trap::Class;
 use crate::ui::Ui;
 
 /// Whether `p` passes a clip: each bounded axis must contain it, and the
@@ -112,19 +113,39 @@ impl Ui {
     }
 
     fn hit_roots(&self, p: Point, prune: bool) -> Option<NodeId> {
+        // A modal restricts where the test starts, not every candidate:
+        // outside it, only the tree paths down to its roots are walked.
+        let gated = self.traps.gate.modal.is_some();
         for &root in self.host.paint_order(ROOT).iter().rev() {
-            if let Some(hit) = self.hit_node(root, p, prune) {
+            if let Some(hit) = self.hit_child(root, p, prune, gated) {
                 return Some(hit);
             }
         }
         None
     }
 
+    /// `hit_node`, under a gated parent (`trap.rs`): a child outside the
+    /// modal is skipped, one on a path to it passes through.
+    #[inline]
+    fn hit_child(&self, id: NodeId, p: Point, prune: bool, gated: bool) -> Option<NodeId> {
+        if !gated {
+            return self.hit_node(id, p, prune, false);
+        }
+        match self.traps.gate.class(id) {
+            Class::Root => self.hit_node(id, p, prune, false),
+            Class::Path => self.hit_node(id, p, prune, true),
+            Class::Out => None,
+        }
+    }
+
     /// `p` is in the parent's child frame (its border box minus scroll).
     /// Each node tests in its own frame, so clips and bounds stay exact
-    /// under rotation and scale.
-    fn hit_node(&self, id: NodeId, p: Point, prune: bool) -> Option<NodeId> {
+    /// under rotation and scale. A `gated` node only passes through.
+    fn hit_node(&self, id: NodeId, p: Point, prune: bool, gated: bool) -> Option<NodeId> {
         let node = self.host.node(id)?;
+        if node.flags.contains(NodeFlags::INERT) {
+            return None;
+        }
         if prune
             && !node.flags.contains(NodeFlags::REACH)
             && self.reach.get(id.index()).is_some_and(|r| !r.contains(p))
@@ -153,13 +174,13 @@ impl Ui {
             // Children paint above their parent, in paint order
             // (`order.rs`): test them last to first.
             for &child in self.host.paint_order(id).iter().rev() {
-                if let Some(hit) = self.hit_node(child, cp, prune) {
+                if let Some(hit) = self.hit_child(child, cp, prune, gated) {
                     return Some(hit);
                 }
             }
         }
         // A layer container passes through (`box-none`).
-        if node.flags.contains(NodeFlags::LAYER) {
+        if gated || node.flags.contains(NodeFlags::LAYER) {
             return None;
         }
         let own_radius = if self.host.kind(id).is_some_and(|k| k.has_box()) {
@@ -180,27 +201,6 @@ impl Ui {
         let spans = &self.host.paragraph(id)?.spans;
         let k = spans.partition_point(|s| s.start <= cluster.start);
         Some(k.saturating_sub(1) as u32)
-    }
-
-    /// Focusable nodes in document order (for Tab traversal).
-    fn focusables(&self) -> Vec<NodeId> {
-        let mut out = Vec::new();
-        let mut stack: Vec<NodeId> = self.host.children(ROOT).iter().rev().copied().collect();
-        while let Some(id) = stack.pop() {
-            let Some(node) = self.host.node(id) else {
-                continue;
-            };
-            if self.host.display_none(id) {
-                continue;
-            }
-            if node.kind == NodeKind::Input || self.host.interaction(id).focusable {
-                out.push(id);
-            }
-            for &child in self.host.children(id).iter().rev() {
-                stack.push(child);
-            }
-        }
-        out
     }
 
     /// Moves focus; emits blur/focus events, manages IME composition.
@@ -487,11 +487,14 @@ impl Ui {
 
         // Focus: nearest focusable/input ancestor of the hit; clicking
         // non-focusable space blurs.
-        if !keep {
+        // Under a modal, a press outside it keeps the focus too.
+        let outside = hit.is_none() && self.traps.gate.modal.is_some();
+        if !keep && !outside {
             let focus_target = hit.and_then(|h| {
                 self.ancestors(h).find(|&id| {
-                    self.host.kind(id) == Some(NodeKind::Input)
-                        || self.host.interaction(id).focusable
+                    (self.host.kind(id) == Some(NodeKind::Input)
+                        || self.host.interaction(id).focusable)
+                        && !self.blocked(id)
                 })
             });
             self.set_focus(focus_target);
@@ -619,22 +622,17 @@ impl Ui {
             }
         }
 
-        // Tab traversal.
+        // Tab traversal, within the innermost active trap (`trap.rs`).
         if k.key == Key::Tab && !k.mods.ctrl && !k.mods.meta {
-            let focusables = self.focusables();
-            if !focusables.is_empty() {
-                let next = match self.focus {
-                    None => focusables[0],
-                    Some(f) => {
-                        let i = focusables.iter().position(|&n| n == f);
-                        match (i, k.mods.shift) {
-                            (Some(i), true) => {
-                                focusables[(i + focusables.len() - 1) % focusables.len()]
-                            }
-                            (Some(i), false) => focusables[(i + 1) % focusables.len()],
-                            (None, _) => focusables[0],
-                        }
-                    }
+            let order = self.tab_order(self.tab_scope());
+            if !order.is_empty() {
+                let n = order.len();
+                let i = self.focus.and_then(|f| order.iter().position(|&o| o == f));
+                let next = match (i, k.mods.shift) {
+                    (Some(i), true) => order[(i + n - 1) % n],
+                    (Some(i), false) => order[(i + 1) % n],
+                    (None, true) => order[n - 1],
+                    (None, false) => order[0],
                 };
                 self.set_focus(Some(next));
             }

@@ -52,6 +52,8 @@ pub struct Ui {
     pub(crate) surface_scratch: Vec<Quad>,
     /// Focused node (key events and input editing).
     pub(crate) focus: Option<NodeId>,
+    /// Focus traps, the modal gate, inert nodes (`trap.rs`).
+    pub(crate) traps: crate::trap::Traps,
     /// Node under the pointer: drives enter/leave synthesis.
     pub(crate) hover: Option<NodeId>,
     /// Node that grabbed the pointer on the last button press.
@@ -149,6 +151,7 @@ impl Ui {
             surface_painters,
             surface_scratch: Vec::new(),
             focus: None,
+            traps: Default::default(),
             hover: None,
             pressed: None,
             pressed_primary: false,
@@ -249,8 +252,19 @@ impl Ui {
     /// UI commands arriving in a transaction.
     pub(crate) fn command(&mut self, id: NodeId, cmd: &Command<'_>) {
         match cmd {
-            Command::Focus => self.set_focus(Some(id)),
+            // At once if the traps allow it now (a text insert may
+            // follow); else judged against the traps the transaction
+            // leaves (`settle_traps`). Either way it beats a restore.
+            Command::Focus => {
+                self.traps.request = Some(id);
+                if !self.blocked(id) {
+                    self.set_focus(Some(id));
+                }
+            }
             Command::Blur => {
+                if self.traps.request == Some(id) {
+                    self.traps.request = None;
+                }
                 if self.focus == Some(id) {
                     self.set_focus(None);
                 }
@@ -322,6 +336,7 @@ impl Ui {
             return;
         }
         match request.action {
+            Action::Focus if self.blocked(id) => {}
             Action::Focus => self.set_focus(Some(id)),
             Action::Blur => {
                 if self.focus == Some(id) {

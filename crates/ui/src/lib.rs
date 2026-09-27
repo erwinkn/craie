@@ -43,6 +43,9 @@ mod states_tests;
 pub mod surface;
 #[cfg(test)]
 mod tests;
+mod trap;
+#[cfg(test)]
+mod trap_tests;
 pub mod ui;
 pub mod vector;
 pub mod wire;

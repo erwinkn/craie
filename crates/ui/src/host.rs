@@ -102,6 +102,9 @@ impl NodeFlags {
     /// A layer container: never a hit target itself (`box-none`), and
     /// never sorts below the sibling that holds its owner.
     pub const LAYER: NodeFlags = NodeFlags(1 << 6);
+    /// Inert (`interaction_flag::INERT`): no hit testing, focus or
+    /// accessibility for it and its subtree (`trap.rs`).
+    pub const INERT: NodeFlags = NodeFlags(1 << 7);
 
     pub fn contains(self, other: NodeFlags) -> bool {
         self.0 & other.0 != 0
@@ -225,6 +228,8 @@ pub struct Interaction {
     pub selectable: bool,
     /// Press flags (`mutation::press`).
     pub press: u8,
+    /// A trap's first pick for focus (`trap.rs`).
+    pub auto_focus: bool,
     pub role: Role,
     /// States reported while clear (`mutation::reported`).
     pub reported: u8,

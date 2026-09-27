@@ -2,8 +2,8 @@
 // Rust decoder must accept. Regenerate after wire format changes:
 //   bun packages/bridge/scripts/gen-fixture.ts
 import {
-  CHORD_FLAG, CLAIM_KIND, CURRENT, ENV_BIT, EVENT_MASK, Encoder, FIT, NIL, PRESS_FLAG, REPORTED, ROLE, STATE_BIT, SUBMIT_KEY, SURFACE,
-  parseChord, transformMatrix,
+  CHORD_FLAG, CLAIM_KIND, CURRENT, ENV_BIT, EVENT_MASK, Encoder, FIT, INTERACTION, NIL, PRESS_FLAG, REPORTED, ROLE,
+  STATE_BIT, SUBMIT_KEY, SURFACE, TRAP, parseChord, transformMatrix,
 } from "../src/wire.js"
 
 const enc = new Encoder()
@@ -43,7 +43,7 @@ enc.spatial(0, transformMatrix([{ translateX: 3 }, { scale: 2 }]), 0.75, -2)
 enc.paint(0, 0x1122_33ff, 6.5, { color: 0xff00_00ff, width: 2 })
 enc.create(2, 2)                                    // input
 enc.inputConfig(2, 15, "type here", true, SUBMIT_KEY["mod+enter"])
-enc.interaction(2, 0x7ff, true)                     // all listeners, focusable
+enc.interaction(2, 0x7ff, INTERACTION.focusable | INTERACTION.autoFocus) // all listeners
 enc.role(2, ROLE.multilineTextInput)
 enc.create(3, 3)                                    // surface
 enc.surface(3, SURFACE.bars, [0x6dc7_c8ff, 0x6dc7_ffff, 0, 0])
@@ -89,8 +89,8 @@ enc.animate(0, "backgroundColor", [0xff00_00ff], { duration: 300, easing: [0.1, 
 enc.animate(0, "gap", [4, 6], { spring: {}, delay: 20 })
 enc.states(0, (1n << BigInt(STATE_BIT.selected)) | 1n) // state styles
 enc.role(0, ROLE.switch, REPORTED.expanded | REPORTED.selected)
-enc.interaction(0, EVENT_MASK.press | EVENT_MASK.activate, false, false,
-  PRESS_FLAG.pressable | PRESS_FLAG.keepFocus)       // a pressable keeping focus
+enc.interaction(0, EVENT_MASK.press | EVENT_MASK.activate,  // a pressable keeping focus
+  (PRESS_FLAG.pressable | PRESS_FLAG.keepFocus) << INTERACTION.pressShift)
 enc.variants(5, [                                  // on the row, scoped by the root
   { terms: [{ scope: 0, mask: 1n << BigInt(STATE_BIT.selected) }], env: 0, values: { fill: 0x2d32_40ff, color: 0xffff_ffff } },
   {
@@ -131,7 +131,7 @@ enc.payload(6, asset)
 enc.place(0, 6, NIL)
 enc.create(7, 0)                                    // a layer container
 enc.layer(7, 6)                                     // owned from the vector
-enc.role(7, ROLE.radiogroup)                        // the last role
+enc.role(7, ROLE.alertdialog)                       // the last role
 enc.spatial(7, undefined, undefined, 50)            // z alone
 enc.place(NIL, 7, NIL)
 // A runtime drawing: a dashed arc path and an even-odd polygon filled
@@ -147,6 +147,8 @@ enc.drawing(8, "0 0 24 24", [
   { ...shape, kind: 2, geometry: "4,4 20,4 12,20", transform: "rotate(90 12 12)", dashes: "", fill: 0xffff_ff80, current: CURRENT.fill, fillRule: 1, stroke: 0, opacity: 0.5 },
 ])
 enc.place(0, 8, NIL)
+enc.interaction(8, 0, INTERACTION.inert)
+enc.trap(7, TRAP.active | TRAP.modal | TRAP.autoFocus | TRAP.restoreFocus) // a modal layer
 // An image node: encoded bytes (native decodes them later, off the UI
 // thread: any bytes are accepted here) and its fit.
 enc.create(9, 7)                                    // image

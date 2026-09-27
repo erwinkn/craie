@@ -17,7 +17,9 @@ use crate::animation::{Prop, Value};
 use crate::claims::{Claim, claim_kind};
 use crate::host::{Host, MAX_NODES, NodeId};
 use crate::list::{IdIndex, MAX_ITEMS};
-use crate::mutation::{Command, ItemDesc, Mutation, NIL, NodeKind, TextSpan, Transaction};
+use crate::mutation::{
+    Command, ItemDesc, Mutation, NIL, NodeKind, TextSpan, Transaction, interaction_flag,
+};
 use crate::states::{env_bit, state_bit, value_field};
 use crate::ui::Ui;
 use crate::wire::WireError;
@@ -401,7 +403,8 @@ pub fn validate(host: &Host, txn: &Transaction<'_>) -> Result<Validated, WireErr
             }
             Mutation::Role { id, .. }
             | Mutation::Label { id, .. }
-            | Mutation::Interaction { id, .. } => {
+            | Mutation::Interaction { id, .. }
+            | Mutation::Trap { id, .. } => {
                 need_live(&o, *id, "semantics on an absent node")?;
             }
             Mutation::Claims { id, claims, .. } => {
@@ -651,10 +654,16 @@ impl Ui {
     /// nothing changes.
     pub fn execute(&mut self, txn: &Transaction<'_>) -> Result<(), WireError> {
         let mut done = validate(&self.host, txn)?;
+        self.begin_traps();
         for (step, m) in txn.mutations.iter().enumerate() {
             self.apply_mutation(txn, step, m, &mut done);
         }
         self.seq = txn.seq;
+        self.restyle();
+        self.settle_traps();
+        self.cancel_blocked_presses();
+        // The focus and the presses settling moved (a key compare when
+        // none did).
         self.restyle();
         Ok(())
     }
@@ -700,12 +709,15 @@ impl Ui {
                 self.end_animations_of(node, crate::animation::end_reason::REMOVED);
                 self.unhover(node);
                 self.unpress(node);
+                self.focus_leaves(node);
+                self.set_inert(node, false);
+                if self.traps.declared.remove(id).is_some() {
+                    self.traps.dirty = true;
+                }
                 self.host.remove(node);
                 self.forget_node_state(node);
-                for slot in [&mut self.focus, &mut self.pressed] {
-                    if *slot == Some(node) {
-                        *slot = None;
-                    }
+                if self.pressed == Some(node) {
+                    self.pressed = None;
                 }
                 self.pending_scrolls.retain(|(n, _, _)| *n != node);
             }
@@ -921,25 +933,44 @@ impl Ui {
             Mutation::Interaction {
                 id,
                 listeners,
-                focusable,
-                selectable,
-                press,
+                flags,
             } => {
                 let hovers = self.host.hover_listeners;
                 let i = self.host.interaction[*id as usize];
+                let focusable = flags & interaction_flag::FOCUSABLE != 0;
+                let selectable = flags & interaction_flag::SELECTABLE != 0;
+                let auto_focus = flags & interaction_flag::AUTO_FOCUS != 0;
+                let press = flags >> interaction_flag::PRESS_SHIFT;
+                let inert = self.set_inert(NodeId(*id), flags & interaction_flag::INERT != 0);
+                if auto_focus && !i.auto_focus && !self.traps.stack.is_empty() {
+                    // It may take the focus of the trap it mounts into.
+                    self.traps.auto_focused.push(NodeId(*id));
+                }
                 if i.listeners != *listeners
-                    || i.focusable != *focusable
-                    || i.selectable != *selectable
-                    || i.press != *press
+                    || i.focusable != focusable
+                    || i.selectable != selectable
+                    || i.press != press
+                    || i.auto_focus != auto_focus
+                    || inert
                 {
                     let i = &mut self.host.interaction[*id as usize];
-                    i.focusable = *focusable;
-                    i.selectable = *selectable;
-                    i.press = *press;
+                    i.focusable = focusable;
+                    i.selectable = selectable;
+                    i.press = press;
+                    i.auto_focus = auto_focus;
                     self.host.set_listeners(*id as usize, *listeners);
                     // A new hover listener: the hover at rest may be
                     // stale (it was not tracked without one).
                     self.hover_stale |= self.host.hover_listeners > hovers;
+                    self.host.revs.semantic.bump();
+                    self.host.dirty.semantic.push(*id);
+                }
+            }
+            Mutation::Trap { id, flags } => {
+                // Takes effect at the end of the transaction
+                // (`settle_traps`).
+                if self.traps.declared.insert(*id, *flags) != Some(*flags) {
+                    self.traps.dirty = true;
                     self.host.revs.semantic.bump();
                     self.host.dirty.semantic.push(*id);
                 }
@@ -1072,7 +1103,7 @@ impl Ui {
     /// capture), with no click on release. Focus stays: a node that
     /// moves keeps it, and its scopes' bits follow it when it is placed
     /// again.
-    fn unpress(&mut self, node: NodeId) {
+    pub(crate) fn unpress(&mut self, node: NodeId) {
         if let Some(p) = self.pressed
             && self.ancestors(p).any(|n| n == node)
         {

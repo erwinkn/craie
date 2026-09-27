@@ -620,8 +620,8 @@ fn a_pressable_span_presses_its_text() {
     assert_eq!(e.last().unwrap().revision, pressed);
 }
 
-/// The press flags and the span flag round-trip; the flag bits no one
-/// owns yet are rejected.
+/// The press flags and the span flag round-trip; the flag bit no one
+/// owns yet (7; 2 and 3 are the traps') is rejected.
 #[test]
 fn press_flags_round_trip() {
     let mut t = Transaction::new(1);
@@ -663,7 +663,7 @@ fn press_flags_round_trip() {
         .windows(9)
         .position(|w| w[0] == wire::op::INTERACTION && w[1..5] == 0u32.to_le_bytes())
         .expect("the interaction op");
-    for bad in [1u8 << 7, 1 << 2, 1 << 3] {
+    for bad in [1u8 << 7, 0xff] {
         let mut b = buf.clone();
         b[i + 9] = bad;
         assert!(

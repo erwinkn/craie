@@ -36,6 +36,7 @@ import {
   type ImageErrorEvt,
   type ImageLoadEvt,
   type KeyClaim,
+  type OwnerRef,
   type ScopeChain,
   type ScopeRef,
   type SurfaceParam,
@@ -45,6 +46,7 @@ import { flattenShapes, type ShapeProps } from "./shapes.js"
 import {
   EVENT_KIND,
   SURFACE,
+  TRAP,
   type AccessibilityRole,
   type AnimProp,
   type AnimationEnd,
@@ -212,6 +214,11 @@ export interface ListenerProps {
   /** Claims context-menu requests: a secondary press here, or the
    * ContextMenu key or Shift+F10 with focus inside. */
   onContextMenu?: (e: ContextMenuEvt) => void
+  /** No hover, press, focus or accessibility for this node and its
+   * subtree, as the web's `inert`: a press falls through to what is
+   * below. Layers opened inside escape it, as portals do. A focus
+   * inside moves out (to the enclosing trap's target, else nowhere). */
+  inert?: boolean
 }
 
 /** What a variant overrides. */
@@ -279,11 +286,19 @@ export interface ViewProps extends ListenerProps, StateProps, Variants {
   borderWidth?: number
   /** Participates in Tab traversal. */
   focusable?: boolean
+  /** The node an enclosing FocusTrap focuses when it activates (the
+   * first one in Tab order), or when it mounts into an active trap that
+   * does not hold the focus (a wizard step loading in). Outside a trap,
+   * or with the focus already inside, mounting does not focus it
+   * (LEDGER DF-48). */
+  autoFocus?: boolean
   /** Accessibility name announced by assistive technology. */
   accessibilityLabel?: string
   /** Accessibility role; a plain View has none, a Pressable is a
    * `button`. The check roles (`checkbox`, `switch`, `radio`) report
-   * `checked`; a `radiogroup` holds radios. Assistive technology is
+   * `checked`; a `radiogroup` holds radios. A `dialog` or
+   * `alertdialog` in an active modal `FocusTrap` is announced as modal.
+   * Assistive technology is
    * offered a click on enabled Pressables only, whatever their role. */
   accessibilityRole?: AccessibilityRole
   /** Sends `display: none`. */
@@ -367,6 +382,8 @@ export interface TextInputProps extends ListenerProps, Omit<StateProps, "disable
   placeholder?: string
   multiline?: boolean
   focusable?: boolean
+  /** The input an enclosing FocusTrap focuses when it activates. */
+  autoFocus?: boolean
   /** Accessibility name announced by assistive technology. */
   accessibilityLabel?: string
   /** Initial text. Inputs are uncontrolled: later `value` changes are
@@ -680,8 +697,13 @@ export function ScrollView(props: ScrollViewProps) {
   }, !!props.group)
 }
 
-/** The layer a subtree renders in (null: the app itself). */
-const LayerOwner = createContext<HostNode | null>(null)
+/** Where a subtree renders: the layer (null: the app itself), and
+ * what owns the layers opened in it: the nearest FocusTrap's node, else
+ * that layer's container (DF-19). */
+const LayerOwner = createContext<{ layer: HostNode | null; owner: OwnerRef | null }>({
+  layer: null,
+  owner: null,
+})
 
 export interface LayerProps {
   /** Order among layers (kit tokens: dropdown 50, modal 70, toast 80...). */
@@ -702,9 +724,10 @@ export interface LayerProps {
  * keys inside read scopes inside the layer only. */
 export function Layer({ z = 0, children }: LayerProps) {
   const host = useContext(HostContext)
-  const owner = useContext(LayerOwner)
+  const outer = useContext(LayerOwner)
   if (!host) throw Error("Layer outside a Craie root")
-  const [container] = useState(() => host.layer(owner, z))
+  const [container] = useState(() => host.layer(outer.layer, outer.owner, z))
+  const [within] = useState(() => ({ layer: container, owner: { node: container } }))
   useLayoutEffect(() => {
     const old = container.props
     if (old.style.zIndex === z) return
@@ -713,8 +736,68 @@ export function Layer({ z = 0, children }: LayerProps) {
     else container.props = props
   }, [z])
   return reconciler.createPortal(
-    createElement(LayerOwner.Provider, { value: container }, unscoped(children)),
+    createElement(LayerOwner.Provider, { value: within }, unscoped(children)),
     container, null, null,
+  )
+}
+
+export interface FocusTrapProps {
+  /** Tab and Shift+Tab cycle inside while true (default true); turning
+   * it off deactivates the trap, as unmounting does. */
+  active?: boolean
+  /** Everything outside the trap and the layers opened inside it is
+   * inert while active: no hover, press, focus or accessibility. A
+   * press outside keeps the focus. (default false) */
+  modal?: boolean
+  /** Activating focuses the `autoFocus` node inside, else the first
+   * focusable, unless focus is inside already (default true). */
+  autoFocus?: boolean
+  /** Deactivating returns focus to the node that had it on activation,
+   * if it is still there, focusable and not inert (default true). */
+  restoreFocus?: boolean
+  /** The trap is a View: a layout box around its children. */
+  style?: StyleProps
+  children?: ReactNode
+}
+
+/** Keeps keyboard focus inside `children` while active: a dialog, a
+ * menu, a sheet. Layers opened inside (a menu from the dialog) belong
+ * to it: Tab reaches their focusables right after the trap's own, and
+ * `modal` leaves them live. Escape is the kit's (a `keymap`).
+ *
+ *   <Pressable onPress={() => setOpen(true)}>Delete…</Pressable>
+ *   {open && (
+ *     <Layer z={70}>
+ *       <FocusTrap modal>   // focuses Delete; closing returns to "Delete…"
+ *         <View accessibilityRole="dialog">
+ *           <Pressable onPress={close}>Cancel</Pressable>
+ *           <Pressable autoFocus onPress={remove}>Delete</Pressable>
+ *           <MoreButton />   // its <Layer z={50}> menu is inside the trap
+ *         </View>
+ *       </FocusTrap>
+ *     </Layer>
+ *   )}
+ *
+ * Traps nest: Tab cycles in the innermost active one holding the focus,
+ * and the most recently activated modal wins (an inner modal makes the
+ * outer one's content inert too). */
+export function FocusTrap({
+  active = true,
+  modal = false,
+  autoFocus = true,
+  restoreFocus = true,
+  style,
+  children,
+}: FocusTrapProps) {
+  const outer = useContext(LayerOwner)
+  const [owner] = useState<OwnerRef>(() => ({ node: null }))
+  const within = useMemo(() => ({ layer: outer.layer, owner }), [outer.layer, owner])
+  const flags = (active ? TRAP.active : 0) | (modal ? TRAP.modal : 0) |
+    (autoFocus ? TRAP.autoFocus : 0) | (restoreFocus ? TRAP.restoreFocus : 0)
+  return createElement(
+    "view",
+    { style, __trap: flags, __owner: owner },
+    createElement(LayerOwner.Provider, { value: within }, children),
   )
 }
 

@@ -297,19 +297,23 @@ Reviewer minors and nitpicks not fixed yet.
 - Why deferred: both need an isolated layer per group or shape.
 - Resolves in: group layers (DF-6).
 
-### DF-17: Tab and accessibility reach layers after the app
+### DF-17: accessibility reads layers after the app
 
 - Source: sibling z and layers (work item 4) implementation (own
   finding).
-- Where: crates/ui/src/dispatch.rs (`focusables`), crates/ui/src/a11y.rs.
+- Where: crates/ui/src/a11y.rs.
 - Claim: a layer container is a root-level node after the app's roots,
-  and Tab and the accessibility tree keep tree order. So Tab reaches a
-  menu opened from a toolbar button only after every focusable node of
-  the app, and a screen reader reads layers last, in open order.
-- Why deferred: where focus goes into and out of a layer is work item
-  3's (focus traps, `modal`, owners' scopes); reading a layer next to
-  its owner is the accessibility pass's (topic 13).
-- Resolves in: work item 3, then topic 13.
+  and the accessibility tree keeps tree order. So a screen reader reads
+  a menu opened from a toolbar button after the whole app, in open
+  order, not next to the button.
+- Partly resolved (work item 3, focus traps): Tab follows owners. An
+  owned layer's focusables come right after its owner's subtree
+  (`trap.rs`, `tab_order`), traps and `modal` include the layers they
+  own, and a modal leaves only its scope in the accessibility tree.
+- Why deferred: reading a layer next to its owner is the accessibility
+  pass's (topic 13): AccessKit children would have to leave tree order,
+  or the owner point at the layer (`aria-owns`, `controls`).
+- Resolves in: topic 13.
 
 ### DF-18: a z change walks the whole tree for the draw order
 
@@ -326,22 +330,6 @@ Reviewer minors and nitpicks not fixed yet.
 - Resolves in: an incremental draw-order patch for structure changes,
   if reordering or inserting in large trees shows up in a frame
   profile (it would serve inserts and moves too).
-
-### DF-19: layers owned coarsely
-
-- Source: sibling z and layers (work item 4) implementation (own
-  finding).
-- Where: packages/bridge/src/index.ts (`Layer`).
-- Claim: a `Layer`'s owner is the enclosing `Layer`'s container, and a
-  top-level `Layer` has none. So an unowned layer with a negative z
-  sorts under the app (the kit's layer tokens are all positive), and
-  owners know nothing finer than a layer (a trap inside it). The other
-  way round, a top-level `Layer` defaults to z 0: an app root with a
-  positive `zIndex` covers every unowned layer.
-- Why deferred: the native op takes any node as owner; finding a finer
-  one (the trap, or the host node that opened the layer) is work item
-  3's, with focus traps.
-- Resolves in: work item 3.
 
 ### DF-21: a variant's transform replaces the whole matrix
 
@@ -724,7 +712,44 @@ Reviewer minors and nitpicks not fixed yet.
 - Resolves in: when a screen puts a link in ticking text; the paragraph
   op would then carry span owners, and only an owner change would cancel.
 
+### DF-47: a `FocusTrap` is a layout box
+
+- Source: work item 3 (focus traps) implementation (own finding).
+- Where: packages/bridge/src/index.ts (`FocusTrap`).
+- Claim: the trap is a View, so it takes part in layout: in a row, its
+  children lay out in the trap's box, not in the row. The web kit's
+  trap adds no box.
+- Why deferred: Craie's layout has no `display: contents`. The trap
+  takes a `style` meanwhile.
+- Resolves in: `display: contents` in the owned layout engine, or the
+  trap op on the first child (one child only).
+
+### DF-48: `autoFocus` does not focus on mount, outside a trap or inside one holding the focus
+
+- Source: work item 3 (focus traps) implementation (own finding),
+  widened by review of #18 (PR18-06).
+- Where: crates/ui/src/trap.rs, packages/bridge/src/index.ts
+  (`autoFocus`).
+- Claim: `autoFocus` marks what a trap focuses when it activates, and
+  a node mounting into an active trap takes the focus only when the
+  focus is outside that trap. A `TextInput autoFocus` in a page with
+  no trap is not focused when it mounts, as React Native's would be;
+  nor is wizard step 2's field while focus sits on the dialog's Back
+  button, where React's `autoFocus` would move it.
+- Why deferred: out of the traps' scope; the kit calls `focus()` from
+  an effect meanwhile.
+- Resolves in: focus on mount for any `AUTO_FOCUS` node (the settle
+  pass already sees each one mount), if the kit needs it.
+
 ## Closed
+
+- DF-19 (work item 3, focus traps): layers owned coarsely. A `Layer`
+  opened inside a `FocusTrap` is owned by the trap's node, found through
+  React context, else by the enclosing layer's container; a trap's
+  scope, `modal` exemption and Tab position follow owners. Still true
+  and accepted: a top-level `Layer` has no owner, so one with a
+  negative z sorts under the app, and one at z 0 goes under an app root
+  with a positive `zIndex` (the kit's layer tokens are all positive).
 
 - DF-8 (2026-09-24, same day): `native_reflow_publishes_after_the_frame`
   failed; I first recorded it as caused by the machine (the display had
@@ -1016,3 +1041,12 @@ Reviewer minors and nitpicks not fixed yet.
 - PR17-10 (press review, nits): `onPressIn` and `onPressOut` are primary-button only, where the kit's web `onPointerDown`/`onPointerUp` hear any: their JSDoc says so.
 - PR17-11 (press review, nits): a root `<Text onPress>` read as static text: it defaults to role `link` (a given role wins); the bun case checks both and the return to `text`.
 - PR17-12 (press review, nits): a lone `onPressIn` or `onPressOut` made a Text pressable, swallowing its row's presses: only `onPress` does now, and the JSDoc says a Text's press-in and out need it; a bun case checks such a Text sends no press flags or pressable spans.
+- PR18-01 (traps review, M1): a `focus()` sealed with the trap op (a layout effect's) became the restore target, so closing the dialog lost the focus: the focus is saved when the transaction begins, and `a_focus_while_opening_keeps_the_restore` checks closing returns to "Delete…".
+- PR18-02 (traps review, M2): a Suspense-hidden modal stayed active (the app gated, Tab in the hidden dialog, the accessibility tree empty): a trap under `display: none` or `inert` is inactive, restores on hiding and activates and auto-focuses again when shown, as the web remounts; `a_hidden_trap_is_inactive` goes both ways.
+- PR18-03 (traps review, m1): a Focus command was judged against the gate before the traps settled: one the traps allow applies at once (a text insert may follow), one they block is judged at the settle, and either beats a restore; `focus_commands_see_the_settled_traps` focuses into a modal opening with it and out of one closing with it.
+- PR18-04 (traps review, m2): closing the menu and the dialog together sent blur 21, focus 14, blur 14, focus 1: the settle picks the final target (restore, command, auto-focus, mount, O1, each overriding the one before) and moves focus once; `closing_traps_together_moves_focus_once` checks the events, and a dialog closing as another opens goes straight to the new one, which inherits the old one's restore.
+- PR18-05 (traps review, m3): a dialog toggled off and on went above its open menu modal, making its content live under the menu: a trap activating goes below the active traps inside it (`an_inner_modal_stays_on_top`).
+- PR18-06 (traps review, m4): the comments now match DF-48, which is widened; an `autoFocus` node mounting into an active trap the focus is outside of now takes it (a wizard step loading in; `auto_focus_on_mount_into_a_trap`).
+- PR18-07 (traps review, m5): tests for the gate following a layer opened and unowned later, a path node not hit (an inline modal), Shift+Tab from nothing, the accessibility tree after closing, and a bridge Layer opening in a later commit than its trap; restore order and the new rules each fail a test when mutated. Two are not tested: auto-focus order is equivalent either way (an outer trap's target inside an inner trap is the inner trap's target too), and the path node's inert check in the accessibility tree is removed, unreachable now that a hidden or inert trap is inactive.
+- PR18-08 (traps review, nits): `reported`'s doc comment is back on it; the modal flag goes on the trap's first `dialog` or `alertdialog` (roles 17 and 18, new in protocol 8), else the trap; the gate reuses its buffers and the focus chain its Vec; Tab walks a hidden or inert subtree only down to owners of layers; the Built cost bullet has the deep-walk row.
+- PR18-09 (lead, rebase on #17): protocol 8, DF-47 and DF-48 after #17's DF-42 to DF-46, and a press on a node turning inert or falling outside a new modal cancels with #17's `PRESS` cancel, Space's press too (`a_blocked_node_loses_its_press`), where this branch had filed it as a DF.
