@@ -40,7 +40,7 @@ static MAIN_THREAD: OnceLock<std::thread::ThreadId> = OnceLock::new();
 fn is_main_thread() -> bool {
     #[cfg(target_os = "macos")]
     unsafe {
-        return libc::pthread_main_np() != 0;
+        libc::pthread_main_np() != 0
     }
     #[cfg(not(target_os = "macos"))]
     {

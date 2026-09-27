@@ -11,3 +11,5 @@ craie-core.workspace = true
 bytemuck.workspace = true
 etagere.workspace = true
 
+[lints]
+workspace = true

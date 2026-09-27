@@ -409,10 +409,10 @@ impl Scene {
                     }
                     let mut b = self.chunk_world_bounds(id);
                     let clip = self.placements[id as usize].clip;
-                    if clip != NONE {
-                        if let Some(c) = clip_bounds[clip as usize] {
-                            b = b.intersect(&c);
-                        }
+                    if clip != NONE
+                        && let Some(c) = clip_bounds[clip as usize]
+                    {
+                        b = b.intersect(&c);
                     }
                     if !b.intersects(&screen) {
                         continue;

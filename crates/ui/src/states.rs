@@ -178,6 +178,9 @@ impl Default for Values {
 
 impl Values {
     /// In range: finite, opacity in [0, 1], known bits.
+    // `value_field::ALL` fills the `u8` today, so its check is always
+    // true; it stays for when the mask widens.
+    #[allow(clippy::bad_bit_mask)]
     pub fn valid(&self) -> bool {
         self.mask & !value_field::ALL == 0
             && self.layout_keys & !layout_key::ALL == 0

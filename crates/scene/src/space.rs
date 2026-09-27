@@ -73,7 +73,7 @@ impl Transforms {
         // A NaN world never equals a derived one: the first `derive`
         // writes and uploads the row even when it is the identity.
         let unset = Affine([f32::NAN; 6]);
-        let id = if let Some(id) = self.free.pop() {
+        if let Some(id) = self.free.pop() {
             self.records[id as usize] = rec;
             self.live[id as usize] = true;
             self.world[id as usize] = unset;
@@ -85,8 +85,7 @@ impl Transforms {
             self.snap_world.push(true);
             self.gpu.push(WorldGpu::default());
             (self.records.len() - 1) as u32
-        };
-        id
+        }
     }
 
     /// Sets whether chunks in this space snap to the pixel grid.

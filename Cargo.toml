@@ -69,6 +69,13 @@ bytemuck = { version = "=1.25.2", features = ["derive"] }
 pollster = "=1.0.1"
 tracing = "=0.1.44"
 
+# Clippy runs in CI with `-D warnings`. Allowed lints, one reason each:
+[workspace.lints.clippy]
+# `!(x > 0.0)` is the deliberate NaN-rejecting check; `partial_cmp` hides it.
+neg_cmp_op_on_partial_ord = "allow"
+# Tests build taffy styles field by field, with comments between fields.
+field_reassign_with_default = "allow"
+
 [profile.dev]
 # Debug text shaping is painful; keep deps fast even in dev builds.
 opt-level = 1

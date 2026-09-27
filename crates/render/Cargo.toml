@@ -16,3 +16,6 @@ pollster.workspace = true
 
 [dev-dependencies]
 craie-vector.workspace = true
+
+[lints]
+workspace = true

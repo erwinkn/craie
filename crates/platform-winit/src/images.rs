@@ -435,6 +435,8 @@ fn bleed(rgba: &mut [u8], w: usize, h: usize) {
                     }
                 }
             }
+            // One check guards all three divisions.
+            #[allow(clippy::manual_checked_ops)]
             if n > 0 {
                 for c in 0..3 {
                     rgba[i + c] = (sum[c] / n) as u8;
@@ -679,7 +681,7 @@ mod tests {
     #[test]
     fn a_truncated_file_fails_its_decode() {
         let png = test_png(64, 64, |x, y| {
-            Rgba([(x * 37 ^ y * 91) as u8, x as u8, y as u8, 255])
+            Rgba([((x * 37) ^ (y * 91)) as u8, x as u8, y as u8, 255])
         });
         let cut = &png[..png.len() / 2];
         assert!(matches!(

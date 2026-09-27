@@ -1052,7 +1052,7 @@ mod drawing_tests {
                 MAX_SHAPES
             ],
         };
-        assert!(MAX_SHAPES * 2048 > MAX_BYTES);
+        const { assert!(MAX_SHAPES * 2048 > MAX_BYTES) };
         let buf = {
             let mut t = Transaction::new(seq + 1);
             t.drawing(1, long.clone());
