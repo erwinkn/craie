@@ -91,7 +91,7 @@ fn js_fixture_decodes_and_executes() {
         (r.press, r.focusable),
         (press::PRESSABLE | press::KEEP_FOCUS, false)
     );
-    assert_eq!(host.interaction(NodeId(7)).role, Role::RadioGroup);
+    assert_eq!(host.interaction(NodeId(7)).role, Role::AlertDialog);
     // `setText` leaves the caret at the start, so the insert lands first.
     assert_eq!(ui.inputs.text(2), "!seed");
     assert_eq!(ui.inputs.get(2).unwrap().submit, SubmitKey::ModEnter);

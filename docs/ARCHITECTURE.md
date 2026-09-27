@@ -1162,7 +1162,8 @@ Roles come from the explicit role field; the facade sets defaults
 View has none. States come from a scope's bits: the check roles report
 `checked`, and `expanded` and `selected` appear where the facade says
 the prop was given, `selected` on list rows only (ARCHITECTURE-update
-§13). A list row reports its position among all items and the item
+§13). Under an active modal trap, AccessKit's `modal` goes on the
+trap's first `dialog` or `alertdialog` node, else on the trap. A list row reports its position among all items and the item
 count; rows appear in item order, and rows layout hides are not
 published.
 Bounds are transform-aware. The whole tree still republishes on any
@@ -1269,8 +1270,8 @@ Payload ops copy typed-array bytes once. Protocol version 8 (36-byte
 event records and claims since 4; inherited color in drawings and
 inputs since 5; the `switch`, `radio` and `radiogroup` roles and the
 ROLE op's reported states since 6; press flags, pressable spans, and
-`PRESS`/`ACTIVATE` since 7; focus traps, inert and auto-focus since
-8). The session hands JS its output in native
+`PRESS`/`ACTIVATE` since 7; focus traps, inert, auto-focus and the
+`dialog` and `alertdialog` roles since 8). The session hands JS its output in native
 order: acks sit between event frames where they happened, so the ack
 of a transaction never overtakes an event raised before it applied,
 and the facade retires a claim set's old handlers on that ack.

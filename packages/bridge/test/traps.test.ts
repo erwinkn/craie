@@ -91,3 +91,26 @@ test("a layer's owner is the nearest FocusTrap, else the enclosing layer", async
   const at = (tag: number, id: number) => ops.findIndex(o => o.tag === tag && o.id === id)
   expect(at(LAYER, parentOf(labelled(ops, "menu")))).toBeGreaterThan(at(CREATE, trap))
 })
+
+// A menu opened in a later commit than its FocusTrap still finds it
+// through context.
+test("a layer opened after its FocusTrap is owned by it", async () => {
+  const t = new FakeTransport()
+  let open!: () => void
+  function Dialog() {
+    const [menu, setMenu] = useState(false)
+    open = () => setMenu(true)
+    return createElement(FocusTrap, { modal: true },
+      createElement(View, { focusable: true },
+        menu && createElement(Layer, { z: 50 }, createElement(View, { accessibilityLabel: "menu" }))))
+  }
+  createRoot(t).renderSync(createElement(Layer, { z: 70 }, createElement(Dialog)))
+  await tick()
+  const trap = t.all().find(o => o.tag === TRAP_OP)!.id
+  t.frames.length = 0
+  open()
+  await settle(t.sent)
+  const ops = t.all()
+  const container = ops.find(o => o.tag === PLACE && o.id === labelled(ops, "menu"))!.f[0]
+  expect(ops.find(o => o.tag === LAYER && o.id === container)!.f[0]).toBe(trap)
+})

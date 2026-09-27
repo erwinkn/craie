@@ -662,6 +662,9 @@ impl Ui {
         self.restyle();
         self.settle_traps();
         self.cancel_blocked_presses();
+        // The focus and the presses settling moved (a key compare when
+        // none did).
+        self.restyle();
         Ok(())
     }
 
@@ -939,6 +942,10 @@ impl Ui {
                 let auto_focus = flags & interaction_flag::AUTO_FOCUS != 0;
                 let press = flags >> interaction_flag::PRESS_SHIFT;
                 let inert = self.set_inert(NodeId(*id), flags & interaction_flag::INERT != 0);
+                if auto_focus && !i.auto_focus && !self.traps.stack.is_empty() {
+                    // It may take the focus of the trap it mounts into.
+                    self.traps.auto_focused.push(NodeId(*id));
+                }
                 if i.listeners != *listeners
                     || i.focusable != focusable
                     || i.selectable != selectable

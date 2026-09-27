@@ -99,6 +99,8 @@ pub enum Role {
     Switch = 14,
     RadioButton = 15,
     RadioGroup = 16,
+    Dialog = 17,
+    AlertDialog = 18,
 }
 
 impl Role {
@@ -121,6 +123,8 @@ impl Role {
             14 => Role::Switch,
             15 => Role::RadioButton,
             16 => Role::RadioGroup,
+            17 => Role::Dialog,
+            18 => Role::AlertDialog,
             _ => return None,
         })
     }
@@ -148,7 +152,9 @@ pub mod interaction_flag {
     /// No hit testing, focus or accessibility for the node and its
     /// subtree (layers it owns excepted).
     pub const INERT: u8 = 1 << 2;
-    /// The node a trap focuses when it activates.
+    /// The node a trap focuses when it activates, or when the node
+    /// mounts into an active trap the focus is outside of. Nothing
+    /// outside traps (LEDGER DF-48).
     pub const AUTO_FOCUS: u8 = 1 << 3;
     /// Bits 4 to 6: the press flags (`press`), shifted.
     pub const PRESS_SHIFT: u8 = 4;

@@ -326,23 +326,48 @@ items when it is open. The app stops answering the pointer, Tab and
 assistive technology. Closing returns focus to "Delete…".
 
 - **Encoding** (protocol 8). Interaction flag bits 2 (`INERT`) and 3
-  (`AUTO_FOCUS`), next to #17's press bits 4 to 6; op 0x62 `TRAP` (`id u32 | flags u8`: `ACTIVE`,
-  `MODAL`, `AUTO_FOCUS`, `RESTORE_FOCUS`). 0x63 stays free. The facade's
-  `FocusTrap` is a View carrying the op, so a trap is any node.
+  (`AUTO_FOCUS`), next to #17's press bits 4 to 6; op 0x62 `TRAP`
+  (`id u32 | flags u8`: `ACTIVE`, `MODAL`, `AUTO_FOCUS`,
+  `RESTORE_FOCUS`); roles 17 `dialog` and 18 `alertdialog`. 0x63
+  stays free. The facade's `FocusTrap` is a View carrying the op, so
+  a trap is any node.
 - **Settling.** Trap flags take effect at the end of the transaction
-  (`trap.rs`, `settle_traps`), after the tree is complete. In order:
-  deactivations restore focus; new traps activate and auto-focus; a
-  lost focus moves (O1); the modal gate is rebuilt. Restore needs the
-  saved (id, generation) still live, focusable, shown and not inert;
-  a reused id fails the generation check. Nested traps that activate
+  (`trap.rs`, `settle_traps`), after the tree is complete. Traps
+  deactivate and activate first. Then focus moves once, so one blur
+  and one focus event, to the last of these that applies:
+  1. the outermost deactivating trap's restore target;
+  2. the transaction's `focus()`;
+  3. a new trap's auto-focus target, deepest trap first;
+  4. an `autoFocus` node mounting into an active trap the focus is
+     outside of (a wizard step loading in);
+  5. O1, for a focus that was removed or ends blocked or hidden.
+
+  The modal gate is rebuilt last, on every transaction while a trap
+  is declared. A restore needs the saved (id, generation) still live,
+  focusable, shown and not inert; a reused id fails the generation
+  check. The saved focus is the one when the transaction began, so a
+  `focus()` from the dialog's own layout effect, sealed with it, is
+  not what closing returns to. A trap opening as another closes
+  inherits the closing one's target. Nested traps that activate
   together restore once, through the outer one: closing only the inner
   one keeps focus inside the outer one.
+- **`focus()`.** A Focus command the traps allow applies at once (a
+  text insert may follow it); one they block waits for the settle and
+  is judged against the traps the transaction leaves, so a `focus()`
+  into a modal opening with it, or out of one closing with it, holds.
+  Either way it beats a restore.
+- **Hidden traps.** A trap under `display: none` (Suspense hides this
+  way) or `inert` is inactive: no gate, no Tab scope. Its focus goes
+  back as on a close, and showing it again activates it and
+  auto-focuses, as the web remounts.
 - **Scope.** A trap's scope is its subtree plus the layers it owns, and
   theirs: a root-level layer's scope parent is its owner. Owner cycles
   and owners out of the tree own nothing.
 - **Nesting.** Tab cycles in the innermost active trap holding the
   focus, else in the top modal, else the window. The top modal is the
-  most recently activated. An inner modal (a menu trap in the dialog's
+  innermost active one, else the most recently activated: a trap
+  activating goes below the active traps inside it, so a dialog
+  toggled off and on stays under its open menu modal. An inner modal (a menu trap in the dialog's
   layer, made modal) makes the outer dialog's content inert as well;
   closing it gives the dialog back.
 - **Modal and hit testing.** The top modal defines a gate: its roots
@@ -380,23 +405,29 @@ assistive technology. Closing returns focus to "Delete…".
   Each Tab walks its scope once: O(nodes in scope), plus a pass over
   the root-level children for owned layers, sorted by owner. That is
   E15's "Tab" row, the same order of magnitude as before (it collected
-  every focusable in the window). Shift+Tab with no focus now goes to
+  every focusable in the window). A hidden or inert subtree is walked
+  only down to owners of layers. Shift+Tab with no focus now goes to
   the last focusable.
 - **Accessibility.** Inert subtrees leave the AccessKit tree. Under a
   modal, nodes outside it leave too, and the path nodes above it stay
-  as bare containers. The active modal trap node sets AccessKit's
-  `modal`. Reading a layer next to its owner stays topic 13's (DF-17).
+  as bare containers. An active modal trap sets AccessKit's `modal` on
+  its first `dialog` or `alertdialog` descendant, else on itself (ARIA
+  puts `aria-modal` on the dialog). Reading a layer next to its owner
+  stays topic 13's (DF-17).
 - **Removal.** Removing the focused node sends its blur at once, with
   its generation (it used to clear silently). Escape is not handled:
   that is the kit's (a `keymap`).
-- **Deferred.** The trap is a layout box (DF-47). `autoFocus` outside a
-  trap does nothing on mount (DF-48).
-- **Cost** (E15, exe1, load 15 to 22, no trap open). Hit tests keep 0
-  allocations and stay within noise: at 100k nodes, walk 766 to 1,294
-  µs against 906 to 1,693 before, index 5.8 to 62 µs against 5.5 to
-  52. Tab through 1,000 focusables takes one allocation fewer; at 100k
-  nodes 515 to 746 µs against 455 to 760. With no active trap, Tab
-  skips the scope lookup.
+- **Deferred.** The trap is a layout box (DF-47). `autoFocus` does
+  nothing on mount outside a trap, or inside one already holding the
+  focus (DF-48).
+- **Cost** (E15, exe1, load 12 to 16, no trap open; two runs each of
+  main and this branch, interleaved). Hit tests keep 0 allocations and
+  stay within noise: at 100k nodes, walk 766 to 1,635 µs against 754
+  to 1,540 on main (deep 1,510 and 1,635 against 1,389 and 1,540; an
+  earlier run's 3,300 µs deep walk did not repeat), index 5.5 to 61 µs
+  against 5.5 to 50. Tab through 1,000 focusables takes one allocation
+  fewer; at 100k nodes 585 to 639 µs against 497 to 839. With no
+  active trap, Tab skips the scope lookup.
 
 **Built (work item 3, presses and activation).** Innermost press, one
 activate, keep focus and focus-visible as targeted (traps, groups and

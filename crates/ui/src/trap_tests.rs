@@ -3,7 +3,9 @@
 use crate::events::{Button, Event, Key, KeyInput, Mods, UiEvent, mask, out_kind, press_phase};
 use crate::geom::Size;
 use crate::host::NodeId;
-use crate::mutation::{Command, NodeKind, Transaction, interaction_flag as f, press, trap_flag};
+use crate::mutation::{
+    Command, NodeKind, Role, Transaction, interaction_flag as f, press, trap_flag,
+};
 use crate::ui::Ui;
 
 const NIL: u32 = u32::MAX;
@@ -567,6 +569,28 @@ fn modal_accessibility_tree() {
     assert!(node(13).is_some() && node(21).is_some());
     assert_eq!(node(10).unwrap().children(), [crate::a11y::aid(NodeId(11))]);
     assert_eq!(tree.focus, crate::a11y::aid(NodeId(13)));
+
+    // A `dialog` in the trap carries the flag instead.
+    let mut t = Transaction::new(3);
+    t.role(12, Role::Dialog);
+    apply(&mut ui, &t);
+    let tree = ui.a11y_tree(VIEW);
+    let modal = |id: u32| {
+        tree.nodes
+            .iter()
+            .any(|(a, n)| *a == crate::a11y::aid(NodeId(id)) && n.is_modal())
+    };
+    assert!(modal(12) && !modal(11));
+
+    // Closed: the app is back.
+    close(&mut ui, 4);
+    let tree = ui.a11y_tree(VIEW);
+    let has = |id: u32| {
+        tree.nodes
+            .iter()
+            .any(|(a, _)| *a == crate::a11y::aid(NodeId(id)))
+    };
+    assert!(has(0) && has(1) && has(2));
 }
 
 /// Without traps, Tab walks the app, then each layer: an owned one
@@ -594,4 +618,237 @@ fn tab_order_follows_owners() {
     t.layer(10, 21);
     apply(&mut ui, &t);
     assert_eq!(order(&ui), [1, 2, 12, 13, 14, 21, 22]);
+}
+
+/// M1: a `focus()` in the transaction that opens the dialog (a layout
+/// effect's, sealed with it) does not become the restore target.
+#[test]
+fn a_focus_while_opening_keeps_the_restore() {
+    let mut ui = app();
+    focus(&mut ui, 2, 1);
+    let mut t = Transaction::new(3);
+    layer(&mut t, 10, NIL, 70);
+    view(&mut t, 10, 11, &boxed(0.0, 200.0, 300.0, 100.0));
+    button(&mut t, 11, 12, &boxed(0.0, 0.0, 50.0, 50.0));
+    button(&mut t, 11, 13, &boxed(50.0, 0.0, 50.0, 50.0));
+    t.trap(11, MODAL).command(13, Command::Focus);
+    apply(&mut ui, &t);
+    assert_eq!(focused(&ui), Some(13), "the command, inside");
+    let mut t = Transaction::new(4);
+    for id in [10, 11, 12, 13] {
+        t.remove(id);
+    }
+    apply(&mut ui, &t);
+    assert_eq!(focused(&ui), Some(1));
+}
+
+fn shown(ui: &mut Ui, seq: u64, id: u32, show: bool) {
+    let mut t = Transaction::new(seq);
+    let mut style = boxed(0.0, 200.0, 300.0, 100.0);
+    if !show {
+        style.display = taffy::Display::None;
+    }
+    t.layout(id, &style);
+    apply(ui, &t);
+}
+
+/// M2: a trap hidden (`display: none`, as Suspense hides) is inactive:
+/// the focus goes back, the app is live for the pointer, Tab and
+/// accessibility. Shown again, it activates again and auto-focuses.
+#[test]
+fn a_hidden_trap_is_inactive() {
+    let mut ui = app();
+    focus(&mut ui, 2, 1);
+    open(&mut ui, 3, MODAL, true);
+    assert_eq!(focused(&ui), Some(13));
+    shown(&mut ui, 4, 11, false);
+    assert_eq!(focused(&ui), Some(1), "restored");
+    assert_eq!(hit(&ui, 50.0, 50.0), Some(1));
+    // Tab walks the window, the trap's content hidden (the menu layer
+    // escapes it, as a portal does).
+    assert_eq!(ring(&mut ui, false, 4), [2, 21, 22, 1]);
+    let tree = ui.a11y_tree(VIEW);
+    assert!(
+        tree.nodes
+            .iter()
+            .any(|(a, _)| *a == crate::a11y::aid(NodeId(1)))
+    );
+
+    focus(&mut ui, 5, 2);
+    shown(&mut ui, 6, 11, true);
+    assert_eq!(focused(&ui), Some(13), "auto-focused again");
+    assert_eq!(hit(&ui, 50.0, 50.0), None);
+    close(&mut ui, 7);
+    assert_eq!(focused(&ui), Some(2), "where it was when shown");
+}
+
+/// m1: Focus commands are judged against the traps the transaction
+/// leaves: one into a modal opening with it is kept, one out of a modal
+/// closing with it wins over the restore.
+#[test]
+fn focus_commands_see_the_settled_traps() {
+    let mut ui = app();
+    focus(&mut ui, 2, 1);
+    open(&mut ui, 3, MODAL, true);
+    let mut t = Transaction::new(4);
+    layer(&mut t, 30, NIL, 90);
+    view(&mut t, 30, 31, &fill());
+    button(&mut t, 31, 32, &boxed(300.0, 0.0, 50.0, 50.0));
+    button(&mut t, 31, 33, &boxed(350.0, 0.0, 50.0, 50.0));
+    t.trap(31, MODAL & !trap_flag::AUTO_FOCUS)
+        .command(33, Command::Focus);
+    apply(&mut ui, &t);
+    assert_eq!(focused(&ui), Some(33));
+    let mut t = Transaction::new(5);
+    for id in [30, 31, 32, 33] {
+        t.remove(id);
+    }
+    apply(&mut ui, &t);
+    assert_eq!(focused(&ui), Some(13), "B hands back A's focus");
+
+    focus_events(&mut ui);
+    let mut t = Transaction::new(6);
+    for id in [20, 21, 22, 10, 11, 12, 13, 14] {
+        t.remove(id);
+    }
+    t.command(2, Command::Focus);
+    apply(&mut ui, &t);
+    assert_eq!(focused(&ui), Some(2), "not the restore to 1");
+    let events = focus_events(&mut ui);
+    assert_eq!(events.len(), 2, "{events:?}");
+    assert_eq!((events[0].0, events[0].1), (BLUR, 13));
+    assert_eq!(events[1], (FOCUSED, 2, 0));
+}
+
+/// m2: the focus moves once, to the final target: the menu trap and
+/// the dialog closing together blur 21 and focus 1, the outer restore.
+#[test]
+fn closing_traps_together_moves_focus_once() {
+    let mut ui = app();
+    focus(&mut ui, 2, 1);
+    open(&mut ui, 3, MODAL, true);
+    focus(&mut ui, 4, 14);
+    let mut t = Transaction::new(5);
+    t.trap(20, TRAP);
+    apply(&mut ui, &t);
+    assert_eq!(focused(&ui), Some(21));
+    focus_events(&mut ui);
+
+    let mut t = Transaction::new(6);
+    t.trap(20, 0).trap(11, 0);
+    apply(&mut ui, &t);
+    assert_eq!(focused(&ui), Some(1));
+    assert_eq!(focus_events(&mut ui), [(BLUR, 21, 0), (FOCUSED, 1, 0)]);
+
+    // A dialog closing as another opens: straight to the new one.
+    close(&mut ui, 7);
+    open(&mut ui, 8, MODAL, true);
+    focus_events(&mut ui);
+    let mut t = Transaction::new(9);
+    for id in [20, 21, 22, 10, 11, 12, 13, 14] {
+        t.remove(id);
+    }
+    layer(&mut t, 30, NIL, 90);
+    view(&mut t, 30, 31, &fill());
+    button(&mut t, 31, 32, &boxed(300.0, 0.0, 50.0, 50.0));
+    t.trap(31, MODAL);
+    apply(&mut ui, &t);
+    let events = focus_events(&mut ui);
+    assert_eq!(events.len(), 2, "{events:?}");
+    assert_eq!((events[0].0, events[0].1), (BLUR, 13));
+    assert_eq!(events[1], (FOCUSED, 32, 0));
+    let mut t = Transaction::new(10);
+    for id in [30, 31, 32] {
+        t.remove(id);
+    }
+    apply(&mut ui, &t);
+    assert_eq!(focused(&ui), Some(1), "the new one restores the old one's");
+}
+
+/// m3: an inner modal stays on top when its outer one re-activates.
+#[test]
+fn an_inner_modal_stays_on_top() {
+    let mut ui = app();
+    open(&mut ui, 2, MODAL, true);
+    let mut t = Transaction::new(3);
+    t.trap(20, MODAL);
+    apply(&mut ui, &t);
+    assert_eq!(hit(&ui, 75.0, 225.0), None, "the dialog, under the menu");
+    for (seq, flags) in [(4, 0), (5, MODAL)] {
+        let mut t = Transaction::new(seq);
+        t.trap(11, flags);
+        apply(&mut ui, &t);
+    }
+    assert_eq!(hit(&ui, 75.0, 225.0), None, "still under the menu");
+    assert_eq!(hit(&ui, 325.0, 325.0), Some(21));
+}
+
+/// m4: a node mounting with `autoFocus` into an active trap the focus
+/// is outside of takes it (a wizard step loading in); one mounting
+/// while the focus is inside does not.
+#[test]
+fn auto_focus_on_mount_into_a_trap() {
+    let mut ui = app();
+    let mut t = Transaction::new(2);
+    layer(&mut t, 10, NIL, 70);
+    view(&mut t, 10, 11, &boxed(0.0, 200.0, 300.0, 100.0));
+    t.trap(11, MODAL);
+    apply(&mut ui, &t);
+    assert_eq!(focused(&ui), None, "nothing to focus yet");
+    let mut t = Transaction::new(3);
+    button(&mut t, 11, 12, &boxed(0.0, 0.0, 50.0, 50.0));
+    button(&mut t, 11, 13, &boxed(50.0, 0.0, 50.0, 50.0));
+    t.interaction_bits(13, FOCUS, f::FOCUSABLE | f::AUTO_FOCUS);
+    apply(&mut ui, &t);
+    assert_eq!(focused(&ui), Some(13));
+    let mut t = Transaction::new(4);
+    button(&mut t, 11, 14, &boxed(100.0, 0.0, 50.0, 50.0));
+    t.interaction_bits(14, FOCUS, f::FOCUSABLE | f::AUTO_FOCUS);
+    apply(&mut ui, &t);
+    assert_eq!(focused(&ui), Some(13), "already inside");
+}
+
+/// m5: the gate follows later changes under an open modal: a menu layer
+/// opened afterwards is live, and unowned again it is not.
+#[test]
+fn the_gate_follows_later_layers() {
+    let mut ui = app();
+    let mut t = Transaction::new(2);
+    layer(&mut t, 10, NIL, 70);
+    view(&mut t, 10, 11, &boxed(0.0, 200.0, 300.0, 100.0));
+    button(&mut t, 11, 14, &boxed(0.0, 0.0, 50.0, 50.0));
+    t.trap(11, MODAL);
+    apply(&mut ui, &t);
+    let mut t = Transaction::new(3);
+    layer(&mut t, 20, 14, 50);
+    button(&mut t, 20, 21, &boxed(300.0, 300.0, 50.0, 50.0));
+    apply(&mut ui, &t);
+    assert_eq!(hit(&ui, 325.0, 325.0), Some(21));
+    let mut t = Transaction::new(4);
+    t.layer(20, NIL);
+    apply(&mut ui, &t);
+    assert_eq!(hit(&ui, 325.0, 325.0), None);
+}
+
+/// m5: a modal inline in the app (no layer): the nodes holding it pass
+/// the pointer through to it but are never hit themselves.
+#[test]
+fn path_nodes_are_not_hit() {
+    let mut ui = app();
+    let mut t = Transaction::new(2);
+    button(&mut t, 0, 3, &boxed(0.0, 100.0, 200.0, 200.0));
+    view(&mut t, 3, 4, &boxed(0.0, 0.0, 50.0, 50.0));
+    button(&mut t, 4, 5, &boxed(0.0, 0.0, 50.0, 50.0));
+    t.trap(4, MODAL);
+    apply(&mut ui, &t);
+    assert_eq!(hit(&ui, 25.0, 125.0), Some(5));
+    assert_eq!(hit(&ui, 150.0, 250.0), None, "3, a path node");
+    assert_eq!(hit(&ui, 350.0, 350.0), None, "0, the root");
+}
+
+/// m5: Shift+Tab with no focus goes to the last focusable.
+#[test]
+fn shift_tab_from_nothing_goes_last() {
+    let mut ui = app();
+    assert_eq!(tab(&mut ui, true), Some(2));
 }

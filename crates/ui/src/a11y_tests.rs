@@ -207,6 +207,6 @@ fn role_op_round_trips() {
     assert!(wire::decode(&bad).is_err(), "unknown reported bit");
     let mut bad = buf;
     let at = bad.len() - 2;
-    bad[at] = UiRole::RadioGroup as u8 + 1;
+    bad[at] = UiRole::AlertDialog as u8 + 1;
     assert!(wire::decode(&bad).is_err(), "unknown role");
 }

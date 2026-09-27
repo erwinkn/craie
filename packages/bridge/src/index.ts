@@ -287,14 +287,18 @@ export interface ViewProps extends ListenerProps, StateProps, Variants {
   /** Participates in Tab traversal. */
   focusable?: boolean
   /** The node an enclosing FocusTrap focuses when it activates (the
-   * first one in Tab order). Nothing else: outside a trap, mounting
-   * does not focus it (LEDGER DF-48). */
+   * first one in Tab order), or when it mounts into an active trap that
+   * does not hold the focus (a wizard step loading in). Outside a trap,
+   * or with the focus already inside, mounting does not focus it
+   * (LEDGER DF-48). */
   autoFocus?: boolean
   /** Accessibility name announced by assistive technology. */
   accessibilityLabel?: string
   /** Accessibility role; a plain View has none, a Pressable is a
    * `button`. The check roles (`checkbox`, `switch`, `radio`) report
-   * `checked`; a `radiogroup` holds radios. Assistive technology is
+   * `checked`; a `radiogroup` holds radios. A `dialog` or
+   * `alertdialog` in an active modal `FocusTrap` is announced as modal.
+   * Assistive technology is
    * offered a click on enabled Pressables only, whatever their role. */
   accessibilityRole?: AccessibilityRole
   /** Sends `display: none`. */

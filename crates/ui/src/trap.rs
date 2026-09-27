@@ -21,10 +21,12 @@
 //! Archive (a layer's focusables right after its owner's subtree), and
 //! the pointer reaches the dialog and the menu but not the app.
 //!
-//! The executor records trap flags as they arrive; `settle_traps`, at
-//! the end of the transaction, activates and deactivates against them,
-//! moves focus (restore, auto-focus, a lost focus) and refreshes the
-//! gate the hit test and the accessibility tree read.
+//! The executor records trap flags and focus requests as they arrive;
+//! `settle_traps`, at the end of the transaction, activates and
+//! deactivates against them, picks where focus ends (restore, request,
+//! auto-focus, a lost focus) and moves it once, then refreshes the gate
+//! the hit test and the accessibility tree read. A trap that is hidden
+//! (`display: none`, as Suspense hides) or inert is inactive.
 
 use std::collections::HashMap;
 
@@ -81,10 +83,12 @@ impl Gate {
 pub(crate) struct Traps {
     /// Declared trap flags, id-keyed: few nodes are traps.
     pub declared: HashMap<u32, u8>,
-    /// Active traps in activation order (an enclosing trap that
-    /// activated with an inner one comes first).
+    /// Active traps, each after the active traps whose scope holds it,
+    /// else in activation order: the last modal is the top one.
     pub stack: Vec<Active>,
     pub gate: Gate,
+    /// The previous gate's buffers, reused.
+    spare: Gate,
     /// Nodes flagged `INERT`.
     pub inert: usize,
     /// A trap flag or an inert flag changed in this transaction.
@@ -94,6 +98,14 @@ pub(crate) struct Traps {
     /// The active traps holding the focus when the transaction began,
     /// innermost first.
     chain: Vec<NodeId>,
+    /// The focus when the transaction began: what traps activating in
+    /// it restore.
+    before: Option<(NodeId, u16)>,
+    /// The node the transaction's last Focus command asked for (not
+    /// blurred since).
+    pub request: Option<NodeId>,
+    /// Nodes whose `AUTO_FOCUS` flag this transaction set.
+    pub auto_focused: Vec<NodeId>,
 }
 
 impl Traps {
@@ -101,7 +113,13 @@ impl Traps {
         self.stack.iter().any(|a| a.id == id)
     }
 
-    /// The most recently activated modal trap.
+    /// A trap declared active, on the stack or not (hidden).
+    fn any_declared(&self) -> bool {
+        self.declared.values().any(|&f| f & trap_flag::ACTIVE != 0)
+    }
+
+    /// The last modal on the stack: the innermost, or the most recently
+    /// activated of unrelated ones.
     pub fn top_modal(&self) -> Option<NodeId> {
         self.stack
             .iter()
@@ -256,8 +274,14 @@ impl Ui {
                 for &(_, l) in owned[from..to].iter().rev() {
                     stack.push((l, false));
                 }
-            } else if hidden {
-                // Walked on only for the layers its nodes own.
+            }
+            // A hidden subtree is walked only down to the owners of
+            // layers.
+            if hidden
+                && !owned
+                    .iter()
+                    .any(|&(o, _)| self.ancestors(NodeId(o)).skip(1).any(|a| a == id))
+            {
                 continue;
             }
             for &c in self.host.children(id).iter().rev() {
@@ -304,17 +328,21 @@ impl Ui {
             .or_else(|| order.first().copied())
     }
 
-    /// At the start of a transaction: which traps hold the focus, for
-    /// a focus the transaction removes.
+    /// At the start of a transaction: the focus, and which traps hold
+    /// it, for a focus the transaction removes.
     pub(crate) fn begin_traps(&mut self) {
-        self.traps.chain.clear();
         self.traps.focus_removed = false;
+        self.traps.before = self
+            .focus
+            .and_then(|f| Some((f, self.host.node(f)?.generation)));
+        let mut chain = std::mem::take(&mut self.traps.chain);
+        chain.clear();
         if let Some(f) = self.focus
             && !self.traps.stack.is_empty()
         {
-            let chain: Vec<NodeId> = self.traps_holding(f).collect();
-            self.traps.chain = chain;
+            chain.extend(self.traps_holding(f));
         }
+        self.traps.chain = chain;
     }
 
     /// `node` leaves: a focus on it blurs now, while the event can still
@@ -332,30 +360,46 @@ impl Ui {
         self.force_paint = true;
     }
 
-    /// At the end of a transaction: deactivates traps (restoring focus),
-    /// activates new ones (auto-focusing), moves a focus that was
-    /// removed or became inert, and refreshes the gate.
+    /// At the end of a transaction: deactivates and activates traps,
+    /// then moves focus once, to the first of these that applies, each
+    /// overriding the one before:
+    ///
+    /// 1. the outermost valid restore target of a trap deactivating;
+    /// 2. the transaction's Focus command, if not blocked or hidden (one
+    ///    the traps allowed already took effect);
+    /// 3. a trap activating with `AUTO_FOCUS`, deepest first, when the
+    ///    focus so far is outside it: its target;
+    /// 4. a node mounting with `AUTO_FOCUS` into an active trap that the
+    ///    focus so far is outside of;
+    /// 5. O1: a focus removed, blocked or hidden goes to the innermost
+    ///    active trap that held it and has a target, else nowhere.
+    ///
+    /// Then refreshes the gate.
     pub(crate) fn settle_traps(&mut self) {
+        let request = self.traps.request.take();
+        let mounted = std::mem::take(&mut self.traps.auto_focused);
         let focus_inert = self.traps.inert > 0 && self.focus.is_some_and(|f| self.blocked(f));
         if !self.traps.dirty
-            && self.traps.stack.is_empty()
+            && !self.traps.any_declared()
             && !self.traps.focus_removed
             && !focus_inert
+            && request.is_none()
         {
             return;
         }
         self.traps.dirty = false;
 
-        // Deactivations: a trap turned off, or its node gone.
-        let mut gone = Vec::new();
+        // Deactivations: a trap turned off, hidden, or its node gone.
         let declared = std::mem::take(&mut self.traps.declared);
-        self.traps.stack.retain_mut(|a| {
+        let mut stack = std::mem::take(&mut self.traps.stack);
+        let mut gone = Vec::new();
+        stack.retain_mut(|a| {
             let flags = declared.get(&a.id.0).copied().unwrap_or(0);
             let live = self
                 .host
                 .node(a.id)
                 .is_some_and(|n| n.generation == a.generation);
-            if live && flags & trap_flag::ACTIVE != 0 {
+            if live && flags & trap_flag::ACTIVE != 0 && !self.hidden(a.id) {
                 a.flags = flags;
                 true
             } else {
@@ -363,72 +407,94 @@ impl Ui {
                 false
             }
         });
-        // Innermost first: the outermost trap's restore wins.
-        for a in gone.iter().rev() {
-            if a.flags & trap_flag::RESTORE_FOCUS != 0
-                && let Some((n, generation)) = a.restore
-                && self
-                    .host
-                    .node(n)
-                    .is_some_and(|h| h.generation == generation)
-                && self.can_focus(n)
-            {
-                self.set_focus(Some(n));
-            }
-        }
+        self.traps.stack = stack;
+        // Outermost first: what the traps closing hand back.
+        let restores: Vec<NodeId> = gone
+            .iter()
+            .filter(|a| a.flags & trap_flag::RESTORE_FOCUS != 0)
+            .filter_map(|a| a.restore)
+            .filter(|&(n, g)| self.host.node(n).is_some_and(|h| h.generation == g))
+            .map(|(n, _)| n)
+            .collect();
 
-        // Activations, outer traps first: an inner trap is the more
-        // recent, so the top modal is the innermost.
+        // Activations, outer traps first. A trap activating in this
+        // transaction restores what the closing ones hand back, else the
+        // focus before it, whatever the transaction focused meanwhile.
         let mut fresh: Vec<(usize, NodeId)> = declared
             .iter()
             .filter(|&(&id, &f)| {
+                let id = NodeId(id);
                 f & trap_flag::ACTIVE != 0
-                    && self.host.is_live(NodeId(id))
-                    && !self.traps.is_active(NodeId(id))
+                    && self.host.is_live(id)
+                    && !self.traps.is_active(id)
+                    && !self.hidden(id)
             })
             .map(|(&id, _)| (self.scope_chain(NodeId(id)).count(), NodeId(id)))
             .collect();
         fresh.sort();
-        let restore = self
-            .focus
-            .and_then(|f| Some((f, self.host.node(f)?.generation)));
+        let before = restores
+            .first()
+            .and_then(|&n| Some((n, self.host.node(n)?.generation)))
+            .or(self.traps.before);
         for &(_, id) in &fresh {
             // A trap activating inside another one leaves the restore to
             // it: deactivating the inner one alone keeps focus inside.
             let nested = fresh.iter().any(|&(_, o)| o != id && self.in_scope(id, o));
-            self.traps.stack.push(Active {
+            // Below the active traps it holds, so an inner modal stays
+            // on top when its outer one re-activates.
+            let at = self
+                .traps
+                .stack
+                .iter()
+                .position(|a| self.in_scope(a.id, id))
+                .unwrap_or(self.traps.stack.len());
+            let active = Active {
                 id,
                 generation: self.host.node(id).map_or(0, |n| n.generation),
                 flags: declared[&id.0],
-                restore: if nested { None } else { restore },
-            });
+                restore: if nested { None } else { before },
+            };
+            self.traps.stack.insert(at, active);
         }
         self.traps.declared = declared;
+
+        // Where focus ends, per the list above.
+        let mut target = self.focus;
+        if let Some(&n) = restores.iter().find(|&&n| self.can_focus(n)) {
+            target = Some(n);
+        }
+        if let Some(r) = request.filter(|&r| !self.blocked(r) && !self.hidden(r)) {
+            target = Some(r);
+        }
         // Deepest first: an outer trap then finds the focus inside.
         for &(_, id) in fresh.iter().rev() {
-            let flags = self.traps.declared.get(&id.0).copied().unwrap_or(0);
-            if flags & trap_flag::AUTO_FOCUS != 0
-                && !self.focus.is_some_and(|f| self.in_scope(f, id))
+            if self.traps.declared[&id.0] & trap_flag::AUTO_FOCUS != 0
+                && !target.is_some_and(|f| self.in_scope(f, id))
                 && let Some(t) = self.trap_target(id)
             {
-                self.set_focus(Some(t));
+                target = Some(t);
             }
         }
-
-        // O1: a focus removed or blocked goes to the innermost active
-        // trap that held it and has a target, else nowhere.
-        let lost = self.traps.focus_removed && self.focus.is_none();
-        if lost || self.focus.is_some_and(|f| self.blocked(f)) {
-            let chain: Vec<NodeId> = match self.focus {
+        for n in mounted {
+            if self.can_focus(n)
+                && let Some(t) = self.traps_holding(n).next()
+                && !target.is_some_and(|f| self.in_scope(f, t))
+            {
+                target = Some(n);
+            }
+        }
+        let lost = target.is_none() && self.traps.focus_removed;
+        if lost || target.is_some_and(|f| self.blocked(f) || self.hidden(f)) {
+            let chain: Vec<NodeId> = match target {
                 Some(f) => self.traps_holding(f).collect(),
-                None => std::mem::take(&mut self.traps.chain),
+                None => self.traps.chain.clone(),
             };
-            let next = chain
+            target = chain
                 .into_iter()
                 .filter(|&t| self.traps.is_active(t))
                 .find_map(|t| self.trap_target(t));
-            self.set_focus(next);
         }
+        self.set_focus(target);
 
         self.refresh_gate();
     }
@@ -450,10 +516,10 @@ impl Ui {
 
     /// Rebuilds the gate from the top modal; a change re-hovers.
     fn refresh_gate(&mut self) {
-        let mut gate = Gate {
-            modal: self.traps.top_modal(),
-            ..Gate::default()
-        };
+        let mut gate = std::mem::take(&mut self.traps.spare);
+        gate.modal = self.traps.top_modal();
+        gate.roots.clear();
+        gate.path.clear();
         if let Some(m) = gate.modal {
             gate.roots.push(m.0);
             for (&l, &o) in &self.host.owners {
@@ -474,10 +540,11 @@ impl Ui {
             gate.path.dedup();
         }
         if gate != self.traps.gate {
-            self.traps.gate = gate;
+            std::mem::swap(&mut gate, &mut self.traps.gate);
             self.hover_stale = true;
             self.a11y_stale = true;
         }
+        self.traps.spare = gate;
     }
 
     /// Records a node's `INERT` flag; returns whether it changed.

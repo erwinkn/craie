@@ -1,6 +1,6 @@
 import { test, expect } from "bun:test"
 import { readFileSync } from "node:fs"
-import { Encoder, NIL, VERSION, transformMatrix } from "../src/wire.js"
+import { Encoder, NIL, ROLE, VERSION, transformMatrix } from "../src/wire.js"
 import { readFrame } from "./crw2.js"
 
 // Hand-computed bytes for: create(0, view) | paragraph(0, "hi") | place.
@@ -160,8 +160,9 @@ test("bad timings leave the encoder unchanged", () => {
 // The handshake compares each side's wire VERSION. They agree through
 // the fixture: its header must be this VERSION, and Rust's
 // wire_fixture test decodes it only at the Rust VERSION.
-test("focus traps bumped the protocol to 8", () => {
+test("focus traps bumped the protocol to 8, with the dialog roles", () => {
   expect(VERSION).toBe(8)
+  expect([ROLE.dialog, ROLE.alertdialog]).toEqual([17, 18])
 })
 
 test("the cross-language fixture carries this VERSION", () => {

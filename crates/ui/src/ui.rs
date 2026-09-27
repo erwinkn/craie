@@ -252,10 +252,19 @@ impl Ui {
     /// UI commands arriving in a transaction.
     pub(crate) fn command(&mut self, id: NodeId, cmd: &Command<'_>) {
         match cmd {
-            // Not onto an inert node, or out of a modal.
-            Command::Focus if self.blocked(id) => {}
-            Command::Focus => self.set_focus(Some(id)),
+            // At once if the traps allow it now (a text insert may
+            // follow); else judged against the traps the transaction
+            // leaves (`settle_traps`). Either way it beats a restore.
+            Command::Focus => {
+                self.traps.request = Some(id);
+                if !self.blocked(id) {
+                    self.set_focus(Some(id));
+                }
+            }
             Command::Blur => {
+                if self.traps.request == Some(id) {
+                    self.traps.request = None;
+                }
                 if self.focus == Some(id) {
                     self.set_focus(None);
                 }

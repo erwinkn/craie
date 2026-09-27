@@ -724,18 +724,22 @@ Reviewer minors and nitpicks not fixed yet.
 - Resolves in: `display: contents` in the owned layout engine, or the
   trap op on the first child (one child only).
 
-### DF-48: `autoFocus` outside a trap does not focus on mount
+### DF-48: `autoFocus` does not focus on mount, outside a trap or inside one holding the focus
 
-- Source: work item 3 (focus traps) implementation (own finding).
+- Source: work item 3 (focus traps) implementation (own finding),
+  widened by review of #18 (PR18-06).
 - Where: crates/ui/src/trap.rs, packages/bridge/src/index.ts
   (`autoFocus`).
-- Claim: `autoFocus` only marks what a trap focuses when it activates.
-  A `TextInput autoFocus` in a page that has no trap is not focused
-  when it mounts, as React Native's would be.
+- Claim: `autoFocus` marks what a trap focuses when it activates, and
+  a node mounting into an active trap takes the focus only when the
+  focus is outside that trap. A `TextInput autoFocus` in a page with
+  no trap is not focused when it mounts, as React Native's would be;
+  nor is wizard step 2's field while focus sits on the dialog's Back
+  button, where React's `autoFocus` would move it.
 - Why deferred: out of the traps' scope; the kit calls `focus()` from
   an effect meanwhile.
-- Resolves in: focus on mount for an `AUTO_FOCUS` node outside traps
-  (the settle pass has the flag), if the kit needs it.
+- Resolves in: focus on mount for any `AUTO_FOCUS` node (the settle
+  pass already sees each one mount), if the kit needs it.
 
 ## Closed
 
@@ -1037,3 +1041,12 @@ Reviewer minors and nitpicks not fixed yet.
 - PR17-10 (press review, nits): `onPressIn` and `onPressOut` are primary-button only, where the kit's web `onPointerDown`/`onPointerUp` hear any: their JSDoc says so.
 - PR17-11 (press review, nits): a root `<Text onPress>` read as static text: it defaults to role `link` (a given role wins); the bun case checks both and the return to `text`.
 - PR17-12 (press review, nits): a lone `onPressIn` or `onPressOut` made a Text pressable, swallowing its row's presses: only `onPress` does now, and the JSDoc says a Text's press-in and out need it; a bun case checks such a Text sends no press flags or pressable spans.
+- PR18-01 (traps review, M1): a `focus()` sealed with the trap op (a layout effect's) became the restore target, so closing the dialog lost the focus: the focus is saved when the transaction begins, and `a_focus_while_opening_keeps_the_restore` checks closing returns to "Delete…".
+- PR18-02 (traps review, M2): a Suspense-hidden modal stayed active (the app gated, Tab in the hidden dialog, the accessibility tree empty): a trap under `display: none` or `inert` is inactive, restores on hiding and activates and auto-focuses again when shown, as the web remounts; `a_hidden_trap_is_inactive` goes both ways.
+- PR18-03 (traps review, m1): a Focus command was judged against the gate before the traps settled: one the traps allow applies at once (a text insert may follow), one they block is judged at the settle, and either beats a restore; `focus_commands_see_the_settled_traps` focuses into a modal opening with it and out of one closing with it.
+- PR18-04 (traps review, m2): closing the menu and the dialog together sent blur 21, focus 14, blur 14, focus 1: the settle picks the final target (restore, command, auto-focus, mount, O1, each overriding the one before) and moves focus once; `closing_traps_together_moves_focus_once` checks the events, and a dialog closing as another opens goes straight to the new one, which inherits the old one's restore.
+- PR18-05 (traps review, m3): a dialog toggled off and on went above its open menu modal, making its content live under the menu: a trap activating goes below the active traps inside it (`an_inner_modal_stays_on_top`).
+- PR18-06 (traps review, m4): the comments now match DF-48, which is widened; an `autoFocus` node mounting into an active trap the focus is outside of now takes it (a wizard step loading in; `auto_focus_on_mount_into_a_trap`).
+- PR18-07 (traps review, m5): tests for the gate following a layer opened and unowned later, a path node not hit (an inline modal), Shift+Tab from nothing, the accessibility tree after closing, and a bridge Layer opening in a later commit than its trap; restore order and the new rules each fail a test when mutated. Two are not tested: auto-focus order is equivalent either way (an outer trap's target inside an inner trap is the inner trap's target too), and the path node's inert check in the accessibility tree is removed, unreachable now that a hidden or inert trap is inactive.
+- PR18-08 (traps review, nits): `reported`'s doc comment is back on it; the modal flag goes on the trap's first `dialog` or `alertdialog` (roles 17 and 18, new in protocol 8), else the trap; the gate reuses its buffers and the focus chain its Vec; Tab walks a hidden or inert subtree only down to owners of layers; the Built cost bullet has the deep-walk row.
+- PR18-09 (lead, rebase on #17): protocol 8, DF-47 and DF-48 after #17's DF-42 to DF-46, and a press on a node turning inert or falling outside a new modal cancels with #17's `PRESS` cancel, Space's press too (`a_blocked_node_loses_its_press`), where this branch had filed it as a DF.

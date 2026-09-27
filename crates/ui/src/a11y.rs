@@ -44,6 +44,8 @@ fn ak_role(role: UiRole) -> Role {
         UiRole::Switch => Role::Switch,
         UiRole::RadioButton => Role::RadioButton,
         UiRole::RadioGroup => Role::RadioGroup,
+        UiRole::Dialog => Role::Dialog,
+        UiRole::AlertDialog => Role::AlertDialog,
     }
 }
 
@@ -135,6 +137,17 @@ impl Ui {
         }
         root.set_children(kids);
         nodes.push((ROOT_AID, root));
+        for m in self
+            .traps
+            .stack
+            .iter()
+            .filter(|a| self.traps.is_modal(a.id))
+        {
+            let m = aid(self.modal_node(m.id));
+            if let Some((_, n)) = nodes.iter_mut().find(|(a, _)| *a == m) {
+                n.set_modal();
+            }
+        }
         let focus = self.focused().map(aid).unwrap_or(ROOT_AID);
         TreeUpdate {
             nodes,
@@ -142,6 +155,23 @@ impl Ui {
             tree_id: TreeId::ROOT,
             focus,
         }
+    }
+
+    /// The node announced as modal for modal trap `t`: the first
+    /// `dialog` or `alertdialog` in its subtree (ARIA pairs `aria-modal`
+    /// with the dialog), else the trap.
+    fn modal_node(&self, t: NodeId) -> NodeId {
+        let mut stack = vec![t];
+        while let Some(n) = stack.pop() {
+            if matches!(
+                self.host.interaction(n).role,
+                UiRole::Dialog | UiRole::AlertDialog
+            ) {
+                return n;
+            }
+            stack.extend(self.host.children(n).iter().rev());
+        }
+        t
     }
 
     /// `a11y_node` under a gated parent (`trap.rs`): outside the top
@@ -154,12 +184,9 @@ impl Ui {
         match self.traps.gate.class(id) {
             Class::Root => self.a11y_node(id, out),
             Class::Out => None,
+            // Never hidden or inert: a trap under such a node is
+            // inactive.
             Class::Path => {
-                if self.host.display_none(id)
-                    || self.host.node(id)?.flags.contains(NodeFlags::INERT)
-                {
-                    return None;
-                }
                 let mut an = Node::new(Role::GenericContainer);
                 let kids: Vec<A11yId> = self
                     .host
@@ -258,9 +285,6 @@ impl Ui {
         }
         if bits & state_bit::DISABLED != 0 {
             an.set_disabled();
-        }
-        if self.traps.is_modal(id) {
-            an.set_modal();
         }
         let r = self.abs_rect(id);
         an.set_bounds(A11yRect {

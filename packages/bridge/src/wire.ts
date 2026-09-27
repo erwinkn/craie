@@ -193,6 +193,8 @@ export const ROLE = {
   switch: 14,
   radio: 15,
   radiogroup: 16,
+  dialog: 17,
+  alertdialog: 18,
 } as const
 export type AccessibilityRole = keyof typeof ROLE
 
@@ -267,7 +269,8 @@ export const CLAIM_KIND = { key: 1, paste: 2, copy: 3, cut: 4, drop: 5, contextM
 export const CHORD_FLAG = { named: 1, noRepeat: 2, inInput: 4 } as const
 /** Interaction op flag bits — mirror mutation.rs `interaction_flag`.
  * `inert`: no hit testing, focus or accessibility for the node and its
- * subtree. `autoFocus`: the node a focus trap focuses on activation.
+ * subtree. `autoFocus`: the node a focus trap focuses on activation,
+ * or on its mount into an active trap the focus is outside of.
  * Bits 4 to 6 are the `PRESS_FLAG` bits, shifted by `pressShift`. */
 export const INTERACTION = { focusable: 1, selectable: 2, inert: 4, autoFocus: 8, pressShift: 4 } as const
 /** Trap op flag bits — mirror mutation.rs `trap_flag`. */
@@ -1055,7 +1058,7 @@ export class Encoder {
   /** Listener mask and `INTERACTION` flags: `selectable` makes the
    * node's text descendants one selection domain; `inert` takes its
    * subtree out of hit testing, focus and accessibility; `autoFocus`
-   * marks a trap's first focus; the press flags sit in bits 4 to 6. */
+   * marks what a trap focuses; the press flags sit in bits 4 to 6. */
   interaction(id: number, listeners: number, flags: number) {
     this.ops.u8(Op.Interaction)
     this.ops.u32(id)
