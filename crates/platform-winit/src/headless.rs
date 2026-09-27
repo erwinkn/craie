@@ -155,9 +155,14 @@ fn run_counted(session: Arc<Session>, logical: Size, scale: f32, frames: &Atomic
         while !*flag {
             match until {
                 // Near deadlines spin: this process's timed waits wake
-                // up to 30 ms late (coalesced timers, no visible window),
-                // which would pace frames by the timer, not the work.
-                Some(at) if at.saturating_duration_since(Instant::now()) < SPIN => {
+                // late (coalesced timers, no visible window), which would
+                // pace frames by the timer, not the work. With the probe
+                // on, every deadline spins: on a Mac whose shell a
+                // background agent started, waits woke up to 150 ms late,
+                // and E19 measured that as clicks waiting for native.
+                Some(at)
+                    if probe.is_some() || at.saturating_duration_since(Instant::now()) < SPIN =>
+                {
                     drop(flag);
                     let spun = thread_cpu();
                     while Instant::now() < at && !*lock.lock().unwrap() {

@@ -59,6 +59,12 @@ def main():
         ("apply", "committed → applied", lambda r, j: r["applied"] - j["committed"]),
         ("paint", f"applied → {drawn}", lambda r, j: r["presented"] - r["applied"]),
     ]
+    # Each JS stamp falls between its click's dispatch and apply, unless
+    # native and JS read different clocks (probe.rs, `now_ns`).
+    skew = [min(j["handler"] - r["dispatched"], r["applied"] - j["committed"]) for r, j in joined]
+    if skew and pct(skew, 50) < 0:
+        sys.exit(f"E19 {label}: JS stamps fall outside dispatch → apply by {-pct(skew, 50) / 1e6:.1f} ms"
+                 " (median): native and JS clocks differ")
     print(f"E19 {label}: {len(native)} clicks, {lost} unanswered")
     print(f"  {'ms':<34}{'p50':>8}{'p95':>8}{'p99':>8}{'max':>8}")
     trip = [(r["presented"] - r["due"]) / 1e6 for r in done] + [math.inf] * lost

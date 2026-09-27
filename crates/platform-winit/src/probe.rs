@@ -5,9 +5,9 @@
 //! `n << 8 | 0xff`, so the marker appears as opaque black (no answers);
 //! clicks start a second after that. They arrive on their own schedule,
 //! not after the previous answer, so a stall is sampled as often as it
-//! lasts. Windowed, a thread wakes the loop at each click's due time, as
-//! platform input does (the loop's own timers can fire late); headless,
-//! the loop spins to its deadlines. The probe stamps each click when it
+//! lasts. Windowed, a spinning thread wakes the loop at each click's due
+//! time, as platform input does (timers, the loop's or a sleep's, can
+//! fire late); headless, the loop spins to its deadlines. The probe stamps each click when it
 //! was due, when it is dispatched (native was free), when the commit
 //! that answers it is applied, and when the first frame after that is
 //! drawn (headless: the GPU finished; windowed: `present` returned). When
@@ -170,7 +170,12 @@ impl Probe {
             let schedule = self.schedule.clone();
             std::thread::spawn(move || {
                 for due in schedule {
-                    std::thread::sleep(due.saturating_duration_since(Instant::now()));
+                    // Spins: platform input is not late, and a timed sleep
+                    // was (up to 150 ms on a Mac, coalesced timers), which
+                    // E19 measured as clicks waiting for native.
+                    while Instant::now() < due {
+                        std::thread::yield_now();
+                    }
                     wake.wake();
                 }
             });
@@ -201,12 +206,16 @@ fn fill(ui: &Ui, id: NodeId) -> u32 {
 }
 
 /// Nanoseconds on the monotonic clock libuv's `uv_hrtime` reads (Node's
-/// `process.hrtime`): CLOCK_MONOTONIC on Linux, mach absolute time
-/// (CLOCK_UPTIME_RAW) on macOS, so JS stamps join native ones.
+/// `process.hrtime`), so JS stamps join native ones: CLOCK_MONOTONIC on
+/// Linux; on macOS mach continuous time, which counts sleep
+/// (CLOCK_MONOTONIC_RAW; CLOCK_MONOTONIC is the same clock in whole µs).
+/// CLOCK_UPTIME_RAW stops during sleep: on a Mac that had slept 16 hours
+/// since boot it put every JS phase 58,876,521 ms late (Node 26.3,
+/// libuv 1.52.1).
 #[cfg(unix)]
 pub fn now_ns() -> u64 {
     #[cfg(target_vendor = "apple")]
-    const CLOCK: libc::clockid_t = libc::CLOCK_UPTIME_RAW;
+    const CLOCK: libc::clockid_t = libc::CLOCK_MONOTONIC_RAW;
     #[cfg(not(target_vendor = "apple"))]
     const CLOCK: libc::clockid_t = libc::CLOCK_MONOTONIC;
     let mut t = libc::timespec {
