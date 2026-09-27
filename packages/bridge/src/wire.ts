@@ -485,7 +485,9 @@ export interface StyleProps {
  * `style.rotate`, radians in a transform list, as before parts). */
 export type Angle = number | `${number}${"deg" | "grad" | "rad" | "turn"}`
 
-/** One RN-style transform step. Angles: "45deg", "0.5rad", or radians. */
+/** One RN-style transform step. Angles: "45deg", "0.5rad", or radians.
+ * Translates are points: a percentage goes in `style.translate`, which
+ * follows the node's size (DF-49). */
 export type TransformStep =
   | { translateX: number }
   | { translateY: number }
@@ -832,11 +834,16 @@ export const IDENTITY: Affine = [1, 0, 0, 1, 0, 0]
  * degrees (`unit` π/180). */
 function angle(v: string | number, unit = 1): number {
   let r = typeof v === "number" ? v * unit : NaN
-  const m = typeof v === "string" ? /^(.+?)(deg|grad|rad|turn)$/.exec(v) : null
-  if (m) r = Number(m[1]) * ANGLE_UNIT[m[2] as keyof typeof ANGLE_UNIT]
+  const m = typeof v === "string" ? ANGLE.exec(v) : null
+  if (m) r = Number(m[1]) * ANGLE_UNIT[m[2]!.toLowerCase() as keyof typeof ANGLE_UNIT]
   if (!Number.isFinite(r)) throw Error(`bad angle "${v}"`)
   return r
 }
+/** A CSS number, strictly: no "", hex or "Infinity" (`Number` takes
+ * all three). */
+const NUM = String.raw`[+-]?(?:\d+\.?\d*|\.\d+)(?:e[+-]?\d+)?`
+const ANGLE = new RegExp(`^(${NUM})(deg|grad|rad|turn)$`, "i")
+const PERCENT = new RegExp(`^(${NUM})%$`, "i")
 /** CSS angle units in radians. */
 const ANGLE_UNIT = { deg: Math.PI / 180, grad: Math.PI / 200, rad: 1, turn: 2 * Math.PI }
 
@@ -856,7 +863,7 @@ export interface Parts {
 export function translateLength(v: unknown): [number, number] {
   const r: [number, number] =
     typeof v === "number" ? [v, 0]
-    : typeof v === "string" && v.endsWith("%") ? [0, Number(v.slice(0, -1)) / 100]
+    : typeof v === "string" && PERCENT.test(v) ? [0, Number(v.slice(0, -1)) / 100]
     : [NaN, 0]
   if (!Number.isFinite(r[0]) || !Number.isFinite(r[1])) throw Error(`bad translate "${String(v)}"`)
   return r
@@ -985,6 +992,9 @@ export function transformMatrix(t: Transform | undefined): Affine {
   let m: Affine = IDENTITY
   for (const step of t ?? []) {
     const [k, v] = Object.entries(step)[0] as [string, any]
+    if (/^(translate|scale)/.test(k) && (typeof v !== "number" || !Number.isFinite(v))) {
+      throw Error(`bad transform ${k} "${String(v)}": percentages go in style.translate (DF-49)`)
+    }
     let s: Affine
     switch (k) {
       case "translateX": s = [1, 0, 0, 1, v, 0]; break

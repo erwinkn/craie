@@ -974,8 +974,18 @@ matrix replaced the whole transform, so hovering dropped the rotation
   (translate `[x, y, fx, fy]`, rotate in radians, scale `[x, y]`, the
   free matrix) and a cached `composed = T·R·S·M`. `set_spatial` is the
   one writer: it applies a patch of the changed parts and recomposes
-  only when one of them changed. A composition that overflows leaves
-  the row unchanged, as a bad matrix did before.
+  only when one of them changed. Rotate's sine and cosine snap to 0
+  and ±1 within 1e-6, so a half or full turn composes to an exact
+  matrix: `animate("rotate", 360)` ends at identity, the node's
+  transform record goes (`transformed()` is false), and the subtree
+  pixel-snaps again. Unsnapped, f32 `sin(τ)` is 1.7e-7 and the node
+  stayed transformed, drawn unsnapped, for good. Validation rejects a
+  non-finite part. Finite parts whose product overflows (a 1e30 scale
+  over a 1e30 matrix) leave the row as it was, but only the row: the
+  base the variants resolve over keeps the part, and each resolve
+  drops it again. Rejecting that in validation would need the base,
+  and a variant's scale over the base can still overflow later, so
+  only the row is guarded.
 - **Percent translate.** `fx` and `fy` are fractions of the border box
   (0.5 is 50%), added when the row is read: `Spatial::local(size)`
   adds `fx·width` and `fy·height` to the composed translation, then
@@ -1021,19 +1031,34 @@ matrix replaced the whole transform, so hovering dropped the rotation
   bare number in a list stays radians, as before. It differs from
   `style.rotate` but keeps existing lists unchanged. The angle parser
   now rejects unknown units: "12grad" used to match the "rad" suffix
-  and read as 12 radians.
+  and read as 12 radians. Numbers parse strictly (no "", hex or
+  "Infinity" before a unit or "%": `Number` read "%" as 0 and "0x10%"
+  as 16%). A percentage or string in a list's translate or scale
+  throws ("percentages go in style.translate (DF-49)"); it used to
+  send NaN, and native rejected the whole transaction.
 - **Kit mapping.** Marbre's `transition: { property: "transform" }`
   covers CSS `transform`, `translate`, `rotate` and `scale`. The kit
-  adapter should expand it to those four keys.
+  adapter should expand it to those four keys. It should also map the
+  kit's `translateX`, `translateY`, `scale` and `rotate` style keys and
+  the `roll-*` enter presets to parts, not to a `transform` list:
+  Marbre's native resolver writes them as a list, with percentages
+  (DF-49).
 - Tests: `crates/ui/src/parts_tests.rs` checks the composition order
   against a hand-computed matrix, per-part tweens (10pt to 100%
   included), rotate 0 to 360 passing 180, a variant's scale keeping the
-  base rotate next to an `animate` on translate, percent translate
-  after a resize, and hit testing plus drawn bounds of a turned and
-  scaled node. `packages/bridge/test/parts.test.ts` covers the keys,
+  base rotate next to an `animate` on translate, variants merging per
+  axis (a hover `translateX` and `scaleX` beside a selected `rotate`,
+  then `translateY` and `scaleY`; copying a whole pair fails it),
+  exact quarter turns and a full turn ending at identity, percent
+  translate after a resize, and hit testing plus drawn bounds of a
+  turned and scaled node. `packages/bridge/test/parts.test.ts` covers the keys,
   the per-change diff and the encoding. The cross-language fixture
   carries every part, and the invariants generator sends parts, so the
   incremental-equals-rebuild check covers them.
+- **Cost** (E15, exe1, load 22 to 30; main, this branch, main,
+  interleaved). 0 allocations everywhere. 100k-node index hit: 5.1 and
+  5.1 µs on main, 6.5 µs here. List walk: 1,076 and 851 µs on main,
+  785 and 1,342 µs here (two runs), within noise.
 - Not yet: percentages inside an RN transform list (DF-49; use
   `translate`).
 

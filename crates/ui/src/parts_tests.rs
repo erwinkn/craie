@@ -210,8 +210,53 @@ fn rotate_tweens_a_full_turn() {
     assert!(near(s.parts.rotate, PI), "{:?}", s.parts);
     assert!(near_m(s.composed, Affine::rotate(PI)), "{:?}", s.composed);
     assert!(near(s.composed.0[0], -1.0));
+    // A full turn composes to exactly identity: the node stores no
+    // transform, and its subtree is axis-aligned (it pixel-snaps).
     at(&mut ui, 1.0);
-    assert_eq!(ui.host.spatial[1].parts.rotate, TAU);
+    let s = ui.host.spatial[1];
+    assert_eq!(s.parts.rotate, TAU);
+    assert_eq!(s.composed, Affine::IDENTITY);
+    assert!(!s.transformed() && s.composed.is_axis_aligned());
+    let drawn = ui.scene().resolve(&|r| r.0 as u64);
+    let rect = drawn.iter().find(|r| r.kind == 0 && r.color == 0x0000_00FF);
+    let b = rect.expect("box 1's fill").bounds;
+    assert_eq!(
+        [b.origin.x, b.origin.y, b.max_x(), b.max_y()],
+        [150.0, 130.0, 250.0, 170.0]
+    );
+}
+
+/// Quarter turns compose exactly (no 1e-7 residue), either way round.
+#[test]
+fn quarter_turns_compose_exactly() {
+    let turn = |r: f32| {
+        Parts {
+            rotate: r,
+            ..Parts::IDENTITY
+        }
+        .compose()
+    };
+    assert_eq!(turn(TAU), Affine::IDENTITY);
+    assert_eq!(turn(-TAU), Affine::IDENTITY);
+    assert_eq!(turn(PI).0, [-1.0, 0.0, 0.0, -1.0, 0.0, 0.0]);
+    assert_eq!(turn(FRAC_PI_2).0, [0.0, 1.0, -1.0, 0.0, 0.0, 0.0]);
+    assert_eq!(turn(3.0 * FRAC_PI_2).0, [0.0, -1.0, 1.0, 0.0, 0.0, 0.0]);
+    // Half and full turns are axis-aligned (`b == c == 0`); quarter
+    // turns swap the axes, so they're exact but not aligned.
+    for r in [PI, -PI, TAU, 2.0 * TAU] {
+        assert!(turn(r).is_axis_aligned(), "{r}");
+    }
+    // Scale and translate ride through exactly.
+    let p = Parts {
+        translate: [3.0, 4.0, 0.0, 0.0],
+        rotate: PI,
+        scale: [2.0, 0.5],
+        ..Parts::IDENTITY
+    };
+    assert_eq!(p.compose().0, [-2.0, 0.0, 0.0, -0.5, 3.0, 4.0]);
+    // Not a quarter turn: untouched.
+    assert!(near_m(turn(0.3), Affine::rotate(0.3)));
+    assert!(!turn(0.3).is_axis_aligned());
 }
 
 /// The Pressable example: a base rotate, a hover scale with its own
@@ -258,6 +303,79 @@ fn a_variant_scale_keeps_the_base_rotate() {
         (p.scale, p.rotate, p.translate),
         ([1.0; 2], twelve, [20.0, 0.0, 0.0, 0.0])
     );
+}
+
+/// A variant on `bit` of scope 1 setting the `mask` parts of `parts`.
+fn variant(bit: u64, mask: u16, parts: Parts) -> VariantDecl {
+    VariantDecl {
+        terms: vec![TermDecl {
+            scope: 1,
+            mask: bit,
+        }],
+        env: 0,
+        values: Values {
+            mask,
+            parts,
+            ..Values::default()
+        },
+    }
+}
+
+/// Variants merge per axis: a hover `translateX` + `scaleX` and a
+/// selected `rotate`, both on, leave the base's translate y (points and
+/// fraction) and scale y alone. Then the selected one takes `translateY`
+/// and `scaleY` too, and the hover's x axes still hold.
+#[test]
+fn variants_merge_parts_per_axis() {
+    use value_field::*;
+    let mut ui = centered(100.0, 40.0);
+    let hover = variant(
+        state_bit::HOVER,
+        TRANSLATE_X | SCALE_X,
+        Parts {
+            translate: [-4.0, 99.0, 0.25, 0.9],
+            scale: [2.0, 9.0],
+            ..Parts::IDENTITY
+        },
+    );
+    let mut selected = variant(
+        state_bit::SELECTED,
+        ROTATE,
+        Parts {
+            rotate: 0.3,
+            translate: [99.0, 3.0, 0.9, -0.5],
+            scale: [9.0, 0.5],
+            ..Parts::IDENTITY
+        },
+    );
+    apply(&mut ui, |t| {
+        t.translate(1, [5.0, 7.0, 0.0, 0.1])
+            .variants(1, &[hover.clone(), selected.clone()])
+            .states(1, state_bit::SELECTED);
+    });
+    ui.dispatch(&crate::events::Event::PointerMove { x: 200.0, y: 150.0 });
+    at(&mut ui, 0.0);
+    let p = parts(&ui, 1);
+    assert_eq!(
+        (p.translate, p.scale, p.rotate),
+        ([-4.0, 7.0, 0.25, 0.1], [2.0, 1.0], 0.3)
+    );
+
+    selected.values.mask |= TRANSLATE_Y | SCALE_Y;
+    apply(&mut ui, |t| {
+        t.variants(1, &[hover, selected]);
+    });
+    at(&mut ui, 0.0);
+    let p = parts(&ui, 1);
+    assert_eq!(
+        (p.translate, p.scale, p.rotate),
+        ([-4.0, 3.0, 0.25, -0.5], [2.0, 0.5], 0.3)
+    );
+    // Hover off: the base's x axes come back under the selected y.
+    ui.dispatch(&crate::events::Event::PointerMove { x: 5.0, y: 5.0 });
+    at(&mut ui, 0.0);
+    let p = parts(&ui, 1);
+    assert_eq!((p.translate, p.scale), ([5.0, 3.0, 0.0, -0.5], [1.0, 0.5]));
 }
 
 /// A 50% translate is half the node's own width, and follows the width.

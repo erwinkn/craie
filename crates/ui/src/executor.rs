@@ -1337,7 +1337,8 @@ impl Ui {
 
     /// Writes a node's spatial row (the fields given), composing the
     /// transform parts when one changed: the one place they compose. A
-    /// composition that overflows keeps the row as it was.
+    /// composition that overflows keeps the row as it was (the row only:
+    /// the base values keep the part, and each resolve drops it again).
     pub(crate) fn set_spatial(&mut self, node: NodeId, patch: SpatialPatch) {
         let s = &mut self.host.spatial[node.index()];
         let before = (s.transformed(), s.layered());

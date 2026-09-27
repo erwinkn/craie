@@ -177,13 +177,27 @@ impl Parts {
     };
 
     /// The parts in CSS order, the percent translate aside (it follows
-    /// the size: `Spatial::local`).
+    /// the size: `Spatial::local`). Rotate's sine and cosine snap to 0
+    /// and ±1 within 1e-6, so quarter turns compose exactly: f32
+    /// `sin(τ)` is 1.7e-7, which would keep a 360deg turn transformed
+    /// (and unsnapped) forever.
     pub fn compose(&self) -> Affine {
         let [tx, ty, _, _] = self.translate;
         let [sx, sy] = self.scale;
         let mut m = Affine::scale(sx, sy).mul(&self.matrix);
         if self.rotate != 0.0 {
-            m = Affine::rotate(self.rotate).mul(&m);
+            let snap = |v: f32| {
+                if v.abs() < 1e-6 {
+                    0.0
+                } else if (v.abs() - 1.0).abs() < 1e-6 {
+                    v.signum()
+                } else {
+                    v
+                }
+            };
+            let (s, c) = self.rotate.sin_cos();
+            let (s, c) = (snap(s), snap(c));
+            m = Affine([c, s, -s, c, 0.0, 0.0]).mul(&m);
         }
         m.0[4] += tx;
         m.0[5] += ty;

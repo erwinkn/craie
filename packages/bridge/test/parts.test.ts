@@ -5,7 +5,7 @@ import { test, expect } from "bun:test"
 import { createElement } from "react"
 import { createRoot, Pressable, View } from "../src/index.js"
 import type { HostNode, Transport, UiEvent } from "../src/host.js"
-import { ANIM_PROP, Encoder, layoutPart, partsOf, styleParts, type StyleProps } from "../src/wire.js"
+import { ANIM_PROP, Encoder, layoutPart, partsOf, styleParts, transformMatrix, type StyleProps, type Transform } from "../src/wire.js"
 import { readFrame } from "./crw2.js"
 
 class FakeTransport implements Transport {
@@ -56,6 +56,27 @@ test("style keys resolve per axis over translate and scale", () => {
   const parts: StyleProps = { translate: 1, translateX: 1, translateY: 1, rotate: 1, scale: 1, scaleX: 1, scaleY: 1 }
   expect(layoutPart(parts)).toBeUndefined()
   expect(layoutPart({ ...parts, width: 3 })).toEqual({ width: 3 })
+})
+
+test("lengths, percentages and angles parse strictly", () => {
+  expect(partsOf({ translate: ["-12.5%", "1e1%"] }).translate).toEqual([0, 0, -0.125, 0.1])
+  expect(r4(partsOf({ rotate: "-.5turn" }).rotate)).toBe(r4(-Math.PI))
+  // Units are case-insensitive, as in CSS (the type lists lowercase).
+  expect(r4(partsOf({ rotate: "90DEG" as any }).rotate)).toBe(r4(Math.PI / 2))
+  // `Number` would read these as 0, 16, Infinity and 1.
+  for (const bad of ["%", "", "0x10%", "Infinity%", " 5%", "5 %"]) {
+    expect(() => partsOf({ translate: bad as any }), bad).toThrow()
+  }
+  for (const bad of ["deg", "0x1deg", "Infinitydeg", "1e999deg", "1 deg", "+deg"]) {
+    expect(() => partsOf({ rotate: bad as any }), bad).toThrow()
+  }
+})
+
+test("an RN transform list throws on a percentage instead of sending NaN", () => {
+  for (const step of [{ translateY: "100%" }, { translateX: "50%" }, { scale: "2" }, { scaleX: NaN }]) {
+    expect(() => transformMatrix([step] as unknown as Transform)).toThrow(/percentages go in style.translate \(DF-49\)/)
+  }
+  expect(transformMatrix([{ translateX: 3 }, { scaleY: 2 }])).toEqual([1, 0, 0, 2, 3, 0])
 })
 
 test("a commit sends only the parts that changed", async () => {
