@@ -527,6 +527,8 @@ with these choices:
 
   Its container is a full-window view added at the end of the root
   level when its first child commits (open order), after its owner's.
+  It closes once it holds neither children nor an open layer it owns
+  (a menu keeps its dialog open), and reopens on top.
   The owner is the enclosing `Layer`'s container, found through React
   context; the app's root nodes are placed before the first layer,
   since React commits a portal's children before its ancestors.

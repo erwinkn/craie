@@ -1,5 +1,5 @@
 import { test, expect } from "bun:test"
-import { createElement, Suspense, useState } from "react"
+import { createElement, Fragment, Suspense, useState } from "react"
 import { createRoot, Layer, View } from "../src/index.js"
 import type { Transport, UiEvent } from "../src/host.js"
 import { NIL } from "../src/wire.js"
@@ -43,6 +43,38 @@ test("a z of 0 sends no spatial op at mount", async () => {
   createRoot(t).renderSync(createElement(View, { style: { width: 10, zIndex: 0 } }))
   await tick()
   expect(t.ops().some(o => o.tag === SPATIAL)).toBe(false)
+})
+
+test("a style of only zIndex has no layout: undefined, {zIndex}, undefined", async () => {
+  const t = new FakeTransport()
+  const root = createRoot(t)
+  const App = ({ style }: { style?: { zIndex: number } }) => createElement(View, { style })
+  root.renderSync(createElement(App, {}))
+  await tick()
+  for (const [style, z] of [[{ zIndex: 1 }, 1], [undefined, 0]] as const) {
+    t.frames.length = 0
+    root.renderSync(createElement(App, { style }))
+    await tick()
+    expect(t.all()).toMatchObject([{ tag: SPATIAL, f: [4, z] }])
+  }
+})
+
+test("any number is a zIndex: rounded, clamped, NaN is 0", async () => {
+  const t = new FakeTransport()
+  const root = createRoot(t)
+  const error = console.error
+  console.error = () => {}
+  try {
+    for (const [zIndex, z] of [[1.5, 2], [1e12, 0x7fff_ffff], [-Infinity, -0x8000_0000], [NaN, 0]]) {
+      t.frames.length = 0
+      root.renderSync(createElement(View, { style: { zIndex } }))
+      await tick()
+      const spatial = t.all().find(o => o.tag === SPATIAL)
+      expect(spatial?.f ?? [4, 0]).toEqual([4, z])
+    }
+  } finally {
+    console.error = error
+  }
 })
 
 /** The ops that open layer containers: [container, owner, z]. */
@@ -143,7 +175,106 @@ test("an empty layer sends nothing", async () => {
   expect(t.all().filter(o => o.tag === CREATE).length).toBe(1)
 })
 
-test("a layer stays open while Suspense hides it", async () => {
+test("an owner stays open while a layer it owns is open", async () => {
+  const t = new FakeTransport()
+  const root = createRoot(t)
+  let setShown!: (shown: boolean) => void
+  function App() {
+    const [shown, ss] = useState(true)
+    setShown = ss
+    return createElement(View, null,
+      createElement(Layer, { z: 70 },
+        shown ? createElement(View) : null,
+        createElement(Layer, { z: 50 }, createElement(View))))
+  }
+  root.renderSync(createElement(App))
+  await tick()
+  const [[dialog], [menu, owner]] = layers(t.all()) as number[][]
+  expect(owner).toBe(dialog)
+  // The dialog's own child leaves; the menu it owns keeps it open.
+  t.frames.length = 0
+  setShown(false)
+  await tick()
+  expect(t.all().some(o => o.tag === REMOVE && (o.id === dialog || o.id === menu))).toBe(false)
+  t.frames.length = 0
+  setShown(true)
+  await tick()
+  const ops = t.all()
+  expect(layers(ops)).toEqual([])
+  expect(ops.find(o => o.tag === PLACE)!.f[0]).toBe(dialog)
+})
+
+test("closing cascades to an idle owner, and both reopen", async () => {
+  const t = new FakeTransport()
+  const root = createRoot(t)
+  let setShown!: (shown: boolean) => void
+  function App() {
+    const [shown, ss] = useState(true)
+    setShown = ss
+    return createElement(Layer, { z: 70 },
+      createElement(Layer, { z: 50 }, shown ? createElement(View) : null))
+  }
+  root.renderSync(createElement(App))
+  await tick()
+  const [[dialog, none], [menu, owner]] = layers(t.all()) as number[][]
+  expect([none, owner]).toEqual([NIL, dialog])
+  t.frames.length = 0
+  setShown(false)
+  await tick()
+  const removed = t.all().filter(o => o.tag === REMOVE).map(o => o.id)
+  expect(removed).toEqual(expect.arrayContaining([dialog, menu]))
+  t.frames.length = 0
+  setShown(true)
+  await tick()
+  const [[dialog2, none2], [, owner2]] = layers(t.all()) as number[][]
+  expect([none2, owner2]).toEqual([NIL, dialog2])
+})
+
+test("an app root remounted while a layer is open lands below it", async () => {
+  const t = new FakeTransport()
+  const root = createRoot(t)
+  let setKey!: (k: number) => void
+  function App() {
+    const [k, sk] = useState(0)
+    setKey = sk
+    return createElement(Fragment, null,
+      createElement(View, { key: k }),
+      createElement(Layer, { z: 50 }, createElement(View)))
+  }
+  root.renderSync(createElement(App))
+  await tick()
+  const [[container]] = layers(t.all()) as number[][]
+  t.frames.length = 0
+  setKey(1)
+  await tick()
+  const placed = t.all().filter(o => o.tag === PLACE && o.f[0] === NIL)
+  expect(placed.map(o => o.f[2])).toEqual([container])
+})
+
+test("a child inserted before another inside a layer", async () => {
+  const t = new FakeTransport()
+  const root = createRoot(t)
+  let setFirst!: (first: boolean) => void
+  function App() {
+    const [first, sf] = useState(false)
+    setFirst = sf
+    return createElement(Layer, { z: 50 },
+      first ? createElement(View, { key: "a" }) : null,
+      createElement(View, { key: "b" }))
+  }
+  root.renderSync(createElement(App))
+  await tick()
+  const ops = t.all()
+  const [[container]] = layers(ops) as number[][]
+  const b = ops.find(o => o.tag === PLACE && o.f[0] === container)!.id
+  t.frames.length = 0
+  setFirst(true)
+  await tick()
+  const a = t.all().find(o => o.tag === CREATE)!.id
+  expect(t.all().find(o => o.tag === PLACE)!.f).toEqual([container, a, b])
+})
+
+test("Suspense hides and reveals a layer's children, keeping it open", async () => {
   const t = new FakeTransport()
   const root = createRoot(t)
   let wake!: () => void
@@ -159,14 +290,23 @@ test("a layer stays open while Suspense hides it", async () => {
       createElement(Lazy)))
   root.renderSync(app())
   await tick()
-  const [[container]] = layers(t.all()) as number[][]
-  // Hiding runs the Layer's layout-effect cleanup, but keeps its
-  // children: the container must stay, to show them again.
+  const ops = t.all()
+  const [[container]] = layers(ops) as number[][]
+  const child = ops.find(o => o.tag === PLACE && o.f[0] === container)!.id
+  // Hiding is display: none on the layer's child (a layout op).
+  t.frames.length = 0
   suspend = true
   root.renderSync(app())
+  await tick()
+  expect(t.all().filter(o => o.tag !== LAYOUT)).toEqual([])
+  expect(t.all().map(o => o.id)).toEqual([child])
+  // Revealing restores its layout; the container never closed.
+  t.frames.length = 0
   suspend = false
   wake()
+  await pending
+  root.renderSync(app())
   await tick()
-  await tick()
-  expect(t.all().some(o => o.tag === REMOVE && o.id === container)).toBe(false)
+  expect(t.all().filter(o => o.tag !== LAYOUT)).toEqual([])
+  expect(t.all().map(o => o.id)).toEqual([child])
 })

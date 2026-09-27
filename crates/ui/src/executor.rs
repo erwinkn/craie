@@ -333,6 +333,9 @@ pub fn validate(host: &Host, txn: &Transaction<'_>) -> Result<(), WireError> {
             }
             Mutation::Layer { id, owner } => {
                 need_live(&o, *id, "layer on an absent node")?;
+                if o.kind(*id) != Some(NodeKind::View) {
+                    return Err(invalid("layer on a non-view node"));
+                }
                 if *owner != NIL {
                     need_live(&o, *owner, "layer owned by an absent node")?;
                     if owner == id {

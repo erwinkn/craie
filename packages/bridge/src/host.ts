@@ -254,8 +254,9 @@ export interface HostNode {
   /** List nodes only. */
   list?: ListKeys
   /** Layer containers only: the layer it was opened from (null: none),
-   * and the children React placed in it. Open while it has any. */
-  layer?: { owner: HostNode | null; kids: Set<HostNode> }
+   * the children React placed in it, and the open layers opened from
+   * it. Open while it has either. */
+  layer?: { owner: HostNode | null; kids: Set<HostNode>; owned: Set<HostNode> }
   /** Text nodes: nested text nodes, in order. They have no native node
    * (virtual); their text and style become spans of the root's
    * paragraph. */
@@ -454,13 +455,14 @@ function layoutOf(props: Record<string, any>, suspended: boolean): StyleProps | 
   return { ...base, display: "none" }
 }
 
-/** A style's `zIndex`: an i32, 0 when unset. */
+/** A style's `zIndex` as the i32 native sorts by, 0 when unset. Like
+ * React Native, any number goes: rounded and clamped, NaN is 0. */
 function zOf(style: StyleProps | undefined): number {
   const z = style?.zIndex ?? 0
-  if (!Number.isInteger(z) || z < -0x8000_0000 || z > 0x7fff_ffff) {
-    throw Error(`zIndex must be a 32-bit integer, got ${z}`)
-  }
-  return z
+  if (Number.isInteger(z) && z >= -0x8000_0000 && z <= 0x7fff_ffff) return z
+  const i = Number.isNaN(z) ? 0 : Math.min(Math.max(Math.round(z), -0x8000_0000), 0x7fff_ffff)
+  warnOnce(`zIndex ${z} is not a 32-bit integer, using ${i}`)
+  return i
 }
 
 function sameMatrix(a: Affine, b: Affine): boolean {
@@ -943,7 +945,7 @@ export class CraieHost {
    * the layer it was opened from (`owner`). Opened on its first child. */
   layer(owner: HostNode | null, z: number): HostNode {
     const n = this.node("view", { style: { width: "100%", height: "100%", zIndex: z } })
-    n.layer = { owner, kids: new Set() }
+    n.layer = { owner, kids: new Set(), owned: new Set() }
     return n
   }
 
@@ -959,18 +961,32 @@ export class CraieHost {
    * the layer (it opens again, on top, with its next child). */
   removeFromLayer(layer: HostNode, child: HostNode) {
     this.detach(child)
-    const kids = layer.layer!.kids
-    kids.delete(child)
-    if (kids.size === 0) this.release(layer)
+    layer.layer!.kids.delete(child)
+    this.closeIdle(layer)
   }
 
   private openLayer(n: HostNode) {
     if (n.mounted || !n.layer) return
     const owner = n.layer.owner
-    if (owner) this.openLayer(owner)
+    if (owner) {
+      this.openLayer(owner)
+      owner.layer!.owned.add(n)
+    }
     this.materialize(n, null, null)
     this.layers.push(n)
-    if (this.ready()) this.encoder.layer(n.id, owner?.mounted ? owner.id : NIL)
+    if (this.ready()) this.encoder.layer(n.id, owner ? owner.id : NIL)
+  }
+
+  /** Closes a layer with neither children nor open layers it owns, and
+   * then its owner if that leaves it idle too. An owner stays open while
+   * a layer it owns is: native would drop the owner on its removal. */
+  private closeIdle(n: HostNode) {
+    const l = n.layer!
+    if (!n.mounted || l.kids.size > 0 || l.owned.size > 0) return
+    this.release(n)
+    if (!l.owner) return
+    l.owner.layer!.owned.delete(n)
+    this.closeIdle(l.owner)
   }
 
   place(parent: HostNode | null, child: HostNode, before: HostNode | null) {
@@ -1041,7 +1057,8 @@ export class CraieHost {
     }
     if (!n.mounted) return
     this.nodes.delete(n.id)
-    if (n.layer) this.layers.splice(this.layers.indexOf(n), 1)
+    const at = n.layer ? this.layers.indexOf(n) : -1
+    if (at >= 0) this.layers.splice(at, 1)
     n.claims = undefined
     // Its native end events will not reach it (the generation moves).
     for (const p of n.pendingAnims?.splice(0) ?? []) p.resolve({ finished: false, reason: "removed" })

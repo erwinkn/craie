@@ -1158,8 +1158,10 @@ pumps: it waits for a pump that is storing a refused frame, then
 retries it); a closed receiver closes the session.
 `Layer` (work item 4) is a React portal into a layer container: a
 full-window view at the end of the root level, opened when its first
-child commits, owned by the enclosing `Layer`'s container. The app's
-root nodes are placed before the first open layer.
+child commits, owned by the enclosing `Layer`'s container. It closes
+once it holds neither children nor an open layer it owns, then its
+owner if that leaves it empty too. The app's root nodes are placed
+before the first open layer.
 
 **Target.** The same transport with CRW2 payloads. The bridge exposes
 `submit` and `subscribe` only, so an embedded JS engine could replace

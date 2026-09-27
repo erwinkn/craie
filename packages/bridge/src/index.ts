@@ -428,12 +428,6 @@ export function Layer({ z = 0, children }: LayerProps) {
     if (container.mounted) host.update(container, old, props)
     else container.props = props
   }, [z])
-  // Closes a container opened only as an owner (it never had children);
-  // one with children closes with its last, so a Suspense boundary that
-  // hides it (cleanups run, children stay) leaves it open.
-  useLayoutEffect(() => () => {
-    if (container.layer!.kids.size === 0) host.release(container)
-  }, [])
   return reconciler.createPortal(
     createElement(LayerOwner.Provider, { value: container }, children),
     container, null, null,

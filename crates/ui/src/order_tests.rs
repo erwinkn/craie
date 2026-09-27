@@ -308,3 +308,244 @@ fn a_reused_owner_id_adopts_nothing() {
     assert_eq!(ui.host.owners[&3], NIL);
     assert_eq!(roots(&ui), [0, 3, 1, 5]);
 }
+
+/// The paint order the oracle expects of `parent`, where it can say:
+/// with no layer raised by an owner sibling, the stable sort by z;
+/// otherwise the same children, each raised layer after its owner's
+/// sibling (outside ownership cycles, which are cut somewhere).
+fn check_order(ui: &Ui, parent: NodeId, why: &str) {
+    let host = &ui.host;
+    let kids = host.children(parent);
+    let order = host.paint_order(parent);
+    let mut same: Vec<NodeId> = order.to_vec();
+    same.sort();
+    let mut tree = kids.to_vec();
+    tree.sort();
+    assert_eq!(same, tree, "{why}: a permutation of the children");
+    // The sibling holding each child's owner, by index in `kids`.
+    let holder: Vec<Option<usize>> = kids
+        .iter()
+        .map(|&c| {
+            let mut cur = NodeId(*host.owners.get(&c.0)?);
+            if cur.0 == NIL {
+                return None;
+            }
+            while host.parent(cur) != parent {
+                cur = host.parent(cur);
+                if !cur.is_node() {
+                    return None;
+                }
+            }
+            (cur != c).then(|| kids.iter().position(|&k| k == cur).unwrap())
+        })
+        .collect();
+    if holder.iter().all(Option::is_none) {
+        let mut by_z = kids.to_vec();
+        by_z.sort_by_key(|c| host.spatial[c.index()].z);
+        assert_eq!(&order[..], &by_z[..], "{why}: stable sort by z");
+        return;
+    }
+    let at = |c: NodeId| order.iter().position(|&o| o == c).unwrap();
+    for (i, h) in holder.iter().enumerate() {
+        let Some(mut h) = *h else { continue };
+        let owner_sibling = kids[h];
+        // Skip a layer on an ownership cycle.
+        let mut cyclic = false;
+        for _ in 0..kids.len() {
+            if h == i {
+                cyclic = true;
+                break;
+            }
+            let Some(next) = holder[h] else { break };
+            h = next;
+        }
+        if !cyclic {
+            assert!(
+                at(kids[i]) > at(owner_sibling),
+                "{why}: layer {:?} sorts below its owner's sibling {owner_sibling:?}",
+                kids[i]
+            );
+        }
+    }
+}
+
+/// Every attached node, depth first in paint order: what the scene
+/// draws when every box overlaps and nothing clips.
+fn drawn(ui: &Ui, parent: NodeId, out: &mut Vec<u32>) {
+    for &c in ui.host.paint_order(parent).iter() {
+        out.push(c.0);
+        drawn(ui, c, out);
+    }
+}
+
+/// Random forests of overlapping views reshaped by z, layers with random
+/// owners, moves and detaches, and removals whose ids are reused at
+/// once, checked against an oracle that knows nothing of the sort keys:
+/// before the refresh (a reader sorting on the spot) and after it, the
+/// drawn order, and hits (front to back, passing layer boxes).
+#[test]
+fn paint_order_matches_an_oracle() {
+    let full = boxed(0.0, 0.0, 100.0, 100.0);
+    for seed in 1..=40u64 {
+        let mut rng = Rng::new(seed * 0x51ED);
+        let mut ui = Ui::new(1.0);
+        let (mut next, mut free) = (0u32, Vec::new());
+        for round in 0..60u64 {
+            let live: Vec<u32> = (0..ui.host.slot_count() as u32)
+                .filter(|&i| ui.host.is_live(NodeId(i)))
+                .collect();
+            let any = |rng: &mut Rng| live[rng.below(live.len() as u32) as usize];
+            let mut t = Transaction::new(round + 1);
+            match if live.is_empty() { 0 } else { rng.below(7) } {
+                0 | 1 => {
+                    let id = free.pop().unwrap_or_else(|| {
+                        next += 1;
+                        next - 1
+                    });
+                    let parent = if live.is_empty() || rng.chance(0.2) {
+                        NIL
+                    } else {
+                        any(&mut rng)
+                    };
+                    view(&mut t, parent, id, &full);
+                    if rng.chance(0.4) {
+                        t.z(id, rng.below(5) as i32 - 2);
+                    }
+                }
+                2 => {
+                    // The slot goes straight to a new node.
+                    let id = any(&mut rng);
+                    t.remove(id);
+                    let parent = live
+                        .iter()
+                        .copied()
+                        .filter(|&p| p != id)
+                        .nth(rng.below(live.len() as u32) as usize)
+                        .unwrap_or(NIL);
+                    view(&mut t, parent, id, &full);
+                }
+                3 => {
+                    let (id, to) = (any(&mut rng), any(&mut rng));
+                    if rng.chance(0.2) {
+                        t.detach(id);
+                    } else if rng.chance(0.2) {
+                        t.append(NIL, id);
+                    } else if !ui.ancestors(NodeId(to)).any(|n| n.0 == id) {
+                        t.append(to, id);
+                    }
+                }
+                4 | 5 => {
+                    t.z(any(&mut rng), rng.below(5) as i32 - 2);
+                }
+                _ => {
+                    let (id, owner) = (any(&mut rng), any(&mut rng));
+                    let owner = if owner == id || rng.chance(0.2) {
+                        NIL
+                    } else {
+                        owner
+                    };
+                    t.layer(id, owner);
+                }
+            }
+            ui.apply_txn(&t).unwrap();
+            let attached: Vec<NodeId> = std::iter::once(NodeId::NIL)
+                .chain((0..ui.host.slot_count() as u32).map(NodeId).filter(|&n| {
+                    ui.host.is_live(n)
+                        && ui
+                            .ancestors(n)
+                            .last()
+                            .is_some_and(|r| ui.host.parent(r) == NodeId::NIL)
+                }))
+                .collect();
+            let why = format!("seed {seed} round {round}");
+            let stale: Vec<Vec<NodeId>> = attached
+                .iter()
+                .map(|&p| {
+                    check_order(&ui, p, &format!("{why}, before the refresh"));
+                    ui.host.paint_order(p).to_vec()
+                })
+                .collect();
+            let shown = painted(&mut ui);
+            for (&p, before) in attached.iter().zip(&stale) {
+                check_order(&ui, p, &why);
+                assert_eq!(
+                    &ui.host.paint_order(p)[..],
+                    &before[..],
+                    "{why}: refresh changed {p:?}"
+                );
+            }
+            let mut expect = Vec::new();
+            drawn(&ui, NodeId::NIL, &mut expect);
+            assert_eq!(shown, expect, "{why}: drawn order");
+            let front = expect.iter().rev().find(|&&n| !ui.host.is_layer(NodeId(n)));
+            assert_eq!(
+                ui.hit_test(50.0, 50.0).map(|n| n.0),
+                front.copied(),
+                "{why}: hit"
+            );
+            assert_eq!(
+                ui.hit_test_walk(50.0, 50.0),
+                ui.hit_test(50.0, 50.0),
+                "{why}: walk"
+            );
+        }
+    }
+}
+
+/// A sorted parent's id, reused at once, starts in tree order.
+#[test]
+fn a_recycled_sorted_parent_starts_in_tree_order() {
+    let mut ui = stack(&[2, 1, 0]);
+    assert_eq!(painted(&mut ui), [0, 3, 2, 1]);
+    let mut t = Transaction::new(2);
+    t.remove(0);
+    view(&mut t, NIL, 0, &boxed(0.0, 0.0, 200.0, 200.0));
+    for id in 1..=3 {
+        t.append(0, id);
+    }
+    ui.apply_txn(&t).unwrap();
+    // The children keep their z: sorted again, from their new tree order.
+    assert_eq!(painted(&mut ui), [0, 3, 2, 1]);
+    let mut t = Transaction::new(3);
+    t.remove(0);
+    view(&mut t, NIL, 0, &boxed(0.0, 0.0, 200.0, 200.0));
+    view(&mut t, 0, 4, &boxed(0.0, 0.0, 100.0, 100.0));
+    view(&mut t, 0, 5, &boxed(0.0, 0.0, 100.0, 100.0));
+    ui.apply_txn(&t).unwrap();
+    assert_eq!(painted(&mut ui), [0, 4, 5]);
+    assert!(!ui.host.orders.contains_key(&0));
+}
+
+/// A z and a layer set while detached take effect on attaching.
+#[test]
+fn z_and_layer_set_while_detached_apply_on_attach() {
+    let mut ui = stack(&[0, 0, 0]);
+    painted(&mut ui);
+    let mut t = Transaction::new(2);
+    t.detach(1).detach(2);
+    ui.apply_txn(&t).unwrap();
+    assert_eq!(painted(&mut ui), [0, 3]);
+    let mut t = Transaction::new(3);
+    t.z(1, 5).layer(2, 3);
+    ui.apply_txn(&t).unwrap();
+    assert_eq!(painted(&mut ui), [0, 3]);
+    let mut t = Transaction::new(4);
+    t.place(0, 1, 3).place(0, 2, 1);
+    ui.apply_txn(&t).unwrap();
+    // Tree order 2, 1, 3: 1 rises by z, 2 above its owner 3.
+    assert_eq!(painted(&mut ui), [0, 3, 2, 1]);
+    assert_eq!(ui.hit_test(50.0, 50.0), Some(NodeId(1)));
+}
+
+/// A layer is a view: anything else is a structural error.
+#[test]
+fn layer_on_a_non_view_is_rejected() {
+    let mut ui = stack(&[0]);
+    let mut t = Transaction::new(2);
+    t.create(9, NodeKind::Text).append(0, 9).layer(9, NIL);
+    assert_eq!(
+        ui.apply_txn(&t),
+        Err(crate::wire::WireError::Invalid("layer on a non-view node"))
+    );
+    assert!(!ui.host.is_live(NodeId(9)));
+}

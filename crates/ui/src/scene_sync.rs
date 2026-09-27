@@ -24,7 +24,7 @@ use craie_core::geom::{Affine, Point, Rect, Size};
 use craie_core::rev::Rev;
 use craie_scene::{ChunkWriter, ClipRecord, NONE, OrderItem, PaintSlot, Placement, RasterId};
 
-use crate::host::{NodeId, ROOT};
+use crate::host::{NodeFlags, NodeId, ROOT};
 use crate::layout::{LayoutData, MeasuredText};
 use crate::mutation::NodeKind;
 use crate::text::paragraph::{SpanStyle, TextSpec, TextStyle};
@@ -424,12 +424,15 @@ impl Ui {
         let Some(child_ctx) = self.visit_node(id, ctx, topo, out) else {
             return;
         };
-        // Children draw in paint order (`order.rs`); most parents keep
-        // tree order and copy nothing.
-        if self.host.has_paint_order(id) {
-            for child in self.host.paint_order(id).into_owned() {
+        // Children draw in paint order (`order.rs`), sorted before the
+        // frame: a sorted parent lends its order to the walk, uncopied;
+        // most parents keep tree order.
+        debug_assert!(!self.host.order_flags(id).contains(NodeFlags::ORDER));
+        if let Some(order) = self.host.orders.get_mut(&id.0).map(std::mem::take) {
+            for &child in &order {
                 self.visit(child, child_ctx, topo, out);
             }
+            self.host.orders.insert(id.0, order);
         } else {
             for i in 0..self.host.child_count(id) {
                 let child = self.host.child_at(id, i);

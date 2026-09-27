@@ -99,7 +99,9 @@ impl Ui {
 
     /// Deepest node containing (x, y) logical, honoring transforms, clip
     /// chains, scroll offsets, and `display: none`. Skips the subtrees
-    /// whose reach misses the point (`reach.rs`).
+    /// whose reach misses the point (`reach.rs`). Allocation-free once
+    /// paint orders are fresh (after `render` or within `dispatch`);
+    /// between a transaction and those, a stale parent sorts on the spot.
     pub fn hit_test(&self, x: f32, y: f32) -> Option<NodeId> {
         self.hit_roots(Point::new(x, y), true)
     }

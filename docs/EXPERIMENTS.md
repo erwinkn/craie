@@ -261,8 +261,9 @@ tree (groups of 5,000 cells 6 pt square), headless on exe1 with a load
 average of 22 to 38; ranges are three runs.
 
 One z change in a parent of 5,000 children, mean of 50 changes: the
-re-sort alone, then the whole next frame (re-sort, draw-order rebuild,
-scene), against the frame after a transform change of the same cell.
+re-sort alone, then the next frame without it (`render` after the
+re-sort: the draw-order rebuild and the scene), against the frame after
+a transform change of the same cell.
 
 | tree | children with z | re-sort | frame after z | frame after a transform |
 |------|-----------------|---------|---------------|-------------------------|
@@ -277,6 +278,11 @@ scene), against the frame after a transform change of the same cell.
   the draw order rebuilds with one walk of the whole tree (`LEDGER.md`,
   DF-18). No layout runs and no chunk rebuilds (`z_change_costs_no_layout`
   checks both).
+- Rerun twice after the PR #6 review (the scene walk lends a sorted
+  order instead of copying it), load average 20 to 26: within noise.
+  Two cells ran slower than their range, both with no z before: the
+  5k re-sort at 13 to 18 µs, and the 100k frame after z at 7.9 to
+  9.0 ms. The others fell inside or just below their ranges.
 
 Hit tests at 100k nodes along E15's 1,000-point path (µs per test,
 allocations per test):

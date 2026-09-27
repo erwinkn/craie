@@ -634,15 +634,21 @@ export function transformMatrix(t: Transform | undefined): Affine {
   return m
 }
 
-/** The layout part of a style: everything but the spatial keys. */
+/** The layout part of a style: everything but the spatial keys, or
+ * undefined when nothing is left (`{ zIndex: 1 }` has no layout, like
+ * no style at all). */
 export function layoutPart(s: StyleProps | undefined): StyleProps | undefined {
   if (!s) return undefined
+  let rest = s
   if (
-    s.transform === undefined && s.opacity === undefined && s.zIndex === undefined &&
-    s.transition === undefined
-  ) return s
-  const { transform: _t, opacity: _o, zIndex: _z, transition: _tr, ...rest } = s
-  return rest
+    s.transform !== undefined || s.opacity !== undefined || s.zIndex !== undefined ||
+    s.transition !== undefined
+  ) {
+    const { transform: _t, opacity: _o, zIndex: _z, transition: _tr, ...layout } = s
+    rest = layout
+  }
+  for (const k in rest) if (rest[k as keyof StyleProps] !== undefined) return rest
+  return undefined
 }
 
 /** Key-order-independent stringify for style interning. */

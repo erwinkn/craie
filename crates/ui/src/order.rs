@@ -15,6 +15,10 @@
 //! paint: app, dialog, menu, toast
 //! ```
 //!
+//! An owner that no sibling holds is silently no owner: one outside the
+//! parent's subtree, one inside the layer itself, and a removed one
+//! (`Host::remove` resets it to NIL, so a recycled id adopts nothing).
+//!
 //! Only parents that need an order hold one (`NodeFlags::SORTED`, the
 //! order in `Host::orders`): a parent whose children all have z = 0 and
 //! no owner paints in tree order and never sorts. A tree edit under a
@@ -126,13 +130,6 @@ impl Host {
                 .owners
                 .keys()
                 .any(|&l| self.parent(NodeId(l)) == parent)
-    }
-
-    /// Whether `parent`'s paint order differs from tree order (it is
-    /// sorted, or queued to be).
-    pub fn has_paint_order(&self, parent: NodeId) -> bool {
-        let f = self.order_flags(parent);
-        f.contains(NodeFlags::SORTED) || f.contains(NodeFlags::ORDER)
     }
 
     /// Re-sorts the queued parents. With owners about, a structure change

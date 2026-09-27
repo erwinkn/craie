@@ -304,9 +304,11 @@ pub enum Mutation<'a> {
         opacity: Option<f32>,
         z: Option<i32>,
     },
-    /// Makes `id` a layer container: hit testing passes through its own
-    /// box, and it never sorts below the sibling holding `owner` (NIL:
-    /// no owner).
+    /// Makes `id` (a View) a layer container: hit testing passes through
+    /// its own box, and it never sorts below the sibling holding `owner`
+    /// (NIL: no owner). An owner that is not under `id`'s parent, or is
+    /// under `id` itself, holds no sibling: the layer sorts as unowned.
+    /// Removing the owner makes it unowned for good.
     Layer {
         id: u32,
         owner: u32,
