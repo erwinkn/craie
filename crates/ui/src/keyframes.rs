@@ -25,7 +25,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::animation::{MAX_SECS, Prop, Spring, bezier, end_reason, lerp_color};
-use crate::host::{NodeId, SpatialPatch};
+use crate::host::{NodeId, Spatial, SpatialPatch};
 use crate::states::value_field;
 use crate::ui::Ui;
 
@@ -831,6 +831,28 @@ impl Ui {
         self.motion.live += 1;
         self.motion.stale = true;
         self.force_paint = true;
+        self.pin_loops(node);
+    }
+
+    /// A loop holds the node's transform record and opacity layer, so
+    /// its frames at identity or opacity 1 change no draw topology (and
+    /// allocate nothing). The hold goes with the last loop.
+    fn pin_loops(&mut self, node: NodeId) {
+        let looping = self.motion.nodes.get(&node.0).map_or(0, |m| {
+            m.list
+                .iter()
+                .filter(|r| r.anim.infinite())
+                .fold(0, |a, r| a | r.anim.props())
+        });
+        let has = |p: Prop| looping & 1 << p as u16 != 0;
+        let mut pin = 0;
+        if has(Prop::Translate) || has(Prop::Rotate) || has(Prop::Scale) {
+            pin |= Spatial::PIN_TRANSFORM;
+        }
+        if has(Prop::Opacity) {
+            pin |= Spatial::PIN_LAYER;
+        }
+        self.pin_spatial(node, pin);
     }
 
     /// Ends the animation of `node` at `i` in its list (reported with
@@ -867,6 +889,7 @@ impl Ui {
         if gone != 0 {
             self.write_sample(node, gone, &under);
         }
+        self.pin_loops(node);
     }
 
     fn report_keyframes_end(&mut self, node: NodeId, key: u32, reason: u32) {

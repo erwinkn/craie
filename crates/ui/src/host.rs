@@ -257,6 +257,10 @@ pub struct Spatial {
     pub scroll: [f32; 2],
     /// Order among its siblings (`order.rs`): higher paints later.
     pub z: i32,
+    /// Held by a looping keyframe animation (`PIN_*`): the transform
+    /// record or opacity layer stays while the loop passes identity or
+    /// opacity 1, so its frames change no draw topology.
+    pub pin: u8,
 }
 
 impl Default for Spatial {
@@ -267,14 +271,20 @@ impl Default for Spatial {
             opacity: 1.0,
             scroll: [0.0; 2],
             z: 0,
+            pin: 0,
         }
     }
 }
 
 impl Spatial {
+    pub const PIN_TRANSFORM: u8 = 1;
+    pub const PIN_LAYER: u8 = 2;
+
     /// Owns a transform record in the scene (drawn in its own space).
     pub fn transformed(&self) -> bool {
-        self.composed != Affine::IDENTITY || self.parts.translate[2..] != [0.0; 2]
+        self.pin & Spatial::PIN_TRANSFORM != 0
+            || self.composed != Affine::IDENTITY
+            || self.parts.translate[2..] != [0.0; 2]
     }
 
     /// The node's transform for a border box of `size`, about its
@@ -291,7 +301,7 @@ impl Spatial {
 
     /// Composites as an isolated group.
     pub fn layered(&self) -> bool {
-        self.opacity < 1.0
+        self.pin & Spatial::PIN_LAYER != 0 || self.opacity < 1.0
     }
 }
 

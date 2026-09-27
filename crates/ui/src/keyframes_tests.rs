@@ -238,6 +238,52 @@ fn a_list_restarts_on_change_only() {
     assert_eq!(ui.motion.node_count(), 0);
 }
 
+/// A loop holds the node's transform record and opacity layer through
+/// identity and opacity 1 (its iteration boundaries), so its frames
+/// change no draw topology; a finite animation holds nothing, and the
+/// hold goes with the loop.
+#[test]
+fn a_loop_holds_its_record_and_layer() {
+    let mut ui = boxed();
+    let held = |ui: &Ui| {
+        let s = &ui.host.spatial[1];
+        (s.transformed(), s.layered())
+    };
+    let pulse = Animation {
+        iterations: f32::INFINITY,
+        ..linear(
+            vec![frame(0.5, value_field::OPACITY, |s| s.opacity = 0.5)],
+            1.0,
+        )
+    };
+    apply(&mut ui, |t| {
+        t.animation(1, Trigger::Base, false, &[spin(1.0), pulse]);
+    });
+    at(&mut ui, 2.0);
+    let s = ui.host.spatial[1];
+    assert_eq!((s.parts.rotate, s.opacity), (0.0, 1.0));
+    assert_eq!(held(&ui), (true, true));
+    let structure = ui.host.revs.structure;
+    at(&mut ui, 2.5);
+    at(&mut ui, 3.0);
+    assert_eq!(ui.host.revs.structure, structure);
+
+    apply(&mut ui, |t| {
+        t.animation(1, Trigger::Base, false, &[fade_from(0.5, 1.0)]);
+    });
+    at(&mut ui, 3.5);
+    assert_eq!(held(&ui), (false, true));
+    at(&mut ui, 4.0);
+    assert_eq!(held(&ui), (false, false));
+    apply(&mut ui, |t| {
+        t.animation(1, Trigger::Base, false, &[spin(1.0)]);
+    });
+    apply(&mut ui, |t| {
+        t.animation(1, Trigger::Base, false, &[]);
+    });
+    assert_eq!(held(&ui), (false, false));
+}
+
 /// A forwards fill holds the last frame after the end; the node's own
 /// value still changes underneath and shows when the list goes.
 #[test]

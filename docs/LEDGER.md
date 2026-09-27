@@ -331,17 +331,6 @@ Reviewer minors and nitpicks not fixed yet.
   if reordering or inserting in large trees shows up in a frame
   profile (it would serve inserts and moves too).
 
-### DF-22: transitions and animations inside a variant
-
-- Source: work item 5.
-- Where: packages/bridge/src/host.ts (`variantValues`).
-- Claim: a variant can change what a property is, not how it moves. A
-  `transition` or `animation` inside `_hover` is ignored; the element's
-  own `transition` applies to every change, whichever state caused it.
-- Why deferred: Marbre's per-state timing is presets (enter, loop),
-  which is work item 6.
-- Resolves in: work item 6 (motion presets).
-
 ### DF-23: text metrics in variants
 
 - Source: work item 5.
@@ -366,6 +355,11 @@ Reviewer minors and nitpicks not fixed yet.
   `NSWorkspace.accessibilityDisplayShouldReduceMotion` plus its change
   notification, and touch stays false on desktop. It needs an objc
   call on the Mac.
+- Since work item 6 (keyframe animations), everything downstream of
+  the bit is there. `Ui::set_reduced_motion` sends an ENVIRONMENT event
+  (out kind 21), and the facade re-sends every transition and animation
+  under each entry's `reducedMotion` policy. Only the platform source
+  is missing.
 - Resolves in: the next macOS pass.
 
 ### DF-26: variants on a nested Text
@@ -781,7 +775,66 @@ Reviewer minors and nitpicks not fixed yet.
 - Resolves in: a grid group, with row structure from the tree or from
   the members' boxes, if the kit builds grids.
 
+### DF-55: no dash offset channel in keyframes
+
+- Source: work item 6 (keyframe animations).
+- Where: crates/ui/src/keyframes.rs (`Sample`), packages/bridge/src/motion.ts
+  (`frameValues`).
+- Claim: the target lists a vector shape's stroke dash offset among the
+  frame values. A frame carries opacity, the transform parts and the
+  three paint colors only, so a marching-ants border or a drawn-on
+  stroke can't loop natively.
+- Why deferred: the dash offset lives in the shape's paint (vector
+  ops), not a row the keyframe driver writes. It needs a channel and
+  an `absorb` path of its own.
+- Resolves in: when a ported component animates a stroke; with blur
+  and shimmer frames in work item 7 if convenient.
+
+### DF-56: variant animation ends are not reported
+
+- Source: work item 6 (keyframe animations).
+- Where: crates/ui/src/states.rs (`variant_animations`),
+  packages/bridge/src/host.ts (`dispatchEvent`).
+- Claim: `onAnimationEnd` fires for `enter` and `animation` entries
+  only. A finite animation under `_pressed: { animation }` finishes
+  unreported, because native starts and stops variant animations
+  without JS and sends them with notify off.
+- Why deferred: nothing waits on one. Kit variant motion is loops and
+  presses, and the facade would also need the variant's declaration
+  index back.
+- Resolves in: the first consumer that chains work on a state's
+  animation.
+
+### DF-57: end indices of a list replaced under reduced motion
+
+- Source: work item 6 (keyframe animations).
+- Where: packages/bridge/src/host.ts (`motionIndex`, `dispatchEvent`).
+- Claim: an end event carries the wire index, and the host maps it
+  back to the prop's index through the list it sent last. When
+  reduced motion dropped entries and a new list replaces the old one,
+  the old list's `retargeted` or `cancelled` ends arrive after the new
+  map is in place. Take `[spin, fadeIn]`, with `reducedMotion: "fade"`
+  on the 200 ms fadeIn, so it sends as `[fadeIn]`. Within 200 ms it is
+  replaced by `[pop, spin, fadeIn]`, which sends as `[pop, fadeIn]`.
+  Native ends the old fadeIn (wire 0) as retargeted, and the new map
+  reads wire 0 as `pop` (index 0) instead of fadeIn (index 1). Without
+  reduced motion, or when the policy drops nothing, the map is the
+  identity and every index is right.
+- Why deferred: it needs a per-send generation in the event key (or
+  the old maps kept until their ends arrive), for a case that needs
+  reduced motion, a dropped loop, and a replaced list with a handler
+  that reads `index`.
+- Resolves in: when a consumer reads `index` on retargeted ends.
+
 ## Closed
+
+- DF-22 (work item 6, keyframe animations): a variant could change
+  what a property is, not how it moves. A variant's `style.transition`
+  now times the changes into it (the most specific active variant
+  that times a property, else the node's own), per property, and its
+  `animation` runs natively while it holds: `_hover: { style: { scale:
+  1.02, transition: { scale: { duration: 120 } } } }` scales in over
+  120 ms and back with the base's timing.
 
 - DF-21 (work item 6, transform parts): a variant's transform replaced
   the whole matrix. The spatial row now holds translate, rotate, scale

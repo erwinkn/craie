@@ -14,12 +14,29 @@ export interface Op {
   claims?: { kind: number; flags: number; mods: number; key: number }[]
   /** VARIANTS: each variant's terms, env, and values in wire order (a
    * layout value contributes its layout keys). */
-  variants?: { terms: { scope: number; mask: bigint }[]; env: number; values: number[] }[]
+  variants?: {
+    terms: { scope: number; mask: bigint }[]; env: number; values: number[]
+    /** Per timing: prop, kind, then six numbers. */
+    transitions?: number[][]
+    animations?: Anim[]
+  }[]
+  /** KEYFRAMES: the frames (its table index is its order in the frame). */
+  frames?: { at: number; easing: number[]; mask: number; values: number[] }[]
+  /** ANIMATION: trigger, notify, and the list. */
+  trigger?: number
+  notify?: number
+  animations?: Anim[]
   /** STATES: the bits. */
   bits?: bigint
   /** DRAWING: each shape's strings (geometry, transform, dashes) and
    * numbers in wire order; `s` holds the view box. */
   shapes?: { strings: string[]; f: number[] }[]
+}
+
+/** An animation: its keyframes' table index, then the timing. */
+export interface Anim {
+  keyframes: number; delay: number; duration: number; easing: number[]
+  iterations: number; direction: number; fill: number
 }
 
 export interface Frame {
@@ -71,7 +88,7 @@ export function readFrame(buf: Uint8Array): Frame {
   const ops: Op[] = []
   while (at < buf.byteLength) {
     const tag = u8()
-    const id = tag === 0x02 || tag === 0xb2 ? 0 : u32() // place, environment: no id
+    const id = tag === 0x02 || tag === 0xb2 || tag === 0xa2 ? 0 : u32() // place, environment, keyframes: no id
     const op: Op = { tag, id, f: [] }
     switch (tag) {
       case 0x01: op.f.push(u8()); break // create kind
@@ -162,6 +179,20 @@ export function readFrame(buf: Uint8Array): Frame {
         op.f.push(u8()); for (let k = 0; k < 6; k++) op.f.push(f32())
         break
       }
+      case 0xa2: { // keyframes: count x (at, easing, mask, values)
+        const n = u16()
+        op.frames = []
+        for (let i = 0; i < n; i++) {
+          const at = f32(), easing = readEasing(), mask = u16(), values: number[] = []
+          for (const bit of [1, 2, 8]) if (mask & bit) values.push(u32())
+          if (mask & 16) values.push(f32())
+          for (const bit of [256, 512]) if (mask & bit) values.push(f32(), f32())
+          for (const bit of [1024, 2048, 4096]) if (mask & bit) values.push(f32())
+          op.frames.push({ at, easing, mask, values })
+        }
+        break
+      }
+      case 0xa3: op.trigger = u8(); op.notify = u8(); op.animations = readAnims(); break
       case 0xb0: op.bits = u64(); break // states
       case 0xb1: { // variants: count x (term count, env, terms, values)
         const n = u16()
@@ -182,7 +213,17 @@ export function readFrame(buf: Uint8Array): Frame {
           if (m & 256) values.push(f32(), f32())
           if (m & 512) values.push(f32(), f32())
           for (const bit of [1024, 2048, 4096]) if (m & bit) values.push(f32())
-          op.variants.push({ terms, env, values })
+          const v: NonNullable<Op["variants"]>[number] = { terms, env, values }
+          if (m & 8192) {
+            v.transitions = []
+            for (let k = u8(); k > 0; k--) {
+              const t = [u8(), u8()]
+              for (let j = 0; j < 6; j++) t.push(f32())
+              v.transitions.push(t)
+            }
+          }
+          if (m & 16384) v.animations = readAnims()
+          op.variants.push(v)
         }
         break
       }
@@ -194,6 +235,25 @@ export function readFrame(buf: Uint8Array): Frame {
   }
   return { seq, strings, styleCount: nStyles, spans, ops }
 
+  function readEasing(): number[] {
+    const k = u8()
+    if (k === 2) return [k, u32(), u8()]
+    if (k === 3) { const e = [k]; for (let n = u16() * 2; n > 0; n--) e.push(f32()); return e }
+    const n = [0, 4, 0, 0, 3][k]!
+    const e = [k]
+    for (let i = 0; i < n; i++) e.push(f32())
+    return e
+  }
+  function readAnims(): Anim[] {
+    const out: Anim[] = []
+    for (let n = u8(); n > 0; n--) {
+      out.push({
+        keyframes: u16(), delay: f32(), duration: f32(), easing: readEasing(),
+        iterations: f32(), direction: u8(), fill: u8(),
+      })
+    }
+    return out
+  }
   function skipStyle() {
     const mask = dv.getBigUint64(at, true); at += 8
     skipFields(mask)

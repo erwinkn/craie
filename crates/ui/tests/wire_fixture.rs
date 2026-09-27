@@ -7,6 +7,7 @@ use craie_ui::claims::{Claim, chord_flag, claim_kind};
 use craie_ui::events::{Key, Mods};
 use craie_ui::host::{NodeFlags, NodeId};
 use craie_ui::input::SubmitKey;
+use craie_ui::keyframes::{Direction, Easing, Fill, Trigger};
 use craie_ui::mutation::{Mutation, NodeKind, Role, group_flag, press, reported, trap_flag};
 use craie_ui::states::layout_key;
 use craie_ui::surface;
@@ -295,6 +296,50 @@ fn js_fixture_decodes_and_executes() {
     assert_eq!(narrow.layout_keys, layout_key::WIDTH | layout_key::HEIGHT);
     assert_eq!(host.colors.get(&0), Some(&0x9aa0_aaff));
     assert!(!host.colors.contains_key(&2));
+
+    // Keyframe animations: the selected variant's timing and loop, the
+    // image's enter (a spring, which sets the duration), and the root's
+    // list, whose first entry shares the variant's keyframes.
+    assert_eq!((v[0].transitions.len(), v[0].animations.len()), (1, 1));
+    let lists: Vec<_> = txn
+        .mutations
+        .iter()
+        .filter_map(|m| match m {
+            Mutation::Animation {
+                id,
+                trigger,
+                notify,
+                animations,
+            } => Some((*id, *trigger, *notify, animations.clone())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        lists
+            .iter()
+            .map(|l| (l.0, l.1, l.2, l.3.len()))
+            .collect::<Vec<_>>(),
+        [(9, Trigger::Enter, true, 1), (0, Trigger::Base, false, 2)]
+    );
+    let (enter, list) = (&lists[0].3[0], &lists[1].3);
+    assert!(matches!(enter.easing, Easing::Spring { .. }) && enter.duration > 0.0);
+    assert_eq!((enter.delay, enter.fill), (0.05, Fill::Backwards));
+    assert!(std::sync::Arc::ptr_eq(
+        &list[0].keyframes,
+        &v[0].animations[0].keyframes
+    ));
+    let pulse = list[0].keyframes.frames();
+    assert_eq!(pulse[1].easing, Some(Easing::Steps { n: 4, jump: 2 }));
+    assert_eq!((pulse[0].mask, pulse[1].mask), (0x1b, 0x1f10));
+    assert!(matches!(&list[0].easing, Easing::Linear(p) if p.len() == 3));
+    assert_eq!(list[0].direction, Direction::Alternate);
+    assert!(list[0].infinite());
+    assert_eq!(
+        (list[1].iterations, list[1].direction, list[1].fill),
+        (2.5, Direction::AlternateReverse, Fill::Both)
+    );
+    // Running: the enter, the list's two, and the selected row's loop.
+    assert_eq!(ui.motion().live(), 4);
 
     // A vector node: the JS-written asset decodes natively.
     assert_eq!(host.kind(NodeId(6)), Some(NodeKind::Vector));

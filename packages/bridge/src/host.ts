@@ -51,6 +51,7 @@ import {
   type VariantIn,
   type VariantValues,
 } from "./wire.js"
+import { animationList, FILL, transitionsIn } from "./motion.js"
 
 // 0 view, 1 text, 2 input, 3 surface, 4 list, 5 vector, 7 image — mirror
 // NodeKind (6 is reserved)
@@ -320,6 +321,15 @@ export interface HostNode {
   sentBits?: bigint
   /** The signature of the variant table last sent ("" none). */
   sentVariants?: string
+  /** The transitions last sent, after the reduced-motion policy ("":
+   * none). */
+  sentTransitions?: string
+  /** The `animation` list last sent, after the policy, and whether it
+   * reports ends ("": none). */
+  sentAnimation?: string
+  /** Per trigger (enter, animation): each sent animation's index in
+   * its prop, for `onAnimationEnd`. */
+  motionIndex?: [number[]?, number[]?]
   /** `animate` calls not ended yet, oldest first (native keeps one tween
    * per property, so ends arrive in call order per property). */
   pendingAnims?: { prop: number; resolve: (end: AnimationEnd) => void }[]
@@ -734,7 +744,9 @@ function flattenVariants(
 }
 
 /** Variant block keys that apply; `_` keys nest. */
-const VARIANT_KEYS = new Set(["backgroundColor", "borderColor", "borderWidth", "borderRadius", "color", "style"])
+const VARIANT_KEYS = new Set([
+  "backgroundColor", "borderColor", "borderWidth", "borderRadius", "color", "style", "animation",
+])
 
 /** A variant block's values in wire form (`undefined`: none). Each
  * layout key applies on its own, over the base and less specific
@@ -759,7 +771,6 @@ function variantValues(n: HostNode, block: Record<string, any>, hidden: boolean)
   if (style?.opacity !== undefined) v.opacity = style.opacity
   Object.assign(v, styleParts(style))
   if (style?.zIndex !== undefined) warnOnce("a variant does not apply style.zIndex (LEDGER DF-29)")
-  if (style?.transition !== undefined) warnOnce("a variant does not apply style.transition (LEDGER DF-22)")
   const layout = layoutPart(style)
   if (layout) {
     const { transition: _, ...rest } = layout
@@ -774,7 +785,21 @@ function variantsKey(list: readonly VariantIn[]): string {
   return list.length ? JSON.stringify(list, (_, x) => (typeof x === "bigint" ? x.toString(16) : x)) : ""
 }
 
+/** A variant block's motion in wire form, under the reduced-motion
+ * setting: its `style.transition` and `animation`. */
+function variantMotion(n: HostNode, block: Record<string, any>, reduced: boolean): Pick<VariantIn, "transitions" | "animations"> {
+  const out: Pick<VariantIn, "transitions" | "animations"> = {}
+  const t = transitionsIn(block.style?.transition, reduced)
+  if (t && Object.values(t).some(x => x !== undefined)) out.transitions = t
+  const { list } = animationList(block.animation, FILL.none, reduced, n.kind !== 1)
+  if (list.length) out.animations = list
+  return out
+}
+
 export class CraieHost {
+  /** The user asked for reduced motion (the environment event): the
+   * motion props' policies (`reducedMotion`) apply. */
+  private reducedMotion = false
   private nextId = 0
   private freeIds: number[] = []
   /** Generation per id; bumped when native frees the slot. */
@@ -1016,13 +1041,14 @@ export class CraieHost {
       const hidden = !!(n.props.hidden || n.suspended)
       for (const p of flattenVariants(n.props, n.props.__scopes ?? null)) {
         const values = variantValues(n, p.block, hidden)
-        if (!values) continue
+        const motion = variantMotion(n, p.block, this.reducedMotion)
+        if (!values && !motion.transitions && !motion.animations) continue
         const terms = []
         for (const [ref, mask] of p.terms) {
           if (!ref.node?.mounted) break
           terms.push({ scope: ref.node.id, mask })
         }
-        if (terms.length === p.terms.size) list.push({ terms, env: p.env, values })
+        if (terms.length === p.terms.size) list.push({ terms, env: p.env, values: values ?? {}, ...motion })
       }
       const key = variantsKey(list)
       if (key !== (n.sentVariants ?? "")) {
@@ -1084,6 +1110,10 @@ export class CraieHost {
   /** Routes a native event record to the target node's listener props.
    * Events for a previous occupant of the id are dropped. */
   private dispatchEvent(ev: UiEvent) {
+    if (ev.kind === EVENT_KIND.environment) {
+      this.setReducedMotion((ev.key & ENV_BIT.reducedMotion) !== 0)
+      return
+    }
     if (ev.kind === EVENT_KIND.claim) {
       this.dispatchClaim(ev)
       return
@@ -1146,6 +1176,15 @@ export class CraieHost {
       case EVENT_KIND.animationEnd: {
         const prop = ev.key & 0xff
         const reason = END_REASON[(ev.key >>> 8) & 0xff] ?? "cancelled"
+        const trigger = (ev.key >>> 16) & 0xff
+        if (trigger) {
+          // A keyframe animation's (key: index | reason << 8 | trigger
+          // + 1 << 16).
+          const index = root.motionIndex?.[trigger - 1]?.[prop] ?? prop
+          const animation = trigger === 1 ? "enter" : "animation"
+          root.props.onAnimationEnd?.({ target: root, animation, index, finished: reason === "finished", reason })
+          break
+        }
         const list = root.pendingAnims ?? []
         const i = list.findIndex(p => p.prop === prop)
         if (i >= 0) list.splice(i, 1)[0]!.resolve({ finished: reason === "finished", reason })
@@ -1257,6 +1296,9 @@ export class CraieHost {
     n.claims = undefined
     n.sentBits = undefined
     n.sentVariants = undefined
+    n.sentTransitions = undefined
+    n.sentAnimation = undefined
+    n.motionIndex = undefined
     this.nodes.set(n.id, n)
     if (!this.ready()) return
     const enc = this.encoder
@@ -1460,9 +1502,7 @@ export class CraieHost {
     // Transitions: a change applies to this commit's changes (CSS uses
     // the after-change style), so it goes first; at mount it goes last,
     // so first values do not tween.
-    const oldTr = mounted ? transitionKey(oldProps.style?.transition) : ""
-    const newTr = transitionKey(props.style?.transition)
-    if (mounted && oldTr !== newTr) enc.transition(id, props.style?.transition)
+    if (mounted) this.sendTransitions(n)
 
     // Layout inputs (spatial keys split off; hiding is display: none).
     const oldLayout = mounted ? layoutOf(oldProps, n.suspended) : undefined
@@ -1529,7 +1569,7 @@ export class CraieHost {
     // Variants resolve at the seal, where every scope has an id.
     if (n.sentVariants || hasVariantKeys(props)) this.dirtyVariants.add(n)
 
-    if (!mounted && newTr !== "") enc.transition(id, props.style?.transition)
+    if (!mounted) this.sendTransitions(n)
 
     if (n.kind === 3) {
       // Surface kind + params; the payload is a typed array copied once
@@ -1720,6 +1760,55 @@ export class CraieHost {
     const oldLabel = oldProps.accessibilityLabel ?? ""
     const newLabel = props.accessibilityLabel ?? ""
     if (oldLabel !== newLabel) enc.label(id, newLabel)
+
+    // Keyframe animations: `enter` with the creation (native runs it
+    // only in the transaction that creates the node), `animation` when
+    // its list changes (a new list restarts; the same one keeps
+    // running).
+    if (!mounted && props.enter) this.sendAnimations(n, 0)
+    this.sendAnimations(n, 1)
+  }
+
+  /** Sends the node's transitions under the reduced-motion policy when
+   * they differ from those last sent. */
+  private sendTransitions(n: HostNode) {
+    const t = transitionsIn(n.props.style?.transition, this.reducedMotion)
+    const key = transitionKey(t)
+    if (key === (n.sentTransitions ?? "")) return
+    n.sentTransitions = key
+    this.encoder.transition(n.id, t)
+  }
+
+  /** Sends `enter` (trigger 0), or `animation` (1) when it differs from
+   * the list last sent. */
+  private sendAnimations(n: HostNode, trigger: 0 | 1) {
+    const p = n.props
+    const fill = trigger === 0 ? FILL.backwards : FILL.none
+    const { list, index } = animationList(trigger === 0 ? p.enter : p.animation, fill, this.reducedMotion, n.kind !== 1)
+    const notify = p.onAnimationEnd !== undefined && list.some(a => a.iterations !== Infinity)
+    if (trigger === 1) {
+      const key = list.length ? JSON.stringify([notify, list]) : ""
+      if (key === (n.sentAnimation ?? "")) return
+      n.sentAnimation = key
+    } else if (!list.length) {
+      return
+    }
+    ;(n.motionIndex ??= [])[trigger] = index
+    this.encoder.animation(n.id, trigger, notify, list)
+  }
+
+  /** The reduced-motion setting changed: each node's transitions,
+   * animation list and variants go again under their policies. A
+   * running `enter` keeps on. */
+  private setReducedMotion(on: boolean) {
+    if (on === this.reducedMotion) return
+    this.reducedMotion = on
+    for (const n of this.nodes.values()) {
+      if (n.sentTransitions || n.props.style?.transition) this.sendTransitions(n)
+      if (n.sentAnimation || n.props.animation) this.sendAnimations(n, 1)
+      if (n.sentVariants || hasVariantKeys(n.props)) this.dirtyVariants.add(n)
+    }
+    this.ready()
   }
 }
 

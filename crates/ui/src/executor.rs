@@ -1432,6 +1432,20 @@ impl Ui {
         self.host.dirty.semantic.push(node.0);
     }
 
+    /// Sets a node's spatial pin (`Spatial::PIN_*`).
+    pub(crate) fn pin_spatial(&mut self, node: NodeId, pin: u8) {
+        let s = &mut self.host.spatial[node.index()];
+        if s.pin == pin {
+            return;
+        }
+        let before = (s.transformed(), s.layered());
+        s.pin = pin;
+        if (s.transformed(), s.layered()) != before {
+            self.host.revs.structure.bump();
+            self.host.dirty.spatial.push(node.0);
+        }
+    }
+
     /// Writes a node's box paint row (the fields given).
     pub(crate) fn set_paint(
         &mut self,

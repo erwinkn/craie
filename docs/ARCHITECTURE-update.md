@@ -856,8 +856,10 @@ defineStates(["unread", "streaming"])
   4/6, and `_narrow: { height: 44 }` keeps whatever width applies
   (another variant's or the base). Suspense's `display: none` wins over
   a variant's `display`. Border color and width are separate values.
-- Not yet: transitions inside a variant (DF-22), text metrics in
-  variants (DF-23), a platform source for touch and reduced motion
+- A variant's `style.transition` times the moves into it, and its
+  `animation` runs while it holds (topic 7, work item 6; DF-22 closed).
+  Not yet: text metrics in variants (DF-23), a platform source for
+  touch and reduced motion
   (DF-25; `Ui::set_touch` and `set_reduced_motion` exist), variants on a
   nested Text (interactive spans, DF-26), z, pointer events and
   visibility in variants (DF-29). Hover can oscillate when a hover
@@ -1179,6 +1181,147 @@ matrix replaced the whole transform, so hovering dropped the rotation
   785 and 1,342 µs here (two runs), within noise.
 - Not yet: percentages inside an RN transform list (DF-49; use
   `translate`).
+
+**Built (work item 6, keyframe animations and variants).** The
+animation op, `enter`, `animation`, loops, and motion in variants, as
+targeted. Not yet: exits and id parking, scroll timelines, named
+keyframes, and blur, shimmer and dash offset frames. The example:
+
+```tsx
+<View style={{ opacity: 0.6 }}
+  enter={{ keyframes: [{ at: 0, opacity: 0, translateY: 8 }], duration: 200, easing: [0.23, 1, 0.32, 1] }}
+  animation={spin && { keyframes: spin, duration: 1000, easing: "linear", iterations: "infinite", reducedMotion: "keep" }}
+  _hover={{ style: { scale: 1.02, transition: { scale: { duration: 120 } } } }}
+  _streaming={{ animation: { keyframes: pulse, duration: 400, iterations: "infinite" } }} />
+```
+
+The row fades in from 0 to 0.6 and rises 8 pt over 200 ms. The spin
+runs on the native clock with no render and no op per frame. Hovering
+scales it over 120 ms, and leaving hover goes back with the base's
+timing (none here, so it jumps). While the `_streaming` variant holds,
+native runs the pulse, and it starts and stops with the state and no
+JS.
+
+- **The animation.** Frames are ordered offsets `at` in [0, 1]. Each
+  holds opacity, the transform parts (translate x and y, rotate, scale
+  x and y), `backgroundColor`, `borderColor` or `color`, plus an
+  optional easing for the segment that starts at it. A channel a frame
+  leaves out interpolates between the frames that set it. The implicit
+  frames at 0 and 1 take the underlying value, so `[{ at: 0, opacity:
+  0 }]` fades to whatever opacity the node resolves to, and a fade
+  toward 0.6 ends at 0.6. Timing follows Web Animations: `delay`,
+  `duration` (ms), `easing` (a CSS name, a Bézier array, `{ steps,
+  jump }`, `{ linear: [0, [0.25, 0.75], 1] }` spread as CSS `linear()`,
+  or `{ spring }`, which sets its own duration), `iterations` (can be
+  fractional, or `"infinite"`), `direction` and `fill`. Box paint on a
+  Text throws ("wrap it in a View"): a Text has no box.
+- **Triggers.** `enter` goes in the batch that creates the node, and
+  native starts it only then, so a later op carrying it does nothing.
+  Its fill defaults to `backwards`, so a delayed enter shows its first
+  frame through the delay. `animation`'s fill defaults to `none`. The
+  facade re-sends a list only when it changes (compared as JSON), and
+  native keeps an equal entry running: a re-render with fresh but equal
+  objects restarts nothing, and a changed list restarts from its first
+  frame. A variant's `animation` travels in its VARIANTS entry, and
+  native starts and stops it when the variant starts or stops applying.
+- **Storage.** Keyframes are `Arc<Keyframes>`, shared. On the wire they
+  are interned per transaction: 1,000 rows with the same `enter` send
+  its frames once, and each row carries a 41-byte ANIMATION op that
+  refers to them by index. Native keeps a `NodeMotion` per animated
+  node in `Motion.nodes`: its running list (in composite order), the
+  props it covers, and `under`, the values the rows would hold with no
+  animation.
+- **Composition.** While an animation covers a property, the row holds
+  the sample. Every other writer goes to `under` instead: a mutation, a
+  variant's value, a transition's tween (`Ui::absorb`). Each frame
+  samples over `under`, in this order: enter, then the node's list,
+  then variants by specificity. The later one wins per channel. So a
+  hover transition on opacity, under a running pulse, tweens the value
+  the pulse returns to. When the last animation covering a property
+  ends, the row takes `under` back at once. A `forwards` fill holds the
+  end over it until the list changes.
+- **Variant transitions (DF-22 closed).** The timing of a change comes
+  from the style being entered: the most specific active variant that
+  times the property, else the node's own `transition`. Hover in with
+  the hover's 120 ms, and out with the base's. Unlike CSS, the merge
+  is per property: a hover that times only `scale` keeps the base's
+  opacity timing, where a CSS `:hover { transition: scale 120ms }`
+  would make opacity jump.
+- **Loops.** Loops run on the native clock, and a frame touches only
+  the nodes in `Motion.nodes`. Nothing is running and nothing is
+  stale, so an idle frame returns at once. A loop's frames allocate
+  nothing, iteration boundaries included. A spin's boundary shows the
+  identity transform, and a pulse's opacity 1. Either would drop the
+  node's transform record or opacity layer, change the draw topology,
+  and allocate (14 to 30 allocations per boundary, measured). So while
+  an infinite animation covers a transform part or opacity, `Spatial`
+  holds a pin that keeps them (`Spatial::PIN_*`). It goes with the last
+  loop. A finite animation pins nothing: its end is a real change.
+- **Reduced motion resolves in JS.** Each animation and each
+  transition entry takes `reducedMotion`:
+  - `skip` (the default): a loop is not sent. A finite animation goes
+    with delay and duration 0, so its fill holds the end state. That is
+    one refinement over "`skip` sends nothing": a `fill: "forwards"`
+    reveal still ends revealed. A skipped transition entry drops, so
+    the change jumps.
+  - `fade`: only the opacity frames go, or skip when there are none.
+    Transitions keep only opacity's timing.
+  - `keep`: as declared.
+
+  Native sends ENVIRONMENT events (out kind 21, node NIL, key = the
+  environment bits) when the setting changes. The facade then re-sends
+  every node's transitions, lists and variants under the new setting.
+  Dropped entries shift the wire indices, so the host maps them back
+  for end events. Nothing sets the platform bit yet (DF-25).
+- **End events.** A finite animation of `enter` or `animation` whose
+  node has `onAnimationEnd` reports `{ animation: "enter" |
+  "animation", index, finished, reason }`. Here `index` is the entry's
+  position in the prop, and `reason` is finished, cancelled (the list
+  dropped it), retargeted (the list changed it) or removed. Loops never
+  end. A variant's animations aren't reported (DF-56).
+- **Encoding** (protocol 11; focus groups, #20, took 10). `KEYFRAMES` 0xA2: a frame count u16, then per
+  frame: `at` f32, an easing, a value mask u16 (the variant value
+  bits), and the values. `ANIMATION` 0xA3: node id u32, trigger u8
+  (enter 0, animation 1), notify u8, and a count u8 of entries, each a
+  keyframes index u16, delay f32, duration f32 (seconds), easing,
+  iterations f32, direction u8 and fill u8. An easing is a kind u8
+  (0 default, 1 Bézier, 2 steps, 3 linear points, 4 spring) and its
+  payload. A VARIANTS entry's mask gains bit 13 TRANSITIONS (count u8 ×
+  (prop u8, timing)) and bit 14 ANIMATIONS (count u8 × entry), after
+  the values. Limits (native and the facade's encoder check the same):
+  16 animations per list, 256 frames, 256 linear points, 600 s. Offsets
+  must rise in [0, 1], and an infinite animation needs a duration. Ops
+  0xA4 to 0xAF stay free for exits and timelines.
+- **`animate` stays** for one-off tweens to a target (a drawer's
+  offset, a retargeted spring). It resolves a promise, and a keyframe
+  animation covering the property plays over it.
+- Tests: `crates/ui/src/keyframes.rs` (easings, omitted end frames,
+  iterations and directions, fills, springs) and `keyframes_tests.rs`.
+  The latter covers enter at creation only, restart on change only,
+  forwards fill over a changing value, variant animations with their
+  variant, entered-style transitions, animations over transitions,
+  later wins per channel, the loop pin, the ENVIRONMENT event, and wire
+  round trips with validation. `packages/bridge/test/motion.test.ts`
+  covers the example's encoding, easings, validation, reduced motion
+  live (skip, fade, keep, and back off) and end indices. The
+  cross-language fixture carries keyframes, both triggers and variant
+  motion. `harness/invariants` checks that loop frames allocate nothing
+  on and off their boundaries, and a GPU test checks that a looping
+  rotation turns the pixels at 0.25 s and 1.25 s with no transaction.
+- **Cost** (`harness/invariants/examples/motion_cost.rs`, exe1, release,
+  load 43 to 65, so noisy). Mounting 1,000 rows (a View and a label),
+  median of 15: 11.2 ms plain and 12.4 ms with `enter` at load 43. At
+  load 65, 44.1 and 36.9, then 39.5 and 53.8: within noise. Wire:
+  85,204 bytes, and 126,226 with `enter`. Per frame: 1,000 enters run
+  0.43 to 1.75 ms. One loop among 1,000 still rows takes 0.05 to
+  0.20 ms, 1,000 loops 0.40 to 0.90 ms, and a still frame nothing.
+  Loops allocate 0 per frame. The enters allocate 13 times on their
+  first frame, then nothing.
+- Not yet: exits and id parking, scroll timelines and named keyframes
+  (the rest of item 6). Also blur and shimmer frames (work item 7), a
+  dash offset channel (DF-55), end events for variant animations
+  (DF-56), and end indices across a list replaced under reduced motion
+  (DF-57).
 
 ## 8. Paint and text styling
 
