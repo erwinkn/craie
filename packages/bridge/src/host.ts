@@ -126,6 +126,15 @@ interface Declared {
 
 const APPLE = typeof process !== "undefined" && process.platform === "darwin"
 
+const warned = new Set<string>()
+/** Logs a bad prop once: a typo should not take the app down, nor
+ * flood the console on every render. */
+function warnOnce(msg: string) {
+  if (warned.has(msg)) return
+  warned.add(msg)
+  console.error(`craie: ${msg}`)
+}
+
 /** Props that claim an event kind, in claim order after the keymap. */
 const CLAIM_PROPS = [
   ["onPaste", CLAIM_KIND.paste],
@@ -140,8 +149,7 @@ function keyClaims(list: readonly Hotkey[] | undefined, out: Declared, window: b
     if (k.when === false) continue
     const c = parseChord(k.keys, APPLE)
     if (!c) {
-      // A typo in one chord should not take the app down.
-      console.error(`craie: unknown key chord "${k.keys}"`)
+      warnOnce(`unknown key chord "${k.keys}"`)
       continue
     }
     if (k.repeat === false) c.flags |= CHORD_FLAG.noRepeat
@@ -173,17 +181,42 @@ function claimsDeclared(props: Record<string, any>): boolean {
 
 function submitKeyOf(props: Record<string, any>): number {
   if (!props.onSubmit) return SUBMIT_KEY.none
-  const v = SUBMIT_KEY[(props.submitKey ?? "enter") as SubmitKey]
-  if (v === undefined) throw Error(`unknown submitKey "${props.submitKey}"`)
-  return v
+  const key = props.submitKey ?? "enter"
+  if (Object.hasOwn(SUBMIT_KEY, key)) return SUBMIT_KEY[key as SubmitKey]
+  warnOnce(`unknown submitKey "${key}", using "enter"`)
+  return SUBMIT_KEY.enter
+}
+
+/** Web `event.code` names of the named keys, by code (`KEY_CODE`). */
+const NAMED_CODE = [
+  "", "Backspace", "Tab", "Enter", "Escape", "ArrowLeft", "ArrowUp", "ArrowRight", "ArrowDown",
+  "Home", "End", "PageUp", "PageDown", "Delete", "Space", "Insert", "ContextMenu",
+]
+/** Web `event.code` names of the punctuation keys, by US character. */
+const PUNCT_CODE: Record<string, string> = {
+  "-": "Minus", "=": "Equal", "[": "BracketLeft", "]": "BracketRight", "\\": "Backslash",
+  ";": "Semicolon", "'": "Quote", "`": "Backquote", ",": "Comma", ".": "Period", "/": "Slash",
+}
+
+/** The web's `event.code` of a key record: the physical key's US
+ * character (`physical`), else the named key (`named`), else "". */
+function webCode(named: number, physical: number): string {
+  if (physical) {
+    const c = String.fromCharCode(physical)
+    if (c >= "a" && c <= "z") return `Key${c.toUpperCase()}`
+    if (c >= "0" && c <= "9") return `Digit${c}`
+    return PUNCT_CODE[c] ?? ""
+  }
+  if (named >= 32 && named <= 55) return `F${named - 31}`
+  return NAMED_CODE[named] ?? ""
 }
 
 /** A key record (events.rs `key_bits`) as a listener's event. */
 function keyEvt(e: { target: HostNode; x: number; y: number }, ev: UiEvent) {
-  const physical = (ev.key >>> 16) & 0xff
+  const named = (ev.key >>> 8) & 0xff
   return {
     ...e,
-    key: (ev.key >>> 8) & 0xff,
+    key: named,
     char: ev.text,
     shift: !!(ev.key & 1),
     ctrl: !!(ev.key & 2),
@@ -191,7 +224,7 @@ function keyEvt(e: { target: HostNode; x: number; y: number }, ev: UiEvent) {
     meta: !!(ev.key & 8),
     repeat: !!(ev.key & 16),
     composing: !!(ev.key & 32),
-    code: physical ? String.fromCharCode(physical) : "",
+    code: webCode(named, (ev.key >>> 16) & 0xff),
   }
 }
 
@@ -496,7 +529,7 @@ export class CraieHost {
   private replaced: { state: ClaimState; version: number }[] = []
   private retired: { seq: number; state: ClaimState; version: number }[] = []
   /** The window list (`useHotkeys`): each hook's bindings, in mount
-   * order, and the claim set they make. */
+   * order, and the claim set they make (latest mounted first). */
   private hotkeys = new Map<object, readonly Hotkey[]>()
   private windowClaims: ClaimState = { sig: "", version: 0, handlers: new Map() }
   /** The window list may have changed: the seal sends it (once). */
@@ -551,14 +584,21 @@ export class CraieHost {
       this.sendClaims(NIL, this.windowClaims, this.windowDeclared())
     }
     const seq = ++this.seq
-    for (const r of this.replaced) this.retired.push({ seq, ...r })
+    // Without acks there is no telling when native is done with a
+    // version: its handlers go now rather than never.
+    for (const r of this.replaced) {
+      if (this.transport.onAck) this.retired.push({ seq, ...r })
+      else r.state.handlers.delete(r.version)
+    }
     this.replaced = []
     this.transport.send(this.encoder.finish(seq))
   }
 
   /** Sends a claim set when its declaration changed (a new version),
-   * and keeps the current version's handlers fresh either way. Call
-   * while a transaction is open. */
+   * and keeps the current version's handlers fresh either way: a press
+   * raised before this commit runs this commit's closures, as a DOM
+   * listener would once React re-rendered. Call while a transaction is
+   * open. */
   private sendClaims(id: number, state: ClaimState, d: Declared) {
     const sig = claimSig(d.claims)
     if (sig === state.sig) {
@@ -573,8 +613,9 @@ export class CraieHost {
   }
 
   /** `useHotkeys`: sets one hook's bindings (`null` drops them). The
-   * window list is every hook's bindings, in mount order; the seal sends
-   * it when its chords changed. */
+   * window list is every hook's bindings, the latest mounted hook's
+   * first, so an overlay's shortcuts beat the page's; the seal sends it
+   * when its chords changed. */
   setHotkeys(owner: object, bindings: readonly Hotkey[] | null) {
     if (bindings) this.hotkeys.set(owner, bindings)
     else this.hotkeys.delete(owner)
@@ -590,7 +631,7 @@ export class CraieHost {
 
   private windowDeclared(): Declared {
     const d: Declared = { claims: [], handlers: [] }
-    for (const list of this.hotkeys.values()) keyClaims(list, d, true)
+    for (const list of [...this.hotkeys.values()].reverse()) keyClaims(list, d, true)
     return d
   }
 
@@ -842,7 +883,7 @@ export class CraieHost {
         }
         break
       }
-      case CLAIM_KIND.drop: run({ ...e, paths: ev.text ? ev.text.split("\n") : [] }); break
+      case CLAIM_KIND.drop: run({ ...e, paths: ev.text ? ev.text.split("\0") : [] }); break
       case CLAIM_KIND.contextMenu: run(e); break
     }
   }

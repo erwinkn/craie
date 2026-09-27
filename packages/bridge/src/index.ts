@@ -120,8 +120,9 @@ export interface KeyEvt {
   repeat: boolean
   /** An IME composes: the key belongs to it. */
   composing: boolean
-  /** The physical key as the character it has on a US layout ("c" for
-   * the C position on any layout); "" for keys without one. */
+  /** The physical key as the web's `event.code`: "KeyC" for the C
+   * position on any layout, "Digit1", "Slash", "Enter", "F5"; "" for
+   * keys Craie doesn't name. */
   code: string
 }
 export interface ScrollEvt {

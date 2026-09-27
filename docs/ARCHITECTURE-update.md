@@ -142,11 +142,19 @@ Changes: §2 (wire), §13, §16 (event records, protocol version 4).
   when the claims change (chords, kinds, flags), not when a handler
   closure does; the handlers of the current version refresh every
   commit.
-- Every `useHotkeys` in the tree shares the one window list, in mount
-  order, and the first match wins. Marbre gives each hook its own
-  window listener, so two hooks binding the same chord both fire
-  there. An unknown chord is logged and left out rather than thrown,
-  so a typo does not take the app down.
+- Every `useHotkeys` in the tree shares the one window list, the latest
+  mounted hook's bindings first, and the first match wins: a dialog
+  that binds Escape beats the page under it. A deviation: Marbre gives
+  each hook its own window listener, so two hooks binding the same
+  chord both fire there. An unknown chord or submit key is logged once
+  and left out (the submit key falls back to `enter`) rather than
+  thrown, so a typo does not take the app down.
+- Drops are claimed on the path under the drop, with the paths joined
+  by NUL. winit 0.30 reports no drop position, and no cursor moves
+  arrive while another app's drag is over the window, so today a drop
+  lands at an unknown position and goes to the focus path (`LEDGER.md`
+  DF-12). On macOS, Ctrl+click is a secondary press, so it opens
+  context menus as it does in every Mac app.
 - Claims on a nested Text (no native node of its own) are not
   supported yet (`LEDGER.md`, DF-10).
 
@@ -198,20 +206,29 @@ the flag is dropped. Native acts first:
 - Chord identity is the kit's rule plus the non-Latin fallback.
 - Repeat on by default, off per claim (closes K2).
 
-**Built (work item 1).** As targeted, with these choices:
+**Built (work item 1).** As targeted, except for one deviation (the
+first bullet), with these choices:
 
+- A chord's key is the character with Shift and Alt applied, not the
+  key without modifiers: it is what the web's `event.key` gives and
+  what Marbre's `matchesChord` compares. So `shift+?` is the chord for
+  Shift+/ on a US layout, and `shift+1` matches nothing there (Shift+1
+  gives "!"). Alt with a letter or digit, and non-Latin letters, match
+  the physical key, as targeted.
 - A key record's `key` packs the modifiers (bits 0 to 3), repeat (4),
   composing (5), the named key (8 to 15) and the physical key as its
   US-layout character (16 to 23, 0 off the US layout). Its text is the
   logical character with Shift and Alt applied, as the web's
-  `event.key` ("?" for Shift+/), so `shift+?` is the chord for "?".
+  `event.key` ("?" for Shift+/). The facade's `KeyEvt.code` is the
+  web's `event.code` ("KeyC", "Digit1", "Enter").
 - Named keys add Space, Insert, ContextMenu and F1 to F24. Claims beat
   every default, Tab traversal included; Shift+Tab is its own chord.
 - The submit key rides in the input config's flag byte. The facade
   mirrors Marbre: `onSubmit` with no `submitKey` means `enter`, and no
   `onSubmit` means `none`. The Rust builder's default is `enter` for a
-  single line and `none` for multiline. A single-line input submits on
-  Shift+Enter too, as a form field does.
+  single line and `none` for multiline. Submit keys match exactly, as
+  in Marbre: Shift+Enter submits nothing in a single-line input and
+  breaks the line in a multiline one.
 - Native editing commands match exact `mod` chords by the same rule:
   Ctrl+Alt+C no longer copies, and `mod+y` redoes (it undid before).
 - A key with nothing focused goes to no one: the whole-tree walk for

@@ -20,6 +20,8 @@ class FakeTransport implements Transport {
 
 const tick = () => new Promise(r => setTimeout(r, 0))
 const ctrl = (key: string) => ({ kind: CLAIM_KIND.key, flags: 0, mods: MODS.ctrl, key: key.codePointAt(0)! })
+/** `mod+key` as the host parses it on this platform. */
+const mod = (key: string) => ({ ...ctrl(key), mods: process.platform === "darwin" ? MODS.meta : MODS.ctrl })
 
 function claim(node: number, version: number, kind: number, index: number, text = "", x = 0, y = 0): UiEvent {
   return { kind: EVENT_KIND.claim, node, generation: 0, revision: version, x, y, a: 0, b: 0, key: kind | index << 8, text }
@@ -39,7 +41,11 @@ test("chords parse as the web's key names with exact modifiers", () => {
   expect(parseChord("ctrl+meta+k", false)!.mods).toBe(MODS.ctrl | MODS.meta)
   // Non-BMP characters are one key.
   expect(parseChord("😀", false)!.key).toBe(0x1f600)
-  for (const bad of ["hyper+k", "mod+", "ab", "", "toString+k"]) expect(parseChord(bad, false)).toBeNull()
+  for (const apple of [false, true]) {
+    for (const bad of ["hyper+k", "mod+", "ab", "", "toString+k", "mod+constructor", "__proto__"]) {
+      expect(parseChord(bad, apple)).toBeNull()
+    }
+  }
 })
 
 test("a keymap is a versioned claim set; the handlers follow the latest render", async () => {
@@ -55,7 +61,7 @@ test("a keymap is a versioned claim set; the handlers follow the latest render",
   const id = op.id
   expect(op.f).toEqual([1])
   expect(op.claims).toEqual([
-    ctrl("k"),
+    mod("k"),
     { kind: CLAIM_KIND.key, flags: CHORD_FLAG.named | CHORD_FLAG.noRepeat, mods: 0, key: KEY_CODE.escape! },
   ])
 
@@ -72,7 +78,7 @@ test("a keymap is a versioned claim set; the handlers follow the latest render",
   await tick()
   const v2 = t.ops().find(o => o.tag === 0x61)!
   expect(v2.f).toEqual([2])
-  expect(v2.claims).toEqual([ctrl("j")])
+  expect(v2.claims).toEqual([mod("j")])
   t.eventCb!(claim(id, 1, CLAIM_KIND.key, 0))
   t.eventCb!(claim(id, 2, CLAIM_KIND.key, 0))
   expect(runs).toEqual(["b:escape", "b:mod+k", "c:mod+j"])
@@ -90,20 +96,27 @@ test("a keymap is a versioned claim set; the handlers follow the latest render",
   expect(v3.claims).toEqual([])
 })
 
-test("an unknown chord is reported and left out", async () => {
+test("an unknown chord or submit key is reported once and skipped", async () => {
   const t = new FakeTransport()
   const root = createRoot(t)
   const errors = console.error
   const logged: string[] = []
   console.error = (m: string) => logged.push(m)
+  const App = ({ n }: { n: number }) => createElement(View, null,
+    createElement(View, { keymap: [{ keys: "hyper+k", run() {} }, { keys: "k", run() {} }] }),
+    createElement(TextInput, { onSubmit() {}, submitKey: "shift+enter" as any, placeholder: `${n}` }))
   try {
-    root.renderSync(createElement(View, { keymap: [{ keys: "hyper+k", run() {} }, { keys: "k", run() {} }] }))
+    root.renderSync(createElement(App, { n: 1 }))
+    await tick()
+    root.renderSync(createElement(App, { n: 2 }))
+    await tick()
   } finally {
     console.error = errors
   }
-  await tick()
-  expect(logged).toEqual(['craie: unknown key chord "hyper+k"'])
-  expect(t.ops().find(o => o.tag === 0x61)!.claims).toEqual([{ kind: CLAIM_KIND.key, flags: 0, mods: 0, key: 0x6b }])
+  expect(logged).toEqual(['craie: unknown key chord "hyper+k"', 'craie: unknown submitKey "shift+enter", using "enter"'])
+  const ops = t.frames.flatMap(f => readFrame(f).ops)
+  expect(ops.find(o => o.tag === 0x61)!.claims).toEqual([{ kind: CLAIM_KIND.key, flags: 0, mods: 0, key: 0x6b }])
+  expect(ops.find(o => o.tag === 0x41)!.f[2]).toBe(0) // single line, enter
 })
 
 test("clipboard claims answer with commands", async () => {
@@ -150,9 +163,9 @@ test("drop and context-menu claims carry their payloads", async () => {
   }))
   await tick()
   const id = t.ops().find(o => o.tag === 0x61)!.id
-  t.eventCb!(claim(id, 1, CLAIM_KIND.drop, 0, "/a b.png\n/c.txt", 3, 4))
+  t.eventCb!(claim(id, 1, CLAIM_KIND.drop, 0, "/a b.png\0/c\n.txt", 3, 4))
   t.eventCb!(claim(id, 1, CLAIM_KIND.contextMenu, 1, "", 5, 6))
-  expect(got).toEqual([["/a b.png", "/c.txt"], 3, 4, "menu", 5, 6])
+  expect(got).toEqual([["/a b.png", "/c\n.txt"], 3, 4, "menu", 5, 6])
 })
 
 test("claim events for a previous occupant of the id are dropped", async () => {
@@ -175,7 +188,7 @@ test("claim events for a previous occupant of the id are dropped", async () => {
   expect(runs).toEqual(["c"])
 })
 
-test("hotkeys form the window list in mount order", async () => {
+test("hotkeys form the window list, the latest mounted hook first", async () => {
   const t = new FakeTransport()
   const root = createRoot(t)
   const runs: string[] = []
@@ -193,20 +206,29 @@ test("hotkeys form the window list in mount order", async () => {
   let op = t.all().filter(o => o.tag === 0x61).at(-1)!
   expect(op.id).toBe(NIL)
   expect(op.f).toEqual([1])
+  // b's "/" comes before a's: native runs the first match.
   expect(op.claims).toEqual([
+    { ...mod("k"), flags: CHORD_FLAG.inInput },
     { kind: CLAIM_KIND.key, flags: 0, mods: 0, key: 0x2f },
-    { ...ctrl("k"), flags: CHORD_FLAG.inInput },
     { kind: CLAIM_KIND.key, flags: 0, mods: 0, key: 0x2f },
   ])
+  t.eventCb!(claim(NIL, 1, CLAIM_KIND.key, 0))
   t.eventCb!(claim(NIL, 1, CLAIM_KIND.key, 1))
-  expect(runs).toEqual(["b:mod+k"])
+  expect(runs).toEqual(["b:mod+k", "b:/"])
 
-  // Unmounting one hook resends the list; an unchanged list sends nothing.
+  // Unmounting one hook resends the list; version 1 runs until native
+  // acks the transaction that replaced it. An unchanged list sends
+  // nothing.
   root.renderSync(createElement(App, { second: false }))
   await tick()
   op = t.all().filter(o => o.tag === 0x61).at(-1)!
   expect(op.f).toEqual([2])
   expect(op.claims).toHaveLength(1)
+  t.eventCb!(claim(NIL, 1, CLAIM_KIND.key, 1))
+  t.ackCb!(t.seq())
+  t.eventCb!(claim(NIL, 1, CLAIM_KIND.key, 1))
+  t.eventCb!(claim(NIL, 2, CLAIM_KIND.key, 0))
+  expect(runs).toEqual(["b:mod+k", "b:/", "b:/", "a:/"])
   const frames = t.frames.length
   root.renderSync(createElement(App, { second: false }))
   await tick()
@@ -224,6 +246,9 @@ test("Enter submits only with onSubmit, per submitKey", async () => {
   root.renderSync(createElement(App, { onSubmit() {} }))
   await tick()
   expect(flags()).toBe(1) // multiline, enter
+  root.renderSync(createElement(App, { onSubmit() {}, submitKey: "none" }))
+  await tick()
+  expect(flags()).toBe(1 | 2 << 1)
   root.renderSync(createElement(App, { onSubmit() {}, submitKey: "mod+enter" }))
   await tick()
   expect(flags()).toBe(1 | 1 << 1)
@@ -240,12 +265,23 @@ test("key records decode modifiers, repeat, composition and the physical key", a
   root.renderSync(createElement(View, { focusable: true, onKeyDown: e => got.push(e) }))
   await tick()
   const id = t.ops().find(o => o.tag === 0x01)!.id
-  const bits = MODS.shift | MODS.alt | 1 << 4 | KEY_CODE.arrowup! << 8 | 0x63 << 16
-  t.eventCb!({ kind: EVENT_KIND.keyDown, node: id, generation: 0, revision: 0, x: 0, y: 0, a: 0, b: 0, key: bits, text: "" })
-  t.eventCb!({ kind: EVENT_KIND.keyDown, node: id, generation: 0, revision: 0, x: 0, y: 0, a: 0, b: 0, key: 1 << 5, text: "с" })
+  const down = (key: number, text = "") =>
+    t.eventCb!({ kind: EVENT_KIND.keyDown, node: id, generation: 0, revision: 0, x: 0, y: 0, a: 0, b: 0, key, text })
+  down(MODS.shift | MODS.alt | 1 << 4 | 0x63 << 16, "Ç")
+  down(1 << 5 | 0x63 << 16, "с")
+  down(KEY_CODE.arrowup! << 8)
+  down(KEY_CODE.f13! << 8)
+  down(0x37 << 16, "7")
+  down(0x2f << 16, "/")
+  down(0)
   expect(got).toMatchObject([
-    { key: KEY_CODE.arrowup, shift: true, ctrl: false, alt: true, meta: false, repeat: true, composing: false, code: "c" },
-    { key: 0, char: "с", composing: true, code: "" },
+    { key: 0, char: "Ç", shift: true, ctrl: false, alt: true, meta: false, repeat: true, composing: false, code: "KeyC" },
+    { key: 0, char: "с", composing: true, code: "KeyC" },
+    { key: KEY_CODE.arrowup, code: "ArrowUp" },
+    { key: KEY_CODE.f13, code: "F13" },
+    { code: "Digit7" },
+    { code: "Slash" },
+    { code: "" },
   ])
 })
 
@@ -263,4 +299,19 @@ test("a claim's update renders before the next event in the batch", async () => 
   t.eventCb!(claim(id, 1, CLAIM_KIND.key, 0))
   t.eventCb!(claim(id, 1, CLAIM_KIND.key, 0))
   expect(seen).toEqual([0, 1])
+})
+
+test("without acks, a replaced version's handlers go at once", async () => {
+  const t = new FakeTransport()
+  const root = createRoot({ send: f => t.send(f), onEvent: cb => t.onEvent(cb), close() {} })
+  const runs: string[] = []
+  const App = ({ k }: { k: string }) => createElement(View, { keymap: [{ keys: k, run: () => runs.push(k) }] })
+  root.renderSync(createElement(App, { k: "x" }))
+  await tick()
+  const id = t.ops().find(o => o.tag === 0x61)!.id
+  root.renderSync(createElement(App, { k: "y" }))
+  await tick()
+  t.eventCb!(claim(id, 1, CLAIM_KIND.key, 0))
+  t.eventCb!(claim(id, 2, CLAIM_KIND.key, 0))
+  expect(runs).toEqual(["y"])
 })

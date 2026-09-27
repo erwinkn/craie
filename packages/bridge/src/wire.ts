@@ -176,7 +176,7 @@ export const EVENT_KIND = {
   /** A claim matched (claims.rs): node = the claimer (NIL: the window
    * list), key = claim kind | claim index << 8, revision = the claim
    * set's version, text = the payload (clipboard or selected text,
-   * dropped paths joined by "\n"). */
+   * dropped paths joined by "\\0"). */
   claim: 17,
 } as const
 
@@ -203,7 +203,7 @@ export const KEY_CODE: Readonly<Record<string, number>> = (() => {
 
 /** When an input's Enter submits — mirror input.rs `SubmitKey`. */
 export const SUBMIT_KEY = { enter: 0, "mod+enter": 1, none: 2 } as const
-export type SubmitKey = Exclude<keyof typeof SUBMIT_KEY, "none">
+export type SubmitKey = keyof typeof SUBMIT_KEY
 
 /** One claim on the wire (claims.rs `Claim`). */
 export interface Claim {
@@ -219,9 +219,11 @@ export interface Claim {
  * as a key claim, or `null` when it names no key. Modifiers must match
  * exactly; `mod` is Cmd on Apple platforms and Ctrl elsewhere (`apple`).
  * The key is a named key (`KEY_CODE`) or one character as the web's
- * `event.key` gives it, lower-cased: Shift+/ is `shift+?`. Native
- * matches letters and digits held with Alt, and letters of non-Latin
- * layouts, by physical key (claims.rs). */
+ * `event.key` gives it, lower-cased: Shift+/ is `shift+?`, and
+ * `shift+1` never matches on a US layout, where Shift+1 gives "!" (as
+ * in Marbre's `matchesChord`). Native matches letters and digits held
+ * with Alt, and letters of non-Latin layouts, by physical key
+ * (claims.rs). */
 export function parseChord(chord: string, apple: boolean): Claim | null {
   const lower = chord.toLowerCase()
   // `+` and `mod++` are the plus key.
@@ -236,7 +238,7 @@ export function parseChord(chord: string, apple: boolean): Claim | null {
       else return null
     }
   }
-  const named = KEY_CODE[key]
+  const named = Object.hasOwn(KEY_CODE, key) ? KEY_CODE[key] : undefined
   if (named !== undefined) return { kind: CLAIM_KIND.key, flags: CHORD_FLAG.named, mods, key: named }
   const cp = key.codePointAt(0)
   if (cp === undefined || String.fromCodePoint(cp) !== key) return null

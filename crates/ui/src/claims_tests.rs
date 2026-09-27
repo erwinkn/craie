@@ -278,11 +278,12 @@ fn submit_keys() {
     assert!(!submits(&mut ui, Mods::SHIFT));
     assert_eq!(ui.inputs.text(1), "\n");
 
-    // A form field submits on Enter and Shift+Enter, not mod+Enter.
+    // A form field submits on exactly Enter (Marbre's rule).
     config(&mut ui, false, SubmitKey::Enter);
     assert!(submits(&mut ui, 0));
-    assert!(submits(&mut ui, Mods::SHIFT));
+    assert!(!submits(&mut ui, Mods::SHIFT));
     assert!(!submits(&mut ui, Mods::COMMAND));
+    assert_eq!(ui.inputs.text(1), "");
 
     // No onSubmit: Enter does nothing in a single line.
     config(&mut ui, false, SubmitKey::None);
@@ -368,8 +369,8 @@ fn clipboard_claims() {
 }
 
 /// Drops and secondary presses are claimed on the path under the
-/// pointer; the context-menu keys on the focus path, at the focused
-/// node's center.
+/// pointer (drops at an unknown position on the focus path); the
+/// context-menu keys on the focus path, at the focused node's center.
 #[test]
 fn drop_and_context_menu() {
     let mut ui = app();
@@ -392,7 +393,7 @@ fn drop_and_context_menu() {
     assert_eq!(only_claim(&e), (0, claim_kind::DROP, 0, 3));
     assert_eq!(
         (e[0].x, e[0].y, e[0].text.as_str()),
-        (210.0, 5.0, "/a.png\n/b c.txt")
+        (210.0, 5.0, "/a.png\0/b c.txt")
     );
 
     // The press itself still focuses and reaches its listeners, first.
@@ -423,6 +424,17 @@ fn drop_and_context_menu() {
         assert_eq!(only_claim(&e), (0, claim_kind::CONTEXT_MENU, 1, 3));
         assert_eq!((e[0].x, e[0].y), (225.0, 10.0), "button 2's center");
     }
+    // A drop at an unknown position goes to the focus path.
+    apply(&mut ui, |t| {
+        t.claims(2, 1, &[Claim::of(claim_kind::DROP)]);
+    });
+    ui.dispatch(&Event::Drop {
+        x: -1.0,
+        y: -1.0,
+        paths: vec!["/a.png".into()],
+    });
+    assert_eq!(only_claim(&ui.take_events()), (2, claim_kind::DROP, 0, 1));
+
     // F10 alone is not the menu key.
     assert_eq!(
         key(&mut ui, named(Key::F(10), 0))[0].kind,
@@ -432,6 +444,7 @@ fn drop_and_context_menu() {
     // Unclaimed, the gestures are plain events or nothing.
     apply(&mut ui, |t| {
         t.claims(0, 4, &[]);
+        t.claims(2, 2, &[]);
     });
     assert_eq!(
         key(&mut ui, named(Key::ContextMenu, 0))[0].kind,
@@ -514,11 +527,39 @@ fn claims_are_validated() {
     });
     assert!(!ui.host.claims.contains_key(&2));
 
-    // The wire rejects a malformed claim at decode.
+    // The wire rejects a malformed claim at decode. The op is last, so
+    // the final 8 bytes are the claim: kind, flags, mods, pad, key.
     let mut t = Transaction::new(4);
-    t.claims(0, 1, &[Claim::of(9)]);
-    assert!(matches!(
-        ui.apply(&wire::encode(&t)),
-        Err(WireError::BadRef("claim"))
-    ));
+    t.claims(0, 1, &[k]);
+    let good = wire::encode(&t);
+    let n = good.len();
+    let patched = |f: &dyn Fn(&mut [u8])| {
+        let mut buf = good.clone();
+        f(&mut buf);
+        wire::decode(&buf).err()
+    };
+    assert_eq!(patched(&|_| {}), None);
+    let claim = Some(WireError::BadRef("claim"));
+    assert_eq!(patched(&|b| b[n - 8] = 9), claim, "unknown kind");
+    assert_eq!(patched(&|b| b[n - 7] |= 0x80), claim, "reserved flag bit");
+    assert_eq!(patched(&|b| b[n - 6] = 16), claim, "mods past bit 3");
+    assert_eq!(patched(&|b| b[n - 4..].fill(0)), claim, "NUL character key");
+    assert_eq!(
+        wire::decode(&good[..n - 3]).err(),
+        Some(WireError::Truncated)
+    );
+    // The count says two claims, the buffer holds one.
+    assert_eq!(patched(&|b| b[n - 10] = 2), Some(WireError::Truncated));
+
+    // Submit bits 3 name no submit key.
+    let mut t = Transaction::new(5);
+    t.input_config_submit(1, 16.0, 0, "", false, SubmitKey::ModEnter);
+    let mut buf = wire::encode(&t);
+    let flags = buf.last_mut().unwrap();
+    assert_eq!(*flags, (SubmitKey::ModEnter as u8) << 1);
+    *flags = 3 << 1;
+    assert_eq!(
+        wire::decode(&buf).err(),
+        Some(WireError::BadRef("input flags"))
+    );
 }

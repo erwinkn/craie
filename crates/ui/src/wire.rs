@@ -755,7 +755,7 @@ fn put_style_fields(out: &mut Vec<u8>, s: &Style, mask: u64) {
 
 // ---------------------------------------------------------------- decoder
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 pub enum WireError {
     Truncated,
     BadMagic,

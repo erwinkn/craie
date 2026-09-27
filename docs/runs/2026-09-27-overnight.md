@@ -27,7 +27,10 @@ Times are UTC.
 | 02:00 | E15 verification (cargo, wasm32, clippy, bun, tsc) |
 | 02:32 | PR #3 (E15) review fixed (all 10 findings, plus a clamp panic in the rounded-clip hit test); E15 rerun twice |
 | 02:36 | PR #3 reverified (CI, 282 workspace tests) and merged as `3e9f0f3` |
-| 02:45 | Claims and keys (work item 1, protocol 4) built on E15; 15 dispatch tests, 10 bridge tests |
+| 02:45 | Claims and keys (work item 1, protocol 4) built on E15; 9 dispatch tests plus 6 claim-rule unit tests, 10 bridge tests |
+| 02:47 | PR #4 (claims) opened and sent to review. Two tracks start in parallel threads: sibling z (item 4) and runtime vectors with images (item 8) |
+| 02:56 | State styles (item 5) track starts from the lead's design brief |
+| 03:10 | PR #4 review fixed (13 findings, no blockers; `LEDGER.md` PR4-01..13, DF-12 for drop positions) |
 
 ## PRs
 
@@ -36,6 +39,7 @@ Times are UTC.
 | [#1](https://github.com/erwinkn/craie/pull/1) | The crate split, plus Linux-host test fixes | Merged |
 | [#2](https://github.com/erwinkn/craie/pull/2) | E19: event round trip under load; React priorities for native events | Merged |
 | [#3](https://github.com/erwinkn/craie/pull/3) | E15: hit-test reach index; propagation paths no longer allocate | Merged |
+| [#4](https://github.com/erwinkn/craie/pull/4) | Claims and keys (work item 1): key records, keymaps, paste and drop claims; protocol 4 | In review |
 
 ## Numbers
 
@@ -93,12 +97,29 @@ percent of the layout pass that stales it, and 16 bytes per node. Rerun on the M
   - A paste is answered with `InsertText` (the focused input's
     selection when the answer lands), not a range against a revision;
     ranges come with rebased writes (topic 11, `LEDGER.md` DF-11).
-  - All `useHotkeys` share one window list: the first match in mount
-    order wins, where Marbre fires every hook that binds the chord.
+  - All `useHotkeys` share one window list, the latest mounted hook
+    first, and the first match wins: a dialog's Escape beats the
+    page's. Marbre fires every hook that binds the chord.
+  - Drops go to the focus path until the platform reports where they
+    land (winit 0.30 does not; `LEDGER.md` DF-12).
+  - `enter` submits on exactly Enter, as in Marbre.
   - The session now keeps acks and events in native order, so the
     facade drops old claim handlers exactly when native has moved on.
   - Escape no longer blurs; a key with nothing focused reaches no one
     (window shortcuts are claims); `mod+y` redoes (it undid).
+
+- Tonight's wire changes all stay protocol 4: it is unreleased, so
+  one bump covers the night. Each track owns a range of op tags, node
+  kinds and event kinds, so the branches merge without renumbering:
+  sibling z takes ops 0x22–0x2F and node kind 6, vectors and images
+  0x72–0x7F, kind 7 and event 18, state styles 0xB0–0xBF.
+- Tracks run as parallel threads on their own worktrees, stacked on
+  the claims branch; each is rebased onto main, reviewed and merged
+  as its own PR.
+- macOS: exe1 cannot build or sign for the Mac, but
+  `cargo check --workspace --target aarch64-apple-darwin` type-checks
+  every `cfg(target_os = "macos")` path (no linking, no codesign). Each
+  PR from #4 on runs it.
 
 ## Open questions for Erwin
 

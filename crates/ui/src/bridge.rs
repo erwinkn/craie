@@ -281,15 +281,17 @@ impl Session {
         out.push(frame);
     }
 
-    /// JS thread: drains pending acks without blocking.
+    /// Tests and tools: drains pending acks without blocking. Acks read
+    /// here skip the event order; the addon reads them via `take_out`.
     pub fn take_acks(&self) -> Vec<u64> {
         let mut inner = self.inner.lock().unwrap();
         inner.acks_taken += inner.acks.len() as u64;
         inner.acks.drain(..).collect()
     }
 
-    /// JS thread: blocks until acks are pending or the session closes,
-    /// then returns them (empty on close). Never call on the UI thread.
+    /// Tests and tools: blocks until acks are pending or the session
+    /// closes, then returns them (empty on close), out of the event
+    /// order like `take_acks`. Never call on the UI thread.
     pub fn recv_acks(&self) -> Vec<u64> {
         let mut inner = self.inner.lock().unwrap();
         loop {

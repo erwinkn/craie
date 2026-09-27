@@ -41,12 +41,6 @@ impl Mods {
             meta: bits & Mods::META != 0,
         }
     }
-
-    /// The platform's command modifier (`mod`) is down and the other of
-    /// Cmd and Ctrl is up: the editing commands' chords (`mod+c`).
-    pub fn command(self) -> bool {
-        self.bits() & (Mods::CTRL | Mods::META) == Mods::COMMAND
-    }
 }
 
 /// Named (non-text) keys Craie recognizes. Code values are the wire
@@ -225,7 +219,8 @@ pub enum Event {
     ImeDone,
     /// Window focus changed.
     Focus(bool),
-    /// Files dropped on the window at (x, y): their paths.
+    /// Files dropped on the window at (x, y): their paths. The position
+    /// is negative when unknown (winit 0.30 reports none).
     Drop {
         x: f32,
         y: f32,

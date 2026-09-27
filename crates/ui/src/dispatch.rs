@@ -323,9 +323,12 @@ impl Ui {
                     self.emit_change(f);
                 }
             }
+            // Claimed on the path under the drop, or on the focus path
+            // when the position is unknown (off the window: see
+            // `Event::Drop`). Paths can hold newlines but not NUL.
             Event::Drop { x, y, paths } => {
-                let hit = self.hit_test(*x, *y);
-                self.pointer_claim(hit, claim_kind::DROP, *x, *y, paths.join("\n"));
+                let hit = self.hit_test(*x, *y).or(self.focus);
+                self.pointer_claim(hit, claim_kind::DROP, *x, *y, paths.join("\0"));
             }
             Event::Focus(gained) => {
                 if !gained {
@@ -735,12 +738,12 @@ impl Ui {
 /// key means nothing to an input.
 fn key_action(k: &KeyInput, multiline: bool, submit: SubmitKey) -> Option<KeyAction> {
     let m = &k.mods;
-    // Enter per the submit key. Shift+Enter is a newline in a multiline
-    // input and submits a single-line one, as a form field does.
+    // Enter per the submit key, with exact modifiers (Marbre's rule).
+    // Shift+Enter is a newline in a multiline input.
     if k.key == Key::Enter {
         let (plain, shift) = (m.bits() == 0, m.bits() == Mods::SHIFT);
         let submits = match submit {
-            SubmitKey::Enter => plain || (shift && !multiline),
+            SubmitKey::Enter => plain,
             SubmitKey::ModEnter => m.bits() == Mods::COMMAND,
             SubmitKey::None => false,
         };

@@ -113,7 +113,7 @@ impl Claim {
                     && if self.flags & chord_flag::NAMED != 0 {
                         Key::from_code(self.key).is_some_and(|k| k != Key::Unknown)
                     } else {
-                        char::from_u32(self.key).is_some()
+                        char::from_u32(self.key).is_some_and(|c| c != '\0')
                     }
             }
             claim_kind::PASTE..=claim_kind::CONTEXT_MENU => {

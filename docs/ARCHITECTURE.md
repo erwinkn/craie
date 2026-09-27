@@ -1012,15 +1012,16 @@ modifiers plus a named key or the lower-cased character; with Alt and
 a letter or digit, or a non-Latin letter, the physical key. Native
 editing commands use the same rule with exact `mod`. Paste, copy, and
 cut are claimed on the focus path (the selection's domain when nothing
-has focus), drops and secondary presses on the path under the pointer,
-and the ContextMenu key and Shift+F10 on the focus path at the focused
+has focus), drops and secondary presses on the path under the pointer
+(a drop at an unknown position on the focus path; on macOS Ctrl+click
+is a secondary press), and the ContextMenu key and Shift+F10 on the focus path at the focused
 node's center. A match sends one `CLAIM` event (claimer, kind and
 index, the set's version, and the clipboard text, the selected text,
 the dropped paths, or the position) and no default; JS answers with
 `InsertText` or `WriteClipboard`. An unclaimed key goes to the focus
 path, and to no one when nothing has focus. Escape has no action in an
 input; Enter follows the input's submit key (`enter`, `mod+enter`, or
-`none`).
+`none`, with exact modifiers).
 
 **Target.** The same model over the new stores. Pointer ids and types
 rather than mouse-only concepts. Hit testing stays bounds plus clip
@@ -1125,7 +1126,7 @@ event loop, the window, the device, or the render target.
 `worker_thread` and submits CRW2 bytes through `NativeClient.submit`.
 One threadsafe function delivers `ack | events` frames. JS recycles
 ids at once and mirrors each slot's generation; events carry the
-generation and JS drops stale ones; the ack only resolves `flush()`.
+generation and JS drops stale ones; the ack resolves `flush()`.
 Payload ops copy typed-array bytes once. Protocol version 4 (36-byte
 event records; claims). The session hands JS its output in native
 order: acks sit between event frames where they happened, so the ack
