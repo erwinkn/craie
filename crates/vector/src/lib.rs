@@ -5,10 +5,11 @@
 //! (triangles in the path's units) at a tolerance the caller picks from
 //! the display scale: this is the `PathRecord` boundary, behind which a
 //! coverage preparation may replace tessellation (E07). The scene draws
-//! meshes; it never sees lyon.
+//! meshes; it never sees lyon. `dashed` cuts a path into a stroke's
+//! dashes before it strokes; `svg` parses runtime SVG attribute strings.
 
 use craie_core::geom::Affine;
-use lyon_tessellation::geom::point;
+use lyon_tessellation::geom::{CubicBezierSegment, LineSegment, QuadraticBezierSegment, point};
 use lyon_tessellation::path::Path as LyonPath;
 use lyon_tessellation::{
     BuffersBuilder, FillOptions, FillTessellator, FillVertex, StrokeOptions, StrokeTessellator,
@@ -16,6 +17,7 @@ use lyon_tessellation::{
 };
 
 pub mod asset;
+pub mod svg;
 
 /// One path command. Points are in the path's own units.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -224,6 +226,17 @@ pub enum FillRule {
     EvenOdd,
 }
 
+impl FillRule {
+    /// The wire's and the asset's value (declaration order).
+    pub fn from_u8(v: u8) -> Option<FillRule> {
+        Some(match v {
+            0 => FillRule::NonZero,
+            1 => FillRule::EvenOdd,
+            _ => return None,
+        })
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum LineJoin {
     #[default]
@@ -232,12 +245,36 @@ pub enum LineJoin {
     Bevel,
 }
 
+impl LineJoin {
+    /// The wire's and the asset's value (declaration order).
+    pub fn from_u8(v: u8) -> Option<LineJoin> {
+        Some(match v {
+            0 => LineJoin::Miter,
+            1 => LineJoin::Round,
+            2 => LineJoin::Bevel,
+            _ => return None,
+        })
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum LineCap {
     #[default]
     Butt,
     Round,
     Square,
+}
+
+impl LineCap {
+    /// The wire's and the asset's value (declaration order).
+    pub fn from_u8(v: u8) -> Option<LineCap> {
+        Some(match v {
+            0 => LineCap::Butt,
+            1 => LineCap::Round,
+            2 => LineCap::Square,
+            _ => return None,
+        })
+    }
 }
 
 /// A stroke's geometry (SVG defaults: miter joins, limit 4, butt caps).
@@ -256,6 +293,235 @@ impl Default for Stroke {
             join: LineJoin::Miter,
             cap: LineCap::Butt,
             miter_limit: 4.0,
+        }
+    }
+}
+
+/// A stroke's dash pattern (SVG `stroke-dasharray` and
+/// `stroke-dashoffset`): alternating on and off lengths, in path units.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Dash {
+    pub array: Vec<f32>,
+    pub offset: f32,
+}
+
+impl Dash {
+    /// The pattern for the path drawn `k` times larger.
+    pub fn scaled(&self, k: f32) -> Dash {
+        Dash {
+            array: self.array.iter().map(|v| v * k).collect(),
+            offset: self.offset * k,
+        }
+    }
+}
+
+/// Dashes one drawing may be cut into; past it, strokes draw solid.
+pub const MAX_DASH_SEGMENTS: usize = 1 << 16;
+
+/// The dashes of `path` as subpaths of lines: curves flattened to within
+/// `tolerance`, then cut by the pattern. Each subpath restarts the
+/// pattern, as in SVG. A zero-length dash is a dot (a round or square
+/// cap draws it), at a subpath's ends too. A closed subpath that starts
+/// and ends inside a dash is one piece through its start, so that
+/// corner joins; one that is all dash stays closed.
+///
+/// `budget` is the dashes left for the drawing: the cut takes its bound
+/// from it. `None` when the pattern is empty, not finite, or its bound
+/// (taken before any cutting from the control polygon's length) is over
+/// `budget`: stroke solid then.
+pub fn dashed(path: &Path, dash: &Dash, tolerance: f32, budget: &mut usize) -> Option<Path> {
+    let n = dash.array.len();
+    let period: f32 = dash.array.iter().sum();
+    let ok = |v: f32| v.is_finite() && v >= 0.0;
+    if n == 0 || n % 2 == 1 || !dash.array.iter().all(|&v| ok(v)) {
+        return None;
+    }
+    if !(period > 0.0 && period.is_finite() && dash.offset.is_finite()) {
+        return None;
+    }
+    // The control polygon is at least as long as the path.
+    let path = path.explicit();
+    let (mut at, mut reach) = ([0.0f32; 2], 0.0f64);
+    let dist = |a: [f32; 2], b: [f32; 2]| ((b[0] - a[0]).hypot(b[1] - a[1])) as f64;
+    let mut subpaths = 0usize;
+    for v in &path.verbs {
+        let pts: &[[f32; 2]] = match v {
+            Verb::MoveTo(p) => {
+                at = *p;
+                subpaths += 1;
+                continue;
+            }
+            Verb::LineTo(p) => std::slice::from_ref(p),
+            Verb::QuadTo(c, p) => &[*c, *p],
+            Verb::CubicTo(a, b, p) => &[*a, *b, *p],
+            // Closing lines are at most as long as their subpath.
+            Verb::Close => continue,
+        };
+        for &p in pts {
+            reach += dist(at, p);
+            at = p;
+        }
+    }
+    // Each subpath adds at most a dot at each end.
+    let bound = reach * 2.0 / period as f64 * n as f64 + 2.0 * subpaths as f64;
+    if !(bound <= *budget as f64) {
+        return None;
+    }
+    *budget -= bound as usize;
+    // Where the offset puts the pattern: element `i`, `left` of it. An
+    // offset landing exactly on a zero-length dash starts on it (a dot).
+    let mut o = dash.offset.rem_euclid(period);
+    let mut first = (0, dash.array[0]);
+    for (i, &len) in dash.array.iter().enumerate() {
+        if o < len || (o == 0.0 && len == 0.0 && i % 2 == 0) {
+            first = (i, len - o);
+            break;
+        }
+        o -= len;
+    }
+    let mut w = Dasher {
+        out: Path::new(),
+        array: &dash.array,
+        eps: period * 1e-6,
+        first,
+        i: first.0,
+        left: first.1,
+        head: None,
+    };
+    let (mut at, mut start, mut open) = ([0.0f32; 2], [0.0f32; 2], false);
+    let tol = tolerance.max(1e-6);
+    let pt = |p: [f32; 2]| point(p[0], p[1]);
+    for v in &path.verbs {
+        match *v {
+            Verb::MoveTo(p) => {
+                if open {
+                    w.end(at);
+                }
+                w.restart(p);
+                (at, start, open) = (p, p, true);
+            }
+            Verb::LineTo(p) => {
+                w.line(at, p);
+                at = p;
+            }
+            Verb::QuadTo(c, p) => {
+                let q = QuadraticBezierSegment {
+                    from: pt(at),
+                    ctrl: pt(c),
+                    to: pt(p),
+                };
+                q.for_each_flattened(tol, &mut |s: &LineSegment<f32>| {
+                    w.line(s.from.to_array(), s.to.to_array())
+                });
+                at = p;
+            }
+            Verb::CubicTo(c1, c2, p) => {
+                let c = CubicBezierSegment {
+                    from: pt(at),
+                    ctrl1: pt(c1),
+                    ctrl2: pt(c2),
+                    to: pt(p),
+                };
+                c.for_each_flattened(tol, &mut |s: &LineSegment<f32>| {
+                    w.line(s.from.to_array(), s.to.to_array())
+                });
+                at = p;
+            }
+            Verb::Close => {
+                w.line(at, start);
+                w.close(start);
+                (at, open) = (start, false);
+            }
+        }
+    }
+    if open {
+        w.end(at);
+    }
+    Some(w.out)
+}
+
+/// Walks segments through a dash pattern.
+struct Dasher<'a> {
+    out: Path,
+    array: &'a [f32],
+    /// What is left of an element when it ends exactly at a point.
+    eps: f32,
+    /// Where each subpath starts: the element and what is left of it.
+    first: (usize, f32),
+    i: usize,
+    left: f32,
+    /// When the subpath starts on a dash: where that first dash starts
+    /// in `out` and, once cut, where it ends.
+    head: Option<(usize, Option<usize>)>,
+}
+
+impl Dasher<'_> {
+    fn on(&self) -> bool {
+        self.i % 2 == 0
+    }
+
+    fn advance(&mut self) {
+        self.i = (self.i + 1) % self.array.len();
+        self.left = self.array[self.i];
+    }
+
+    fn restart(&mut self, p: [f32; 2]) {
+        (self.i, self.left) = self.first;
+        self.head = None;
+        if self.on() {
+            self.head = Some((self.out.verbs.len(), None));
+            self.out.move_to(p[0], p[1]);
+        }
+    }
+
+    fn line(&mut self, a: [f32; 2], b: [f32; 2]) {
+        let len = (b[0] - a[0]).hypot(b[1] - a[1]);
+        let mut t = 0.0;
+        while len - t > self.left {
+            t += self.left;
+            let f = t / len;
+            let p = [a[0] + (b[0] - a[0]) * f, a[1] + (b[1] - a[1]) * f];
+            if self.on() {
+                self.out.line_to(p[0], p[1]);
+                if let Some((_, end @ None)) = &mut self.head {
+                    *end = Some(self.out.verbs.len());
+                }
+            } else {
+                self.out.move_to(p[0], p[1]);
+            }
+            self.advance();
+        }
+        self.left -= len - t;
+        if self.on() {
+            self.out.line_to(b[0], b[1]);
+        }
+    }
+
+    /// An open subpath's end at `p`: a gap ending exactly there, before a
+    /// zero-length dash, leaves a dot.
+    fn end(&mut self, p: [f32; 2]) {
+        let next = (self.i + 1) % self.array.len();
+        if !self.on() && self.left <= self.eps && self.array[next] == 0.0 {
+            self.out.move_to(p[0], p[1]).line_to(p[0], p[1]);
+        }
+    }
+
+    /// A closed subpath's end, back at its start `p`.
+    fn close(&mut self, p: [f32; 2]) {
+        match self.head.take() {
+            // All one dash: the subpath stays closed.
+            Some((_, None)) => {
+                self.out.close();
+            }
+            // The last dash runs on into the first: move the first's
+            // lines after it, so the start is a join, not two caps.
+            Some((s, Some(e))) if self.on() => {
+                let first: Vec<Verb> = self.out.verbs.drain(s..e).skip(1).collect();
+                self.out.verbs.extend(first);
+            }
+            // The first dash already starts here.
+            Some(_) => {}
+            None => self.end(p),
         }
     }
 }
@@ -446,6 +712,167 @@ mod tests {
             .close()
             .line_to(5.0, 6.0);
         assert_eq!(q.explicit().verbs[3], Verb::MoveTo([5.0, 5.0]));
+    }
+
+    fn dash(array: &[f32], offset: f32) -> Dash {
+        Dash {
+            array: array.to_vec(),
+            offset,
+        }
+    }
+
+    /// `dashed` with an unlimited budget.
+    fn cut(p: &Path, d: &Dash, tolerance: f32) -> Option<Path> {
+        dashed(p, d, tolerance, &mut usize::MAX.clone())
+    }
+
+    /// The x extents of each piece of a dashed horizontal path.
+    fn spans(p: &Path) -> Vec<[f32; 2]> {
+        let mut out = vec![];
+        for v in &p.verbs {
+            match *v {
+                Verb::MoveTo(a) => out.push([a[0], a[0]]),
+                Verb::LineTo(b) => out.last_mut().unwrap()[1] = b[0],
+                _ => {}
+            }
+        }
+        out
+    }
+
+    fn line(len: f32) -> Path {
+        let mut p = Path::new();
+        p.move_to(0.0, 0.0).line_to(len, 0.0);
+        p
+    }
+
+    /// Dashes cut a path by length, across curves and closes, starting
+    /// where the offset says; each subpath restarts the pattern.
+    #[test]
+    fn dashes_cut_by_length() {
+        let line = line(10.0);
+        let d = dash;
+        let cut_ = cut(&line, &d(&[3.0, 1.0], 0.0), 0.1).unwrap();
+        assert_eq!(spans(&cut_), [[0.0, 3.0], [4.0, 7.0], [8.0, 10.0]]);
+        // An offset of 2 starts one unit into the first dash; a negative
+        // one wraps, and so does one past a period (4 + 2 is 2).
+        let c = cut(&line, &d(&[3.0, 1.0], 2.0), 0.1).unwrap();
+        assert_eq!(spans(&c)[0], [0.0, 1.0]);
+        let c = cut(&line, &d(&[3.0, 1.0], -1.0), 0.1).unwrap();
+        assert_eq!(spans(&c)[0], [1.0, 4.0]);
+        let c = cut(&line, &d(&[3.0, 1.0], 42.0), 0.1).unwrap();
+        assert_eq!(spans(&c)[0], [0.0, 1.0]);
+        // A closed square of perimeter 40, half on: 20 units drawn,
+        // stroked 1 wide with butt caps: area 20.
+        let sq = Path::rect(0.0, 0.0, 10.0, 10.0);
+        let c = cut(&sq, &d(&[5.0, 5.0], 0.0), 0.1).unwrap();
+        let s = Stroke {
+            width: 1.0,
+            join: LineJoin::Bevel,
+            ..Stroke::default()
+        };
+        let area = stroke(&c, &s, 0.01).unwrap().area();
+        assert!((area - 20.0).abs() < 1e-3, "{area}");
+        // A circle half dashed draws about half its perimeter.
+        let circle = Path::circle(0.0, 0.0, 10.0);
+        let per = 2.0 * std::f32::consts::PI * 10.0;
+        let c = cut(&circle, &d(&[per / 8.0, per / 8.0], 0.0), 0.01).unwrap();
+        let area = stroke(&c, &s, 0.01).unwrap().area();
+        assert!((area - per as f64 / 2.0).abs() < 0.2, "{area}");
+        // Two subpaths each start on a dash.
+        let mut two = line.clone();
+        two.move_to(0.0, 5.0).line_to(10.0, 5.0);
+        let c = cut(&two, &d(&[3.0, 1.0], 0.0), 0.1).unwrap();
+        assert_eq!(spans(&c).len(), 6);
+        // Bounded: a pattern cutting too many dashes, or an empty one,
+        // gives no dashes (the caller strokes solid).
+        let mut long = Path::new();
+        long.move_to(0.0, 0.0).line_to(1e6, 0.0);
+        let budget = &mut MAX_DASH_SEGMENTS.clone();
+        assert!(dashed(&long, &d(&[0.1, 0.1], 0.0), 0.1, budget).is_none());
+        assert!(cut(&line, &d(&[0.0, 0.0], 0.0), 0.1).is_none());
+        assert!(cut(&line, &d(&[1.0], 0.0), 0.1).is_none());
+        assert!(cut(&line, &d(&[f32::NAN, 1.0], 0.0), 0.1).is_none());
+    }
+
+    /// PR5-03: zero-length dashes are dots, at a subpath's ends too: a
+    /// 12-unit line dashed "0 4" has dots at 0, 4, 8 and 12, as in
+    /// Chrome; with round caps of width 2, four unit discs.
+    #[test]
+    fn zero_length_dashes_are_dots() {
+        let c = cut(&line(12.0), &dash(&[0.0, 4.0], 0.0), 0.1).unwrap();
+        assert_eq!(
+            spans(&c),
+            [[0.0, 0.0], [4.0, 4.0], [8.0, 8.0], [12.0, 12.0]]
+        );
+        let round = Stroke {
+            width: 2.0,
+            cap: LineCap::Round,
+            ..Stroke::default()
+        };
+        let area = stroke(&c, &round, 0.001).unwrap().area();
+        let want = 4.0 * std::f64::consts::PI;
+        assert!((area - want).abs() / want < 0.01, "{area}");
+        // An offset landing on the dot: the same; one just past it
+        // starts in the gap (no dot at 0).
+        let c = cut(&line(12.0), &dash(&[0.0, 4.0], 4.0), 0.1).unwrap();
+        assert_eq!(spans(&c).len(), 4);
+        let c = cut(&line(12.0), &dash(&[0.0, 4.0], 1.0), 0.1).unwrap();
+        assert_eq!(spans(&c), [[3.0, 3.0], [7.0, 7.0], [11.0, 11.0]]);
+        // A progress ring at 0 ("0 c", round caps): one dot at the start.
+        let ring = Path::circle(0.0, 0.0, 10.0);
+        let c = cut(&ring, &dash(&[0.0, 100.0], 0.0), 0.01).unwrap();
+        let area = stroke(&c, &round, 0.001).unwrap().area();
+        assert!((area - std::f64::consts::PI).abs() < 0.05, "{area}");
+    }
+
+    /// PR5-03 (DF-16's corner): a closed subpath starting and ending
+    /// inside a dash is one piece through its start, so the corner there
+    /// joins; one that is all dash stays closed.
+    #[test]
+    fn closed_dashes_join_through_the_start() {
+        // A 10 x 10 square, perimeter 40, "30 10" offset 5: on from 0 to
+        // 25, off to 35, on from 35 round to 40. The pieces: 0..25 and
+        // 35..40, and the second runs on into the first.
+        let sq = Path::rect(0.0, 0.0, 10.0, 10.0);
+        let c = cut(&sq, &dash(&[30.0, 10.0], 5.0), 0.1).unwrap();
+        let moves = c
+            .verbs
+            .iter()
+            .filter(|v| matches!(v, Verb::MoveTo(_)))
+            .count();
+        assert_eq!(moves, 1, "{:?}", c.verbs);
+        assert_eq!(c.verbs[0], Verb::MoveTo([0.0, 5.0]));
+        // Through (0, 0), where it now joins, to (5, 10).
+        assert!(c.verbs.contains(&Verb::LineTo([0.0, 0.0])));
+        assert_eq!(*c.verbs.last().unwrap(), Verb::LineTo([5.0, 10.0]));
+        // With a miter join, the corner at (0, 0) is square: no notch
+        // where two butt caps would have met.
+        let s = Stroke {
+            width: 2.0,
+            ..Stroke::default()
+        };
+        let mesh = stroke(&c, &s, 0.01).unwrap();
+        let reach = mesh
+            .vertices
+            .iter()
+            .any(|v| (v[0] + 1.0).abs() < 1e-4 && (v[1] + 1.0).abs() < 1e-4);
+        assert!(reach, "the corner is mitered");
+        // All dash ("50 1" on a 40 perimeter): closed, one subpath.
+        let c = cut(&sq, &dash(&[50.0, 1.0], 0.0), 0.1).unwrap();
+        assert_eq!(*c.verbs.last().unwrap(), Verb::Close);
+    }
+
+    /// PR5-02: one dash budget serves a whole drawing: each cut takes its
+    /// bound from it, and a cut past what is left strokes solid.
+    #[test]
+    fn dash_budget_is_shared() {
+        let mut budget = 100;
+        let d = dash(&[1.0, 1.0], 0.0);
+        // 40 units, period 2, two elements: a bound of 80 (+2 for dots).
+        assert!(dashed(&line(40.0), &d, 0.1, &mut budget).is_some());
+        assert_eq!(budget, 18);
+        assert!(dashed(&line(40.0), &d, 0.1, &mut budget).is_none());
+        assert_eq!(budget, 18);
     }
 
     #[test]

@@ -39,6 +39,9 @@ Times are UTC.
 | 03:52 | State styles (item 5) pushed by its track; PR #7 opened and sent to review |
 | 04:02 | Images (item 8, part 2) pushed by its track; PR #8 opened, stacked on #5, and sent to review |
 | 04:15 | PR #6 review fixed (`LEDGER.md` PR6-01..10), reverified (CI, 311 workspace tests, smoke, macOS type-check) and merged |
+| 04:18 | PR #7 review: no blockers, 2 majors (transitions ran on mount and on the first frame; layout values in a variant took their partner fields from the base, not from other variants), 13 minors; its track fixes them after merging main |
+| 04:22 | PR #8 review: 1 blocker (decoding was not memory-bounded: a 249 KB PNG with a 16,000×16,000 header took 1.25 GB), 7 majors; its track fixes them |
+| 04:35 | PR #5 review fixed (`LEDGER.md` PR5-01..13), main merged in, reverified (CI, 337 workspace tests, smoke, macOS type-check) and merged; PR #8 retargeted to main first |
 
 ## PRs
 
@@ -48,7 +51,7 @@ Times are UTC.
 | [#2](https://github.com/erwinkn/craie/pull/2) | E19: event round trip under load; React priorities for native events | Merged |
 | [#3](https://github.com/erwinkn/craie/pull/3) | E15: hit-test reach index; propagation paths no longer allocate | Merged |
 | [#4](https://github.com/erwinkn/craie/pull/4) | Claims and keys (work item 1): key records, keymaps, paste and drop claims; protocol 4 | Merged |
-| [#5](https://github.com/erwinkn/craie/pull/5) | Runtime vector shapes (work item 8, part 1): SVG path strings parsed natively, dashes, a shared mesh cache | In review |
+| [#5](https://github.com/erwinkn/craie/pull/5) | Runtime vector shapes (work item 8, part 1): SVG path strings parsed natively, dashes, a shared mesh cache | Merged |
 | [#6](https://github.com/erwinkn/craie/pull/6) | Sibling z and layers (work item 4, first half): `zIndex` among siblings, layer containers that never sort below their owner | Merged |
 | [#7](https://github.com/erwinkn/craie/pull/7) | State styles (work item 5): hover, press, focus, app states and breakpoints restyle natively; inherited color | In review |
 | [#8](https://github.com/erwinkn/craie/pull/8) | Images (work item 8, part 2): decoded off-thread at the drawn size, drawn from the glyph atlas | In review |
@@ -161,7 +164,9 @@ percent of the layout pass that stales it, and 16 bytes per node. Rerun on the M
 ## Open questions for Erwin
 
 - `craie-render --test paths` failed once in the first full test run
-  of PR #2 and passed in five reruns. Likely a timing flake under
-  llvmpipe load; worth watching on the Mac.
+  of PR #2 and passed in five reruns. It crashed again (SIGSEGV) in
+  PR #5's first CI run and passed alone three times and in the CI rerun.
+  A segfault points at llvmpipe or the driver rather than timing;
+  worth watching on the Mac.
 
 ## Next steps

@@ -196,6 +196,7 @@ fn path(p: &usvg::Path, opacity: f32, asset: &mut Asset, report: &mut Report) {
             paint: asset.paints.len() - 1,
             opacity: (opacity * own).clamp(0.0, 1.0),
             transform,
+            dash: None,
         });
     }
 }

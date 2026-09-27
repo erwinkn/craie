@@ -112,6 +112,61 @@ instead of both reading the closed state.
 The harness found one bug: `runApp` held the process for 2 s after the
 window closed (an un-unref'd timeout in a `Promise.race`).
 
+### Runtime vector shapes (work item 8)
+
+`cargo run --release -p craie-harness --example vectors`. This is the
+Rust direct API: transactions built in Rust and applied with
+`apply_txn`, with no wire encode or decode and no JS (the JS side is
+below). Headless (`Ui::render`, no GPU), display scale 2, medians of 21
+fresh `Ui`s, on exe1 (Linux, llvmpipe) at load average 17 to 29
+(loaded; indicative only). Icons: eight Lucide icons (circle-check,
+house, search, settings, bell, user, calendar, chevron-right) at 25
+stroke widths each, so 200 distinct drawings, 24 pt square. Numbers
+after the PR #5 review fixes; the PR's first run in parentheses where
+it differs.
+
+| case | parse | apply | first frame |
+|---|---|---|---|
+| 200 plain views (baseline) | | 115 µs (109) | 92 µs (94) |
+| 200 icons, new | 451 µs (354) | 872 µs (729) | 1,588 µs (1,407) |
+| 200 more nodes, same icons (cache hits) | | 218 µs (199) | 737 µs (667) |
+| the same 200 drawings resent | | 51 µs (42) | 1 µs |
+| sparkline, 2,000 points, solid | 90 µs (84) | 115 µs (106) | 784 µs (755) |
+| sparkline, dashed "6 3" | 88 µs (85) | 116 µs (115) | 719 µs (720) |
+| 4,096 shapes sharing one 1 KiB path | | 7,152 µs | 45,335 µs |
+
+- A new icon costs about 10 µs over a plain view (parse, validate,
+  tessellate at 48 device px, emit); its frame share is mostly
+  tessellation.
+- A cache hit (the source interned, the meshes shared) costs about 3 µs
+  over a plain view: the key, a hash lookup, and copying the mesh into
+  the node's chunk. On the Rust side, resending an unchanged drawing
+  builds its key and compares it with the node's (0.25 µs per icon),
+  and the frame does nothing.
+- The sparkline's frame is its stroke tessellation (about 0.35 µs per
+  point with round joins); dashing it is within the noise.
+- Apply parses each new source once: validation keeps what it built for
+  apply, and equal drawings in one transaction build once.
+- The review fixes against the PR's first commit, run back to back
+  three times (`f4ae6b6` built apart): first frames within noise of
+  each other (1,393 to 1,525 µs before, 1,466 to 1,506 after); apply
+  about 130 µs higher for 200 icons (757 to 805 before, 864 to 889
+  after), which is the per-drawing check, the memo tables and the
+  shared key. Parse alone was within the load's noise (358 to 626 µs
+  before, 445 to 1,119 after).
+- The worst case the per-drawing bounds allow: 4,096 filled shapes all
+  referencing one 1 KiB path, 4 MiB of references. Apply (the check,
+  a 4 MiB key, one parse) takes 7 ms; the first frame tessellates
+  4,096 paths of 113 segments, 45 ms. Before the fixes each shape
+  parsed its own copy, and each of 4,096 strings could hold a million
+  path commands.
+
+JS side of a resend (bun 1.4.2, exe1, loaded; `flattenShapes`, then
+`JSON.stringify` of `[viewBox, shapes]` and a compare with the string
+the host node last sent, which is all an unchanged drawing costs in
+JS): a Lucide-sized icon (circle, path, rounded rect) 5.0 µs a render;
+a 1,000-point polyline 157 µs (the points joined, then stringified).
+
 ### E15: interaction lookups, index versus walk
 
 `cargo run --release -p craie-harness --example e15_lookups`. Trees of

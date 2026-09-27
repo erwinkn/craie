@@ -127,6 +127,18 @@ enc.create(7, 0)                                    // a layer container
 enc.layer(7, 6)                                     // owned from the vector
 enc.spatial(7, undefined, undefined, 50)            // z alone
 enc.place(NIL, 7, NIL)
+// A runtime drawing: a dashed arc path and an even-odd polygon.
+const shape = {
+  kind: 0, geometry: "M2 12a10 10 0 0 1 20 0", transform: "", dashes: "4 2",
+  fill: 0, fillRule: 0, stroke: 0x1122_33ff, strokeWidth: 2, join: 1, cap: 2,
+  miterLimit: 4, dashOffset: 1.5, opacity: 1,
+}
+enc.create(8, 5)                                    // vector
+enc.drawing(8, "0 0 24 24", [
+  shape,
+  { ...shape, kind: 2, geometry: "4,4 20,4 12,20", transform: "rotate(90 12 12)", dashes: "", fill: 0xff00_00ff, fillRule: 1, stroke: 0, opacity: 0.5 },
+])
+enc.place(0, 8, NIL)
 
 await Bun.write(new URL("../test/fixture.bin", import.meta.url).pathname, enc.finish(99n))
 console.log("wrote fixture.bin")

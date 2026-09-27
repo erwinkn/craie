@@ -230,11 +230,14 @@ pub struct SurfaceData {
     pub payload: Vec<u8>,
 }
 
-/// A vector node's asset: its bytes (as sent) and their decoding.
+/// A vector node's asset: its source (payload bytes as sent, or a
+/// drawing's key), shared with the source table and other nodes, and
+/// their decoding.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct VectorData {
-    pub bytes: Vec<u8>,
-    /// `None` until a payload arrives.
+    pub bytes: std::sync::Arc<[u8]>,
+    /// `None` until a source arrives, and for a drawing that does not
+    /// parse (it draws nothing).
     pub asset: Option<std::sync::Arc<craie_vector::asset::Asset>>,
 }
 
@@ -291,6 +294,11 @@ pub struct Host {
     pub surfaces: HashMap<u32, SurfaceData>,
     /// Vector nodes' assets, id-keyed.
     pub vectors: HashMap<u32, VectorData>,
+    /// Decoded vector sources by source bytes: nodes with the same
+    /// source share one asset (and so its tessellation).
+    vector_sources: HashMap<std::sync::Arc<[u8]>, std::sync::Weak<craie_vector::asset::Asset>>,
+    /// `vector_sources` entries after the last sweep of dead ones.
+    vector_sources_swept: usize,
     /// Claim sets (`claims.rs`), id-keyed; NIL keys the window list.
     pub claims: HashMap<u32, crate::claims::ClaimSet>,
     /// Inherited text colors (`COLOR`), id-keyed: few nodes set one.
@@ -359,6 +367,8 @@ impl Host {
             transitions: HashMap::new(),
             surfaces: HashMap::new(),
             vectors: HashMap::new(),
+            vector_sources: HashMap::new(),
+            vector_sources_swept: 0,
             claims: HashMap::new(),
             colors: HashMap::new(),
             list_index: Vec::new(),
@@ -380,6 +390,59 @@ impl Host {
 
     pub fn node_mut(&mut self, id: NodeId) -> Option<&mut NodeHeader> {
         self.nodes.get_mut(id.index()).filter(|n| n.is_live())
+    }
+
+    /// Whether a vector source is decoded and in use (validation skips
+    /// parsing it again).
+    pub fn has_vector_source(&self, source: &[u8]) -> bool {
+        self.vector_sources
+            .get(source)
+            .is_some_and(|w| w.strong_count() > 0)
+    }
+
+    /// The table's copy of a source, if it holds one (nodes of the same
+    /// source share one copy).
+    pub fn vector_source_key(&self, source: &[u8]) -> Option<std::sync::Arc<[u8]>> {
+        self.vector_sources
+            .get_key_value(source)
+            .map(|(k, _)| k.clone())
+    }
+
+    /// Vector source table entries, live or not yet swept (tests).
+    pub fn vector_sources_len(&self) -> usize {
+        self.vector_sources.len()
+    }
+
+    /// The shared copy and decoding of a vector source: the table's, or
+    /// `share()` and `build()` on a miss (`None`: it does not build, and
+    /// is not kept). Dead entries are swept when the table has doubled
+    /// since the last sweep.
+    pub fn vector_source(
+        &mut self,
+        source: &[u8],
+        share: impl FnOnce() -> std::sync::Arc<[u8]>,
+        build: impl FnOnce() -> Option<craie_vector::asset::Asset>,
+    ) -> (
+        std::sync::Arc<[u8]>,
+        Option<std::sync::Arc<craie_vector::asset::Asset>>,
+    ) {
+        if let Some((k, w)) = self.vector_sources.get_key_value(source)
+            && let Some(a) = w.upgrade()
+        {
+            return (k.clone(), Some(a));
+        }
+        let key = share();
+        let Some(a) = build().map(std::sync::Arc::new) else {
+            return (key, None);
+        };
+        self.vector_sources.remove(source);
+        self.vector_sources
+            .insert(key.clone(), std::sync::Arc::downgrade(&a));
+        if self.vector_sources.len() > 2 * self.vector_sources_swept + 64 {
+            self.vector_sources.retain(|_, w| w.strong_count() > 0);
+            self.vector_sources_swept = self.vector_sources.len();
+        }
+        (key, Some(a))
     }
 
     pub fn kind(&self, id: NodeId) -> Option<NodeKind> {
