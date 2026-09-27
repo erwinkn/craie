@@ -28,3 +28,6 @@ unicode-segmentation.workspace = true
 [dev-dependencies]
 # E01 reference for hard breaks (UAX #14).
 unicode-linebreak.workspace = true
+
+[lints]
+workspace = true

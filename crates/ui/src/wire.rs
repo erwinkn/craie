@@ -1494,6 +1494,9 @@ impl Reader<'_> {
             mask: self.u8()?,
             ..Values::default()
         };
+        // Never true while `value_field::ALL` fills the `u8`; it stays for
+        // when the mask widens.
+        #[allow(clippy::bad_bit_mask)]
         if v.mask & !value_field::ALL != 0 {
             return Err(WireError::BadRef("value field"));
         }

@@ -12,6 +12,9 @@ use crate::wire::{self, WireError};
 
 const NIL: u32 = u32::MAX;
 
+/// A named edit that must make a transaction fail.
+type BadOp = (&'static str, fn(&mut Transaction));
+
 /// Every drawn primitive in draw order, in device space.
 fn resolved(scene: &Scene) -> Vec<Resolved> {
     scene.resolve(&|r| r.0 as u64)
@@ -1806,7 +1809,7 @@ fn list_ops_validate_atomically() {
     ui.apply_txn(&t).unwrap();
     assert_eq!(ui.host.lists.get(1).unwrap().len(), 2);
     let seq = ui.seq;
-    let bad: [(&str, fn(&mut Transaction)); 6] = [
+    let bad: [BadOp; 6] = [
         // The valid first op leaves 3 items.
         ("splice past the end", |t| {
             t.list_splice(1, 4, 0, &[]);
@@ -1929,7 +1932,7 @@ fn list_identities_are_unique() {
                 ui.apply_txn(t).map(|_| ())
             }
         };
-        let bad: [(&str, fn(&mut Transaction)); 4] = [
+        let bad: [BadOp; 4] = [
             ("twice in one insertion", |t| {
                 t.list_splice(1, 0, 0, &[item(9), item(9)]);
             }),

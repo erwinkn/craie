@@ -457,7 +457,7 @@ struct Dasher<'a> {
 
 impl Dasher<'_> {
     fn on(&self) -> bool {
-        self.i % 2 == 0
+        self.i.is_multiple_of(2)
     }
 
     fn advance(&mut self) {

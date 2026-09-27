@@ -68,3 +68,6 @@ path = "../../examples/images/main.rs"
 [target.'cfg(unix)'.dependencies]
 # The headless loop's thread CPU clock.
 libc = "0.2"
+
+[lints]
+workspace = true

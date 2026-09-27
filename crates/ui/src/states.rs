@@ -70,7 +70,7 @@ pub mod value_field {
     pub const BORDER_WIDTH: u8 = 1 << 7;
     /// Values only nodes with a box hold.
     pub const BOX: u8 = FILL | BORDER_COLOR | RADIUS | BORDER_WIDTH;
-    pub const ALL: u8 = 0xFF;
+    pub const ALL: u8 = BOX | COLOR | OPACITY | TRANSFORM | LAYOUT;
 }
 
 /// Layout keys: one per property, axis and side, so two variants that
@@ -179,7 +179,11 @@ impl Default for Values {
 impl Values {
     /// In range: finite, opacity in [0, 1], known bits.
     pub fn valid(&self) -> bool {
-        self.mask & !value_field::ALL == 0
+        // `value_field::ALL` fills the `u8` today, so this is always
+        // true; it stays for when the mask widens.
+        #[allow(clippy::bad_bit_mask)]
+        let known = self.mask & !value_field::ALL == 0;
+        known
             && self.layout_keys & !layout_key::ALL == 0
             && self.border.1.is_finite()
             && self.radius.is_finite()

@@ -300,8 +300,8 @@ fn main() {
         WIDE.width, WIDE.height
     );
     let hover = |ui: &mut Ui, i: usize| {
-        let x = if i % 2 == 0 { 100.0 } else { 1300.0 };
-        let y = if i % 2 == 0 { 20.0 } else { 880.0 };
+        let x = if i.is_multiple_of(2) { 100.0 } else { 1300.0 };
+        let y = if i.is_multiple_of(2) { 20.0 } else { 880.0 };
         ui.dispatch(&Event::PointerMove { x, y });
         ui.render(WIDE);
     };

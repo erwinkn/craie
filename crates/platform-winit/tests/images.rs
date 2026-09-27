@@ -173,10 +173,10 @@ fn each_fit_draws_its_part_of_the_image() {
         eprintln!("no GPU adapter: skipped");
         return;
     };
-    let mut r = Renderer::new(&gpu, FORMAT);
+    let mut r = Renderer::new(gpu, FORMAT);
     let mut ui = ui();
     settle(&mut ui);
-    let img = draw(&gpu, &mut r, &mut ui);
+    let img = draw(gpu, &mut r, &mut ui);
     let at = |x: u32, y: u32| img[(y * W + x) as usize];
 
     // Cover: the middle 20 x 20 of the image (green, blue) fills the box,
@@ -226,7 +226,7 @@ fn a_rounded_parent_clips_an_image() {
         eprintln!("no GPU adapter: skipped");
         return;
     };
-    let mut r = Renderer::new(&gpu, FORMAT);
+    let mut r = Renderer::new(gpu, FORMAT);
     let mut ui = Ui::new(1.0);
     ui.clear = 0x0000_00FF;
     let side = taffy::Dimension::length(40.0);
@@ -260,7 +260,7 @@ fn a_rounded_parent_clips_an_image() {
         .place(0, 1, NIL);
     ui.apply_txn(&t).unwrap();
     settle(&mut ui);
-    let img = draw(&gpu, &mut r, &mut ui);
+    let img = draw(gpu, &mut r, &mut ui);
     let at = |x: u32, y: u32| img[(y * W + x) as usize];
     assert_eq!(at(25, 20), BLUE);
     assert_eq!(at(15, 38), GREEN);
@@ -280,7 +280,7 @@ fn transparent_edges_have_no_dark_rim() {
         eprintln!("no GPU adapter: skipped");
         return;
     };
-    let mut r = Renderer::new(&gpu, FORMAT);
+    let mut r = Renderer::new(gpu, FORMAT);
     let mut ui = Ui::new(1.0);
     ui.clear = 0xFFFF_FFFF;
     let rgba: Vec<u8> = (0..10)
@@ -307,7 +307,7 @@ fn transparent_edges_have_no_dark_rim() {
         .place(NIL, 1, NIL);
     ui.apply_txn(&t).unwrap();
     settle(&mut ui);
-    let img = draw(&gpu, &mut r, &mut ui);
+    let img = draw(gpu, &mut r, &mut ui);
     let at = |x: u32, y: u32| img[(y * W + x) as usize];
     assert_eq!((at(0, 20), at(20, 20)), (WHITE, RED));
     // Along a row across the left edge: green and blue stay equal (a
