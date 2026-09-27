@@ -31,6 +31,8 @@ Times are UTC.
 | 02:47 | PR #4 (claims) opened and sent to review. Two tracks start in parallel threads: sibling z (item 4) and runtime vectors with images (item 8) |
 | 02:56 | State styles (item 5) track starts from the lead's design brief |
 | 03:10 | PR #4 review fixed (13 findings, no blockers; `LEDGER.md` PR4-01..13, DF-12 for drop positions) |
+| 03:15 | PR #4 reverified (CI, 300 workspace tests, smoke, macOS type-check) and merged as `a4e71a8`; tracks told to rebase onto it |
+| 03:30 | Runtime vector shapes (item 8, part 1) pushed by its track; PR #5 opened and sent to review; images (part 2) continue stacked on it |
 
 ## PRs
 
@@ -39,7 +41,8 @@ Times are UTC.
 | [#1](https://github.com/erwinkn/craie/pull/1) | The crate split, plus Linux-host test fixes | Merged |
 | [#2](https://github.com/erwinkn/craie/pull/2) | E19: event round trip under load; React priorities for native events | Merged |
 | [#3](https://github.com/erwinkn/craie/pull/3) | E15: hit-test reach index; propagation paths no longer allocate | Merged |
-| [#4](https://github.com/erwinkn/craie/pull/4) | Claims and keys (work item 1): key records, keymaps, paste and drop claims; protocol 4 | In review |
+| [#4](https://github.com/erwinkn/craie/pull/4) | Claims and keys (work item 1): key records, keymaps, paste and drop claims; protocol 4 | Merged |
+| [#5](https://github.com/erwinkn/craie/pull/5) | Runtime vector shapes (work item 8, part 1): SVG path strings parsed natively, dashes, a shared mesh cache | In review |
 
 ## Numbers
 
@@ -116,6 +119,11 @@ percent of the layout pass that stales it, and 16 bytes per node. Rerun on the M
 - Tracks run as parallel threads on their own worktrees, stacked on
   the claims branch; each is rebased onto main, reviewed and merged
   as its own PR.
+- Runtime vectors: shapes travel as SVG strings (path data, points,
+  transforms, dash arrays) and native parses them with a small parser
+  of its own, not usvg; the dash offset is not animatable yet (a
+  spinner rotates its node; `LEDGER.md` DF-13), and `currentColor`
+  waits for state styles (DF-14).
 - macOS: exe1 cannot build or sign for the Mac, but
   `cargo check --workspace --target aarch64-apple-darwin` type-checks
   every `cfg(target_os = "macos")` path (no linking, no codesign). Each
