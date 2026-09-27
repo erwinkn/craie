@@ -21,6 +21,9 @@ pub mod clipboard;
 mod dispatch;
 pub mod events;
 mod executor;
+mod group;
+#[cfg(test)]
+mod group_tests;
 pub mod host;
 pub mod image;
 pub mod input;

@@ -228,6 +228,7 @@ impl Ui {
             if self.host.interaction(id).listeners & mask::FOCUS != 0 {
                 self.pending_events.push(self.event(out_kind::FOCUS, id));
             }
+            self.note_group_focus(id);
         }
         self.a11y_stale = true;
         self.force_paint = true;
@@ -636,6 +637,9 @@ impl Ui {
                 self.set_focus(Some(next));
             }
         }
+
+        // Arrows, Home and End in a focus group (`group.rs`).
+        self.group_key(k);
 
         // Enter and Space on a focused pressable.
         self.press_key_down(k);

@@ -46,15 +46,17 @@ fn ak_role(role: UiRole) -> Role {
         UiRole::RadioGroup => Role::RadioGroup,
         UiRole::Dialog => Role::Dialog,
         UiRole::AlertDialog => Role::AlertDialog,
+        UiRole::Tab => Role::Tab,
+        UiRole::TabList => Role::TabList,
     }
 }
 
 /// Whether assistive technology reads `selected` on `role`: of Marbre
 /// web's selectable roles (tab, option, row, gridcell, treeitem, and
-/// the headers), Craie has the list row, which stands in for option and
-/// row. Add the others as they become roles.
+/// the headers), Craie has the tab and the list row, which stands in
+/// for option and row. Add the others as they become roles.
 fn selectable(role: UiRole) -> bool {
-    role == UiRole::ListItem
+    matches!(role, UiRole::ListItem | UiRole::Tab)
 }
 
 /// The window root's accessibility id.

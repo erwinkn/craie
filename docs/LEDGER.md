@@ -757,6 +757,30 @@ Reviewer minors and nitpicks not fixed yet.
 - Resolves in: the kit adapter mapping (above); the list itself only
   if a ported component writes a percent step by hand.
 
+### DF-50: arrows don't flip right to left
+
+- Source: work item 3 (focus groups) implementation (own finding).
+- Where: crates/ui/src/group.rs (`group_key`).
+- Claim: → always moves to the next member in tree order. In a
+  right-to-left layout the next member is drawn to the left, so a
+  horizontal toolbar in Arabic moves against the arrow. React Aria and
+  the WAI-ARIA practices flip ←→ there.
+- Why deferred: Craie has no layout direction yet.
+- Resolves in: a direction in layout; `group_key` then swaps ←→ for a
+  group laid out right to left.
+
+### DF-51: `both` moves in one line, not a grid
+
+- Source: work item 3 (focus groups) implementation (own finding).
+- Where: crates/ui/src/group.rs (`group_key`).
+- Claim: a `FocusGroup orientation="both"` over a 3 x 3 grid of swatches
+  moves → and ↓ alike to the next swatch in tree order, so ↓ from the
+  first goes to the second, not to the one below it.
+- Why deferred: a grid needs rows (a two-axis group, or geometry), and
+  the kit's groups are lines.
+- Resolves in: a grid group, with row structure from the tree or from
+  the members' boxes, if the kit builds grids.
+
 ## Closed
 
 - DF-21 (work item 6, transform parts): a variant's transform replaced

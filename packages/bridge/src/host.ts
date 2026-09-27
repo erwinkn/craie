@@ -1700,6 +1700,10 @@ export class CraieHost {
     if (props.__trap !== undefined && props.__trap !== oldProps.__trap) {
       enc.trap(id, props.__trap)
     }
+    // A FocusGroup's node carries the group's flags.
+    if (props.__group !== undefined && props.__group !== oldProps.__group) {
+      enc.group(id, props.__group)
+    }
 
     // Claims: a new version when the declaration changes; the handlers
     // follow every commit.

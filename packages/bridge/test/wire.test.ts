@@ -14,7 +14,7 @@ test("encoder emits the documented byte layout", () => {
   const dv = new DataView(buf.buffer, buf.byteOffset, buf.byteLength)
   let at = 0
   expect(dv.getUint32(at, true)).toBe(0x3257_5243); at += 4 // "CRW2"
-  expect(dv.getUint16(at, true)).toBe(9); at += 2            // version
+  expect(dv.getUint16(at, true)).toBe(10); at += 2            // version
   expect(dv.getUint16(at, true)).toBe(0); at += 2            // flags
   expect(dv.getBigUint64(at, true)).toBe(7n); at += 8        // seq
   expect(dv.getUint32(at, true)).toBe(1); at += 4            // 1 string
@@ -160,9 +160,9 @@ test("bad timings leave the encoder unchanged", () => {
 // The handshake compares each side's wire VERSION. They agree through
 // the fixture: its header must be this VERSION, and Rust's
 // wire_fixture test decodes it only at the Rust VERSION.
-test("transform parts bumped the protocol to 9 (focus traps took 8)", () => {
-  expect(VERSION).toBe(9)
-  expect([ROLE.dialog, ROLE.alertdialog]).toEqual([17, 18])
+test("focus groups bumped the protocol to 10, with the tab roles (transform parts took 9)", () => {
+  expect(VERSION).toBe(10)
+  expect([ROLE.dialog, ROLE.alertdialog, ROLE.tab, ROLE.tablist]).toEqual([17, 18, 19, 20])
 })
 
 test("the cross-language fixture carries this VERSION", () => {

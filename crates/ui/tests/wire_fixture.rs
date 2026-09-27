@@ -7,7 +7,7 @@ use craie_ui::claims::{Claim, chord_flag, claim_kind};
 use craie_ui::events::{Key, Mods};
 use craie_ui::host::{NodeFlags, NodeId};
 use craie_ui::input::SubmitKey;
-use craie_ui::mutation::{Mutation, NodeKind, Role, press, reported, trap_flag};
+use craie_ui::mutation::{Mutation, NodeKind, Role, group_flag, press, reported, trap_flag};
 use craie_ui::states::layout_key;
 use craie_ui::surface;
 use craie_ui::ui::Ui;
@@ -73,7 +73,8 @@ fn js_fixture_decodes_and_executes() {
     let i = host.interaction(NodeId(2));
     assert_eq!(i.listeners, 0x7ff);
     assert!(i.focusable && i.auto_focus && !i.selectable);
-    // The vector 8 is inert; the layer 7 a modal focus trap.
+    // The vector 8 is inert; the layer 7 a modal focus trap and a
+    // focus group.
     assert!(
         host.node(NodeId(8))
             .unwrap()
@@ -87,6 +88,13 @@ fn js_fixture_decodes_and_executes() {
             flags: trap_flag::ALL
         }
     )));
+    assert!(txn.mutations.iter().any(|m| matches!(
+        m,
+        Mutation::Group {
+            id: 7,
+            flags: group_flag::ALL
+        }
+    )));
     assert_eq!(i.role, Role::MultilineTextInput);
     assert_eq!(i.reported, 0);
     // The root: a switch reporting expanded and selected while clear.
@@ -97,7 +105,7 @@ fn js_fixture_decodes_and_executes() {
         (r.press, r.focusable),
         (press::PRESSABLE | press::KEEP_FOCUS, false)
     );
-    assert_eq!(host.interaction(NodeId(7)).role, Role::AlertDialog);
+    assert_eq!(host.interaction(NodeId(7)).role, Role::TabList);
     // `setText` leaves the caret at the start, so the insert lands first.
     assert_eq!(ui.inputs.text(2), "!seed");
     assert_eq!(ui.inputs.get(2).unwrap().submit, SubmitKey::ModEnter);

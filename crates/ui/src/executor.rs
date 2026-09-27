@@ -400,7 +400,8 @@ pub fn validate(host: &Host, txn: &Transaction<'_>) -> Result<Validated, WireErr
             Mutation::Role { id, .. }
             | Mutation::Label { id, .. }
             | Mutation::Interaction { id, .. }
-            | Mutation::Trap { id, .. } => {
+            | Mutation::Trap { id, .. }
+            | Mutation::Group { id, .. } => {
                 need_live(&o, *id, "semantics on an absent node")?;
             }
             Mutation::Claims { id, claims, .. } => {
@@ -713,6 +714,7 @@ impl Ui {
                 if self.traps.declared.remove(id).is_some() {
                     self.traps.dirty = true;
                 }
+                self.groups.remove(id);
                 self.host.remove(node);
                 self.forget_node_state(node);
                 if self.pressed == Some(node) {
@@ -971,6 +973,7 @@ impl Ui {
                     self.host.dirty.semantic.push(*id);
                 }
             }
+            Mutation::Group { id, flags } => self.set_group(NodeId(*id), *flags),
             Mutation::Claims {
                 id,
                 version,

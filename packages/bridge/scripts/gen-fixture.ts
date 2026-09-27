@@ -2,7 +2,7 @@
 // Rust decoder must accept. Regenerate after wire format changes:
 //   bun packages/bridge/scripts/gen-fixture.ts
 import {
-  CHORD_FLAG, CLAIM_KIND, CURRENT, ENV_BIT, EVENT_MASK, Encoder, FIT, INTERACTION, NIL, PRESS_FLAG, REPORTED, ROLE,
+  CHORD_FLAG, CLAIM_KIND, CURRENT, ENV_BIT, EVENT_MASK, Encoder, FIT, GROUP, INTERACTION, NIL, PRESS_FLAG, REPORTED, ROLE,
   STATE_BIT, SUBMIT_KEY, SURFACE, TRAP, parseChord, transformMatrix,
 } from "../src/wire.js"
 
@@ -138,7 +138,7 @@ enc.payload(6, asset)
 enc.place(0, 6, NIL)
 enc.create(7, 0)                                    // a layer container
 enc.layer(7, 6)                                     // owned from the vector
-enc.role(7, ROLE.alertdialog)                       // the last role
+enc.role(7, ROLE.tablist)                           // the last role
 enc.spatial(7, { z: 50 })                           // z alone
 enc.place(NIL, 7, NIL)
 // A runtime drawing: a dashed arc path and an even-odd polygon filled
@@ -156,6 +156,7 @@ enc.drawing(8, "0 0 24 24", [
 enc.place(0, 8, NIL)
 enc.interaction(8, 0, INTERACTION.inert)
 enc.trap(7, TRAP.active | TRAP.modal | TRAP.autoFocus | TRAP.restoreFocus) // a modal layer
+enc.group(7, GROUP.horizontal | GROUP.vertical | GROUP.loop | GROUP.selectOnFocus) // and a focus group
 // An image node: encoded bytes (native decodes them later, off the UI
 // thread: any bytes are accepted here) and its fit.
 enc.create(9, 7)                                    // image

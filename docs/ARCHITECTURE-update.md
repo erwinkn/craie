@@ -519,6 +519,86 @@ Archive button, a composer, and a mention button under it.
   (`onPointerDown`, `onPointerUp`) hear any. `onLongPress` and
   `onMiddlePress` are deferred (`LEDGER.md` DF-42).
 
+**Built (work item 3, focus groups).** As targeted, with these choices.
+The example, a size picker:
+
+```tsx
+<FocusGroup accessibilityRole="radiogroup" orientation="vertical" selectOnFocus>
+  <Pressable accessibilityRole="radio" checked={size === "s"} onPress={() => setSize("s")}>Small</Pressable>
+  <Pressable accessibilityRole="radio" checked={size === "m"} onPress={() => setSize("m")}>Medium</Pressable>
+  <Pressable accessibilityRole="radio" disabled>Large</Pressable>
+</FocusGroup>
+```
+
+Tab reaches Medium (checked) alone; the next Tab leaves the group. ↓
+focuses Small, skipping Large and wrapping, and activates it (`onPress`
+with `e.source` "keyboard"), so Small becomes checked. Shift+Tab out and
+Tab back lands on Small.
+
+- **Encoding** (protocol 10; #19 took 9). Op 0x63 `GROUP` (`id u32 | flags u8`:
+  `HORIZONTAL`, `VERTICAL`, `LOOP`, `SELECT_ON_FOCUS`); no bits unmake
+  the group, and unknown bits fail decoding. Roles 19 `tab` and 20
+  `tablist`. Ops 0x64 and 0x65 and interaction flag bit 7 stay free.
+  The facade's `FocusGroup` is a View carrying the op (a layout box,
+  like the trap: DF-47), and always sends an orientation: `both` by
+  default, with `loop` on.
+- **Members.** Walked from the group in tree order: a focusable node (or
+  input) that is enabled is a member, and its subtree is not searched
+  further; a hidden or inert subtree holds none. A disabled one (press
+  or state `DISABLED`) is no member and no Tab stop of its own, even when
+  left focusable, but what it holds may be members, as on the web. A
+  `radiogroup` takes only `radio`s and a `tablist` only `tab`s; any
+  other focusable in it (a "More…" button) stays its own Tab stop, and
+  arrows from it do nothing.
+- **The stop**: the member holding the focus, else the first checked or
+  selected, else the last focused, else the first. The first rule is a
+  choice: with focus on Small while Medium is checked, Tab leaves the
+  group from Small, as a roving `tabIndex` does, rather than stepping to
+  Medium.
+- **Last focused** is native, per group: `Ui::groups` maps the group's
+  id to its flags and the (id, generation) of the member focused last,
+  noted in `set_focus`. A removed or reused id fails the generation
+  check, and removing the group drops the entry. It never crosses the
+  wire.
+- **Keys.** After claims and Tab, before Enter and Space: the innermost
+  group the focus is a member of whose orientation takes the key moves
+  the focus; Home and End go to the innermost group's ends. At an end
+  without `loop` the key does nothing, and is still the group's (no
+  activation). No arrows from a text input, whose caret keeps them, nor
+  with Ctrl, Alt or Meta (Shift passes). The `KEY_DOWN` event still
+  goes to JS, as for Tab. With `SELECT_ON_FOCUS`, each move activates
+  the member reached once, through `Ui::activate` with the keyboard
+  source and the key's modifiers; a claim on the chord wins over the
+  whole group, so JS highlight mode claims ↑↓ and native stays out.
+- **Nesting.** A group inside another is one member of it, entered at
+  its own stop, and its members are its own: in a vertical group of
+  horizontal toolbars, ↑↓ move between the toolbars (landing on each
+  one's stop) and ←→ within one. A key the inner group's orientation
+  doesn't take goes to the outer group. An empty inner group is no
+  member. Focus inside a nested group counts as the outer group's last
+  focused too, so Tab back returns to it.
+- **Traps.** A group in a trap is one stop of the trap's cycle. A trap
+  in a group scopes Tab and arrows to itself: with focus in it, the
+  group around it doesn't apply.
+- **Accessibility.** `tab` and `tablist` map to AccessKit's `Tab` and
+  `TabList`, and a `tab` reports `selected` like a list row. Nothing
+  else changes: AccessKit has no roving focus to announce, and each
+  member keeps its own node, role and states.
+- **Cost** (E15, exe1, load 20 to 41; best of 6 runs of main and 4 of
+  this branch, interleaved; single runs varied up to 4x). A group costs
+  nothing until one exists: Tab through 1,000 focusables at 100k nodes
+  is 538, 587 and 607 µs (deep, wide, list) against main's 586, 649 and
+  607, with the same allocations. With the root a group over 999 of
+  them, Tab costs one more walk of the group's subtree: 1,182, 1,252 and
+  1,331 µs, 31 to 37 allocations against 20 to 24. An arrow walks the
+  group once: 516 to 544 µs, 12 to 14 allocations. Real groups hold a
+  few nodes, so both are about a Tab. The group map is a B-tree: a
+  `HashMap` lookup on every node walked made Tab in a group 5x slower.
+- **Deferred.** No right-to-left flip of ←→ (DF-50). `both` moves in one
+  line in tree order, not a grid (DF-51). No PageUp and PageDown, and
+  typeahead is JS's, as targeted. Menu, listbox and tree item roles
+  wait on DF-41; until then such a group takes every focusable member.
+
 ## 4. Lookup cost
 
 Changes: §13. The decision "No BVH or R-tree for ordinary UI" reopens,
@@ -1613,7 +1693,8 @@ The order follows the dependencies:
    items 1, 3, 4 and 5, which add lookups.
 3. Focus traps with `modal`, focus groups, `inert`, innermost press, one
    activate, keep-focus flag, focus-visible (topic 3). `modal` needs
-   `inert` and item 4's owners.
+   `inert` and item 4's owners. Done: #17 (presses), #18 (traps), focus
+   groups.
 4. Sibling z and the sorted child order; layer containers with owners
    (topic 6, first half).
 5. State styles: scopes, variant tables with layout values, specificity,

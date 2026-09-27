@@ -102,6 +102,8 @@ pub enum Role {
     RadioGroup = 16,
     Dialog = 17,
     AlertDialog = 18,
+    Tab = 19,
+    TabList = 20,
 }
 
 impl Role {
@@ -126,6 +128,8 @@ impl Role {
             16 => Role::RadioGroup,
             17 => Role::Dialog,
             18 => Role::AlertDialog,
+            19 => Role::Tab,
+            20 => Role::TabList,
             _ => return None,
         })
     }
@@ -175,6 +179,19 @@ pub mod trap_flag {
     /// Deactivating returns focus to where it was on activation.
     pub const RESTORE_FOCUS: u8 = 1 << 3;
     pub const ALL: u8 = ACTIVE | MODAL | AUTO_FOCUS | RESTORE_FOCUS;
+}
+
+/// Focus group flag bits (`Mutation::Group`). No bits: not a group.
+pub mod group_flag {
+    /// ← and → move among the members.
+    pub const HORIZONTAL: u8 = 1 << 0;
+    /// ↑ and ↓ move among the members.
+    pub const VERTICAL: u8 = 1 << 1;
+    /// An arrow past an end comes around to the other.
+    pub const LOOP: u8 = 1 << 2;
+    /// A keyboard move also activates the member it reaches.
+    pub const SELECT_ON_FOCUS: u8 = 1 << 3;
+    pub const ALL: u8 = HORIZONTAL | VERTICAL | LOOP | SELECT_ON_FOCUS;
 }
 
 /// States a node reports to assistive technology even while clear:
@@ -451,6 +468,12 @@ pub enum Mutation<'a> {
         id: u32,
         flags: u8,
     },
+    /// Makes the node a focus group (`group.rs`), or updates one;
+    /// `flags` are `group_flag` bits, and none unmake it.
+    Group {
+        id: u32,
+        flags: u8,
+    },
     /// Replaces the node's claims (`claims.rs`; empty clears). `id` NIL
     /// is the window list.
     Claims {
@@ -568,6 +591,7 @@ impl Mutation<'_> {
             | Mutation::Label { id, .. }
             | Mutation::Interaction { id, .. }
             | Mutation::Trap { id, .. }
+            | Mutation::Group { id, .. }
             | Mutation::Claims { id, .. }
             | Mutation::Surface { id, .. }
             | Mutation::Payload { id, .. }
@@ -988,6 +1012,12 @@ impl<'a> Transaction<'a> {
     /// inactive).
     pub fn trap(&mut self, id: u32, flags: u8) -> &mut Self {
         self.push(Mutation::Trap { id, flags })
+    }
+
+    /// Makes `id` a focus group with `group_flag` bits (none: not a
+    /// group).
+    pub fn group(&mut self, id: u32, flags: u8) -> &mut Self {
+        self.push(Mutation::Group { id, flags })
     }
 
     /// The node's claims (NIL: the window list), known to JS as `version`.

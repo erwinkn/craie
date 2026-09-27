@@ -244,10 +244,13 @@ impl Ui {
     /// Tab order within `scope` (ROOT: the window): tree order, each
     /// owned layer right after its owner's subtree, unowned layers
     /// after the app. `display: none` and `inert` hide a subtree but
-    /// not the layers its nodes own.
+    /// not the layers its nodes own. A focus group is one stop
+    /// (`group.rs`): its other members are skipped.
     pub(crate) fn tab_order(&self, scope: NodeId) -> Vec<NodeId> {
         let owned = self.owned_layers();
         let mut out = Vec::new();
+        // Group members that are not their group's stop, sorted.
+        let mut skip: Vec<u32> = Vec::new();
         let mut stack: Vec<(NodeId, bool)> = Vec::new();
         if scope.is_nil() {
             for &c in self.host.children(scope).iter().rev() {
@@ -265,7 +268,14 @@ impl Ui {
             };
             let hidden =
                 above || node.flags.contains(NodeFlags::INERT) || self.host.display_none(id);
-            if !hidden && (node.kind == NodeKind::Input || self.host.interaction(id).focusable) {
+            if !hidden && !self.groups.is_empty() && self.groups.contains_key(&id.0) {
+                self.group_skips(id, &mut skip);
+                skip.sort_unstable();
+            }
+            if !hidden
+                && (node.kind == NodeKind::Input || self.host.interaction(id).focusable)
+                && skip.binary_search(&id.0).is_err()
+            {
                 out.push(id);
             }
             if !owned.is_empty() {

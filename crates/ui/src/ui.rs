@@ -54,6 +54,9 @@ pub struct Ui {
     pub(crate) focus: Option<NodeId>,
     /// Focus traps, the modal gate, inert nodes (`trap.rs`).
     pub(crate) traps: crate::trap::Traps,
+    /// Focus groups, id-keyed (`group.rs`). A B-tree: there are few, and
+    /// the walks look up every node they pass, where hashing costs more.
+    pub(crate) groups: std::collections::BTreeMap<u32, crate::group::Group>,
     /// Node under the pointer: drives enter/leave synthesis.
     pub(crate) hover: Option<NodeId>,
     /// Node that grabbed the pointer on the last button press.
@@ -152,6 +155,7 @@ impl Ui {
             surface_scratch: Vec::new(),
             focus: None,
             traps: Default::default(),
+            groups: Default::default(),
             hover: None,
             pressed: None,
             pressed_primary: false,
