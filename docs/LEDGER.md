@@ -249,7 +249,7 @@ Reviewer minors and nitpicks not fixed yet.
 - Resolves in: the winit 0.31 upgrade, or a macOS-only position read
   if a drop target needs it first.
 
-### DF-13: Tab and accessibility reach layers after the app
+### DF-17: Tab and accessibility reach layers after the app
 
 - Source: sibling z and layers (work item 4) implementation (own
   finding).
@@ -263,7 +263,7 @@ Reviewer minors and nitpicks not fixed yet.
   its owner is the accessibility pass's (topic 13).
 - Resolves in: work item 3, then topic 13.
 
-### DF-14: a z change walks the whole tree for the draw order
+### DF-18: a z change walks the whole tree for the draw order
 
 - Source: sibling z (work item 4) measurement (`zorder` example).
 - Where: crates/ui/src/scene_sync.rs (`walk_tree`).
@@ -279,7 +279,7 @@ Reviewer minors and nitpicks not fixed yet.
   if reordering or inserting in large trees shows up in a frame
   profile (it would serve inserts and moves too).
 
-### DF-15: layers owned coarsely
+### DF-19: layers owned coarsely
 
 - Source: sibling z and layers (work item 4) implementation (own
   finding).
@@ -293,7 +293,7 @@ Reviewer minors and nitpicks not fixed yet.
   3's, with focus traps.
 - Resolves in: work item 3.
 
-### DF-16: an owner-only layer closes when Suspense hides it
+### DF-20: an owner-only layer closes when Suspense hides it
 
 - Source: sibling z and layers (work item 4) implementation (own
   finding).

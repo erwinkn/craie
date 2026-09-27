@@ -275,7 +275,7 @@ scene), against the frame after a transform change of the same cell.
   among 5,000 zeros is about a linear pass.
 - The frame is: a z change bumps `structure_rev`, like an insert, and
   the draw order rebuilds with one walk of the whole tree (`LEDGER.md`,
-  DF-14). No layout runs and no chunk rebuilds (`z_change_costs_no_layout`
+  DF-18). No layout runs and no chunk rebuilds (`z_change_costs_no_layout`
   checks both).
 
 Hit tests at 100k nodes along E15's 1,000-point path (µs per test,

@@ -534,11 +534,11 @@ with these choices:
   5,000-child parent after one z change takes 13 to 74 µs. The frame
   after it pays the draw-order walk any structure change pays: 6 to 9
   ms at 100k nodes, against 2.5 to 3.7 ms after a transform
-  (`LEDGER.md`, DF-14). Hit tests stay allocation-free: 7 to 12 µs at
+  (`LEDGER.md`, DF-18). Hit tests stay allocation-free: 7 to 12 µs at
   100k nodes, with or without z.
 - Focus traps, `modal` and `inert` stay with work item 3, which will
   set finer owners (a trap inside the layer) through the same op
-  (DF-15). Tab and accessibility reach layers after the app (DF-13).
+  (DF-19). Tab and accessibility reach layers after the app (DF-17).
 
 ## 7. Motion
 
