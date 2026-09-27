@@ -39,9 +39,9 @@ fn js_fixture_decodes_and_executes() {
     assert_eq!(ui.apply(&buf).unwrap(), 99);
     let host = &ui.host;
 
-    // remove(1): view + input + surface + list + row + vector + layer
-    // remain.
-    assert_eq!(host.len(), 7);
+    // remove(1): view + input + surface + list + row + two vectors +
+    // layer remain.
+    assert_eq!(host.len(), 8);
     assert_eq!(host.kind(NodeId(0)), Some(NodeKind::View));
     let paint = host.paint[0];
     assert_eq!(paint.fill, 0x1122_33ff);
@@ -134,7 +134,7 @@ fn js_fixture_decodes_and_executes() {
     assert_eq!(host.label(NodeId(3)), None);
     assert_eq!(
         host.children(NodeId(0)),
-        [NodeId(3), NodeId(2), NodeId(4), NodeId(6)]
+        [NodeId(3), NodeId(2), NodeId(4), NodeId(6), NodeId(8)]
     );
 
     // List: templates, items after two splices, a row, an anchor.
@@ -203,6 +203,34 @@ fn js_fixture_decodes_and_executes() {
     assert_eq!(asset.view_box, [0.0, 0.0, 10.0, 10.0]);
     assert_eq!(asset.items.len(), 1);
     assert_eq!(asset.paints[0], craie_vector::Paint::Solid(0x0080_ffff));
+    // A runtime drawing: every shape field survives, and it builds.
+    assert_eq!(host.kind(NodeId(8)), Some(NodeKind::Vector));
+    let drawing = host.vectors[&8].asset.as_ref().expect("drawing builds");
+    assert_eq!(drawing.view_box, [0.0, 0.0, 24.0, 24.0]);
+    // The arc strokes (no fill); the polygon fills (no stroke).
+    assert_eq!(drawing.items.len(), 2);
+    let (arc, tri) = (&drawing.items[0], &drawing.items[1]);
+    let dash = arc.dash.as_ref().expect("dashed");
+    assert_eq!((dash.array.as_slice(), dash.offset), (&[4.0, 2.0][..], 1.5));
+    let craie_vector::asset::ItemStyle::Stroke(line) = arc.style else {
+        panic!("{:?}", arc.style)
+    };
+    assert_eq!(line.width, 2.0);
+    assert_eq!(
+        (line.join, line.cap),
+        (craie_vector::LineJoin::Round, craie_vector::LineCap::Square)
+    );
+    assert_eq!(drawing.paints[0], craie_vector::Paint::Solid(0x1122_33ff));
+    assert_eq!(
+        tri.style,
+        craie_vector::asset::ItemStyle::Fill(craie_vector::FillRule::EvenOdd)
+    );
+    assert_eq!(tri.opacity, 0.5);
+    assert!(
+        (tri.transform.0[4] - 24.0).abs() < 1e-4,
+        "{:?}",
+        tri.transform
+    );
 
     // WriteClipboard, addressed to no node.
     assert_eq!(ui.inputs.clipboard.get().as_deref(), Some("copied"));

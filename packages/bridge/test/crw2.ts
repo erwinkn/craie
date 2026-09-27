@@ -10,6 +10,9 @@ export interface Op {
   bytes?: Uint8Array
   /** CLAIMS: the claim set (`f` holds the version). */
   claims?: { kind: number; flags: number; mods: number; key: number }[]
+  /** DRAWING: each shape's strings (geometry, transform, dashes) and
+   * numbers in wire order; `s` holds the view box. */
+  shapes?: { strings: string[]; f: number[] }[]
 }
 
 export interface Frame {
@@ -98,6 +101,18 @@ export function readFrame(buf: Uint8Array): Frame {
       }
       case 0x70: op.f.push(u32(), u32(), u32(), u32(), u32()); break // surface
       case 0x71: { const n = u32(); op.bytes = buf.slice(at, at + n); at += n; break }
+      case 0x72: { // drawing: view box, count x 44-byte shapes
+        op.s = strings[u32()]
+        const n = u16()
+        op.shapes = []
+        for (let i = 0; i < n; i++) {
+          const f = [u8(), u8(), u8(), u8()]
+          const strs = [strings[u32()]!, strings[u32()]!, strings[u32()]!]
+          f.push(u32(), u32(), f32(), f32(), f32(), f32())
+          op.shapes.push({ strings: strs, f })
+        }
+        break
+      }
       case 0x80: { // command
         const c = u8(); op.f.push(c)
         if (c === 2 || c === 4 || c === 5) op.s = strings[u32()]

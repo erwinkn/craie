@@ -742,6 +742,62 @@ and that the core owns `ImageId`, dimensions, format and residency).
   is runtime input.
 - JS fetches images and native decodes them; Rust gets no HTTP client.
 
+**Built (work item 8, runtime vector shapes).** As targeted, with these
+choices:
+
+- One op, `DRAWING` (0x72), replaces a Vector node's whole drawing: a
+  view box and up to 4,096 shapes of 44 bytes (kind, fill rule, join,
+  cap, three string refs, fill and stroke colors, width, miter limit,
+  dash offset, opacity). The strings stay SVG syntax and native parses
+  them (`craie_vector::svg`, about 600 lines, no dependency). A drawing
+  whose strings or numbers do not parse draws nothing (zero intrinsic
+  size) and the session goes on, as SVG draws nothing for an empty view
+  box; structural errors (bad refs, too many shapes, too many bytes)
+  reject the transaction.
+- Work is bounded per drawing, not per string: at most 4,096 shapes
+  whose string references add up to at most 4 MiB (a string shared by
+  every shape counts for each), checked before anything else; each
+  distinct string parses once; path commands (per shape drawing them),
+  transform functions and points share one budget of 2^20, and dashes
+  one of 65,536 per drawing.
+- A drawing builds the same `Asset` a `CRV1` payload decodes to, so
+  layout, fitting, clipping and tessellation are shared. Sources are
+  interned by content (payload bytes, which must start `CRV1`, or a
+  drawing's canonical key, which starts `CRVS`, built once per
+  transaction and shared) and meshes are shared across nodes per asset,
+  content box and scale: the cache is per drawing, not per shape.
+  Tessellation skips shapes outside the view box or at opacity 0, and
+  flattens no finer than a shape's size over 2^16.
+- Dashes restart on each subpath, as SVG does; zero-length dashes draw
+  as dots with round or square caps; a closed subpath joins its last
+  dash to its first. Past the drawing's dash budget, a pattern draws
+  solid rather than stall.
+- The dash offset is a plain value, not animatable: `ANIMATE` (0xA1)
+  animates node properties, and an offset belongs to a shape, so a
+  spinner ring rotates the node instead (`LEDGER.md` DF-13).
+- Paints are plain colors. `currentColor` resolves in the facade to a
+  `color` prop on the `Vector` or a `G`, as `<svg color>` does, and
+  throws without one; inheriting a color from ancestors waits for
+  topic 5 (DF-14). `fillOpacity` and `strokeOpacity` scale the alpha.
+  Gradients stay build-time.
+- The facade flattens children into shapes: `Path`, `Circle`,
+  `Ellipse`, `Rect`, `Line`, `Polyline`, `Polygon` and `G` (attributes
+  inherited, transforms nested, a `G`'s opacity multiplied into its
+  shapes: DF-16), with the Vector's own paint props as defaults, as on
+  an `<svg>` element. The Vector's `opacity` is the node's: one layer,
+  animatable. Numbers are coerced as SVG reads attributes; a shape with
+  one that is not finite is dropped, with a warning. The kit's shapes
+  differ in three ways: token colors must be resolved first, its
+  `Path` and `Circle` wrappers use hooks and so throw (shapes must be
+  direct elements, DF-15), and inherited color needs `color` (DF-14).
+- Cost (exe1, loaded; `cargo run --release -p craie-harness --example
+  vectors`, the Rust direct API: no wire, no JS): 200 distinct 24 px
+  icons parse in about 0.4 ms and mount in about 2 ms more than 200
+  plain views (10 µs per icon, tessellation included); an icon already
+  drawn elsewhere costs about 3 µs more than a plain view; a
+  2,000-point sparkline parses in 90 µs. In JS, an unchanged icon
+  costs about 5 µs a render (flatten, stringify, compare).
+
 ## 11. Inline content and editing
 
 Changes: §4 (the decision "Block means block-level boxes only. Inline

@@ -42,6 +42,7 @@ const enum Op {
   // payload
   Surface = 0x70,
   Payload = 0x71,
+  Drawing = 0x72,
   // command
   Command = 0x80,
   // lists
@@ -52,6 +53,30 @@ const enum Op {
   // animation
   Transition = 0xa0,
   Animate = 0xa1,
+}
+
+/** One shape of a runtime vector drawing: SVG strings plus resolved
+ * paint. Mirrors craie-vector's `svg::Shape`; colors are RGBA u32 (alpha
+ * 0 is `none`), empty strings are absent attributes. */
+export interface WireShape {
+  /** 0 path (`d`), 1 polyline, 2 polygon (`points`). */
+  kind: number
+  geometry: string
+  transform: string
+  /** `stroke-dasharray` as lengths ("4 2"), or "" for solid. */
+  dashes: string
+  fill: number
+  /** 0 nonzero, 1 evenodd. */
+  fillRule: number
+  stroke: number
+  strokeWidth: number
+  /** 0 miter, 1 round, 2 bevel. */
+  join: number
+  /** 0 butt, 1 round, 2 square. */
+  cap: number
+  miterLimit: number
+  dashOffset: number
+  opacity: number
 }
 
 /** Animatable properties — mirror animation.rs `Prop`. */
@@ -874,6 +899,29 @@ export class Encoder {
     b.reserve(view.byteLength)
     b.bytes.set(view, b.at)
     b.at += view.byteLength
+  }
+  /** Runtime vector drawing: a view box and shapes, 44 bytes each. */
+  drawing(id: number, viewBox: string, shapes: readonly WireShape[]) {
+    const view = this.strRef(viewBox)
+    const b = this.ops
+    b.u8(Op.Drawing)
+    b.u32(id)
+    b.u32(view)
+    b.u16(shapes.length)
+    for (const s of shapes) {
+      const refs = [this.strRef(s.geometry), this.strRef(s.transform), this.strRef(s.dashes)]
+      b.u8(s.kind)
+      b.u8(s.fillRule)
+      b.u8(s.join)
+      b.u8(s.cap)
+      for (const r of refs) b.u32(r)
+      b.u32(s.fill >>> 0)
+      b.u32(s.stroke >>> 0)
+      b.f32(s.strokeWidth)
+      b.f32(s.miterLimit)
+      b.f32(s.dashOffset)
+      b.f32(s.opacity)
+    }
   }
   cmdFocus(id: number) {
     this.ops.u8(Op.Command)

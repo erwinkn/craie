@@ -33,6 +33,7 @@ import {
   type SurfaceParam,
   type Transport,
 } from "./host.js"
+import { flattenShapes, type ShapeProps } from "./shapes.js"
 import {
   EVENT_KIND,
   SURFACE,
@@ -85,6 +86,10 @@ export type {
   UiEvent,
 } from "./host.js"
 export { onFrameStats } from "./host.js"
+export { Circle, Ellipse, G, Line, Path, Polygon, Polyline, Rect } from "./shapes.js"
+export type {
+  CircleProps, EllipseProps, GProps, LineProps, PathProps, PolyProps, RectProps, ShapeProps,
+} from "./shapes.js"
 
 /** Pointer position + target passed to pointer/wheel listeners. `x`/`y`
  * are window-absolute logical points; `rx`/`ry` are relative to the
@@ -351,25 +356,74 @@ export function Surface(props: SurfaceProps) {
   return createElement("surface", props)
 }
 
-export interface VectorProps extends ListenerProps {
+interface VectorBase extends ListenerProps {
   style?: StyleProps
   backgroundColor?: string | number
   borderRadius?: number
   borderColor?: string | number
   borderWidth?: number
-  /** A vector asset: the bytes `craie-svg in.svg out.crv` writes (SVG
-   * is imported at build time). Its view box is the node's intrinsic
-   * size; the drawing fits its content box, centered, aspect kept. */
-  asset: Uint8Array
   accessibilityLabel?: string
   accessibilityRole?: AccessibilityRole
   hidden?: boolean
 }
 
-/** A vector drawing (icons, illustrations) from a prepared asset. An
- * image for assistive technology unless a role is given. */
+/** A prepared asset: the bytes `craie-svg in.svg out.crv` writes (SVG
+ * documents import at build time). Its paint is baked in. */
+export interface VectorAssetProps extends VectorBase {
+  asset: Uint8Array
+  viewBox?: undefined
+  children?: undefined
+}
+
+/** Runtime shapes: `Path`, `Circle`, ... children in a view box. The
+ * paint props (`fill`, `stroke`, ...) are defaults the shapes inherit;
+ * `opacity` is the node's (as `style.opacity`: the drawing fades as one
+ * layer, and animates). */
+export interface VectorShapeProps extends VectorBase, ShapeProps {
+  asset?: undefined
+  /** "minX minY width height". Empty or zero-size draws nothing. */
+  viewBox: string
+  children?: ReactNode
+}
+
+/** A Vector with neither draws nothing. */
+export interface VectorEmptyProps extends VectorBase {
+  asset?: undefined
+  viewBox?: undefined
+  children?: undefined
+}
+
+export type VectorProps = VectorAssetProps | VectorShapeProps | VectorEmptyProps
+
+/** A vector drawing (icons, illustrations, charts). Its view box is the
+ * node's intrinsic size; the drawing fits its content box, centered,
+ * aspect kept. An image for assistive technology unless a role is
+ * given.
+ *
+ *   <Vector viewBox="0 0 24 24" fill="none" stroke="#fff" strokeWidth={2}>
+ *     <Circle cx={12} cy={12} r={10} />
+ *     <Path d="m9 12 2 2 4-4" />
+ *   </Vector>
+ */
 export function Vector(props: VectorProps) {
-  return createElement("vector", { accessibilityRole: "image", ...props })
+  if (props.viewBox === undefined) {
+    const { children: _, ...rest } = props
+    return createElement("vector", { accessibilityRole: "image", ...rest })
+  }
+  const {
+    children, viewBox, asset: _, fill, fillOpacity, fillRule, stroke, strokeOpacity,
+    strokeWidth, strokeLinecap, strokeLinejoin, strokeMiterlimit, strokeDasharray,
+    strokeDashoffset, color, opacity, transform, ...rest
+  } = props as VectorShapeProps
+  const shapes = flattenShapes(children, {
+    fill, fillOpacity, fillRule, stroke, strokeOpacity, strokeWidth, strokeLinecap,
+    strokeLinejoin, strokeMiterlimit, strokeDasharray, strokeDashoffset, color, transform,
+  }, viewBox)
+  if (opacity !== undefined) {
+    const o = Math.min(Math.max(Number(opacity), 0), 1)
+    rest.style = { ...rest.style, opacity: (rest.style?.opacity ?? 1) * (Number.isNaN(o) ? 1 : o) }
+  }
+  return createElement("vector", { accessibilityRole: "image", ...rest, viewBox, shapes })
 }
 
 /** Bar chart surface (`SURFACE.bars`). */

@@ -1,7 +1,11 @@
 import { test, expect } from "bun:test"
 import { Activity, createElement, useState } from "react"
-import { createRoot, View, Text, TextInput, ScrollView, Pressable, Bars, List, ROLE, Vector } from "../src/index.js"
+import {
+  createRoot, View, Text, TextInput, ScrollView, Pressable, Bars, List, ROLE, Vector,
+  Circle, Ellipse, G, Line, Path, Polygon, Polyline, Rect,
+} from "../src/index.js"
 import { CraieHost } from "../src/host.js"
+import { flattenShapes, MAX_BYTES, MAX_SHAPES } from "../src/shapes.js"
 import type { HostNode, Transport, UiEvent } from "../src/host.js"
 import { readFrame } from "./crw2.js"
 import { decodeEvents } from "../src/native.js"
@@ -830,4 +834,180 @@ test("vectors send their asset once per change", async () => {
   root.renderSync(createElement(App, { asset: b, bg: "#ffffff" }))
   await tick()
   expect([...t.ops().find(o => o.tag === 0x71)!.bytes!]).toEqual([4, 5])
+})
+
+// Work item 8: runtime shapes flatten into one DRAWING op, sent again
+// only when the drawing changes. Vector props are inherited defaults.
+test("vector shapes send one drawing per change", async () => {
+  const t = new FakeTransport()
+  const root = createRoot(t)
+  function App({ r, bg }: { r: number; bg: string }) {
+    return createElement(Vector, {
+      viewBox: "0 0 24 24", fill: "none", stroke: "#ffffff", strokeWidth: 2,
+      strokeLinecap: "round", backgroundColor: bg,
+    },
+      createElement(Circle, { cx: 12, cy: 12, r, strokeDasharray: [4, 2] }),
+      createElement(G, { transform: "translate(1 0)", opacity: 0.5, stroke: "#ff0000" },
+        createElement(Path, { d: "m9 12 2 2 4-4", transform: "scale(2)" }),
+        [createElement(Polygon, { key: "p", points: [0, 0, 4, 0, 2, 3], fill: "#00ff00", fillRule: "evenodd" })]),
+      createElement(Rect, { width: 10, height: 6, rx: 2 }),
+      createElement(Line, { x2: 5, y2: 5 }),
+    )
+  }
+  root.renderSync(createElement(App, { r: 10, bg: "#000000" }))
+  await tick()
+  const ops = t.ops(0)
+  expect(ops.find(o => o.tag === 0x01)!.f[0]).toBe(5)
+  const d = ops.find(o => o.tag === 0x72)!
+  expect(d.s).toBe("0 0 24 24")
+  const [circle, path, poly, rect, line] = d.shapes!
+  expect(circle!.strings).toEqual(["M22 12A10 10 0 1 1 2 12A10 10 0 1 1 22 12Z", "", "4 2"])
+  // kind, rule, join, cap, fill, stroke, width, miter, offset, opacity
+  expect(circle!.f).toEqual([0, 0, 0, 1, 0, 0xffffffff, 2, 4, 0, 1])
+  expect(path!.strings).toEqual(["m9 12 2 2 4-4", "translate(1 0) scale(2)", ""])
+  expect(path!.f[5]).toBe(0xff0000ff)
+  expect(path!.f[9]).toBe(0.5)
+  expect(poly!.strings[0]).toBe("0 0 4 0 2 3")
+  expect(poly!.f.slice(0, 2)).toEqual([2, 1])
+  expect(poly!.f[4]).toBe(0x00ff00ff)
+  expect(rect!.strings[0]).toBe(
+    "M2 0H8A2 2 0 0 1 10 2V4A2 2 0 0 1 8 6H2A2 2 0 0 1 0 4V2A2 2 0 0 1 2 0Z")
+  expect(line!.strings[0]).toBe("M0 0L5 5")
+  t.frames.length = 0
+  root.renderSync(createElement(App, { r: 10, bg: "#ffffff" }))
+  await tick()
+  expect(t.ops().some(o => o.tag === 0x72)).toBe(false)
+  t.frames.length = 0
+  root.renderSync(createElement(App, { r: 8, bg: "#ffffff" }))
+  await tick()
+  expect(t.ops().find(o => o.tag === 0x72)!.shapes![0]!.strings[0]).toContain("A8 8")
+})
+
+test("vector shapes reject what they cannot draw", () => {
+  const bad = [
+    // PR5-06: currentColor needs a color to resolve to.
+    [createElement(Path, { d: "M0 0", fill: "currentColor" })],
+    [createElement(View)],
+    ["text"],
+    // PR5-07: past the native limits, a clear error, not a closed session.
+    Array.from({ length: MAX_SHAPES + 1 }, (_, i) => createElement(Path, { key: i, d: "M0 0" })),
+    Array.from({ length: 2048 }, (_, i) => createElement(Path, { key: i, d: "M0 0".padEnd(2100) })),
+  ]
+  for (const children of bad) expect(() => flattenShapes(children)).toThrow(/Vector/)
+  expect(() => flattenShapes(bad[3]!)).toThrow(/more than 4096 shapes/)
+  expect(() => flattenShapes(bad[4]!)).toThrow(`at most ${MAX_BYTES}`)
+  expect(flattenShapes(bad[3]!.slice(1))).toHaveLength(MAX_SHAPES)
+})
+
+// PR5-01, PR5-06: numbers are coerced and checked as SVG reads them, so a
+// bad value drops a shape (or takes a default) instead of reaching the
+// native side; the paint opacities and currentColor resolve here.
+test("vector shape values coerce as SVG reads them", () => {
+  const errors: unknown[] = []
+  const log = console.error
+  console.error = (...a: unknown[]) => { errors.push(a.join(" ")) }
+  try {
+    const one = (el: any, up = {}) => flattenShapes([el], up)
+    const [e] = one(createElement(Ellipse, { cx: "12", cy: 12, rx: 10, ry: "5" }))
+    expect(e!.geometry).toBe("M22 12A10 5 0 1 1 2 12A10 5 0 1 1 22 12Z")
+    // Odd trailing numbers drop, as SVG does; strings go over as written.
+    const [pl] = one(createElement(Polyline, { points: [0, 0, "4", 0, 2] }))
+    expect([pl!.kind, pl!.geometry]).toEqual([1, "0 0 4 0"])
+    expect(one(createElement(Polygon, { points: "0 0 4 0 2" }))[0]!.geometry).toBe("0 0 4 0 2")
+    // A size of zero or less draws no shape; a number that is not finite
+    // drops the shape, warned once.
+    for (const el of [
+      createElement(Circle, { r: 0 }),
+      createElement(Circle, { r: -1 }),
+      createElement(Ellipse, { rx: 1, ry: 0 }),
+      createElement(Rect, { width: 0, height: 4 }),
+      createElement(Rect, { width: 4, height: -4 }),
+    ]) expect(one(el)).toEqual([])
+    expect(errors).toEqual([])
+    expect(one(createElement(Circle, { cx: NaN, r: 4 }))).toEqual([])
+    expect(one(createElement(Circle, { r: "4px" }))).toEqual([])
+    expect(one(createElement(Line, { x2: Infinity }))).toEqual([])
+    expect(one(createElement(Polyline, { points: [0, 0, NaN, 1] }))).toEqual([])
+    expect(errors.length).toBe(3)
+    expect(String(errors[0])).toContain("not finite")
+    // Opacity clamps; a bad stroke width or miter limit takes the default.
+    const at = (props: object) => one(createElement(Path, { d: "M0 0", ...props }))[0]!
+    expect(at({ opacity: 2 }).opacity).toBe(1)
+    expect(at({ opacity: "-1" }).opacity).toBe(0)
+    expect(at({ opacity: "0.5" }).opacity).toBe(0.5)
+    expect(at({ strokeWidth: -2 }).strokeWidth).toBe(1)
+    expect(at({ strokeWidth: "3" }).strokeWidth).toBe(3)
+    expect(at({ strokeMiterlimit: 0.5 }).miterLimit).toBe(4)
+    expect(at({ strokeDashoffset: NaN }).dashOffset).toBe(0)
+    // Dash arrays: a number, an array, or a string; a negative length
+    // draws solid, as SVG does.
+    expect(at({ strokeDasharray: 4 }).dashes).toBe("4")
+    expect(at({ strokeDasharray: [4, "2"] }).dashes).toBe("4 2")
+    expect(at({ strokeDasharray: "4, 2 1" }).dashes).toBe("4 2 1")
+    expect(at({ strokeDasharray: "4 -2" }).dashes).toBe("")
+    // Inherited from a G.
+    const [g] = flattenShapes([createElement(G, { strokeDasharray: [1, 1] },
+      createElement(Path, { d: "M0 0" }))])
+    expect(g!.dashes).toBe("1 1")
+    // fillOpacity and strokeOpacity scale the color's alpha, inherited.
+    const [f] = flattenShapes([createElement(G, { strokeOpacity: 0.5, fillOpacity: 2 },
+      createElement(Path, { d: "M0 0", fill: "#ffffff", stroke: "#ff000080" }))])
+    expect(f!.fill).toBe(0xffffffff)
+    expect(f!.stroke).toBe(0xff000040)
+    expect(at({ fillOpacity: 0.5 }).fill).toBe(0x00000080)
+    // currentColor paints with the nearest color prop.
+    const [c] = flattenShapes([createElement(G, { color: "#00ff00" },
+      createElement(Path, { d: "M0 0", fill: "currentColor", stroke: "currentColor", strokeOpacity: 0.5 }))],
+    { color: "#ff0000" })
+    expect([c!.fill, c!.stroke]).toEqual([0x00ff00ff, 0x00ff0080])
+  } finally {
+    console.error = log
+  }
+})
+
+// PR5-04: Vector's opacity is the node's (one layer, animatable), not a
+// multiplier on each shape; a G's opacity still multiplies into shapes.
+test("vector opacity is the node's", async () => {
+  const t = new FakeTransport()
+  const root = createRoot(t)
+  root.renderSync(createElement(Vector, { viewBox: "0 0 24 24", opacity: 0.5, style: { opacity: 0.5 } },
+    createElement(Path, { d: "M0 0H4V4Z" }),
+    createElement(G, { opacity: 0.5 }, createElement(Path, { d: "M0 0H4V4Z" }))))
+  await tick()
+  const ops = t.ops(0)
+  const spatial = ops.find(o => o.tag === 0x20)!
+  expect(spatial.f).toEqual([2, 0.25])
+  const [a, b] = ops.find(o => o.tag === 0x72)!.shapes!
+  expect([a!.f[9], b!.f[9]]).toEqual([1, 0.5])
+})
+
+// PR5-08, PR5-09, PR5-11: a drawing is resent when anything in it changes (the view
+// box alone too), after an asset, and cleared when the Vector has
+// neither shapes nor an asset.
+test("vector drawings resend on change and clear", async () => {
+  const t = new FakeTransport()
+  const root = createRoot(t)
+  const asset = new Uint8Array([1, 2])
+  const shapes = (viewBox: string) =>
+    createElement(Vector, { viewBox }, createElement(Circle, { r: 4 }))
+  const step = async (el: any) => {
+    t.frames.length = 0
+    root.renderSync(el)
+    await tick()
+    return t.frames.length ? t.ops().filter(o => o.tag === 0x71 || o.tag === 0x72) : []
+  }
+  expect((await step(shapes("0 0 24 24"))).map(o => o.tag)).toEqual([0x72])
+  expect(await step(shapes("0 0 24 24"))).toEqual([])
+  const moved = await step(shapes("0 0 12 12"))
+  expect(moved.map(o => [o.tag, o.s])).toEqual([[0x72, "0 0 12 12"]])
+  expect((await step(createElement(Vector, { asset }))).map(o => o.tag)).toEqual([0x71])
+  // Back to the same shapes as before the asset: sent again.
+  expect((await step(shapes("0 0 12 12"))).map(o => o.tag)).toEqual([0x72])
+  const cleared = await step(createElement(Vector, {}))
+  expect(cleared.map(o => [o.tag, o.s, o.shapes!.length])).toEqual([[0x72, "", 0]])
+  expect(await step(createElement(Vector, { accessibilityLabel: "x" }))).toEqual([])
+  expect((await step(shapes("0 0 12 12"))).map(o => o.tag)).toEqual([0x72])
+  // Asset then neither also clears.
+  await step(createElement(Vector, { asset }))
+  expect((await step(createElement(Vector, {}))).map(o => o.tag)).toEqual([0x72])
 })

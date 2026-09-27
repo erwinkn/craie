@@ -29,6 +29,9 @@ use taffy::{
 
 use craie_core::geom::Affine;
 
+use craie_vector::svg::{Drawing, Shape, ShapeKind};
+use craie_vector::{FillRule, LineCap, LineJoin, Stroke};
+
 use crate::mutation::{
     Anchor, Claim, Command, ItemDesc, ItemTemplate, Mutation, NIL, NodeKind, Role, SubmitKey,
     TextSpan, Transaction,
@@ -65,6 +68,12 @@ pub mod op {
     // payload
     pub const SURFACE: u8 = 0x70;
     pub const PAYLOAD: u8 = 0x71;
+    /// A vector node's runtime drawing (`craie_vector::svg`): id u32 |
+    /// view box string u32 | count u16 | count × 44-byte shapes (kind
+    /// u8, fill rule u8, join u8, cap u8, geometry string u32, transform
+    /// string u32, dash array string u32, fill u32, stroke u32, stroke
+    /// width f32, miter limit f32, dash offset f32, opacity f32).
+    pub const DRAWING: u8 = 0x72;
     // command
     pub const COMMAND: u8 = 0x80;
     // lists
@@ -538,6 +547,37 @@ pub fn encode(txn: &Transaction<'_>) -> Vec<u8> {
                 u32le(&mut ops, *id);
                 u32le(&mut ops, bytes.len() as u32);
                 ops.extend_from_slice(bytes);
+            }
+            Mutation::Drawing { id, drawing } => {
+                let view_box = strings.get(&drawing.view_box);
+                ops.push(op::DRAWING);
+                u32le(&mut ops, *id);
+                u32le(&mut ops, view_box);
+                ops.extend_from_slice(&(drawing.shapes.len() as u16).to_le_bytes());
+                for sh in &drawing.shapes {
+                    let refs = [
+                        strings.get(&sh.geometry),
+                        strings.get(&sh.transform),
+                        strings.get(&sh.dashes),
+                    ];
+                    ops.extend_from_slice(&[
+                        sh.kind as u8,
+                        sh.fill_rule as u8,
+                        sh.line.join as u8,
+                        sh.line.cap as u8,
+                    ]);
+                    for v in refs.into_iter().chain([sh.fill, sh.stroke]) {
+                        u32le(&mut ops, v);
+                    }
+                    for v in [
+                        sh.line.width,
+                        sh.line.miter_limit,
+                        sh.dash_offset,
+                        sh.opacity,
+                    ] {
+                        f32le(&mut ops, v);
+                    }
+                }
             }
             Mutation::Command { id, cmd } => {
                 ops.push(op::COMMAND);
@@ -1042,6 +1082,46 @@ pub fn decode(buf: &[u8]) -> Result<Transaction<'_>, WireError> {
                 Mutation::Payload {
                     id,
                     bytes: r.take(len)?.into(),
+                }
+            }
+            op::DRAWING => {
+                let id = r.u32()?;
+                let view_box = string(r.u32()?)?.into();
+                let n = r.u16()? as usize;
+                let mut shapes = Vec::with_capacity(n.min(r.remaining() / 44));
+                for _ in 0..n {
+                    let [kind, rule, join, cap] = [r.u8()?, r.u8()?, r.u8()?, r.u8()?];
+                    let bad = || WireError::BadRef("drawing shape");
+                    let kind = ShapeKind::from_u8(kind).ok_or_else(bad)?;
+                    let fill_rule = FillRule::from_u8(rule).ok_or_else(bad)?;
+                    let join = LineJoin::from_u8(join).ok_or_else(bad)?;
+                    let cap = LineCap::from_u8(cap).ok_or_else(bad)?;
+                    let geometry = string(r.u32()?)?.into();
+                    let transform = string(r.u32()?)?.into();
+                    let dashes = string(r.u32()?)?.into();
+                    let (fill, stroke) = (r.u32()?, r.u32()?);
+                    let (width, miter_limit) = (r.f32()?, r.f32()?);
+                    shapes.push(Shape {
+                        kind,
+                        geometry,
+                        transform,
+                        fill,
+                        fill_rule,
+                        stroke,
+                        line: Stroke {
+                            width,
+                            join,
+                            cap,
+                            miter_limit,
+                        },
+                        dashes,
+                        dash_offset: r.f32()?,
+                        opacity: r.f32()?,
+                    });
+                }
+                Mutation::Drawing {
+                    id,
+                    drawing: Drawing { view_box, shapes },
                 }
             }
             op::COMMAND => {
