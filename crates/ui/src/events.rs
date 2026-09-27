@@ -258,7 +258,11 @@ pub mod out_kind {
     /// none).
     pub const LIST_RANGE: u8 = 14;
     /// An `Animate` tween ended (always sent): key = property | reason
-    /// << 8 (`animation::end_reason`).
+    /// << 8 (`animation::end_reason`). A keyframe animation's end (when
+    /// its op asked): key = index | reason << 8 | (trigger + 1) << 16
+    /// (`keyframes::Trigger`); reasons: finished, cancelled (no longer
+    /// declared), retargeted (replaced by a changed one), removed (its
+    /// node went).
     pub const ANIMATION_END: u8 = 15;
     /// Frame statistics from the platform frame loop, about twice a
     /// second while frames are drawn (node NIL, droppable): x = frames
@@ -285,6 +289,9 @@ pub mod out_kind {
     /// release point, or the node's center from a key or assistive
     /// technology; a/b node-relative.
     pub const ACTIVATE: u8 = 20;
+    /// The reduced-motion setting changed (node NIL, always sent): key =
+    /// the environment bits (`states::env_bit`).
+    pub const ENVIRONMENT: u8 = 21;
 }
 
 /// `PRESS` phases (key bits 4 and 5).

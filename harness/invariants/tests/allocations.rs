@@ -8,8 +8,13 @@ use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
 
 use craie_core::geom::{Affine, Size};
+use std::f32::consts::TAU;
+use std::sync::Arc;
+
 use craie_ui::animation::{Prop, Timing, Value};
+use craie_ui::keyframes::{Animation, Easing, Frame as KeyFrame, Keyframes, Sample, Trigger};
 use craie_ui::mutation::{NIL, NodeKind, Transaction};
+use craie_ui::states::value_field;
 use craie_ui::ui::Ui;
 
 thread_local! {
@@ -154,6 +159,76 @@ fn steady_frames_do_not_allocate() {
         }
     });
     assert_eq!(n, 0, "rotate tween frames allocated {n} times");
+
+    // Keyframe loops: a spin and a pulse on two nodes, sampled each frame
+    // on the native clock, allocate nothing past their start, iteration
+    // boundaries included. The pulse is finite (100 iterations): it pins
+    // like a loop until it ends.
+    let spin = Arc::new(Keyframes::new(vec![
+        frame(0.0, value_field::ROTATE, |s| s.rotate = 0.0),
+        frame(1.0, value_field::ROTATE, |s| s.rotate = TAU),
+    ]));
+    // Opacity 1 at the ends: the loop holds the node's layer through it.
+    let pulse = Arc::new(Keyframes::new(vec![frame(
+        0.5,
+        value_field::OPACITY | value_field::SCALE_X,
+        |s| {
+            s.opacity = 0.4;
+            s.scale[0] = 1.1;
+        },
+    )]));
+    let forever = |k: &Arc<Keyframes>, secs: f32| Animation {
+        iterations: f32::INFINITY,
+        ..Animation::new(k.clone(), secs, Easing::LINEAR)
+    };
+    let mut t = Transaction::new(13);
+    t.animation(4, Trigger::Base, false, &[forever(&spin, 1.0)])
+        .animation(
+            5,
+            Trigger::Base,
+            false,
+            &[
+                forever(&spin, 2.0),
+                Animation {
+                    index: 1,
+                    iterations: 100.0,
+                    ..forever(&pulse, 0.5)
+                },
+            ],
+        );
+    // They start at 0.5: every quarter second after is exact in binary.
+    ui.set_time(0.5);
+    ui.apply_txn(&t).unwrap();
+    // One cycle sizes the reused buffers (the pulse's opacity layer comes
+    // and goes); the rotate tween above ends in it.
+    for f in 0..=40 {
+        ui.set_time(0.5 + f as f64 * 0.05);
+        ui.render(VIEW);
+    }
+    ui.take_events();
+    // Every other frame lands on a pulse boundary (opacity 1), every
+    // fourth on a spin's (the identity transform), every eighth on both
+    // of node 5's: their pins keep the layer and the transform records.
+    let n = allocs(|| {
+        for f in 1..40 {
+            ui.set_time(2.5 + f as f64 * 0.25);
+            ui.render(VIEW);
+            ui.hit_test(20.0, 60.0);
+        }
+    });
+    assert_eq!(n, 0, "keyframe loop frames allocated {n} times");
+    assert_eq!(ui.motion().live(), 3);
+}
+
+fn frame(at: f32, mask: u16, f: impl FnOnce(&mut Sample)) -> KeyFrame {
+    let mut values = Sample::default();
+    f(&mut values);
+    KeyFrame {
+        at,
+        easing: None,
+        mask,
+        values,
+    }
 }
 
 /// wgpu's own allocations in `Renderer::encode_frame` (wgpu 30), besides

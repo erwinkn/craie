@@ -27,6 +27,9 @@ mod group_tests;
 pub mod host;
 pub mod image;
 pub mod input;
+pub mod keyframes;
+#[cfg(test)]
+mod keyframes_tests;
 pub mod layout;
 pub mod list;
 pub mod mutation;

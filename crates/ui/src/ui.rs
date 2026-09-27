@@ -102,6 +102,8 @@ pub struct Ui {
     pub(crate) images: crate::image::Images,
     /// Running animations (`animation.rs`).
     pub(crate) animations: crate::animation::Animations,
+    /// Keyframe animations (`keyframes.rs`).
+    pub(crate) motion: crate::keyframes::Motion,
     /// Events accumulated for the JS side since the last `take_events`.
     pub(crate) pending_events: Vec<UiEvent>,
     /// Set when anything observable to assistive tech changed.
@@ -174,6 +176,7 @@ impl Ui {
             selection_generations: [0; 3],
             selection_revs: Default::default(),
             animations: Default::default(),
+            motion: Default::default(),
             vector_meshes: Default::default(),
             images: Default::default(),
             pending_events: Vec::new(),
@@ -531,6 +534,7 @@ impl Ui {
         self.update_env(size);
         self.restyle();
         self.run_animations(size);
+        self.run_keyframes();
         self.layout(size);
         self.sync_lists(size);
         // The frame's geometry is final: refresh the hit-test index here,

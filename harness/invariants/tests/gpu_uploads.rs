@@ -446,3 +446,72 @@ fn inherited_color_reaches_drawing_pixels() {
         "a paint patch, no rebuild"
     );
 }
+
+/// A looping rotation draws on the native clock: a 60×10 bar centred in
+/// the window turns a quarter by 0.25 s and a full turn plus a quarter
+/// by 1.25 s, with no transaction in between.
+#[test]
+fn a_looping_rotation_turns_the_pixels() {
+    use craie_ui::keyframes::{Animation, Easing, Frame, Keyframes, Sample, Trigger};
+    use craie_ui::states::value_field;
+    let Some(gpu) = gpu() else {
+        eprintln!("no GPU adapter: skipped");
+        return;
+    };
+    let mut ui = Ui::new(1.0);
+    ui.clear = 0x0000_00FF;
+    let mut root = taffy::Style::default();
+    root.size = taffy::Size {
+        width: taffy::Dimension::percent(1.0),
+        height: taffy::Dimension::percent(1.0),
+    };
+    root.align_items = Some(taffy::AlignItems::CENTER);
+    root.justify_content = Some(taffy::JustifyContent::CENTER);
+    let mut bar = taffy::Style::default();
+    bar.size = taffy::Size {
+        width: taffy::Dimension::length(60.0),
+        height: taffy::Dimension::length(10.0),
+    };
+    let turn = |at: f32, rotate: f32| Frame {
+        at,
+        easing: None,
+        mask: value_field::ROTATE,
+        values: Sample {
+            rotate,
+            ..Sample::default()
+        },
+    };
+    let mut spin = Animation::new(
+        std::sync::Arc::new(Keyframes::new(vec![
+            turn(0.0, 0.0),
+            turn(1.0, std::f32::consts::TAU),
+        ])),
+        1.0,
+        Easing::Bezier([0.0, 0.0, 1.0, 1.0]),
+    );
+    spin.iterations = f32::INFINITY;
+    let mut t = Transaction::new(1);
+    t.create(0, NodeKind::View)
+        .layout(0, &root)
+        .append(NIL, 0)
+        .create(1, NodeKind::View)
+        .layout(1, &bar)
+        .fill(1, 0xFF00_00FF)
+        .append(0, 1)
+        .animation(1, Trigger::Base, false, &[spin]);
+    ui.apply_txn(&t).unwrap();
+    // (75, 50) lies on the bar lying flat; (50, 75) on it standing up.
+    let red = |px: [u8; 4]| px[0] > 200 && px[1] < 50;
+    let (flat, up) = ((75, 50), (50, 75));
+    for (secs, standing) in [(0.0, false), (0.25, true), (0.5, false), (1.25, true)] {
+        ui.set_time(secs);
+        let a = pixel(gpu, &mut ui, 100, 100, flat);
+        ui.set_time(secs);
+        let b = pixel(gpu, &mut ui, 100, 100, up);
+        assert_eq!(
+            (red(a), red(b)),
+            (!standing, standing),
+            "at {secs} s: {a:?} {b:?}"
+        );
+    }
+}

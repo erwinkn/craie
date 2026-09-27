@@ -75,6 +75,7 @@ Times are UTC.
 | [#18](https://github.com/erwinkn/craie/pull/18) | Evening: focus traps, `modal` and `inert` (work item 3, part 1); layers owned by the trap they open from; protocol 8 | Merged |
 | [#19](https://github.com/erwinkn/craie/pull/19) | Evening: transform parts (work item 6, part 1): translate, rotate and scale stored, tweened and overridden apart from the free matrix; protocol 9 | Merged |
 | [#20](https://github.com/erwinkn/craie/pull/20) | Evening: focus groups (work item 3, part 3): one Tab stop, arrows, Home and End, `selectOnFocus`; `KEY_DOWN` goes to the node it left; protocol 10 | Merged |
+| [#21](https://github.com/erwinkn/craie/pull/21) | Evening: keyframe animations (work item 6, part 2): `enter`, `animation`, loops on the native clock, motion in variants; protocol 11 | Merged |
 
 ## Numbers
 
@@ -485,7 +486,12 @@ groups follow, since they activate through #17's event. exe1's load was
 | 20:28 | PR #20 (focus groups) opened, rebased on #19 with protocol 10, and sent to review |
 | 20:38 | PR #20 review: no blockers, 1 major (each group re-sorted Tab's skip list, so one Tab over 4,000 small groups took 12.5 ms), 3 minors (an arrow's `KEY_DOWN` went to the member it focused; a focused but disabled member fell out of the Tab order; `selectOnFocus` passed the arrow's Shift to `onPress`), 3 mutations no test caught, 5 nits |
 | 21:50 | PR #20 review fixed (PR20-01..10), verified at its head, which is `main` plus the PR (CI, 479 Rust tests, 116 bun tests, smoke, macOS type-check); one Tab over 1,000 groups of 3 at 100k nodes went from 2.3 to 2.8 ms down to 0.9 to 1.1 ms |
-| 21:52 | PR #20 merged: work item 3 is done |
+| 21:53 | PR #20 merged: work item 3 is done |
+| 22:01 | PR #21 (keyframe animations) opened, rebased on #20 with protocol 11, and sent to review; exits (item 6, part 3) start from its branch |
+| 22:12 | PR #21 review: no blockers, 2 majors (an animation was known by its place in the list sent, so `[busy && fade, spin]` restarted the spin when `busy` went false; a finished one-shot replayed on any resync, a reduced-motion flip included), 7 minors, 6 nits |
+| 22:44 | PR #21 review fixed (PR21-01..10), verified at its head, which is `main` plus the PR (CI, 505 Rust tests, 124 bun tests, smoke, macOS type-check) |
+| 22:57 | PR #21: variant animations keyed by their `_` path, so a conditional block doesn't restart the ones after it (PR21-11); the same checks pass again at the head |
+| 22:57 | PR #21 merged |
 
 ### Decisions
 
@@ -576,6 +582,39 @@ groups follow, since they activate through #17's event. exe1's load was
   follows its `KEY_DOWN` instead of preceding it.
 - Deferred: ←→ don't flip right to left (DF-50); `orientation="both"`
   is one line in tree order, not a grid (DF-51).
+- **Animations run natively from keyframes.** `enter` runs when the
+  node is created, `animation` while it's declared, and a variant's
+  while the variant applies, so a spinner or a `_streaming` pulse
+  needs no JS per frame or per state change. Keyframes go on the wire
+  once and are shared: 1,000 rows with the same `enter` cost about 41
+  bytes more each.
+- **An animation is its place in the author's list**, so in
+  `[busy && fade, spin]` the spin keeps turning when `busy` goes false;
+  a variant's animations are keyed by their `_` path. A finished
+  one-shot stays finished while it's declared, and only changed
+  keyframes restart it.
+- **A running animation wins over a transition on the same property**,
+  and the transition keeps tweening underneath, so the property lands
+  where the transition is when the animation stops.
+- **A variant's `transition` replaces the base's while it applies**
+  (DF-22 closed), as on Marbre web and in CSS: with
+  `_hover: { transition: { scale } }`, scale tweens into hover and an
+  opacity change during hover jumps; leaving uses the base's list. The
+  first version merged them per property; the review showed the web
+  doesn't, and matching the web won.
+- **Reduced motion is applied in JS**, and follows a change of the
+  setting live: `skip` drops loops and sends a finite animation at 0 s,
+  so a reveal that holds its end still ends revealed; `fade` keeps the
+  opacity frames; `keep` runs as declared. Nothing on the platform sets
+  it yet (DF-25).
+- **Only drawn nodes animate**: a spinner under `hidden` stops, and
+  restarts when shown, as in CSS. While an animation covers a node's
+  transform or opacity, the node keeps its transform record and layer,
+  so a spin passing the identity at each turn doesn't allocate.
+- Deferred: dash offset frames (DF-55); a variant's animations don't
+  report their end (DF-56); an `enter` with a forwards fill holds for
+  good (DF-58); CSS's shorter reversal of an interrupted transition
+  (DF-60).
 
 ## The `paths` crash
 
@@ -636,8 +675,7 @@ In Marbre:
   assistive technology.
 
 Work items not started:
-- Item 6: keyframe animations, loops, `enter`, and transitions and
-  animations inside variants (DF-22, in progress); then exits.
+- Item 6: exits (in progress). Scroll timelines wait.
 - The second half of item 4: anchor and geometry expressions.
 - Topic 11: text ranges against a revision. This covers paste answers
   with a range (DF-11) and variants on nested Text (DF-26).

@@ -14,7 +14,7 @@
 // across transactions.
 
 const MAGIC = 0x3257_5243 // "CRW2" little-endian
-export const VERSION = 10
+export const VERSION = 11
 export const NIL = 0xffff_ffff // no node / append / default style
 
 const enum Op {
@@ -56,6 +56,8 @@ const enum Op {
   // animation
   Transition = 0xa0,
   Animate = 0xa1,
+  Keyframes = 0xa2,
+  Animation = 0xa3,
   // state styles
   States = 0xb0,
   Variants = 0xb1,
@@ -137,7 +139,106 @@ export type Timing =
   | { spring: { stiffness?: number; damping?: number; mass?: number }; delay?: number }
 
 /** `style.transition`: later changes of these properties tween. */
-export type Transitions = Partial<Record<AnimProp, Timing>>
+export type Transitions = Partial<Record<AnimProp, Timing & { reducedMotion?: ReducedMotion }>>
+
+/** How motion answers the user's reduced-motion setting: `skip` (the
+ * default) jumps a transition, an `enter` or a finite animation to its
+ * end and starts no loop; `fade` keeps opacity only (a fade still
+ * shows); `keep` runs as declared (a spinner that means "busy"). */
+export type ReducedMotion = "skip" | "fade" | "keep"
+
+/** A keyframe animation's easing: a CSS curve (named or cubic-bezier
+ * points), `steps(n, jump)`, `linear(...)` points (an output, or
+ * [output, input in 0..1]; missing inputs spread evenly, as CSS), or a
+ * spring, which sets the duration to its settle time. */
+export type AnimationEasing =
+  | Easing
+  | { steps: number; jump?: "start" | "end" | "none" | "both" }
+  | { linear: readonly (number | readonly [number, number])[] }
+  | { spring: { stiffness?: number; damping?: number; mass?: number } }
+
+/** One keyframe: its offset `at` in [0, 1], the values it sets, and the
+ * easing of the segment that starts at it (default: the animation's).
+ * A property the first or last frame leaves out starts or ends at the
+ * node's own value, as CSS. */
+export interface Keyframe {
+  at: number
+  easing?: AnimationEasing
+  opacity?: number
+  /** As `style.translate`: points or a percentage of the node's size. */
+  translate?: LengthPct | readonly [LengthPct, LengthPct]
+  translateX?: LengthPct
+  translateY?: LengthPct
+  /** As `style.rotate`: degrees or an angle string. */
+  rotate?: Angle
+  scale?: number | readonly [number, number]
+  scaleX?: number
+  scaleY?: number
+  backgroundColor?: string | number
+  borderColor?: string | number
+  /** The inherited color (text, inputs, `currentColor` drawings). */
+  color?: string | number
+}
+
+/** A keyframe animation (CSS `@keyframes` plus `animation-*`), timed
+ * in milliseconds on the native clock. */
+export interface KeyframeAnimation {
+  keyframes: readonly Keyframe[]
+  /** One iteration (default 0); a spring easing sets its own. */
+  duration?: number
+  delay?: number
+  /** Each segment's default (default `ease`, as CSS). */
+  easing?: AnimationEasing
+  /** A count, fractions allowed (default 1), or `"infinite"`. */
+  iterations?: number | "infinite"
+  direction?: "normal" | "reverse" | "alternate" | "alternate-reverse"
+  /** Whether the first frame holds through the delay (`backwards`) and
+   * the last after the end (`forwards`). Default: `backwards` for
+   * `enter` (it shows its first frame from mount), `none` otherwise
+   * (the values return when it ends). */
+  fill?: "none" | "forwards" | "backwards" | "both"
+  reducedMotion?: ReducedMotion
+}
+
+/** What started a keyframe animation (`animationEnd` key bits 16+,
+ * minus one). */
+export const ANIMATION_TRIGGER = { enter: 0, animation: 1 } as const
+
+/** A keyframe animation's easing on the wire: [kind, ...params] —
+ * 1 bezier (x1, y1, x2, y2), 2 steps (n, jump), 3 linear (output,
+ * input pairs), 4 spring (stiffness, damping, mass). */
+export type EasingIn = readonly number[]
+
+/** A keyframe's values in wire form (value_field channels). */
+export interface FrameValues {
+  fill?: number
+  borderColor?: number
+  color?: number
+  opacity?: number
+  /** [points, fraction of the border box]. */
+  translateX?: readonly [number, number]
+  translateY?: readonly [number, number]
+  /** Radians. */
+  rotate?: number
+  scaleX?: number
+  scaleY?: number
+}
+
+/** A keyframe animation in wire form: seconds, `EasingIn`s, and the
+ * direction and fill codes (keyframes.rs `Direction`, `Fill`). */
+export interface AnimationIn {
+  /** Its position in the author's list, 0 to 255: its identity. Rising
+   * within a list. */
+  index: number
+  frames: readonly { at: number; easing?: EasingIn; values: FrameValues }[]
+  delay: number
+  duration: number
+  easing: EasingIn
+  /** A count or `Infinity`. */
+  iterations: number
+  direction: number
+  fill: number
+}
 
 /** Scroll anchoring policies — mirror mutation.rs `Anchor`. */
 export const ANCHOR = { "keep-visible": 0, "stick-to-end": 1, none: 2 } as const
@@ -236,7 +337,9 @@ export const EVENT_KIND = {
   /** A list's rendered range: a = first, b = end, x = kept item index
    * (-1), y = the list's splice revision (mod 2^24), key = kept item id. */
   listRange: 14,
-  /** An `animate` tween ended: key = property | reason << 8. */
+  /** An `animate` tween ended: key = property | reason << 8. Or a
+   * keyframe animation (`enter`, `animation`): key = index | reason << 8
+   * | (trigger + 1) << 16 (`ANIMATION_TRIGGER`). */
   animationEnd: 15,
   /** Native frame statistics (node NIL): x = frames per second, y = mean
    * CPU ms per frame, a = the largest, b = mean layout and scene ms,
@@ -260,6 +363,9 @@ export const EVENT_KIND = {
    * button << 8 (1: primary, 0: none) | span + 1 << 16, x/y = the
    * release point or else the node's center, a/b = node-relative. */
   activate: 20,
+  /** The environment changed (node NIL): key = `ENV_BIT`s. Sent when
+   * the reduced-motion setting changes. */
+  environment: 21,
 } as const
 
 /** A press event's phase — mirror events.rs `press_phase`. */
@@ -483,8 +589,14 @@ export interface StyleProps {
    * `zIndex`: no stacking contexts, ties keep tree order). Never
    * relayouts; Tab order and accessibility keep tree order. */
   zIndex?: number
-  /** Not layout: declared transitions, sent in their own op. */
-  transition?: Transitions
+  /** Not layout: declared transitions, sent in their own op. A
+   * variant's list replaces the node's while it holds, as CSS's
+   * `transition` does: moving into it (and changes during it) tween
+   * with its timings, properties it leaves out jump, and `"none"`
+   * times nothing; moving out uses the node's list. A running keyframe
+   * animation covers the properties it sets; a transition then tweens
+   * the value underneath. */
+  transition?: Transitions | "none"
 }
 
 /** An angle: "45deg", "0.5rad", "0.25turn", "50grad", or a number (degrees in
@@ -824,6 +936,15 @@ export interface VariantIn {
   terms: readonly { scope: number; mask: bigint }[]
   env: number
   values: VariantValues
+  /** The transition list that replaces the node's while the variant is
+   * the most specific active one with a list (`{}`: none tween); unset,
+   * the variant says nothing. */
+  transitions?: Transitions
+  /** Keyframe animations that run while the variant is active. */
+  animations?: readonly AnimationIn[]
+  /** Its animations' identity: a number per `_` path, stable for the
+   * node's life (host.ts `variantBlocks`), unique in the table. */
+  block?: number
 }
 
 // Variant value bits — mirror states.rs `value_field`.
@@ -831,7 +952,64 @@ const VALUE_FIELD = {
   FILL: 1 << 0, BORDER_COLOR: 1 << 1, RADIUS: 1 << 2, COLOR: 1 << 3,
   OPACITY: 1 << 4, TRANSFORM: 1 << 5, LAYOUT: 1 << 6, BORDER_WIDTH: 1 << 7,
   TRANSLATE_X: 1 << 8, TRANSLATE_Y: 1 << 9, ROTATE: 1 << 10, SCALE_X: 1 << 11, SCALE_Y: 1 << 12,
+  TRANSITIONS: 1 << 13, ANIMATIONS: 1 << 14,
 } as const
+
+/** The most animations one list holds (keyframes.rs `MAX_ANIMATIONS`). */
+export const MAX_ANIMATIONS = 16
+const MAX_FRAMES = 256
+const MAX_POINTS = 256
+
+/** Checks what native checks of an easing (keyframes.rs
+ * `Easing::is_valid`, bar a spring's settle time) and throws. */
+function checkEasing(e: EasingIn) {
+  const fin = (i: number, lim = Infinity) => Number.isFinite(e[i]) && Math.abs(e[i]!) <= lim
+  const ok =
+    e[0] === 1 ? e.length === 5 && e[1]! >= 0 && e[1]! <= 1 && e[3]! >= 0 && e[3]! <= 1 && fin(2, 100) && fin(4, 100)
+    : e[0] === 2 ? e.length === 3 && Number.isInteger(e[1]) && Number.isInteger(e[2]) && e[2]! >= 0 && e[2]! <= 3
+      && e[1]! > (e[2] === 2 ? 1 : 0) && e[1]! <= 10_000
+    : e[0] === 3 ? e.length % 2 === 1 && e.length >= 5 && e.length <= 1 + 2 * MAX_POINTS
+      && e.every((v, i) => i === 0 || (Number.isFinite(v) && (i % 2 === 1 || Math.abs(v) <= 100)))
+      && e.every((v, i) => i < 3 || i % 2 === 0 || v >= e[i - 2]!)
+    : e[0] === 4 ? e.length === 4 && [1, 2, 3].every(i => fin(i, 1e6) && e[i]! > 0)
+    : false
+  if (!ok) throw Error(`bad easing [${e.join(", ")}]`)
+}
+
+/** Checks what native checks of an animation (keyframes.rs
+ * `Animation::is_valid`) and throws. */
+function checkAnimation(a: AnimationIn) {
+  if (!(Math.abs(a.delay) <= 600)) throw Error(`bad animation delay ${a.delay * 1000} ms (within ±600 s)`)
+  if (!(a.duration >= 0 && a.duration <= 600)) throw Error(`bad animation duration ${a.duration * 1000} ms`)
+  checkEasing(a.easing)
+  const it = a.iterations
+  if (!(it === Infinity ? a.duration > 0 || a.easing[0] === 4 : it >= 0 && it <= 1e6)) {
+    throw Error(`bad iterations ${it}`)
+  }
+  if (!(a.direction >= 0 && a.direction <= 3 && a.fill >= 0 && a.fill <= 3)) throw Error("bad direction or fill")
+  const f = a.frames
+  if (f.length < 1 || f.length > MAX_FRAMES) throw Error(`an animation takes 1 to ${MAX_FRAMES} keyframes`)
+  f.forEach((k, i) => {
+    if (!(k.at >= 0 && k.at <= 1) || (i > 0 && k.at < f[i - 1]!.at)) {
+      throw Error(`keyframe offsets must rise within [0, 1] (got ${k.at})`)
+    }
+    if (k.easing) checkEasing(k.easing)
+    const v = k.values
+    const nums = [v.rotate, v.scaleX, v.scaleY, ...(v.translateX ?? []), ...(v.translateY ?? [])]
+    if (!nums.every(n => n === undefined || Number.isFinite(n))) throw Error("keyframe values must be finite")
+    if (v.opacity !== undefined && !(v.opacity >= 0 && v.opacity <= 1)) throw Error(`bad keyframe opacity ${v.opacity}`)
+  })
+}
+
+function putEasing(b: Writer, e: EasingIn | undefined) {
+  if (!e) return b.u8(0)
+  b.u8(e[0]!)
+  switch (e[0]) {
+    case 2: b.u32(e[1]!); b.u8(e[2]!); break
+    case 3: b.u16((e.length - 1) / 2); for (let i = 1; i < e.length; i++) b.f32(e[i]!); break
+    default: for (let i = 1; i < e.length; i++) b.f32(e[i]!)
+  }
+}
 
 export type Affine = [number, number, number, number, number, number]
 export const IDENTITY: Affine = [1, 0, 0, 1, 0, 0]
@@ -1062,6 +1240,73 @@ export class Encoder {
   private spanCount = 0
   /** Span lists interned by content: most paragraphs share one style. */
   private spanIx = new Map<string, number>()
+  /** Keyframe lists interned by content, defined inline (KEYFRAMES)
+   * before their first use. */
+  private keyframeIx = new Map<string, number>()
+
+  /** A keyframe list's table index, writing its KEYFRAMES op first if
+   * this transaction has not defined it. */
+  private keyframesRef(frames: AnimationIn["frames"]): number {
+    const key = JSON.stringify(frames)
+    const hit = this.keyframeIx.get(key)
+    if (hit !== undefined) return hit
+    const ix = this.keyframeIx.size
+    if (ix > 0xffff) throw Error("too many keyframe lists in one commit")
+    this.keyframeIx.set(key, ix)
+    const b = this.ops
+    b.u8(Op.Keyframes)
+    b.u16(frames.length)
+    for (const f of frames) {
+      b.f32(f.at)
+      putEasing(b, f.easing)
+      const v = f.values
+      const has = (k: keyof FrameValues) => v[k] !== undefined
+      b.u16(
+        (has("fill") ? VALUE_FIELD.FILL : 0) |
+          (has("borderColor") ? VALUE_FIELD.BORDER_COLOR : 0) |
+          (has("color") ? VALUE_FIELD.COLOR : 0) |
+          (has("opacity") ? VALUE_FIELD.OPACITY : 0) |
+          (has("translateX") ? VALUE_FIELD.TRANSLATE_X : 0) |
+          (has("translateY") ? VALUE_FIELD.TRANSLATE_Y : 0) |
+          (has("rotate") ? VALUE_FIELD.ROTATE : 0) |
+          (has("scaleX") ? VALUE_FIELD.SCALE_X : 0) |
+          (has("scaleY") ? VALUE_FIELD.SCALE_Y : 0),
+      )
+      for (const c of [v.fill, v.borderColor, v.color]) if (c !== undefined) b.u32(c >>> 0)
+      if (v.opacity !== undefined) b.f32(v.opacity)
+      for (const x of [...(v.translateX ?? []), ...(v.translateY ?? [])]) b.f32(x)
+      for (const x of [v.rotate, v.scaleX, v.scaleY]) if (x !== undefined) b.f32(x)
+    }
+    return ix
+  }
+
+  /** Checks a list and defines its keyframes; `putAnimations` then
+   * writes it. */
+  private animationRefs(list: readonly AnimationIn[]): number[] {
+    if (list.length > MAX_ANIMATIONS) throw Error(`at most ${MAX_ANIMATIONS} animations per list`)
+    list.forEach((a, i) => {
+      if (!(Number.isInteger(a.index) && a.index >= 0 && a.index <= 255 && (i === 0 || a.index > list[i - 1]!.index))) {
+        throw Error(`animation indices must rise within [0, 255] (got ${a.index})`)
+      }
+      checkAnimation(a)
+    })
+    return list.map(a => this.keyframesRef(a.frames))
+  }
+
+  private putAnimations(list: readonly AnimationIn[], refs: readonly number[]) {
+    const b = this.ops
+    b.u8(list.length)
+    list.forEach((a, i) => {
+      b.u8(a.index)
+      b.u16(refs[i]!)
+      b.f32(a.delay)
+      b.f32(a.duration)
+      putEasing(b, a.easing)
+      b.f32(a.iterations)
+      b.u8(a.direction)
+      b.u8(a.fill)
+    })
+  }
 
   private strRef(s: string): number {
     const hit = this.stringIx.get(s)
@@ -1445,6 +1690,19 @@ export class Encoder {
     putTiming(b, t)
   }
 
+  /** Replaces a node's keyframe animations of `trigger`
+   * (`ANIMATION_TRIGGER`; an empty list stops them). `enter` applies
+   * only in the transaction that creates the node. With `notify`, a
+   * finite animation's end comes back as `animationEnd`. */
+  animation(id: number, trigger: number, notify: boolean, list: readonly AnimationIn[]) {
+    const refs = this.animationRefs(list)
+    this.ops.u8(Op.Animation)
+    this.ops.u32(id)
+    this.ops.u8(trigger)
+    this.ops.u8(notify ? 1 : 0)
+    this.putAnimations(list, refs)
+  }
+
   /** Sets scope `id`'s app state bits (`STATE_BIT`, custom bits); the
    * node becomes a scope. Input bits (hover, pressed, focus) are
    * native's. */
@@ -1458,10 +1716,23 @@ export class Encoder {
    * values the node's own props set. */
   variants(id: number, variants: readonly VariantIn[]) {
     const b = this.ops
+    // Checked, and keyframes defined, before the op starts.
+    const motion = variants.map(v => {
+      if (v.block !== undefined && !(Number.isInteger(v.block) && v.block >= 0 && v.block <= 0xffff)) {
+        throw Error(`bad variant block ${v.block}`)
+      }
+      const props = (Object.keys(ANIM_PROP) as AnimProp[]).filter(p => v.transitions?.[p] !== undefined)
+      return {
+        props,
+        timings: props.map(p => timingValues(v.transitions![p]!)),
+        refs: v.animations?.length ? this.animationRefs(v.animations) : undefined,
+      }
+    })
     b.u8(Op.Variants)
     b.u32(id)
     b.u16(variants.length)
-    for (const v of variants) {
+    variants.forEach((v, vi) => {
+      const m = motion[vi]!
       b.u8(v.terms.length)
       b.u8(v.env)
       for (const t of v.terms) {
@@ -1483,7 +1754,9 @@ export class Encoder {
           (has("translateY") ? VALUE_FIELD.TRANSLATE_Y : 0) |
           (has("rotate") ? VALUE_FIELD.ROTATE : 0) |
           (has("scaleX") ? VALUE_FIELD.SCALE_X : 0) |
-          (has("scaleY") ? VALUE_FIELD.SCALE_Y : 0),
+          (has("scaleY") ? VALUE_FIELD.SCALE_Y : 0) |
+          (v.transitions ? VALUE_FIELD.TRANSITIONS : 0) |
+          (m.refs ? VALUE_FIELD.ANIMATIONS : 0),
       )
       if (x.fill !== undefined) b.u32(x.fill >>> 0)
       if (x.borderColor !== undefined) b.u32(x.borderColor >>> 0)
@@ -1502,7 +1775,18 @@ export class Encoder {
       if (x.rotate !== undefined) b.f32(x.rotate)
       if (x.scaleX !== undefined) b.f32(x.scaleX)
       if (x.scaleY !== undefined) b.f32(x.scaleY)
-    }
+      if (v.transitions) {
+        b.u8(m.props.length)
+        m.props.forEach((p, i) => {
+          b.u8(ANIM_PROP[p])
+          putTiming(b, m.timings[i]!)
+        })
+      }
+      if (m.refs) {
+        b.u16(v.block ?? vi)
+        this.putAnimations(v.animations!, m.refs)
+      }
+    })
   }
 
   /** The window-width breakpoints of `narrow` and `compact` (logical
@@ -1547,6 +1831,7 @@ export class Encoder {
     this.stringIx.clear()
     this.styleIx.clear()
     this.spanIx.clear()
+    this.keyframeIx.clear()
     this.styleCount = 0
     this.spanCount = 0
     return buf

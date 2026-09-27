@@ -43,6 +43,7 @@ import {
   type Transport,
 } from "./host.js"
 import { flattenShapes, type ShapeProps } from "./shapes.js"
+import type { Animations } from "./motion.js"
 import {
   EVENT_KIND,
   GROUP,
@@ -87,7 +88,12 @@ export {
   type TransformStep,
   type Transitions,
   type Angle,
+  type AnimationEasing,
+  type Keyframe,
+  type KeyframeAnimation,
+  type ReducedMotion,
 } from "./wire.js"
+export type { Animations } from "./motion.js"
 export type {
   ClipboardEvt,
   ContextMenuEvt,
@@ -223,6 +229,54 @@ export interface ListenerProps {
   inert?: boolean
 }
 
+/** Which animation ended (`onAnimationEnd`): `enter` or `animation`,
+ * its index in that prop, and why: `finished`, `cancelled` (it left the
+ * list, or the node stopped being drawn: `hidden`, detached) or
+ * `retargeted` (the keyframes at its index changed, and it restarted).
+ * Loops never end. A removed node reports nothing: its handler goes
+ * with it (`removed` is for `animate`, whose promise JS resolves itself
+ * when the node goes). */
+export interface AnimationEndEvt {
+  target: HostNode
+  animation: "enter" | "animation"
+  index: number
+  finished: boolean
+  reason: EndReason
+}
+
+/** Keyframe animations, run on the native clock (no render per frame).
+ *
+ *     <View style={{ opacity: 0.6 }}
+ *       enter={{ keyframes: [{ at: 0, opacity: 0, translateY: 8 }], duration: 200 }}
+ *       animation={busy && { keyframes: spin, duration: 1000, easing: "linear",
+ *         iterations: "infinite", reducedMotion: "keep" }}
+ *       _streaming={{ animation: { keyframes: pulse, duration: 400, iterations: "infinite" } }} />
+ *
+ * Several animations on one property: the later one wins; a running one
+ * wins over the property's own value, variants and transitions (they
+ * move the value underneath, where it returns when the animation
+ * stops). A list is one animation or several; falsy entries skip. */
+export interface MotionProps {
+  /** Runs once, when the node is created (later changes do nothing).
+   * Fill defaults to `backwards`: the first frame shows from mount,
+   * through the delay. With `fill: "forwards"` or `"both"` the last
+   * frame holds over the node's own value for good: later style
+   * changes to the properties it sets don't show (LEDGER DF-58). A
+   * running `enter` keeps on when reduced motion turns on (DF-59). */
+  enter?: Animations
+  /** Runs while set. An entry is its index in the list: one whose
+   * keyframes change restarts; a timing change applies in place (as
+   * CSS); one that ended stays ended while listed (a re-render or a
+   * reduced-motion change doesn't replay it); entries coming and going
+   * around it (falsy ones) leave it running. Fill defaults to `none`:
+   * the values return when it ends or stops. On a node not drawn
+   * (`hidden`, under a hidden ancestor) nothing runs, and everything
+   * starts over when it is drawn again, as CSS does. */
+  animation?: Animations
+  /** A finite `enter` or `animation` ended. */
+  onAnimationEnd?: (e: AnimationEndEvt) => void
+}
+
 /** What a variant overrides. */
 export interface VariantStyle {
   backgroundColor?: string | number
@@ -238,16 +292,27 @@ export interface VariantStyle {
    * the others alone, so a pressed `scale` keeps the base `rotate`:
    *
    *     <Pressable style={{ rotate: 12, transition: { scale: { duration: 120 } } }}
-   *       _hover={{ style: { scale: 1.02 } }} _pressed={{ style: { scale: 0.98 } }} /> */
+   *       _hover={{ style: { scale: 1.02 } }} _pressed={{ style: { scale: 0.98 } }} />
+   *
+   * `style.transition` replaces the node's list while the variant
+   * holds, as CSS does: the move into it and changes during it tween
+   * with its timings, the properties it leaves out jump, and `"none"`
+   * times nothing. Moving out uses the base's list (or a less specific
+   * active variant's). */
   style?: StyleProps
+  /** Runs while the variant holds, started and stopped natively. Its
+   * ends are not reported (LEDGER DF-56). */
+  animation?: Animations
 }
 /** State and environment variants, resolved natively (no render): a
  * key names a state of the nearest scope (`_hover`, `_selected`, a
  * `defineStates` state), an environment condition (`_narrow`,
  * `_compact`, `_touch`, `_reducedMotion`), or a `group` up the tree
  * (`_row`, whose states the block then reads). Nesting ANDs; of the
- * variants that hold, the more specific one wins per property. */
-export type Variants = { [key: `_${string}`]: (VariantStyle & Variants) | undefined }
+ * variants that hold, the more specific one wins per property. A
+ * falsy block (`_pressed: busy && {...}`) declares nothing, and moves
+ * no other block's animations. */
+export type Variants = { [key: `_${string}`]: (VariantStyle & Variants) | false | null | undefined }
 
 /** The states a scope sets (hover, press and focus are native's).
  * The accessibility tree carries them too: `checked` on the check roles
@@ -275,7 +340,7 @@ export interface StateProps {
   states?: Record<string, boolean>
 }
 
-export interface ViewProps extends ListenerProps, StateProps, Variants {
+export interface ViewProps extends ListenerProps, StateProps, Variants, MotionProps {
   style?: StyleProps
   /** Makes the View a scope whose states its variants and its
    * descendants' read; a name also addresses it (`_name`) from further
@@ -325,7 +390,7 @@ export interface PressableProps extends ViewProps, PressProps {
  * assistive technology unless given a role), but not focusable, like a
  * web span; a nested one activates when pressed and released on its
  * spans. */
-export interface TextProps extends ListenerProps, PressProps, Variants {
+export interface TextProps extends ListenerProps, PressProps, Variants, MotionProps {
   style?: StyleProps
   /** This Text alone is a selection domain (on the outermost Text). */
   selectable?: boolean
@@ -349,7 +414,7 @@ export interface TextProps extends ListenerProps, PressProps, Variants {
   children?: ReactNode // strings land on the wire as text
   text?: string
 }
-export interface SurfaceProps extends ListenerProps, Variants {
+export interface SurfaceProps extends ListenerProps, Variants, MotionProps {
   style?: StyleProps
   backgroundColor?: string | number
   borderRadius?: number
@@ -376,7 +441,7 @@ export interface BarsProps extends Omit<SurfaceProps, "kind" | "params" | "paylo
 }
 /** A TextInput is a scope: its own `_hover` and `_focusVisible` read
  * its own states. `disabled` waits for a read-only input natively. */
-export interface TextInputProps extends ListenerProps, Omit<StateProps, "disabled">, Variants {
+export interface TextInputProps extends ListenerProps, Omit<StateProps, "disabled">, Variants, MotionProps {
   accessibilityRole?: AccessibilityRole
   style?: StyleProps
   backgroundColor?: string | number
@@ -510,7 +575,7 @@ export function Surface(props: SurfaceProps) {
   return useHost("surface", props)
 }
 
-interface VectorBase extends ListenerProps, Variants {
+interface VectorBase extends ListenerProps, Variants, MotionProps {
   style?: StyleProps
   backgroundColor?: string | number
   borderRadius?: number
@@ -581,7 +646,7 @@ export function Vector(props: VectorProps) {
   return useHost("vector", { accessibilityRole: "image", ...rest, viewBox, shapes })
 }
 
-export interface ImageProps extends ListenerProps, Variants {
+export interface ImageProps extends ListenerProps, Variants, MotionProps {
   style?: StyleProps
   backgroundColor?: string | number
   borderRadius?: number

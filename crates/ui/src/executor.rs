@@ -12,9 +12,10 @@ use std::sync::Arc;
 
 use craie_layout::LayoutRow;
 
-use crate::animation::{Prop, Value};
+use crate::animation::{Prop, Transition, Value};
 use crate::claims::{Claim, claim_kind};
 use crate::host::{Host, MAX_NODES, NodeId, SpatialPatch};
+use crate::keyframes::Animation;
 use crate::list::{IdIndex, MAX_ITEMS};
 use crate::mutation::{
     Command, ItemDesc, Mutation, NIL, NodeKind, TextSpan, Transaction, interaction_flag,
@@ -550,17 +551,7 @@ pub fn validate(host: &Host, txn: &Transaction<'_>) -> Result<Validated, WireErr
             }
             Mutation::Transition { id, transitions } => {
                 need_live(&o, *id, "transition on an absent node")?;
-                if transitions.len() > Prop::COUNT {
-                    return Err(invalid("too many transitions"));
-                }
-                for (k, t) in transitions.iter().enumerate() {
-                    if !t.timing.is_valid() {
-                        return Err(invalid("transition timing out of range"));
-                    }
-                    if transitions[..k].iter().any(|u| u.prop == t.prop) {
-                        return Err(invalid("transition declared twice"));
-                    }
-                }
+                valid_transitions(transitions)?;
             }
             Mutation::Animate {
                 id,
@@ -578,6 +569,11 @@ pub fn validate(host: &Host, txn: &Transaction<'_>) -> Result<Validated, WireErr
                 if !valid_target(*prop, value) {
                     return Err(invalid("animation target out of range"));
                 }
+            }
+            Mutation::Animation { id, animations, .. } => {
+                need_live(&o, *id, "animation on an absent node")?;
+                let boxed = o.kind(*id).is_some_and(NodeKind::has_box);
+                valid_animations(animations, boxed)?;
             }
             Mutation::States { id, bits } => {
                 need_live(&o, *id, "states on an absent node")?;
@@ -604,6 +600,14 @@ pub fn validate(host: &Host, txn: &Transaction<'_>) -> Result<Validated, WireErr
                     for t in &v.terms {
                         need_live(&o, t.scope, "variant on an absent scope")?;
                     }
+                    valid_transitions(v.transitions.as_deref().unwrap_or_default())?;
+                    valid_animations(&v.animations, boxed)?;
+                }
+                let blocks = variants.iter().filter(|v| !v.animations.is_empty());
+                for (k, v) in blocks.clone().enumerate() {
+                    if blocks.clone().take(k).any(|u| u.block == v.block) {
+                        return Err(invalid("variant block declared twice"));
+                    }
                 }
             }
             Mutation::Environment {
@@ -620,6 +624,40 @@ pub fn validate(host: &Host, txn: &Transaction<'_>) -> Result<Validated, WireErr
         }
     }
     Ok(done)
+}
+
+/// Transitions: at most one per property, timings in range.
+fn valid_transitions(transitions: &[Transition]) -> Result<(), WireError> {
+    if transitions.len() > Prop::COUNT {
+        return Err(invalid("too many transitions"));
+    }
+    for (k, t) in transitions.iter().enumerate() {
+        if !t.timing.is_valid() {
+            return Err(invalid("transition timing out of range"));
+        }
+        if transitions[..k].iter().any(|u| u.prop == t.prop) {
+            return Err(invalid("transition declared twice"));
+        }
+    }
+    Ok(())
+}
+
+/// Keyframe animations: a bounded list, in range, indices ascending, box
+/// colors only on a node with a box.
+fn valid_animations(animations: &[Animation], boxed: bool) -> Result<(), WireError> {
+    if animations.len() > crate::keyframes::MAX_ANIMATIONS {
+        return Err(invalid("too many animations in one list"));
+    }
+    for (k, a) in animations.iter().enumerate() {
+        a.check().map_err(invalid)?;
+        if k > 0 && animations[k - 1].index >= a.index {
+            return Err(invalid("animation indices out of order"));
+        }
+        if !boxed && a.keyframes.mask() & value_field::BOX != 0 {
+            return Err(invalid("paint animation on a node without a box"));
+        }
+    }
+    Ok(())
 }
 
 /// An `Animate` target: the value kind of `prop`, finite, lengths (not
@@ -654,6 +692,10 @@ impl Ui {
     /// nothing changes.
     pub fn execute(&mut self, txn: &Transaction<'_>) -> Result<(), WireError> {
         let mut done = validate(&self.host, txn)?;
+        if !self.states.env_reported {
+            self.report_env();
+        }
+        self.motion.begin();
         self.begin_traps();
         for (step, m) in txn.mutations.iter().enumerate() {
             self.apply_mutation(txn, step, m, &mut done);
@@ -680,6 +722,7 @@ impl Ui {
                 let node = NodeId(*id);
                 self.host.create(node, *kind);
                 self.forget_node_state(node);
+                self.motion.born(node);
             }
             Mutation::Place {
                 parent,
@@ -707,6 +750,7 @@ impl Ui {
                 let node = NodeId(*id);
                 // Its tweens end before the slot's generation moves.
                 self.end_animations_of(node, crate::animation::end_reason::REMOVED);
+                self.end_keyframes_of(node);
                 self.unhover(node);
                 self.unpress(node);
                 self.focus_leaves(node);
@@ -804,6 +848,12 @@ impl Ui {
                     self.report_end(node, *prop, crate::animation::end_reason::FINISHED);
                 }
             }
+            Mutation::Animation {
+                id,
+                trigger,
+                notify,
+                animations,
+            } => self.declare_animations(NodeId(*id), *trigger, *notify, animations),
             Mutation::Paragraph { id, text, spans } => {
                 let node = NodeId(*id);
                 // Families in host indices.
@@ -1172,6 +1222,7 @@ impl Ui {
         self.vector_meshes.forget(node.0);
         self.images.forget(node.0, &mut self.scene.atlas);
         self.animations.forget(node);
+        self.motion.forget(node);
         self.layouts.forget(node);
         self.forget_states(node);
         self.inheritors.remove(&node.0);
@@ -1192,24 +1243,26 @@ impl Ui {
         self.set_layout(node, LayoutRow::from(&new));
     }
 
-    /// Declares a node's spatial fields (those given).
+    /// Declares a node's spatial fields (those given). Transitions
+    /// intercept them; a keyframe animation takes them under it.
     pub(crate) fn declare_spatial(&mut self, node: NodeId, p: SpatialPatch) {
+        let now = |ui: &mut Ui, prop: Prop, v: Value| {
+            ui.intercept(node, prop, v) && !ui.absorb(node, prop, Some(v))
+        };
         let patch = SpatialPatch {
             translate: p
                 .translate
-                .filter(|t| self.intercept(node, Prop::Translate, Value::Translate(*t))),
+                .filter(|t| now(self, Prop::Translate, Value::Translate(*t))),
             rotate: p
                 .rotate
-                .filter(|r| self.intercept(node, Prop::Rotate, Value::Rotate(*r))),
-            scale: p
-                .scale
-                .filter(|s| self.intercept(node, Prop::Scale, Value::Scale(*s))),
+                .filter(|r| now(self, Prop::Rotate, Value::Rotate(*r))),
+            scale: p.scale.filter(|s| now(self, Prop::Scale, Value::Scale(*s))),
             matrix: p
                 .matrix
-                .filter(|t| self.intercept(node, Prop::Transform, Value::Transform(*t))),
+                .filter(|t| now(self, Prop::Transform, Value::Transform(*t))),
             opacity: p
                 .opacity
-                .filter(|o| self.intercept(node, Prop::Opacity, Value::Opacity(*o))),
+                .filter(|o| now(self, Prop::Opacity, Value::Opacity(*o))),
         };
         self.set_spatial(node, patch);
     }
@@ -1222,10 +1275,14 @@ impl Ui {
         radius: Option<f32>,
         border: Option<(u32, f32)>,
     ) {
-        let fill = fill.filter(|c| self.intercept(node, Prop::Fill, Value::Color(*c)));
+        let now = |ui: &mut Ui, prop: Prop, c: u32| {
+            ui.intercept(node, prop, Value::Color(c))
+                && !ui.absorb(node, prop, Some(Value::Color(c)))
+        };
+        let fill = fill.filter(|c| now(self, Prop::Fill, *c));
         let border_color = border
             .map(|(c, _)| c)
-            .filter(|c| self.intercept(node, Prop::BorderColor, Value::Color(*c)));
+            .filter(|c| now(self, Prop::BorderColor, *c));
         self.set_paint(node, fill, radius, border_color, border.map(|(_, w)| w));
     }
 
@@ -1234,7 +1291,9 @@ impl Ui {
     pub(crate) fn declare_color(&mut self, node: NodeId, color: Option<u32>) {
         match color {
             Some(c) => {
-                if self.intercept(node, Prop::Color, Value::Color(c)) {
+                if self.intercept(node, Prop::Color, Value::Color(c))
+                    && !self.absorb(node, Prop::Color, Some(Value::Color(c)))
+                {
                     self.set_color(node, Some(c));
                 }
             }
@@ -1242,7 +1301,9 @@ impl Ui {
                 if let Some(i) = self.animations.find(node, Prop::Color) {
                     self.end_animation(i, crate::animation::end_reason::CANCELLED);
                 }
-                self.set_color(node, None);
+                if !self.absorb(node, Prop::Color, None) {
+                    self.set_color(node, None);
+                }
             }
         }
     }
@@ -1379,6 +1440,20 @@ impl Ui {
         self.host.revs.transform.bump();
         self.host.dirty.spatial.push(node.0);
         self.host.dirty.semantic.push(node.0);
+    }
+
+    /// Sets a node's spatial pin (`Spatial::PIN_*`).
+    pub(crate) fn pin_spatial(&mut self, node: NodeId, pin: u8) {
+        let s = &mut self.host.spatial[node.index()];
+        if s.pin == pin {
+            return;
+        }
+        let before = (s.transformed(), s.layered());
+        s.pin = pin;
+        if (s.transformed(), s.layered()) != before {
+            self.host.revs.structure.bump();
+            self.host.dirty.spatial.push(node.0);
+        }
     }
 
     /// Writes a node's box paint row (the fields given).

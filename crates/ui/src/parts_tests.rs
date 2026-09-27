@@ -98,6 +98,7 @@ fn hover(scale: f32) -> VariantDecl {
             },
             ..Values::default()
         },
+        ..Default::default()
     }
 }
 
@@ -318,6 +319,7 @@ fn variant(bit: u64, mask: u16, parts: Parts) -> VariantDecl {
             parts,
             ..Values::default()
         },
+        ..Default::default()
     }
 }
 

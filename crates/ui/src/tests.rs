@@ -702,6 +702,7 @@ fn a11y_click_activates() {
     let mut ui = Ui::new(1.0);
     ui.apply(&buf).unwrap();
     ui.render(Size::new(400.0, 300.0));
+    ui.take_events();
     let click = |ui: &mut Ui| {
         ui.a11y_action(&ActionRequest {
             action: Action::Click,
@@ -1025,6 +1026,7 @@ fn recycled_ids_carry_new_generation() {
     let gen1 = ui.host.node(NodeId(0)).unwrap().generation;
     assert_eq!(gen1, gen0.wrapping_add(1));
     ui.render(Size::new(200.0, 200.0));
+    ui.take_events();
     ui.dispatch(&crate::events::Event::PointerDown {
         x: 10.0,
         y: 10.0,
