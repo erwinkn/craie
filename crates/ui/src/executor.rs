@@ -839,8 +839,6 @@ impl Ui {
         }
     }
 
-    /// Drops per-node state held outside the host when a slot is created
-    /// or freed: a recycled id must start clean.
     /// `node` leaves its place in the tree: if the pointer is over it or
     /// inside it, the hover falls back to its parent. Its ancestors stay
     /// hovered (no second enter on the next move); the subtree gets no
@@ -853,6 +851,8 @@ impl Ui {
         }
     }
 
+    /// Drops per-node state held outside the host when a slot is created
+    /// or freed: a recycled id must start clean.
     fn forget_node_state(&mut self, node: NodeId) {
         if let Some(t) = self.texts.get_mut(node.index()) {
             *t = None;
