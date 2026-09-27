@@ -249,6 +249,65 @@ Reviewer minors and nitpicks not fixed yet.
 - Resolves in: the winit 0.31 upgrade, or a macOS-only position read
   if a drop target needs it first.
 
+### DF-13: Tab and accessibility reach layers after the app
+
+- Source: sibling z and layers (work item 4) implementation (own
+  finding).
+- Where: crates/ui/src/dispatch.rs (`focusables`), crates/ui/src/a11y.rs.
+- Claim: a layer container is a root-level node after the app's roots,
+  and Tab and the accessibility tree keep tree order. So Tab reaches a
+  menu opened from a toolbar button only after every focusable node of
+  the app, and a screen reader reads layers last, in open order.
+- Why deferred: where focus goes into and out of a layer is work item
+  3's (focus traps, `modal`, owners' scopes); reading a layer next to
+  its owner is the accessibility pass's (topic 13).
+- Resolves in: work item 3, then topic 13.
+
+### DF-14: a z change walks the whole tree for the draw order
+
+- Source: sibling z (work item 4) measurement (`zorder` example).
+- Where: crates/ui/src/scene_sync.rs (`walk_tree`).
+- Claim: a z change bumps `structure_rev`, like an insert, and the next
+  frame rebuilds the draw order with one walk of the whole tree. At
+  100k nodes that frame took 6.0 to 8.8 ms against 2.5 to 3.7 ms after
+  a transform change (exe1, loaded); the re-sort itself took 28 to 74
+  µs. At 5k nodes: 0.31 to 0.45 ms against 0.17 to 0.29 ms.
+- Why deferred: it is the cost every structure change already pays,
+  and the draw order is a derived cache by decision (§8). Patching one
+  parent's range needs the draw list ranged per parent.
+- Resolves in: an incremental draw-order patch for structure changes,
+  if reordering or inserting in large trees shows up in a frame
+  profile (it would serve inserts and moves too).
+
+### DF-15: layers owned coarsely
+
+- Source: sibling z and layers (work item 4) implementation (own
+  finding).
+- Where: packages/bridge/src/index.ts (`Layer`).
+- Claim: a `Layer`'s owner is the enclosing `Layer`'s container, and a
+  top-level `Layer` has none. So an unowned layer with a negative z
+  sorts under the app (the kit's layer tokens are all positive), and
+  owners know nothing finer than a layer (a trap inside it).
+- Why deferred: the native op takes any node as owner; finding a finer
+  one (the trap, or the host node that opened the layer) is work item
+  3's, with focus traps.
+- Resolves in: work item 3.
+
+### DF-16: an owner-only layer closes when Suspense hides it
+
+- Source: sibling z and layers (work item 4) implementation (own
+  finding).
+- Where: packages/bridge/src/index.ts (`Layer`).
+- Claim: a `Layer` with no children of its own, opened only to own a
+  nested one, closes in its layout-effect cleanup. A Suspense boundary
+  that hides it runs that cleanup and keeps the nested layer, which
+  loses its owner and sorts at its own z after the reveal. (A layer
+  with children stays open: it closes with its last child.)
+- Why deferred: no kit component nests a layer in a childless one. The
+  fix reopens the container on setup and hands the nested layers their
+  owner again.
+- Resolves in: work item 3, with owners.
+
 ## Closed
 
 - DF-8 (2026-09-24, same day): `native_reflow_publishes_after_the_frame`

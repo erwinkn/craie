@@ -1,5 +1,5 @@
 import { test, expect } from "bun:test"
-import { createElement, useState } from "react"
+import { createElement, Suspense, useState } from "react"
 import { createRoot, Layer, View } from "../src/index.js"
 import type { Transport, UiEvent } from "../src/host.js"
 import { NIL } from "../src/wire.js"
@@ -141,4 +141,32 @@ test("an empty layer sends nothing", async () => {
   createRoot(t).renderSync(createElement(View, null, createElement(Layer, { z: 60 })))
   await tick()
   expect(t.all().filter(o => o.tag === CREATE).length).toBe(1)
+})
+
+test("a layer stays open while Suspense hides it", async () => {
+  const t = new FakeTransport()
+  const root = createRoot(t)
+  let wake!: () => void
+  const pending = new Promise<void>(r => { wake = r })
+  let suspend = false
+  function Lazy() {
+    if (suspend) throw pending
+    return null
+  }
+  const app = () => createElement(View, null,
+    createElement(Suspense, { fallback: null },
+      createElement(Layer, { z: 50 }, createElement(View)),
+      createElement(Lazy)))
+  root.renderSync(app())
+  await tick()
+  const [[container]] = layers(t.all()) as number[][]
+  // Hiding runs the Layer's layout-effect cleanup, but keeps its
+  // children: the container must stay, to show them again.
+  suspend = true
+  root.renderSync(app())
+  suspend = false
+  wake()
+  await tick()
+  await tick()
+  expect(t.all().some(o => o.tag === REMOVE && o.id === container)).toBe(false)
 })
