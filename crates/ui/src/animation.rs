@@ -35,10 +35,13 @@ pub enum Prop {
     Padding = 6,
     /// Both axes.
     Gap = 7,
+    /// The inherited text color (`COLOR`). Tweens only between two set
+    /// colors: setting or clearing it jumps.
+    Color = 8,
 }
 
 impl Prop {
-    pub const COUNT: usize = 8;
+    pub const COUNT: usize = 9;
     pub const ALL: [Prop; Prop::COUNT] = [
         Prop::Transform,
         Prop::Opacity,
@@ -48,6 +51,7 @@ impl Prop {
         Prop::Height,
         Prop::Padding,
         Prop::Gap,
+        Prop::Color,
     ];
 
     pub fn from_u8(v: u8) -> Option<Prop> {
@@ -61,6 +65,7 @@ impl Prop {
             5 => Height,
             6 => Padding,
             7 => Gap,
+            8 => Color,
             _ => return None,
         })
     }
@@ -626,6 +631,7 @@ impl Ui {
                 s.padding().bottom,
             ]),
             Prop::Gap => Value::Gap([s.gap().width, s.gap().height]),
+            Prop::Color => Value::Color(self.host.colors.get(&node.0).copied().unwrap_or(0)),
         }
     }
 
@@ -634,6 +640,9 @@ impl Ui {
     /// when there is none to start from (never laid out, a percent
     /// padding or gap).
     fn current_num(&self, node: NodeId, prop: Prop) -> Option<Num> {
+        if prop == Prop::Color && !self.host.colors.contains_key(&node.0) {
+            return None;
+        }
         Some(match self.row_value(node, prop) {
             Value::Transform(t) => Num::Transform(Decomposed::of(&t)),
             Value::Opacity(o) => Num::Scalar(o),
@@ -689,9 +698,16 @@ impl Ui {
     /// declared value is what the node holds: an equal `next` changes
     /// nothing, another one retargets (with a transition) or cancels it.
     /// Without one, a declared transition starts a tween from the value
-    /// on screen.
+    /// on screen. A table's first resolution (`states.snapping`) writes
+    /// at once: nothing was on screen to move from.
     pub(crate) fn intercept(&mut self, node: NodeId, prop: Prop, next: Value) -> bool {
         let running = self.animations.find(node, prop);
+        if self.states.snapping {
+            if let Some(i) = running {
+                self.end_animation(i, end_reason::CANCELLED);
+            }
+            return true;
+        }
         if let Some(i) = running
             && self.animations.active[i].declared == next
         {
@@ -760,7 +776,7 @@ impl Ui {
     }
 
     /// Removes animation `i`, reporting its end when JS started it.
-    fn end_animation(&mut self, i: usize, reason: u32) {
+    pub(crate) fn end_animation(&mut self, i: usize, reason: u32) {
         let a = self.animations.remove(i);
         if a.notify {
             self.report_end(a.node, a.prop, reason);
@@ -875,7 +891,7 @@ impl Ui {
                 Value::Transform(m)
             }
             (Prop::Opacity, Num::Scalar(o)) => Value::Opacity(o),
-            (Prop::Fill | Prop::BorderColor, Num::Color(c)) => Value::Color(c),
+            (Prop::Fill | Prop::BorderColor | Prop::Color, Num::Color(c)) => Value::Color(c),
             (Prop::Width | Prop::Height, Num::Lengths(l)) => Value::Size(Dimension::length(l[0])),
             (Prop::Padding, Num::Lengths(l)) => Value::Padding(l.map(LengthPercentage::length)),
             (Prop::Gap, Num::Lengths(l)) => Value::Gap([
@@ -893,30 +909,36 @@ impl Ui {
         match v {
             Value::Transform(t) => self.set_spatial(node, Some(t), None),
             Value::Opacity(o) => self.set_spatial(node, None, Some(o)),
-            Value::Color(c) if prop == Prop::Fill => {
-                self.set_paint(node, Some(c), None, None, None)
-            }
-            Value::Color(c) => self.set_paint(node, None, None, Some(c), None),
+            Value::Color(c) => match prop {
+                Prop::Fill => self.set_paint(node, Some(c), None, None, None),
+                Prop::BorderColor => self.set_paint(node, None, None, Some(c), None),
+                _ => self.set_color(node, Some(c)),
+            },
             _ => {
                 let mut style = self.host.layout[node.index()];
-                match v {
-                    Value::Size(d) if prop == Prop::Width => style.set_width(d),
-                    Value::Size(d) => style.set_height(d),
-                    Value::Padding([l, r, t, b]) => style.set_padding(taffy::Rect {
-                        left: l,
-                        right: r,
-                        top: t,
-                        bottom: b,
-                    }),
-                    Value::Gap([w, h]) => style.set_gap(taffy::Size {
-                        width: w,
-                        height: h,
-                    }),
-                    _ => return,
-                }
+                set_row_field(&mut style, prop, v);
                 self.set_layout(node, style);
             }
         }
+    }
+}
+
+/// Sets `prop`'s field of a layout row to `v` (a layout value).
+pub(crate) fn set_row_field(style: &mut LayoutRow, prop: Prop, v: Value) {
+    match v {
+        Value::Size(d) if prop == Prop::Width => style.set_width(d),
+        Value::Size(d) => style.set_height(d),
+        Value::Padding([l, r, t, b]) => style.set_padding(taffy::Rect {
+            left: l,
+            right: r,
+            top: t,
+            bottom: b,
+        }),
+        Value::Gap([w, h]) => style.set_gap(taffy::Size {
+            width: w,
+            height: h,
+        }),
+        _ => {}
     }
 }
 

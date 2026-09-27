@@ -2540,8 +2540,8 @@ fn unknown_span_flag_bits_reject() {
         + 6;
     assert_eq!(buf[at], 0);
     let mut ok = buf.clone();
-    ok[at] = wire::span_flag::ITALIC | wire::span_flag::UNDERLINE | wire::span_flag::LINE_THROUGH;
-    for bit in [1u8 << 3, 1 << 7] {
+    ok[at] = wire::span_flag::ALL;
+    for bit in [1u8 << 4, 1 << 7] {
         let mut bad = buf.clone();
         bad[at] |= bit;
         assert!(ui.apply(&bad).is_err(), "bit {bit:#x}");

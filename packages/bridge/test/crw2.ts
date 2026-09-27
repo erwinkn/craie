@@ -10,6 +10,11 @@ export interface Op {
   bytes?: Uint8Array
   /** CLAIMS: the claim set (`f` holds the version). */
   claims?: { kind: number; flags: number; mods: number; key: number }[]
+  /** VARIANTS: each variant's terms, env, and values in wire order (a
+   * layout value contributes its layout keys). */
+  variants?: { terms: { scope: number; mask: bigint }[]; env: number; values: number[] }[]
+  /** STATES: the bits. */
+  bits?: bigint
   /** DRAWING: each shape's strings (geometry, transform, dashes) and
    * numbers in wire order; `s` holds the view box. */
   shapes?: { strings: string[]; f: number[] }[]
@@ -22,6 +27,7 @@ export interface Frame {
   spans: {
     start: number; fontSize: number; color: number; weight: number; italic: boolean
     decoration: number; family: string | undefined; letterSpacing: number; lineHeight: number
+    inheritColor: boolean
   }[]
   ops: Op[]
 }
@@ -33,6 +39,7 @@ export function readFrame(buf: Uint8Array): Frame {
   const u16 = () => { const v = dv.getUint16(at, true); at += 2; return v }
   const u32 = () => { const v = dv.getUint32(at, true); at += 4; return v }
   const f32 = () => { const v = dv.getFloat32(at, true); at += 4; return v }
+  const u64 = () => { const v = dv.getBigUint64(at, true); at += 8; return v }
   if (u32() !== 0x3257_5243) throw Error("bad magic")
   if (u16() !== 4) throw Error("bad version")
   u16()
@@ -55,13 +62,13 @@ export function readFrame(buf: Uint8Array): Frame {
       start, fontSize, color, weight, italic: !!(flags & 1),
       decoration: (flags >> 1) & 3,
       family: familyRef === 0xffff_ffff ? undefined : strings[familyRef],
-      letterSpacing, lineHeight,
+      letterSpacing, lineHeight, inheritColor: !!(flags & 8),
     })
   }
   const ops: Op[] = []
   while (at < buf.byteLength) {
     const tag = u8()
-    const id = tag === 0x02 ? 0 : u32()
+    const id = tag === 0x02 || tag === 0xb2 ? 0 : u32() // place, environment: no id
     const op: Op = { tag, id, f: [] }
     switch (tag) {
       case 0x01: op.f.push(u8()); break // create kind
@@ -141,12 +148,35 @@ export function readFrame(buf: Uint8Array): Frame {
       }
       case 0xa1: { // animate: prop, value by prop, timing
         const p = u8(); op.f.push(p)
-        const n = [6, 1, 0, 0, 1, 1, 4, 2][p]!
-        if (p === 2 || p === 3) op.f.push(u32())
+        const n = [6, 1, 0, 0, 1, 1, 4, 2, 0][p]!
+        if (p === 2 || p === 3 || p === 8) op.f.push(u32())
         for (let i = 0; i < n; i++) op.f.push(f32())
         op.f.push(u8()); for (let k = 0; k < 6; k++) op.f.push(f32())
         break
       }
+      case 0xb0: op.bits = u64(); break // states
+      case 0xb1: { // variants: count x (term count, env, terms, values)
+        const n = u16()
+        op.variants = []
+        for (let i = 0; i < n; i++) {
+          const nTerms = u8(), env = u8()
+          const terms = []
+          for (let k = 0; k < nTerms; k++) terms.push({ scope: u32(), mask: u64() })
+          const m = u8(), values = [m]
+          if (m & 1) values.push(u32())
+          if (m & 2) values.push(u32())
+          if (m & 4) values.push(f32())
+          if (m & 8) values.push(u8(), u32())
+          if (m & 16) values.push(f32())
+          if (m & 32) for (let k = 0; k < 6; k++) values.push(f32())
+          if (m & 64) { const keys = u64(); values.push(Number(keys)); skipFields(keyFields(keys)) }
+          if (m & 128) values.push(f32())
+          op.variants.push({ terms, env, values })
+        }
+        break
+      }
+      case 0xb2: op.f.push(f32(), f32()); break // environment
+      case 0xb3: op.f.push(u8(), u32()); break // color
       default: throw Error(`unknown op 0x${tag.toString(16)}`)
     }
     ops.push(op)
@@ -155,6 +185,9 @@ export function readFrame(buf: Uint8Array): Frame {
 
   function skipStyle() {
     const mask = dv.getBigUint64(at, true); at += 8
+    skipFields(mask)
+  }
+  function skipFields(mask: bigint) {
     const lp = () => { const t = u8(); if (t < 2) at += 4 }
     const dim = () => { const t = u8(); if (t <= 1 || t === 5 || t === 6) at += 4 }
     for (let bit = 0; bit < 21; bit++) {
@@ -168,4 +201,18 @@ export function readFrame(buf: Uint8Array): Frame {
       else at += 2
     }
   }
+}
+
+/** The style fields carrying layout keys (states.rs `layout_key::fields`):
+ * the first eight keys are their fields; then gap 2, size 2, min 2,
+ * max 2, padding 4, margin 4, border 4, inset 4, then one each. */
+function keyFields(keys: bigint): bigint {
+  let fields = keys & 0xffn
+  const widths = [2, 2, 2, 2, 4, 4, 4, 4, 1, 1, 1, 1, 2]
+  let at = 8n
+  widths.forEach((w, i) => {
+    if ((keys >> at) & ((1n << BigInt(w)) - 1n)) fields |= 1n << BigInt(8 + i)
+    at += BigInt(w)
+  })
+  return fields
 }

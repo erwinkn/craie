@@ -8,7 +8,10 @@
 import {
   CHORD_FLAG,
   CLAIM_KIND,
+  CUSTOM_STATES,
   DECORATION,
+  ENV_BIT,
+  STATE_BIT,
   Encoder,
   EVENT_KIND,
   EVENT_MASK,
@@ -36,6 +39,8 @@ import {
   type ScrollAnchor,
   type StyleProps,
   type TextSpanIn,
+  type VariantIn,
+  type VariantValues,
 } from "./wire.js"
 
 // 0 view, 1 text, 2 input, 3 surface, 4 list, 5 vector, 7 image — mirror
@@ -293,6 +298,10 @@ export interface HostNode {
   paragraphRev?: number
   /** The claim set sent for this node (`keymap`, `onPaste`...). */
   claims?: ClaimState
+  /** The state bits this scope last sent. */
+  sentBits?: bigint
+  /** The signature of the variant table last sent ("" none). */
+  sentVariants?: string
   /** `animate` calls not ended yet, oldest first (native keeps one tween
    * per property, so ends arrive in call order per property). */
   pendingAnims?: { prop: number; resolve: (end: AnimationEnd) => void }[]
@@ -386,7 +395,7 @@ function animValue(prop: AnimProp, to: unknown): number[] {
   }
   switch (prop) {
     case "transform": return [...transformMatrix(to as any)]
-    case "backgroundColor": case "borderColor": return [color(to as string | number)]
+    case "backgroundColor": case "borderColor": case "color": return [color(to as string | number)]
     case "padding": return nums(to, 4)
     case "gap": return nums(to, 2)
     default: return nums(to, 1)
@@ -400,7 +409,8 @@ function inheritSpan(parent: TextSpanIn, props: Record<string, any>): TextSpanIn
   return {
     start: 0,
     fontSize: props.fontSize !== undefined ? own.fontSize : parent.fontSize,
-    color: props.color !== undefined ? own.color : parent.color,
+    color: props.color !== undefined ? color(props.color) : parent.color,
+    inheritColor: props.color === undefined && parent.inheritColor,
     weight: props.fontWeight !== undefined ? own.weight : parent.weight,
     italic: props.fontStyle !== undefined ? own.italic : parent.italic,
     fontFamily: props.fontFamily !== undefined ? own.fontFamily : parent.fontFamily,
@@ -417,12 +427,16 @@ function decorationOf(line: unknown): number {
     (line.includes("line-through") ? DECORATION.lineThrough : 0)
 }
 
-/** The span a Text's own props describe (its base style). */
+/** The span a Text's own props describe (its base style). Its color is
+ * inherited: the Text's own `color` travels as COLOR, so a new color
+ * (or a variant's, or a tween) leaves the paragraph alone; white when
+ * nothing up the tree sets one. */
 export function spanStyle(props: Record<string, any>): TextSpanIn {
   return {
     start: 0,
     fontSize: props.fontSize ?? 14,
-    color: color(props.color, 0xffff_ffff),
+    color: 0xffff_ffff,
+    inheritColor: true,
     weight: typeof props.fontWeight === "number"
       ? props.fontWeight
       : props.fontWeight === "bold" ? 700 : 400,
@@ -435,7 +449,7 @@ export function spanStyle(props: Record<string, any>): TextSpanIn {
 }
 
 function sameSpan(a: TextSpanIn, b: TextSpanIn): boolean {
-  return a.fontSize === b.fontSize && a.color === b.color &&
+  return a.fontSize === b.fontSize && a.color === b.color && !!a.inheritColor === !!b.inheritColor &&
     a.weight === b.weight && !!a.italic === !!b.italic &&
     a.fontFamily === b.fontFamily && (a.decoration ?? 0) === (b.decoration ?? 0) &&
     (a.letterSpacing ?? 0) === (b.letterSpacing ?? 0) && (a.lineHeight ?? 0) === (b.lineHeight ?? 0)
@@ -545,6 +559,152 @@ export function onFrameStats(listener: (s: FrameStats) => void): () => void {
   }
 }
 
+/** A scope: an element whose state bits variants read (Pressable, a
+ * View with `group`). `node` is its host node, once created. */
+export interface ScopeRef {
+  node: HostNode | null
+}
+/** The scopes an element sees, nearest first (itself, when a scope). */
+export interface ScopeChain {
+  ref: ScopeRef
+  /** The `group` name: `_name` keys address this scope. */
+  name?: string
+  parent: ScopeChain | null
+}
+
+/** Custom states by name -> bit, in declaration order. */
+const customStates = new Map<string, number>()
+
+/** Declares custom states: each name gets the next free bit (54 at
+ * most). A custom state ranks below every built-in one, and a later
+ * one above an earlier one, when two variants tie on depth. */
+export function defineStates(names: readonly string[]) {
+  for (const name of names) {
+    if (customStates.has(name)) continue
+    if (name in STATE_BIT || name in ENV_BIT) throw Error(`state "${name}" is built in`)
+    if (customStates.size === CUSTOM_STATES) throw Error(`more than ${CUSTOM_STATES} custom states`)
+    customStates.set(name, customStates.size)
+  }
+}
+
+/** The state props a scope sets itself; the others are native's. */
+const APP_STATES = ["expanded", "selected", "checked", "highlighted", "disabled"] as const
+
+function stateBit(name: string): number | undefined {
+  return Object.hasOwn(STATE_BIT, name) ? STATE_BIT[name as keyof typeof STATE_BIT] : customStates.get(name)
+}
+
+/** A scope's app state bits: its built-in state props and `states`. */
+function stateBits(props: Record<string, any>): bigint {
+  let bits = 0n
+  for (const s of APP_STATES) if (props[s]) bits |= 1n << BigInt(STATE_BIT[s])
+  const custom = props.states as Record<string, boolean> | undefined
+  for (const name in custom) {
+    const bit = customStates.get(name)
+    if (bit === undefined) warnOnce(`unknown state "${name}" (declare it with defineStates)`)
+    else if (custom[name]) bits |= 1n << BigInt(bit)
+  }
+  return bits
+}
+
+function hasVariantKeys(props: Record<string, any>): boolean {
+  for (const k in props) if (k[0] === "_" && k[1] !== "_" && props[k]) return true
+  return false
+}
+
+/** A variant with its scopes unresolved: its `_` path's terms and
+ * environment, and the block of values at the end of the path. */
+interface PathVariant {
+  terms: Map<ScopeRef, bigint>
+  env: number
+  block: Record<string, any>
+}
+
+/** Flattens `_` keys depth first, in declaration order: nesting ANDs.
+ * A key names a state (of the scope in effect: the nearest, or one a
+ * scope key picked), an environment bit, or a `group` up the chain. */
+function flattenVariants(
+  props: Record<string, any>,
+  chain: ScopeChain | null,
+  out: PathVariant[] = [],
+  terms = new Map<ScopeRef, bigint>(),
+  env = 0,
+  scope = chain,
+): PathVariant[] {
+  for (const key in props) {
+    const block = props[key]
+    if (key[0] !== "_" || key[1] === "_" || !block || typeof block !== "object") continue
+    const name = key.slice(1)
+    let t = terms, e = env, s = scope
+    const bit = stateBit(name)
+    if (bit !== undefined) {
+      if (!scope) {
+        warnOnce(`${key} needs a scope: a Pressable or a View with group above`)
+        continue
+      }
+      t = new Map(terms)
+      t.set(scope.ref, (t.get(scope.ref) ?? 0n) | (1n << BigInt(bit)))
+    } else if (Object.hasOwn(ENV_BIT, name)) {
+      e |= ENV_BIT[name as keyof typeof ENV_BIT]
+    } else {
+      let c = chain
+      while (c && c.name !== name) c = c.parent
+      if (!c) {
+        warnOnce(`unknown variant key "${key}"`)
+        continue
+      }
+      s = c
+    }
+    out.push({ terms: t, env: e, block })
+    flattenVariants(block, chain, out, t, e, s)
+  }
+  return out
+}
+
+/** Variant block keys that apply; `_` keys nest. */
+const VARIANT_KEYS = new Set(["backgroundColor", "borderColor", "borderWidth", "borderRadius", "color", "style"])
+
+/** A variant block's values in wire form (`undefined`: none). Each
+ * layout key applies on its own, over the base and less specific
+ * variants. A hidden node (`hidden`, Suspense) stays hidden: variants
+ * set no `display` on it. */
+function variantValues(n: HostNode, block: Record<string, any>, hidden: boolean): VariantValues | undefined {
+  const v: VariantValues = {}
+  const boxed = n.kind !== 1
+  const style: StyleProps | undefined = block.style
+  for (const k in block) {
+    if (k[0] !== "_" && !VARIANT_KEYS.has(k)) warnOnce(`a variant does not apply "${k}" (LEDGER DF-29)`)
+  }
+  if (boxed) {
+    if (block.backgroundColor !== undefined) v.fill = color(block.backgroundColor)
+    if (block.borderColor !== undefined) v.borderColor = color(block.borderColor)
+    if (block.borderWidth !== undefined) v.borderWidth = block.borderWidth
+    if (block.borderRadius !== undefined) v.radius = block.borderRadius
+  } else if (["backgroundColor", "borderColor", "borderWidth", "borderRadius"].some(k => k in block)) {
+    warnOnce("a Text variant sets no box paint: wrap it in a View")
+  }
+  if (block.color !== undefined) {
+    if (n.kind === 2) warnOnce("a TextInput variant sets no color")
+    else v.color = color(block.color)
+  }
+  if (style?.opacity !== undefined) v.opacity = style.opacity
+  if (style?.transform !== undefined) v.transform = transformMatrix(style.transform)
+  if (style?.zIndex !== undefined) warnOnce("a variant does not apply style.zIndex (LEDGER DF-29)")
+  if (style?.transition !== undefined) warnOnce("a variant does not apply style.transition (LEDGER DF-22)")
+  const layout = layoutPart(style)
+  if (layout) {
+    const { transition: _, ...rest } = layout
+    if (hidden) delete rest.display
+    if (Object.keys(rest).length) v.layout = rest
+  }
+  return Object.keys(v).length ? v : undefined
+}
+
+/** A variant table's signature, for change detection. */
+function variantsKey(list: readonly VariantIn[]): string {
+  return list.length ? JSON.stringify(list, (_, x) => (typeof x === "bigint" ? x.toString(16) : x)) : ""
+}
+
 export class CraieHost {
   private nextId = 0
   private freeIds: number[] = []
@@ -614,6 +774,7 @@ export class CraieHost {
 
   private seal() {
     this.flushTexts()
+    this.flushVariants()
     if (this.windowDirty) {
       this.windowDirty = false
       this.sendClaims(NIL, this.windowClaims, this.windowDeclared())
@@ -712,6 +873,7 @@ export class CraieHost {
       // A hidden root is `display: none` natively and keeps its text, so
       // revealing it needs no recomposition; hidden nested Text drops out.
       if (n !== r && (n.suspended || n.props.hidden)) return
+      if (n !== r && hasVariantKeys(n.props)) warnOnce("a nested Text takes no variants: put them on the outer Text")
       const own = textOf(n.props)
       if (own) {
         // A piece that opens with the low half of a pair the text before
@@ -759,6 +921,36 @@ export class CraieHost {
       r.sentInteraction = interaction
       this.encoder.interaction(r.id, mask, !!r.props.focusable, !!r.props.selectable)
     }
+  }
+
+  /** Nodes whose variants may have changed in this commit. */
+  private dirtyVariants = new Set<HostNode>()
+
+  /** Sends each dirty node's variant table when its signature changed.
+   * Scopes resolve to ids here, once every node of the commit has one;
+   * a variant of a scope that is gone drops out. */
+  private flushVariants() {
+    for (const n of this.dirtyVariants) {
+      if (!n.mounted || n.textParent) continue
+      const list: VariantIn[] = []
+      const hidden = !!(n.props.hidden || n.suspended)
+      for (const p of flattenVariants(n.props, n.props.__scopes ?? null)) {
+        const values = variantValues(n, p.block, hidden)
+        if (!values) continue
+        const terms = []
+        for (const [ref, mask] of p.terms) {
+          if (!ref.node?.mounted) break
+          terms.push({ scope: ref.node.id, mask })
+        }
+        if (terms.length === p.terms.size) list.push({ terms, env: p.env, values })
+      }
+      const key = variantsKey(list)
+      if (key !== (n.sentVariants ?? "")) {
+        n.sentVariants = key
+        this.encoder.variants(n.id, list)
+      }
+    }
+    this.dirtyVariants.clear()
   }
 
   /** Sends pending ops and resolves once native acks the transaction. */
@@ -954,6 +1146,8 @@ export class CraieHost {
     n.spanOwners = undefined
     n.paragraphRev = 0
     n.claims = undefined
+    n.sentBits = undefined
+    n.sentVariants = undefined
     this.nodes.set(n.id, n)
     if (!this.ready()) return
     const enc = this.encoder
@@ -1103,6 +1297,8 @@ export class CraieHost {
     n.suspended = hidden
     const layout = layoutOf(n.props, n.suspended)
     if (styleKey(layout) !== before && this.ready()) this.encoder.layout(n.id, layout)
+    // Its variants' `display` stops (or resumes) applying.
+    if (n.sentVariants || hasVariantKeys(n.props)) this.dirtyVariants.add(n)
   }
 
   /** Prop diff -> ops for the fields that changed. */
@@ -1183,6 +1379,28 @@ export class CraieHost {
         )
       }
     }
+
+    // The inherited text color (an input's color is its own config).
+    if (n.kind !== 2 && n.kind !== 3) {
+      const oldC = mounted && oldProps.color !== undefined ? color(oldProps.color) : null
+      const newC = props.color !== undefined ? color(props.color) : null
+      if (oldC !== newC) enc.color(id, newC)
+    }
+
+    // A scope: its app state bits. It is one from its first STATES on.
+    const scope: ScopeRef | undefined = props.__scope
+    if (scope) {
+      scope.node = n
+      const bits = stateBits(props)
+      if (bits !== n.sentBits) {
+        n.sentBits = bits
+        enc.states(id, bits)
+      }
+    } else if (APP_STATES.some(k => props[k] !== undefined) || props.states !== undefined) {
+      warnOnce("state props need a scope: a Pressable or a View with group")
+    }
+    // Variants resolve at the seal, where every scope has an id.
+    if (n.sentVariants || hasVariantKeys(props)) this.dirtyVariants.add(n)
 
     if (!mounted && newTr !== "") enc.transition(id, props.style?.transition)
 

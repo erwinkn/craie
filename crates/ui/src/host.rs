@@ -298,6 +298,9 @@ pub struct Host {
     /// Font family names spans refer to (interned, grow-only).
     pub families: Vec<String>,
     pub interaction: Vec<Interaction>,
+    /// Nodes listening for pointer enter and leave: without them (and
+    /// hover variants), hover at rest need not hit-test.
+    pub hover_listeners: usize,
     pub labels: HashMap<u32, Box<str>>,
     /// Declared transitions per node (`animation.rs`), id-keyed: few
     /// nodes have any.
@@ -314,6 +317,8 @@ pub struct Host {
     vector_sources_swept: usize,
     /// Claim sets (`claims.rs`), id-keyed; NIL keys the window list.
     pub claims: HashMap<u32, crate::claims::ClaimSet>,
+    /// Inherited text colors (`COLOR`), id-keyed: few nodes set one.
+    pub colors: HashMap<u32, u32>,
     /// Item index of a list row (a child of a List node); NIL otherwise.
     pub list_index: Vec<u32>,
     /// List states and scroll anchors (§7).
@@ -374,6 +379,7 @@ impl Host {
             paragraphs: Vec::new(),
             families: Vec::new(),
             interaction: Vec::new(),
+            hover_listeners: 0,
             labels: HashMap::new(),
             transitions: HashMap::new(),
             surfaces: HashMap::new(),
@@ -382,6 +388,7 @@ impl Host {
             vector_sources: HashMap::new(),
             vector_sources_swept: 0,
             claims: HashMap::new(),
+            colors: HashMap::new(),
             list_index: Vec::new(),
             lists: crate::list::Lists::default(),
             orders: HashMap::new(),
@@ -560,6 +567,7 @@ impl Host {
         if kind == NodeKind::Text {
             p.spans.push(TextSpan::default());
         }
+        self.set_listeners(i, 0);
         self.interaction[i] = Interaction::default();
         self.labels.remove(&id.0);
         self.transitions.remove(&id.0);
@@ -567,6 +575,7 @@ impl Host {
         self.vectors.remove(&id.0);
         self.images.remove(&id.0);
         self.claims.remove(&id.0);
+        self.colors.remove(&id.0);
         self.orders.remove(&id.0);
         self.owners.remove(&id.0);
         self.list_index[i] = NIL;
@@ -678,12 +687,14 @@ impl Host {
         let p = &mut self.paragraphs[i];
         p.text = String::new();
         p.spans = Vec::new();
+        self.set_listeners(i, 0);
         self.labels.remove(&id.0);
         self.transitions.remove(&id.0);
         self.surfaces.remove(&id.0);
         self.vectors.remove(&id.0);
         self.images.remove(&id.0);
         self.claims.remove(&id.0);
+        self.colors.remove(&id.0);
         self.orders.remove(&id.0);
         self.owners.remove(&id.0);
         // Its layers lose their owner: a reuse of the id must not adopt
@@ -758,6 +769,31 @@ impl Host {
             .map(|_| &self.paragraphs[id.index()])
     }
 
+    /// The nearest inherited color: the node's own `COLOR` or its
+    /// nearest ancestor's.
+    pub fn inherited_color(&self, id: NodeId) -> Option<u32> {
+        if self.colors.is_empty() {
+            return None;
+        }
+        let mut cur = id;
+        while cur.is_node() {
+            if let Some(&c) = self.colors.get(&cur.0) {
+                return Some(c);
+            }
+            cur = self.parent(cur);
+        }
+        None
+    }
+
+    /// The color a span of text node `id` draws in.
+    pub fn span_color(&self, id: NodeId, s: &TextSpan) -> u32 {
+        if s.inherit_color {
+            self.inherited_color(id).unwrap_or(s.color)
+        } else {
+            s.color
+        }
+    }
+
     pub fn style(&self, id: NodeId) -> &LayoutRow {
         &self.layout[id.index()]
     }
@@ -771,6 +807,14 @@ impl Host {
 
     pub fn label(&self, id: NodeId) -> Option<&str> {
         self.labels.get(&id.0).map(|s| &**s)
+    }
+
+    /// Sets slot `i`'s listener mask, keeping `hover_listeners`.
+    pub fn set_listeners(&mut self, i: usize, listeners: u32) {
+        let hovers = |l: u32| (l & crate::events::mask::POINTER_ENTER_LEAVE != 0) as usize;
+        let l = &mut self.interaction[i].listeners;
+        self.hover_listeners = self.hover_listeners + hovers(listeners) - hovers(*l);
+        *l = listeners;
     }
 
     pub fn interaction(&self, id: NodeId) -> Interaction {

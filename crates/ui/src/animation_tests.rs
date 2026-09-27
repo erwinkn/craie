@@ -426,7 +426,7 @@ fn animation_ops_round_trip_and_validate() {
     let buf = wire::encode(&t);
     let at = buf.iter().rposition(|&b| b == wire::op::ANIMATE).unwrap();
     let mut prop = buf.clone();
-    prop[at + 5] = 8;
+    prop[at + 5] = Prop::COUNT as u8;
     assert!(ui.apply(&prop).is_err());
     let mut kind = buf.clone();
     kind[at + 5 + 1 + 4] = 2;
