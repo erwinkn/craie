@@ -151,10 +151,18 @@ struct GpuFrames {
     view: wgpu::TextureView,
     renderer: craie_render::Renderer,
     size: (u32, u32),
+    /// Held until the device is gone (fields drop in order), so the
+    /// tests' devices never overlap: the Vulkan validation layer can
+    /// crash when threads create and destroy devices concurrently, and
+    /// a shared device's queue could retire the other test's work inside
+    /// a measured phase.
+    _serial: std::sync::MutexGuard<'static, ()>,
 }
 
 impl GpuFrames {
     fn new() -> Option<GpuFrames> {
+        static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
         let gpu = craie_render::Gpu::try_headless()?;
         let format = wgpu::TextureFormat::Rgba8UnormSrgb;
         let (w, h) = (800u32, 600u32);
@@ -179,6 +187,7 @@ impl GpuFrames {
             view,
             renderer,
             size: (w, h),
+            _serial: serial,
         })
     }
 

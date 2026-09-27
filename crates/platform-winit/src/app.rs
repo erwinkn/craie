@@ -659,6 +659,7 @@ mod tests {
     /// (one world matrix uploaded) before drawing.
     #[test]
     fn native_input_reaches_the_frame_path() {
+        let _serial = crate::GPU_TESTS.lock().unwrap_or_else(|e| e.into_inner());
         let Some(gpu) = Gpu::try_headless() else {
             eprintln!("no GPU adapter: skipped");
             return;
@@ -734,6 +735,7 @@ mod publish_tests {
     /// the new bounds.
     #[test]
     fn native_reflow_publishes_after_the_frame() {
+        let _serial = crate::GPU_TESTS.lock().unwrap_or_else(|e| e.into_inner());
         let Some(gpu) = Gpu::try_headless() else {
             eprintln!("no GPU adapter: skipped");
             return;

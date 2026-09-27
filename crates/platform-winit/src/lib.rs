@@ -19,6 +19,12 @@ mod winit;
 
 use std::sync::{Arc, Mutex};
 
+/// Held by this crate's GPU tests, one at a time: the Vulkan validation
+/// layer can crash when test threads create and destroy devices
+/// concurrently (LEDGER, Closed).
+#[cfg(test)]
+pub(crate) static GPU_TESTS: Mutex<()> = Mutex::new(());
+
 use craie_core::{Rect, Size};
 use craie_ui::a11y::A11yShared;
 use craie_ui::events::Event;

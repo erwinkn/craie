@@ -283,6 +283,7 @@ mod tests {
     /// waiting for a frame.
     #[test]
     fn commit_events_go_out_without_a_frame() {
+        let _serial = crate::GPU_TESTS.lock().unwrap_or_else(|e| e.into_inner());
         if Gpu::try_headless().is_none() {
             eprintln!("no GPU adapter: skipped");
             return;

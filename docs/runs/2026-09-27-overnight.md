@@ -209,13 +209,21 @@ bug). A helper looped it on exe1 and read 13 core dumps:
 
 Every core's top frame is in the Khronos Vulkan validation layer
 (1.3.275, Ubuntu 24.04), which wgpu loads in debug builds. Each test
-made and dropped its own device, and while one thread was inside the
-layer's `vkCreateDevice` or `vkDestroyDevice`, another's call on its
-own device read freed layer state. So it's neither Craie's rendering
-code nor wgpu nor llvmpipe. The fix is in the tests (PR #9): each GPU
-test binary (`paths`, `gpu_uploads`, `images`) shares one device, and
-validation stays on. On the Mac, wgpu uses Metal, which has no such
-layer.
+made and dropped its own device. Most likely, while one thread was
+inside the layer's `vkCreateDevice` or `vkDestroyDevice`, another's
+call on its own device read freed layer state: one core catches a
+create and a destroy in flight around the crash, but it isn't matched
+to an upstream bug. It isn't Craie's rendering code, wgpu or llvmpipe.
+
+The fix is in the tests (PR #9), and validation stays on:
+- `paths`, `gpu_uploads` and `images` share one device per binary.
+- `allocations` and platform-winit's own tests take a lock, so their
+  devices never overlap. `allocations` measures allocations per phase,
+  and a shared queue could finish the other test's work inside one.
+
+After the fix, on exe1: `paths` 0 crashes in 200 runs, `gpu_uploads` 0
+in 100, `images` 0 in 100. On the Mac, wgpu uses Metal, which has no
+such layer.
 
 ## Next steps
 
