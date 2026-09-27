@@ -875,11 +875,13 @@ impl Ui {
         let s = &mut self.host.spatial[node.index()];
         let before = (s.transformed(), s.layered());
         let mut changed = false;
+        let mut moved = false;
         if let Some(t) = transform
             && s.transform != t
         {
             s.transform = t;
             changed = true;
+            moved = true;
         }
         if let Some(o) = opacity
             && s.opacity != o
@@ -890,7 +892,11 @@ impl Ui {
         if !changed {
             return;
         }
-        if before != (s.transformed(), s.layered()) {
+        let after = (s.transformed(), s.layered());
+        if moved {
+            self.host.touch(node);
+        }
+        if before != after {
             // A transform record or an opacity layer appears or goes:
             // the draw topology changes.
             self.host.revs.structure.bump();

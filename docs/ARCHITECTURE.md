@@ -106,13 +106,14 @@ crates/ui/              craie-ui: core, scene, text, Taffy, accesskit
   layout.rs             Taffy over host rows; moved/resized tracking
   scene_sync.rs         host + layout -> chunks, placements, records
   dispatch.rs           hit testing, focus, pointer capture, editing
+  reach.rs              hit-test index: reach box per subtree (E15)
   ui.rs                 facade; a11y.rs, input.rs, surface.rs, events.rs
   bridge.rs platform.rs Session (commit queue, outbox), platform contract
 crates/platform-winit/  winit 0.30 driver, Window, HostApp, clipboard,
                         fonts.rs (SystemFonts: fontique behind FontSource)
 crates/node/            N-API: NativeHost, NativeClient
 harness/invariants/     craie-harness: invariant, cost, graph tests; E01
-                        (Parley oracle), E10, E14
+                        (Parley oracle), E10, E14, E15
 assets/fonts/           pinned test fonts (OFL), `pinned-fonts` feature
 ```
 
@@ -960,8 +961,10 @@ zero layouts and zero shapes (asserted, `EXPERIMENTS.md` Step 4).
 ## 13. Input, focus, editing
 
 **Current.** Platform events normalize into `Event`s. `Ui::dispatch`
-hit tests through border boxes, ancestor clips, and scroll offsets, then
-walks the propagation path with listener-relative coordinates. Pointer
+hit tests through border boxes, ancestor clips, and scroll offsets,
+skipping any subtree whose reach (a box around everything it can hit,
+kept lazily; `reach.rs`, E15) misses the point, then walks the
+propagation path with listener-relative coordinates. Pointer
 capture holds a drag on the pressed node. Tab traverses focusable nodes
 in tree order. Clipboard via arboard. IME with cursor-area tracking.
 A pointer event on a text node carries the span under the pointer (key
@@ -997,7 +1000,8 @@ movement without a React round trip.
 
 **Decisions.**
 - Listener-relative coordinates stay.
-- No BVH or R-tree for ordinary UI.
+- No BVH or R-tree for ordinary UI: a reach box per subtree prunes the
+  hit test 12 to 236 times (E15), and the full walk stays as its oracle.
 
 ## 14. Accessibility
 

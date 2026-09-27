@@ -266,7 +266,15 @@ straightforward walk is both the baseline and the oracle.
   nodes. Measure the time per event, the allocations, and the memory and
   update cost of each index. An index ships only where it beats the walk
   on the realistic cases and costs less to keep up than it saves
-  (principle 7). The walk stays as its oracle (principle 6).
+  (principle 7). The walk stays as its oracle (principle 6). Measured
+  (`EXPERIMENTS.md`, E15): the hit test takes the first candidate, a
+  reach box per subtree kept lazily (one stale bit, refreshed before
+  dispatch), 12 to 236 times faster than the walk (5 to 50 µs a pointer
+  move at 100k nodes, from 0.7 to 1.3 ms), with upkeep at 3 to 30
+  percent of the layout pass that caused it and 16 bytes per node.
+  Propagation paths no longer allocate. Tab stays a walk (under 0.7 ms
+  at 100k nodes, once per keypress); the key walk with no focus goes
+  away with claims' window list (item 1), so neither gets an index.
 
 ## 5. State styles
 
@@ -854,7 +862,7 @@ Changes: §15, §16.
 | §9 Decisions | "SVG imports at build time only" | SVG documents at build time; path data parsed at runtime |
 | §12 Current | Transforms interpolate by matrix decomposition | Transform parts, composed in CSS order |
 | §12 Decisions | "First values at mount do not tween" | Kept for transitions; `enter` covers mount; scroll timelines join the clock |
-| §13 Decisions | "No BVH or R-tree for ordinary UI" | Reopened only through E15 |
+| §13 Decisions | "No BVH or R-tree for ordinary UI" | Kept; E15 adds a reach box per subtree that prunes the hit test |
 | §13 behavior | Escape blurs inputs; Tab and Enter act before JS; presses reach every listener | Claims, input policies, focus traps and groups, innermost press, one activate |
 | §15 Target | No device-loss handling | Rebuild the device and upload everything again |
 | Non-goals | "Inline formatting context" | Inline boxes that break across lines, and floats |

@@ -83,6 +83,10 @@ pub struct Ui {
     pub(crate) sync: SceneSync,
     /// `ScrollTo` commands waiting for the layout after their batch.
     pub(crate) pending_scrolls: Vec<(NodeId, f32, f32)>,
+    /// Each node's hit-test reach, by id (`reach.rs`).
+    pub(crate) reach: Vec<crate::reach::Bounds>,
+    /// Scratch stack for tree walks during dispatch.
+    pub(crate) walk: Vec<NodeId>,
     /// Display scale factor (physical / logical).
     pub scale: f32,
     /// Background clear color, 0xRRGGBBAA.
@@ -134,6 +138,8 @@ impl Ui {
             relayout: false,
             sync,
             pending_scrolls: Vec::new(),
+            reach: Vec::new(),
+            walk: Vec::new(),
             scale,
             clear: 0x1415_18FF,
             seq: 0,
@@ -385,6 +391,7 @@ impl Ui {
             return None;
         }
         self.host.spatial[id.index()].scroll = next;
+        self.host.touch(id);
         self.host.revs.transform.bump();
         self.host.dirty.spatial.push(id.0);
         self.a11y_stale = true;
