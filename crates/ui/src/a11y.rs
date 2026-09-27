@@ -14,12 +14,13 @@ use std::sync::{Arc, Mutex};
 
 use accesskit::{
     Action, ActionRequest, ActivationHandler, DeactivationHandler, Node, NodeId as A11yId,
-    Rect as A11yRect, Role, TreeId, TreeInfo, TreeUpdate,
+    Rect as A11yRect, Role, Toggled, TreeId, TreeInfo, TreeUpdate,
 };
 
 use crate::geom::Size;
 use crate::host::{NodeId, ROOT};
-use crate::mutation::{NIL, NodeKind, Role as UiRole};
+use crate::mutation::{NIL, NodeKind, Role as UiRole, reported};
+use crate::states::state_bit;
 use crate::ui::Ui;
 
 /// The AccessKit role for a Craie role.
@@ -39,6 +40,8 @@ fn ak_role(role: UiRole) -> Role {
         UiRole::List => Role::List,
         UiRole::ListItem => Role::ListItem,
         UiRole::Group => Role::Group,
+        UiRole::Switch => Role::Switch,
+        UiRole::RadioButton => Role::RadioButton,
     }
 }
 
@@ -135,7 +138,8 @@ impl Ui {
     ///
     /// The role comes from the node's role field only; the facade sets
     /// defaults (Pressable, TextInput, ScrollView, Text). Content (text,
-    /// input value) and behavior (scroll actions) come from the node.
+    /// input value) and behavior (scroll actions) come from the node;
+    /// states (checked, expanded, selected, disabled) from its scope bits.
     fn a11y_node(&self, id: NodeId, out: &mut Vec<(A11yId, Node)>) -> Option<A11yId> {
         let node = self.host.node(id)?;
         let style = self.host.style(id);
@@ -150,9 +154,24 @@ impl Ui {
         let scroll_y = overflow.y == taffy::Overflow::Scroll;
 
         let mut an = Node::new(ak_role(props.role));
+        let bits = self.state_bits(id);
         match props.role {
-            UiRole::Button | UiRole::Link | UiRole::CheckBox => an.add_action(Action::Click),
+            UiRole::Button | UiRole::Link => an.add_action(Action::Click),
+            // A check role is always checked or not: a clear bit (or no
+            // `checked` prop) reads unchecked.
+            UiRole::CheckBox | UiRole::Switch | UiRole::RadioButton => {
+                an.add_action(Action::Click);
+                an.set_toggled(Toggled::from(bits & state_bit::CHECKED != 0));
+            }
             _ => {}
+        }
+        // Expanded and selected only where the prop was given: a plain
+        // button is neither collapsed nor unselected.
+        if props.reported & reported::EXPANDED != 0 {
+            an.set_expanded(bits & state_bit::EXPANDED != 0);
+        }
+        if props.reported & reported::SELECTED != 0 {
+            an.set_selected(bits & state_bit::SELECTED != 0);
         }
         if let Some(p) = self.host.paragraph(id) {
             an.set_value(p.text.clone());
@@ -184,7 +203,7 @@ impl Ui {
         if let Some(label) = self.host.label(id) {
             an.set_label(label.to_string());
         }
-        if self.state_bits(id) & crate::states::state_bit::DISABLED != 0 {
+        if bits & state_bit::DISABLED != 0 {
             an.set_disabled();
         }
         let r = self.abs_rect(id);

@@ -224,6 +224,8 @@ pub struct Interaction {
     /// Its text descendants (itself included) form one selection domain.
     pub selectable: bool,
     pub role: Role,
+    /// States reported while clear (`mutation::reported`).
+    pub reported: u8,
 }
 
 /// A surface node's retained data: kind, parameters, and payload bytes.

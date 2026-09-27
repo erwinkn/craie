@@ -1153,7 +1153,9 @@ movement without a React round trip.
 **Current.** `a11y.rs` projects an AccessKit tree from retained state.
 Roles come from the explicit role field; the facade sets defaults
 (Pressable, TextInput, ScrollView, Text, List, list rows) and a plain
-View has none. A list row reports its position among all items and the
+View has none. States come from a scope's bits: the check roles report
+`checked`, and `expanded` and `selected` appear where the facade says
+the prop was given (ARCHITECTURE-update §13). A list row reports its position among all items and the
 item count; rows appear in item order, and rows layout hides are not
 published.
 Bounds are transform-aware. The whole tree still republishes on any
@@ -1256,9 +1258,10 @@ event loop, the window, the device, or the render target.
 One threadsafe function delivers `ack | events` frames. JS recycles
 ids at once and mirrors each slot's generation; events carry the
 generation and JS drops stale ones; the ack resolves `flush()`.
-Payload ops copy typed-array bytes once. Protocol version 5 (36-byte
+Payload ops copy typed-array bytes once. Protocol version 6 (36-byte
 event records and claims since 4; inherited color in drawings and
-inputs since 5). The session hands JS its output in native
+inputs since 5; the `switch` and `radio` roles and the ROLE op's
+reported states since 6). The session hands JS its output in native
 order: acks sit between event frames where they happened, so the ack
 of a transaction never overtakes an event raised before it applied,
 and the facade retires a claim set's old handlers on that ack.

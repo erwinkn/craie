@@ -7,7 +7,7 @@ use craie_ui::claims::{Claim, chord_flag, claim_kind};
 use craie_ui::events::{Key, Mods};
 use craie_ui::host::NodeId;
 use craie_ui::input::SubmitKey;
-use craie_ui::mutation::{Mutation, NodeKind, Role};
+use craie_ui::mutation::{Mutation, NodeKind, Role, reported};
 use craie_ui::states::layout_key;
 use craie_ui::surface;
 use craie_ui::ui::Ui;
@@ -68,6 +68,10 @@ fn js_fixture_decodes_and_executes() {
     assert_eq!(i.listeners, 0x1ff);
     assert!(i.focusable);
     assert_eq!(i.role, Role::MultilineTextInput);
+    assert_eq!(i.reported, 0);
+    // The root: a switch reporting expanded and selected while clear.
+    let r = host.interaction(NodeId(0));
+    assert_eq!((r.role, r.reported), (Role::Switch, reported::ALL));
     // `setText` leaves the caret at the start, so the insert lands first.
     assert_eq!(ui.inputs.text(2), "!seed");
     assert_eq!(ui.inputs.get(2).unwrap().submit, SubmitKey::ModEnter);

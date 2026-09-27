@@ -17,6 +17,7 @@ import {
   EVENT_MASK,
   FIT,
   NIL,
+  REPORTED,
   ROLE,
   SUBMIT_KEY,
   parseChord,
@@ -509,6 +510,15 @@ function roleOf(props: Record<string, any>): number {
   const v = ROLE[r]
   if (v === undefined) throw Error(`unknown accessibilityRole "${r}"`)
   return v
+}
+
+/** The states a scope reports while false: `expanded` and `selected`
+ * when the prop was given, so `expanded={false}` reads "collapsed" and a
+ * plain button reads neither. (`checked` goes with the check roles.) */
+function reportedOf(props: Record<string, any>): number {
+  if (!props.__scope) return 0
+  return (props.expanded !== undefined ? REPORTED.expanded : 0) |
+    (props.selected !== undefined ? REPORTED.selected : 0)
 }
 
 function f32bits(v: number): number {
@@ -1575,7 +1585,9 @@ export class CraieHost {
 
     const oldRole = mounted ? roleOf(oldProps) : ROLE.none
     const newRole = roleOf(props)
-    if (oldRole !== newRole) enc.role(id, newRole)
+    const oldReported = mounted ? reportedOf(oldProps) : 0
+    const newReported = reportedOf(props)
+    if (oldRole !== newRole || oldReported !== newReported) enc.role(id, newRole, newReported)
 
     const oldLabel = oldProps.accessibilityLabel ?? ""
     const newLabel = props.accessibilityLabel ?? ""

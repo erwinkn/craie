@@ -37,11 +37,11 @@ use crate::states::{TermDecl, Values, VariantDecl, layout_key, value_field};
 
 use crate::mutation::{
     Anchor, Claim, Command, ItemDesc, ItemTemplate, Mutation, NIL, NodeKind, Role, SubmitKey,
-    TextSpan, Transaction,
+    TextSpan, Transaction, reported,
 };
 
 pub const MAGIC: u32 = 0x3257_5243; // "CRW2"
-pub const VERSION: u16 = 5;
+pub const VERSION: u16 = 6;
 
 pub mod op {
     // structure
@@ -61,6 +61,7 @@ pub mod op {
     pub const PARAGRAPH: u8 = 0x40;
     pub const INPUT_CONFIG: u8 = 0x41;
     // semantics
+    /// id u32 | role u8 | reported u8 (`mutation::reported`)
     pub const ROLE: u8 = 0x50;
     pub const LABEL: u8 = 0x51;
     // interaction
@@ -508,10 +509,11 @@ pub fn encode(txn: &Transaction<'_>) -> Vec<u8> {
                 u32le(&mut ops, s);
                 ops.push(*multiline as u8 | (*submit as u8) << input_flag::SUBMIT_SHIFT);
             }
-            Mutation::Role { id, role } => {
+            Mutation::Role { id, role, reported } => {
                 ops.push(op::ROLE);
                 u32le(&mut ops, *id);
                 ops.push(*role as u8);
+                ops.push(*reported);
             }
             Mutation::Label { id, text } => {
                 let s = strings.get(text);
@@ -1092,7 +1094,11 @@ pub fn decode(buf: &[u8]) -> Result<Transaction<'_>, WireError> {
             op::ROLE => {
                 let id = r.u32()?;
                 let role = Role::from_u8(r.u8()?).ok_or(WireError::BadRef("role"))?;
-                Mutation::Role { id, role }
+                let reported = r.u8()?;
+                if reported & !reported::ALL != 0 {
+                    return Err(WireError::BadRef("reported states"));
+                }
+                Mutation::Role { id, role, reported }
             }
             op::LABEL => Mutation::Label {
                 id: r.u32()?,

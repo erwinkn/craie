@@ -41,6 +41,8 @@ pub mod state_bit {
     pub const DISABLED: u64 = 1 << 63;
     /// Owned by native: `STATES` may not set them.
     pub const INPUT: u64 = HOVER | FOCUS_WITHIN | FOCUS_VISIBLE | FOCUS_VISIBLE_WITHIN | PRESSED;
+    /// Reported to assistive technology (`a11y.rs`).
+    pub const A11Y: u64 = EXPANDED | SELECTED | CHECKED | DISABLED;
 }
 
 /// Environment bits (the window's). Their rank is 64 + bit index.
@@ -655,7 +657,7 @@ impl Ui {
         s.app = bits;
         st.queue_dependents(id);
         // Assistive technology reports it.
-        if changed & state_bit::DISABLED != 0 {
+        if changed & state_bit::A11Y != 0 {
             self.host.revs.semantic.bump();
             self.host.dirty.semantic.push(id);
         }

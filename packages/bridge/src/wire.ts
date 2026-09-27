@@ -14,7 +14,7 @@
 // across transactions.
 
 const MAGIC = 0x3257_5243 // "CRW2" little-endian
-export const VERSION = 5
+export const VERSION = 6
 export const NIL = 0xffff_ffff // no node / append / default style
 
 const enum Op {
@@ -187,8 +187,14 @@ export const ROLE = {
   list: 11,
   listItem: 12,
   group: 13,
+  switch: 14,
+  radio: 15,
 } as const
 export type AccessibilityRole = keyof typeof ROLE
+
+/** States a node reports while false, set when the prop was given —
+ * mirror mutation.rs `reported`. */
+export const REPORTED = { expanded: 1, selected: 2 } as const
 
 /** Built-in surface kinds — mirror surface.rs `kind`. */
 export const SURFACE = { bars: 1 } as const
@@ -989,10 +995,12 @@ export class Encoder {
     this.ops.u32(s)
     this.ops.u8((multiline ? 1 : 0) | submit << 1)
   }
-  role(id: number, role: number) {
+  /** The role, and the states it reports while false (`REPORTED`). */
+  role(id: number, role: number, reported = 0) {
     this.ops.u8(Op.Role)
     this.ops.u32(id)
     this.ops.u8(role)
+    this.ops.u8(reported)
   }
   /** Accessibility name (empty string clears it). */
   label(id: number, text: string) {

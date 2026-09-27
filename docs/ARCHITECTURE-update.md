@@ -1173,6 +1173,20 @@ no scrollbars and scrolls only on wheel events.
 
 Changes: §14. Related: `LEDGER.md` DF-1 (per-cluster text runs).
 
+**Current.** Roles up to `switch` and `radio` (protocol 6). States come
+from a scope's bits: the check roles (`checkbox`, `switch`, `radio`)
+always report `checked` as AccessKit toggled, and take a click, so
+`<Pressable accessibilityRole="checkbox" checked={on}>` reads "checkbox,
+unchecked" until `on`. `expanded` and `selected` are reported where the
+prop was given: the ROLE op carries a `reported` byte the facade sets
+from `props.expanded !== undefined` and `props.selected !== undefined`,
+so `expanded={false}` reads "collapsed" and a plain button reads
+neither (a bit alone can't tell `false` from absent). `checked` on other
+roles stays a styling state; `disabled` reads disabled. A change to any
+of these bits marks the node semantic-dirty like a label change. Not
+yet: mixed (the kit's `CheckInputProps` has none), pressed (toggle
+buttons), and the other states below.
+
 **Target.** Roles for the kit's full role set. States: checked (and
 mixed), selected, expanded, pressed, disabled, busy, invalid, required,
 read-only, current, modal and the popup type. Relations by node reference:

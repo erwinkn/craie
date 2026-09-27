@@ -204,10 +204,18 @@ export interface VariantStyle {
  * variants that hold, the more specific one wins per property. */
 export type Variants = { [key: `_${string}`]: (VariantStyle & Variants) | undefined }
 
-/** The states a scope sets (hover, press and focus are native's). */
+/** The states a scope sets (hover, press and focus are native's).
+ * Assistive technology reads them too: `checked` on the check roles
+ * (`checkbox`, `switch`, `radio`; absent reads unchecked), `expanded`
+ * and `selected` wherever the prop is given (`expanded={false}` reads
+ * collapsed; without the prop, neither), and `disabled`. */
 export interface StateProps {
+  /** Selected, or not when given `false` (a tab, a list option). */
   selected?: boolean
+  /** Expanded, or collapsed when given `false` (a menu trigger, a
+   * disclosure). */
   expanded?: boolean
+  /** Checked, on the check roles; on others a styling state only. */
   checked?: boolean
   highlighted?: boolean
   /** Also masks hover and press, and stops `onPress`. */
@@ -236,7 +244,9 @@ export interface ViewProps extends ListenerProps, StateProps, Variants {
   focusable?: boolean
   /** Accessibility name announced by assistive technology. */
   accessibilityLabel?: string
-  /** Accessibility role; a plain View has none. */
+  /** Accessibility role; a plain View has none, a Pressable is a
+   * `button`. The check roles (`checkbox`, `switch`, `radio`) report
+   * `checked` and take a click, like `button` and `link`. */
   accessibilityRole?: AccessibilityRole
   /** Sends `display: none`. */
   hidden?: boolean
