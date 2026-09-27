@@ -73,8 +73,8 @@ Times are UTC.
 
 ## Numbers
 
-Full tables in `docs/EXPERIMENTS.md`. All on exe1 (llvmpipe, loaded);
-the Mac's are in the follow-up below.
+Full tables in `docs/EXPERIMENTS.md`. On exe1 (llvmpipe, loaded) unless
+marked Mac; the Mac's are in the follow-up's Numbers.
 
 E19, click to drawn (GPU done), headless, ms (p50 / p95 / p99), and
 the JS part alone (native dispatch to React's commit, p50 / p99):
@@ -88,7 +88,7 @@ the JS part alone (native dispatch to React's commit, p50 / p99):
 
 JS is quick, garbage-collection pauses set its tail, and on exe1 the
 rest is llvmpipe rasterizing. On the Mac the idle round trip is
-1.01 / 1.19 / 1.24 ms (The Mac, below).
+1.01 / 1.19 / 1.24 ms (the follow-up's Numbers).
 
 E15, µs per pointer move's hit test, the full walk against the reach
 index (speedup):
@@ -154,7 +154,8 @@ loaded). Each PR has the full table and says what it means:
     (window shortcuts are claims); `mod+y` redoes (it undid).
 
 - Tonight's wire changes all stay protocol 4: it is unreleased, so
-  one bump covers the night (the morning's #12 bumps to 5). Each
+  one bump covers the night (the morning's #12 bumps to 5, and #14
+  to 6). Each
   track owns a range of op tags, node kinds and event kinds, so the
   branches merge without renumbering:
   sibling z takes ops 0x22–0x2F and node kind 6, vectors and images
@@ -256,48 +257,68 @@ and each carries its load average.
   leak.** `list_frames_do_not_allocate` made 57 allocations against
   56, and `whole_frame_budgets` 127 against 125, both in
   `harness/invariants/tests/allocations.rs`. The budget for wgpu's
-  share of a frame was a flat cost per pass, measured once on wgpu 27.
-  wgpu 30's cost has three parts: a fixed cost per frame, a cost per
-  opacity layer (the layer's pass, its composite, and the parent's
-  pass resumed after it), and each pass's command list, a `Vec` that
-  starts at 4 and doubles, so it grows with the log of the pass's
-  commands. The fixed costs differ by backend:
+  share of a frame was 56 per frame plus 23 per extra pass, measured
+  on wgpu 27 at one draw count. wgpu 30's cost has three parts:
+  - a fixed cost per frame;
+  - a cost per opacity layer (the layer's pass, its composite, and
+    the parent's pass resumed after it);
+  - each pass's command list: a `Vec` that starts at 4 and doubles.
+    A pass records its draws plus 3 setup commands, and a list of up
+    to 4 commands costs 1 allocation, 5 to 8 costs 2, 9 to 16 costs
+    3, and so on.
 
-  | backend | per frame | per layer (1 to 5 layers) |
-  | --- | --- | --- |
-  | Metal (the Mac) | 53 | 62 to 70 |
-  | Vulkan (exe1, llvmpipe) | 49 | 47 to 54 |
+  The fixed costs differ by backend:
 
-  For example, the opacity-0.5 frame on Metal is four passes of 5, 4,
-  3 and 10 commands, whose lists cost 2 + 1 + 1 + 3: 53 + 67 + 7 =
-  127. The budget allows the most a layer costs, 70, so 130.
-  Single-pass frames are exact on both machines. One extra allocation
-  per frame, per pass or per draw fails both tests on both, and
-  Craie's own phases still allocate nothing.
+  | backend | per frame | first layer | each layer, 1 to 5 layers |
+  | --- | --- | --- | --- |
+  | Metal (the Mac) | 53 | 67 | 62 to 70 |
+  | Vulkan (exe1, llvmpipe) | 49 | 50 | 47 to 54 |
 
-  The first version of this section said each pass that crossed 16
-  draws added one allocation (+1 on the list frame, +2 on the
-  four-pass frame). That was wrong: the four-pass frame draws 11
-  times in all, and its extra is wgpu's own work per pass.
-- **The high E19 times Erwin saw were two bugs in the probe, not in
-  Craie.**
+  For example, the opacity-0.5 frame has four passes: the parent
+  before the layer, the layer, the composite, and the parent resumed.
+  They record 5, 4, 3 and 10 commands, whose lists cost 2 + 1 + 1 +
+  3 = 7. On Metal that's 53 + 67 + 7 = 127; the budget allows the
+  most a layer costs, 70, so 130. Single-pass frames are exact on
+  both machines. One extra allocation per frame, per pass or per draw
+  fails both tests on both, and Craie's own phases still allocate
+  nothing.
+
+  #13's version of this section said each pass past 16 draws added
+  one allocation (+1 on the list frame, +2 on the four-pass frame).
+  That was half wrong. The list frame's +1 is its command list (16
+  draws are 19 commands, past 16; the step is at 14 draws, not 16).
+  But the four-pass frame draws only 11 times, and its +2 is wgpu's
+  own work per pass.
+- **The high E19 times were two bugs in the probe, not in Craie.**
+  The Mac thread reproduced them in its own shell (an agent's);
+  whether timers in a terminal Erwin opens wake as late wasn't
+  measured. The CPU-only examples were never high.
   - Native and JS stamps read different clocks. The probe read
     `CLOCK_UPTIME_RAW`, which stops while the Mac sleeps; Node's
     doesn't. After 16.35 hours of sleep, every phase that joins the
     two sides was off by that much: idle "js" read 58,876,521 ms. The
     probe reads Node's clock now (`CLOCK_MONOTONIC_RAW`), and
-    `report.py` rejects any stamp out of order.
+    `report.py` exits with an error when any JS stamp falls outside
+    native dispatch → apply.
   - The probe's own timers woke late. In the agent's shell, a 30 to
-    70 ms sleep woke 37 to 141 ms late at the median (macOS coalesces
-    timers), and E19 counted that as the click waiting for native.
-    With the probe on, macOS now spins to each deadline. Linux timers
-    weren't late, so Linux still sleeps.
+    70 ms sleep woke 37 to 82 ms late at the median and up to 150 ms
+    (macOS coalesces timers), and neither QoS nor `mach_wait_until`
+    helped. E19
+    counted that as the click waiting for native. With the probe on,
+    macOS now spins to each deadline. Linux timers weren't late, so
+    Linux keeps its timed waits.
 
-  With both fixed, the Mac answers a click in about a millisecond
-  headless and 0.3 ms windowed (Numbers, below).
-- **On the Mac, the full suite passes**: `cargo test --workspace`
-  (404 tests, the pixel tests on Metal included), `ci.sh`, and the
-  smoke test with the signed addon.
+  Headless idle round trip p50 / p95 went from 23.85 / 124.67 ms to
+  1.01 / 1.19 ms, and windowed from 34.85 / 74.85 ms to 0.29 /
+  0.41 ms. The two end at
+  different points: headless when the GPU finishes the frame,
+  windowed when `present` returns. The display then adds up to one
+  refresh, which E19 doesn't measure.
+- **On the Mac, at f1fb16e** (before #14 was merged in, so 404 tests,
+  not 411): `cargo test --workspace`, the pixel tests on Metal
+  included, and `ci.sh` pass. The smoke test, with the ad-hoc-signed
+  addon, passed earlier, at protocol 5. The merged tree was verified
+  on exe1.
 - **Marbre's side of the scope decisions is done.** Marbre already
   cut scopes at layers (marbre#22), and its spec now says so
   (marbre#27).
@@ -343,14 +364,18 @@ and each carries its load average.
   (#12), as Marbre web's `.m-input` does with `color: inherit`.
 - **Accessibility states reach assistive technology** (#14, protocol
   6). Marbre asked whether its `CheckInput` is a scope in Craie. It
-  is, since it builds on `Pressable`, which always is. But checking
-  showed that only `disabled` reached AccessKit: a checkbox had no
-  checked state, and `expanded` and `selected` were never sent. Now
-  `<Pressable accessibilityRole="checkbox" checked={on}>` reads as
-  "checkbox, checked" or "unchecked", and `switch`, `radio` and
-  `radiogroup` are roles. `expanded` and `selected` are reported only
-  where the prop was given, so a plain button isn't announced as
-  "collapsed": the facade tells native which props were given (a
+  will be: its Craie adapter will build it on `Pressable`, which
+  always is. But checking showed that only `disabled` reached
+  AccessKit (the Rust library that talks to VoiceOver and AT-SPI): a
+  checkbox had no checked state, and `expanded` and `selected` were
+  never sent. Now
+  `<Pressable accessibilityRole="checkbox" checked={on}>` is exposed
+  as a checked or unchecked checkbox (VoiceOver would say "checkbox,
+  unchecked", by AccessKit's mapping; no screen reader was tried),
+  and `switch`, `radio` and `radiogroup` are roles. `expanded` and
+  `selected` are reported only where the prop was given, so a plain
+  button isn't announced as "collapsed" (on Windows and iOS; see
+  Known gaps): the facade tells native which props were given (a
   byte on the ROLE op). `selected` is reported on list rows only, as
   Marbre web limits `aria-selected` to selectable roles: the kit also
   uses `selected` to style checkboxes and radios, which a screen
@@ -388,7 +413,8 @@ and each carries its load average.
   bump. The change only adds a kind, and no reader outside this repo
   was found.
 - `ci.sh` lints only the host's cfg. The macOS and wasm cfgs ran clean
-  by hand (#10); running `ci.sh` on the Mac covers macOS.
+  by hand (#10), and `ci.sh` ran clean on the Mac in #15 (at
+  f1fb16e).
 - During #10, one `cargo test --workspace` run timed out in
   `commit_events_go_out_without_a_frame`, and the binary then crashed
   (SIGSEGV) at exit. #11 fixed the timeout; the crash at exit is
@@ -396,18 +422,8 @@ and each carries its load average.
 
 ### Numbers
 
-Inherited color, on exe1 (release, CPU only; medians and best of 14
-runs at load 36 to 55; `docs/EXPERIMENTS.md`, state styles), 1,000
-dependents each: a fill hover 380 µs (best 134), `currentColor` icons
-250 (89), inheriting labels 146 (47). None allocates, lays out, or
-rebuilds any part of the scene. The overnight fill-hover row (116 µs)
-ran at load 10, so compare within this run: icons cost about two
-thirds of a fill hover. These ran before a review fix (R12-04) that
-removed a scan over each drawing's items, so the icon number is an
-upper bound.
-
-On the Mac (M5 Max, release, AC power; load average per row), against
-exe1 (`docs/EXPERIMENTS.md` has every table):
+The Mac (M5 Max, release, AC power) against exe1, load average in
+each cell (`docs/EXPERIMENTS.md` has every table):
 
 | What | exe1 | Mac |
 | --- | --- | --- |
@@ -415,13 +431,21 @@ exe1 (`docs/EXPERIMENTS.md` has every table):
 | E19 headless stream + gc | 80.0 / 135.2 / 178.8 ms (load 13 to 15) | 1.39 / 8.73 / 9.46 ms (load 3.0 to 3.6) |
 | E19 windowed idle, to `present` | 7.8 / 16.3 / 21.5 ms (Xvfb, load 13 to 15) | 0.29 / 0.41 / 0.51 ms (load 9 to 12) |
 | Hover, 1,000 dependents | 116 µs (load 10) | 74 µs (load 10 to 17) |
-| Inherited color, 1,000 each: fill / icons / labels | 380 / 250 / 146 µs (load 36 to 55, before R12-04) | 73.7 / 35.2 / 20.5 µs (load 10 to 17) |
+| Inherited color, 1,000 each: fill / icons / labels | 380 / 250 / 146 µs (load 36 to 55)¹ | 73.7 / 35.2 / 20.5 µs (load 10 to 17) |
+
+¹ Medians of 14 runs, before a review fix (R12-04) removed a scan
+over each drawing's items, so the icon number is an upper bound. The
+load was high, so compare within the row: on exe1 the fill hover here
+is 380 µs, against 116 at load 10 in the row above.
 
 The E19 round trip is 11 to 58 times shorter at p50: on exe1 native
 was the bottleneck (llvmpipe rasterizing), and on the Mac a click
 rarely waits for it. Headless under stream, the Mac's p95 of about
 9 ms is the loop's own 120 Hz pacing: the answer waits for the next
-frame slot. The CPU-only benchmarks ran 1.2 to 10 times as fast as on
+frame slot. Windowed looks faster than headless because it stops
+earlier: at `present` returning, while headless waits for the GPU to
+finish an 1800 × 1400 frame. The display adds up to one refresh after
+`present`, which E19 doesn't measure. The CPU-only benchmarks ran 1.2 to 10 times as fast as on
 exe1, mostly about twice, and their conclusions held. The PR #15
 review reran E19 on exe1 with the Mac's spinning probe: within
 exe1's usual spread, so the two tables compare.
@@ -471,8 +495,18 @@ On the Mac (exe1 can't link, sign or use a real GPU):
   - `cargo run --release -p craie-harness --example zorder`
   - `cargo run --release -p craie-harness --example states_restyle`
   - `cargo run --release -p craie-platform-winit --example images`
+- Whether a terminal Erwin opens delays timers as much as the agent's
+  shell did (the second E19 bug).
+- Time to photons: E19 stops at `present` returning, and the frame
+  reaches the display up to one refresh later.
 - Give touch and reduced motion a platform source (DF-25; the setters
   exist, with a TODO(macOS) in `app.rs`).
+
+In Marbre:
+- The Craie `CheckInput` adapter (`check-input.craie.ts`, only a
+  declaration today) builds on `Pressable` and passes `checked` and
+  `accessibilityRole`, so its checkboxes, switches and radios reach
+  assistive technology.
 
 Work items not started:
 - Item 3: focus traps, modals and inert content. This also covers Tab

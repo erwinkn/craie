@@ -40,7 +40,7 @@ than on loaded exe1, mostly about twice as fast (1.2 to 10 times).
   such rows.
 - The probe waited on timers that woke late. In the shell these runs
   came from (a background agent's), a plain 30 to 70 ms sleep woke 37 to
-  141 ms late at the median and up to 150 ms late (macOS timer
+  82 ms late at the median and up to 150 ms late (macOS timer
   coalescing). Nor did the usual remedies help: in 60 sleeps of 30 to
   70 ms each, the median wake was 37 ms late plain, 55 ms with a
   latency-critical `NSProcessInfo` activity, 141 ms at user-interactive
