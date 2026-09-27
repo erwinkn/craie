@@ -1,8 +1,10 @@
 //! Runtime SVG attribute strings (ARCHITECTURE.md section 9): path data
 //! (`d`), `points`, the `transform` attribute, `viewBox` and
 //! `stroke-dasharray`, parsed into paths, affines and numbers. This is
-//! not a document parser: no elements, styles, units, text or
-//! `currentColor` (colors arrive resolved).
+//! not a document parser: no elements, styles, units or text. Colors
+//! arrive resolved, except `currentColor` with no `color` inside the
+//! drawing, which is a flag (`CURRENT_FILL`, `CURRENT_STROKE`): the
+//! node's inherited color, resolved at paint.
 //!
 //! A `Drawing` (a view box and shapes, as the wire carries them) builds
 //! the same `Asset` a `CRV1` payload decodes to, so layout, fitting and
@@ -39,6 +41,11 @@ pub const MAX_BYTES: usize = 4 << 20;
 pub const MAX_VERBS: usize = 1 << 20;
 /// Numbers in one dash array.
 pub const MAX_DASHES: usize = 64;
+
+/// `Shape::current` bits: the fill or the stroke paints with the node's
+/// inherited color, and its color field is the tint (`Paint::Current`).
+pub const CURRENT_FILL: u8 = 1 << 0;
+pub const CURRENT_STROKE: u8 = 1 << 1;
 
 /// Why a string is not what its attribute takes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -79,6 +86,8 @@ pub struct Shape<'a> {
     pub fill: u32,
     pub fill_rule: FillRule,
     pub stroke: u32,
+    /// `CURRENT_FILL` and `CURRENT_STROKE`.
+    pub current: u8,
     /// Stroke geometry; a width of 0 strokes nothing.
     pub line: Stroke,
     /// `stroke-dasharray` (empty or `none`: solid).
@@ -97,6 +106,7 @@ impl Default for Shape<'_> {
             fill: 0x0000_00FF,
             fill_rule: FillRule::NonZero,
             stroke: 0,
+            current: 0,
             line: Stroke::default(),
             dashes: Cow::Borrowed(""),
             dash_offset: 0.0,
@@ -138,9 +148,9 @@ impl Drawing<'_> {
     /// Canonical bytes: equal drawings, equal keys (the host shares one
     /// parse and one tessellation between nodes drawing the same thing).
     /// Distinct from any `CRV1` payload (they start with "CRV1"). At most
-    /// `MAX_BYTES` plus 48 bytes a shape once `check` passes.
+    /// `MAX_BYTES` plus 49 bytes a shape once `check` passes.
     pub fn key(&self) -> Vec<u8> {
-        let mut out = Vec::with_capacity(8 + self.string_bytes() + self.shapes.len() * 48);
+        let mut out = Vec::with_capacity(8 + self.string_bytes() + self.shapes.len() * 49);
         out.extend_from_slice(b"CRVS");
         let put = |out: &mut Vec<u8>, s: &str| {
             out.extend_from_slice(&(s.len() as u32).to_le_bytes());
@@ -153,6 +163,7 @@ impl Drawing<'_> {
                 s.fill_rule as u8,
                 s.line.join as u8,
                 s.line.cap as u8,
+                s.current,
             ]);
             for v in [s.fill, s.stroke] {
                 out.extend_from_slice(&v.to_le_bytes());
@@ -174,7 +185,7 @@ impl Drawing<'_> {
         let view_box = r.string()?;
         let mut shapes = Vec::new();
         while !r.0.is_empty() {
-            let [kind, rule, join, cap] = r.take(4)?.try_into().ok()?;
+            let [kind, rule, join, cap, current] = r.take(5)?.try_into().ok()?;
             let (fill, stroke) = (r.word()?, r.word()?);
             let [width, miter_limit, dash_offset, opacity] =
                 [r.float()?, r.float()?, r.float()?, r.float()?];
@@ -183,6 +194,7 @@ impl Drawing<'_> {
                 fill_rule: FillRule::from_u8(rule)?,
                 fill,
                 stroke,
+                current,
                 line: Stroke {
                     width,
                     join: crate::LineJoin::from_u8(join)?,
@@ -269,8 +281,12 @@ impl Drawing<'_> {
                 array,
                 offset: s.dash_offset,
             });
-            let mut push = |style: ItemStyle, color: u32, dash: Option<Dash>| {
-                paints.push(Paint::Solid(color));
+            let mut push = |style: ItemStyle, color: u32, current: bool, dash: Option<Dash>| {
+                paints.push(if current {
+                    Paint::Current(color)
+                } else {
+                    Paint::Solid(color)
+                });
                 items.push(Item {
                     path: path.clone(),
                     style,
@@ -281,10 +297,20 @@ impl Drawing<'_> {
                 });
             };
             if fills {
-                push(ItemStyle::Fill(s.fill_rule), s.fill, None);
+                push(
+                    ItemStyle::Fill(s.fill_rule),
+                    s.fill,
+                    s.current & CURRENT_FILL != 0,
+                    None,
+                );
             }
             if strokes {
-                push(ItemStyle::Stroke(s.line), s.stroke, dash);
+                push(
+                    ItemStyle::Stroke(s.line),
+                    s.stroke,
+                    s.current & CURRENT_STROKE != 0,
+                    dash,
+                );
             }
         }
         Ok(Asset {

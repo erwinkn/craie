@@ -116,7 +116,7 @@ test("an unknown chord or submit key is reported once and skipped", async () => 
   expect(logged).toEqual(['craie: unknown key chord "hyper+k"', 'craie: unknown submitKey "shift+enter", using "enter"'])
   const ops = t.frames.flatMap(f => readFrame(f).ops)
   expect(ops.find(o => o.tag === 0x61)!.claims).toEqual([{ kind: CLAIM_KIND.key, flags: 0, mods: 0, key: 0x6b }])
-  expect(ops.find(o => o.tag === 0x41)!.f[2]).toBe(0) // single line, enter
+  expect(ops.find(o => o.tag === 0x41)!.f[1]).toBe(0) // single line, enter
 })
 
 test("clipboard claims answer with commands", async () => {
@@ -238,7 +238,7 @@ test("hotkeys form the window list, the latest mounted hook first", async () => 
 test("Enter submits only with onSubmit, per submitKey", async () => {
   const t = new FakeTransport()
   const root = createRoot(t)
-  const flags = () => t.ops().find(o => o.tag === 0x41)?.f[2]
+  const flags = () => t.ops().find(o => o.tag === 0x41)?.f[1]
   const App = (props: Record<string, unknown>) => createElement(TextInput, { multiline: true, ...props })
   root.renderSync(createElement(App, {}))
   await tick()

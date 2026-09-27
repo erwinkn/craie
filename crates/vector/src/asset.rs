@@ -10,6 +10,7 @@
 //!          paint count u32 | item count u32 | verb count u32 | point count u32
 //! paints:  kind u8, then
 //!            solid:  color u32 (0xRRGGBBAA)
+//!            current: tint u32 (kind 3: the inherited color times it)
 //!            linear: x0, y0, x1, y1 f32 | transform f32 x 6 | stops
 //!            radial: cx, cy, r f32       | transform f32 x 6 | stops
 //!          stops: count u16, then (offset f32, color u32) per stop
@@ -70,6 +71,15 @@ pub struct Asset {
     pub view_box: [f32; 4],
     pub paints: Vec<Paint>,
     pub items: Vec<Item>,
+}
+
+impl Asset {
+    /// Whether an item paints with the inherited color.
+    pub fn inherits_color(&self) -> bool {
+        self.items
+            .iter()
+            .any(|it| matches!(self.paints[it.paint], Paint::Current(_)))
+    }
 }
 
 /// Why bytes are not an asset.
@@ -182,6 +192,7 @@ pub fn decode(buf: &[u8]) -> Result<Asset, AssetError> {
     for _ in 0..np {
         paints.push(match r.u8()? {
             0 => Paint::Solid(r.u32()?),
+            3 => Paint::Current(r.u32()?),
             1 => {
                 let (x0, y0, x1, y1) = (r.f32()?, r.f32()?, r.f32()?, r.f32()?);
                 let transform = r.affine()?;
@@ -386,6 +397,10 @@ pub fn encode(a: &Asset) -> Vec<u8> {
                 out.push(0);
                 u32le(&mut out, *c);
             }
+            Paint::Current(tint) => {
+                out.push(3);
+                u32le(&mut out, *tint);
+            }
             Paint::Linear {
                 start,
                 end,
@@ -469,6 +484,7 @@ mod tests {
                     stops: vec![(0.5, 0x00FF_00FF)],
                     transform: Affine::scale(2.0, 1.0),
                 },
+                Paint::Current(0xFFFF_FF80),
             ],
             items: vec![
                 Item {
@@ -516,6 +532,16 @@ mod tests {
         assert_eq!(decode(&encode(&small)).unwrap(), small);
     }
 
+    /// An asset inherits the node's color when an item paints with
+    /// `Current`; an unused `Current` paint does not count.
+    #[test]
+    fn inherits_color_needs_an_item() {
+        let mut a = sample();
+        assert!(!a.inherits_color());
+        a.items[1].paint = 3;
+        assert!(a.inherits_color());
+    }
+
     /// Every truncation and a sweep of single-byte corruptions decode to
     /// an error or a checked asset, never a panic or a huge allocation.
     #[test]
@@ -550,9 +576,9 @@ mod tests {
         let item_at = {
             let mut r = Reader { buf: &one, pos: 0 };
             r.take(40).unwrap();
-            for _ in 0..3 {
+            for _ in 0..sample().paints.len() {
                 match r.u8().unwrap() {
-                    0 => {
+                    0 | 3 => {
                         r.u32().unwrap();
                     }
                     1 => {

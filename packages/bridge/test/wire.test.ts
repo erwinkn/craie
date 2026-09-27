@@ -1,5 +1,6 @@
 import { test, expect } from "bun:test"
-import { Encoder, NIL, transformMatrix } from "../src/wire.js"
+import { readFileSync } from "node:fs"
+import { Encoder, NIL, VERSION, transformMatrix } from "../src/wire.js"
 import { readFrame } from "./crw2.js"
 
 // Hand-computed bytes for: create(0, view) | paragraph(0, "hi") | place.
@@ -13,7 +14,7 @@ test("encoder emits the documented byte layout", () => {
   const dv = new DataView(buf.buffer, buf.byteOffset, buf.byteLength)
   let at = 0
   expect(dv.getUint32(at, true)).toBe(0x3257_5243); at += 4 // "CRW2"
-  expect(dv.getUint16(at, true)).toBe(4); at += 2            // version
+  expect(dv.getUint16(at, true)).toBe(5); at += 2            // version
   expect(dv.getUint16(at, true)).toBe(0); at += 2            // flags
   expect(dv.getBigUint64(at, true)).toBe(7n); at += 8        // seq
   expect(dv.getUint32(at, true)).toBe(1); at += 4            // 1 string
@@ -154,4 +155,13 @@ test("bad timings leave the encoder unchanged", () => {
   enc.place(NIL, 1, NIL)
   const f = readFrame(enc.finish(1n))
   expect(f.ops.map(o => o.tag)).toEqual([0x01, 0x02])
+})
+
+// The handshake compares each side's wire VERSION. They agree through
+// the fixture: its header must be this VERSION, and Rust's
+// wire_fixture test decodes it only at the Rust VERSION.
+test("the cross-language fixture carries this VERSION", () => {
+  const buf = readFileSync(new URL("./fixture.bin", import.meta.url))
+  expect(buf.readUInt32LE(0)).toBe(0x3257_5243)
+  expect(buf.readUInt16LE(4)).toBe(VERSION)
 })

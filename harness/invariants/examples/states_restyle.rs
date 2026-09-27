@@ -7,6 +7,11 @@
 //!   dispatch (hit test, input bits, restyle) and render (paint patch).
 //!   Against the same moves over a row that only listens for enter and
 //!   leave, with no scope or table: the difference is the state work.
+//! - inherited color: the same moves, the root colored `#9aa0aa` with
+//!   `_row: { _hover: { color: "#fff" } }`, over 1,000 12 pt icons each
+//!   stroking `currentColor` (one shared drawing), or 1,000 labels
+//!   whose spans inherit. Every icon or label repaints; nothing
+//!   relayouts or tessellates.
 //! - breakpoint: 1,000 rows 36 pt tall with `_narrow: { height: 44 }`;
 //!   the window crosses 1,023 pt back and forth. Against the same
 //!   resize with no variant tables, and with no tables but a
@@ -26,11 +31,12 @@ use std::time::Instant;
 use craie_core::geom::Size;
 use craie_layout::LayoutRow;
 use craie_ui::events::{Event, UiEvent, mask};
-use craie_ui::mutation::{NIL, NodeKind, Transaction};
+use craie_ui::mutation::{NIL, NodeKind, TextSpan, Transaction};
 use craie_ui::states::{
     TermDecl, Values, VariantDecl, env_bit, layout_key, state_bit, value_field,
 };
 use craie_ui::ui::Ui;
+use craie_vector::svg::{CURRENT_STROKE, Drawing, Shape};
 
 static ALLOCS: AtomicUsize = AtomicUsize::new(0);
 
@@ -188,6 +194,68 @@ fn hover_tree(n: u32, scopes: bool) -> Ui {
     ui
 }
 
+/// The row (id 1, a scope) and `n` 12 pt icons or one-word labels
+/// wrapped after it, all inheriting the root's color, white while the
+/// row is hovered.
+fn color_tree(n: u32, icons: bool) -> Ui {
+    let mut ui = Ui::new(2.0);
+    let mut t = Transaction::new(1);
+    root(&mut t, true);
+    t.create(1, NodeKind::View)
+        .layout(1, &sized(200.0, 40.0))
+        .interaction(1, mask::POINTER_ENTER_LEAVE, false)
+        .states(1, 0)
+        .place(0, 1, NIL);
+    t.color(0, Some(0x9AA0_AAFF)).variants(
+        0,
+        &[VariantDecl {
+            terms: vec![TermDecl {
+                scope: 1,
+                mask: state_bit::HOVER,
+            }],
+            env: 0,
+            values: Values {
+                mask: value_field::COLOR,
+                color: Some(0xFFFF_FFFF),
+                ..Values::default()
+            },
+        }],
+    );
+    let icon = Drawing {
+        view_box: "0 0 24 24".into(),
+        shapes: vec![Shape {
+            geometry: "M4 12H20M12 4V20".into(),
+            fill: 0,
+            stroke: 0xFFFF_FFFF,
+            current: CURRENT_STROKE,
+            line: craie_vector::Stroke {
+                width: 2.0,
+                ..craie_vector::Stroke::default()
+            },
+            ..Shape::default()
+        }],
+    };
+    let span = [TextSpan {
+        font_size: 11.0,
+        inherit_color: true,
+        ..TextSpan::default()
+    }];
+    let cell = sized(12.0, 12.0);
+    for id in 2..2 + n {
+        if icons {
+            t.create(id, NodeKind::Vector)
+                .layout(id, &cell)
+                .drawing(id, icon.clone());
+        } else {
+            t.create(id, NodeKind::Text).paragraph(id, "Label", &span);
+        }
+        t.place(0, id, NIL);
+    }
+    ui.apply_txn(&t).unwrap();
+    ui.render(WIDE);
+    ui
+}
+
 fn row_style(height: f32) -> taffy::Style {
     style(|s| {
         s.size.height = taffy::Dimension::length(height);
@@ -247,6 +315,21 @@ fn main() {
         print(&format!("hover, {n} dependents"), &c);
         assert!(c.patched >= n as f64, "every dependent repaints");
         assert_eq!(c.layout_passes, 0.0, "a fill never relayouts");
+    }
+    for icons in [true, false] {
+        let mut ui = color_tree(1_000, icons);
+        let chunks = ui.counters().chunks_built;
+        let c = cost(&mut ui, hover);
+        let what = if icons {
+            "currentColor icons"
+        } else {
+            "inheriting labels"
+        };
+        print(&format!("hover color, 1,000 {what}"), &c);
+        assert!(c.patched >= 1_000.0, "every one repaints");
+        assert_eq!(c.layout_passes, 0.0, "a color never relayouts");
+        // Drawings tessellate only as their chunk builds.
+        assert_eq!(ui.counters().chunks_built, chunks, "no chunk rebuilt");
     }
     for variants in [false, true] {
         let mut ui = breakpoint_tree(variants);

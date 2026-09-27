@@ -763,3 +763,29 @@ fn adjacent_meshes_stay_seamless_across_disjoint_content() {
         assert_eq!(px(&a, k, 47 - k), [255, 255, 255, 255], "({k}, {})", 47 - k);
     }
 }
+
+/// DF-24: a mesh's paint patched in place (a `currentColor` icon on
+/// hover) draws in the new color with no chunk rebuilt.
+#[test]
+fn patched_mesh_paints_redraw() {
+    let Some((gpu, mut r)) = gpu() else {
+        eprintln!("no GPU adapter: skipped");
+        return;
+    };
+    let mut s = scene();
+    let mut w = ChunkWriter::new();
+    let square = fill(&Path::rect(8.0, 8.0, 48.0, 48.0), FillRule::NonZero, 0.1).unwrap();
+    mesh(&mut w, &square, 0x9AA0_AAFF);
+    s.commit_chunk(0, &mut w);
+    place(&mut s, 0);
+    s.set_order(vec![OrderItem::Chunk(0)], vec![]);
+    let img = render(gpu, &mut r, &mut s);
+    assert_eq!(px(&img, 32, 32), [0x9A, 0xA0, 0xAA, 255]);
+    let built = s.counters.chunks_built;
+    s.set_paint(0, craie_scene::PaintSlot(0), 0xFFFF_FF80);
+    let img = render(gpu, &mut r, &mut s);
+    assert_eq!(s.counters.chunks_built, built);
+    // Half white over black, in sRGB: 188.
+    let p = px(&img, 32, 32);
+    assert!(p[..3].iter().all(|&c| (c as i32 - 188).abs() <= 2), "{p:?}");
+}

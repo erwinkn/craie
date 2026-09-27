@@ -14,7 +14,7 @@
 // across transactions.
 
 const MAGIC = 0x3257_5243 // "CRW2" little-endian
-const VERSION = 4
+export const VERSION = 5
 export const NIL = 0xffff_ffff // no node / append / default style
 
 const enum Op {
@@ -61,6 +61,10 @@ const enum Op {
   Color = 0xb3,
 }
 
+/** `WireShape.current` bits (craie-vector's `svg::CURRENT_FILL` and
+ * `CURRENT_STROKE`). */
+export const CURRENT = { fill: 1, stroke: 2 } as const
+
 /** One shape of a runtime vector drawing: SVG strings plus resolved
  * paint. Mirrors craie-vector's `svg::Shape`; colors are RGBA u32 (alpha
  * 0 is `none`), empty strings are absent attributes. */
@@ -75,6 +79,10 @@ export interface WireShape {
   /** 0 nonzero, 1 evenodd. */
   fillRule: number
   stroke: number
+  /** `CURRENT` bits: the fill or the stroke paints with the node's
+   * inherited color (`currentColor`), and its color is the tint (white
+   * with the paint's opacity as alpha). */
+  current: number
   strokeWidth: number
   /** 0 miter, 1 round, 2 bevel. */
   join: number
@@ -95,7 +103,8 @@ export const ANIM_PROP = {
   height: 5,
   padding: 6,
   gap: 7,
-  /** The inherited text color: tweens between two set colors. */
+  /** The inherited color (text, inputs, `currentColor` drawings):
+   * tweens between two set colors. */
   color: 8,
 } as const
 export type AnimProp = keyof typeof ANIM_PROP
@@ -682,7 +691,8 @@ export interface VariantValues {
   borderColor?: number
   borderWidth?: number
   radius?: number
-  /** The inherited text color; `null` clears it. */
+  /** The inherited color (text, inputs, `currentColor` drawings);
+   * `null` clears it. */
   color?: number | null
   opacity?: number
   transform?: Affine
@@ -968,7 +978,6 @@ export class Encoder {
   inputConfig(
     id: number,
     fontSize: number,
-    color: number,
     placeholder: string,
     multiline: boolean,
     submit: number,
@@ -977,7 +986,6 @@ export class Encoder {
     this.ops.u8(Op.InputConfig)
     this.ops.u32(id)
     this.ops.f32(fontSize)
-    this.ops.u32(color >>> 0)
     this.ops.u32(s)
     this.ops.u8((multiline ? 1 : 0) | submit << 1)
   }
@@ -1034,7 +1042,7 @@ export class Encoder {
     b.bytes.set(view, b.at)
     b.at += view.byteLength
   }
-  /** Runtime vector drawing: a view box and shapes, 44 bytes each. */
+  /** Runtime vector drawing: a view box and shapes, 45 bytes each. */
   drawing(id: number, viewBox: string, shapes: readonly WireShape[]) {
     const view = this.strRef(viewBox)
     const b = this.ops
@@ -1048,6 +1056,7 @@ export class Encoder {
       b.u8(s.fillRule)
       b.u8(s.join)
       b.u8(s.cap)
+      b.u8(s.current)
       for (const r of refs) b.u32(r)
       b.u32(s.fill >>> 0)
       b.u32(s.stroke >>> 0)
@@ -1239,7 +1248,8 @@ export class Encoder {
     this.ops.f32(compactMax)
   }
 
-  /** Sets (or with `null` clears) the color a node's text inherits. */
+  /** Sets (or with `null` clears) the color a node's text, inputs and
+   * `currentColor` drawings inherit. */
   color(id: number, color: number | null) {
     this.ops.u8(Op.Color)
     this.ops.u32(id)

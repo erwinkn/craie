@@ -267,20 +267,6 @@ Reviewer minors and nitpicks not fixed yet.
 - Resolves in: shape-level animation targets, or dashes in the shader
   (E07).
 
-### DF-14: no inherited color in drawings
-
-- Source: runtime vector shapes (work item 8) implementation (own
-  finding); narrowed in the PR #5 review (PR5-06).
-- Where: packages/bridge/src/shapes.ts (`paint`).
-- Claim: `currentColor` resolves to the `color` prop of the `Vector` or
-  a `G` above the shape, as `<svg color>` does; it does not inherit a
-  color from the node's ancestors (there is none to inherit), and
-  without a `color` prop it throws. The kit's token colors (`'ink-3'`)
-  must be resolved to colors before they reach a shape.
-- Why deferred: the color a node inherits comes with state styles and
-  paint sources (topic 5).
-- Resolves in: topic 5.
-
 ### DF-15: shapes must be direct children of a Vector
 
 - Source: runtime vector shapes (work item 8) implementation (own
@@ -393,22 +379,6 @@ Reviewer minors and nitpicks not fixed yet.
   text pipeline's own ops, not in the paint-and-layout overlay.
 - Resolves in: when a component needs a responsive type size; the
   facade can re-render with a different variant meanwhile.
-
-### DF-24: input color and vector currentColor
-
-- Source: work item 5.
-- Where: crates/ui/src/host.rs (`Host::colors`), the text input config,
-  the vector path.
-- Claim: `COLOR` reaches spans only. A TextInput keeps its config
-  color (the facade warns on `color` in its variants). A vector's
-  `currentColor` resolves in the facade to the `color` prop of the
-  `Vector` or a `G` above (PR #5, DF-14), not to the inherited `COLOR`:
-  `<Pressable color="#9aa0aa" _hover={{ color: "#fff" }}>` recolors its
-  label but not an icon drawn with `currentColor`.
-- Why deferred: the input's color lives in its editor config, and a
-  drawing's colors are resolved before they reach native.
-- Resolves in: one lookup of `Host::colors` at paint for both, which
-  closes DF-14 too.
 
 ### DF-25: no platform source for touch and reduced motion
 
@@ -625,6 +595,22 @@ Reviewer minors and nitpicks not fixed yet.
   decode is the cost of no jump.
 - Resolves in: planning the decode for the new natural size when the
   node's size depends on it, if the double decode shows.
+
+### DF-39: imported SVGs bake `currentColor`
+
+- Source: PR #12 review (inherited color), R12-03.
+- Where: tools/svg-import/src/lib.rs (`paint`: usvg resolves
+  `currentColor` before the tree reaches us).
+- Claim: usvg resolves `currentColor` at import against the SVG's own
+  `color`, black by default. An icon imported as CRV1 with
+  `stroke="currentColor"` draws black on a dark UI and ignores
+  `_hover={{ color }}`, with no warning. The same icon sent as runtime
+  shapes (`<Path>` and the other elements) inherits the node's `COLOR`.
+- Why deferred: out of PR #12's scope (runtime drawings); the kit's
+  icons are runtime shapes.
+- Resolves in: a pre-scan for `currentColor` (as the one for dropped
+  elements) that emits `Paint::Current` for the affected paints, or at
+  least a report note at import.
 
 ## Closed
 
@@ -864,3 +850,10 @@ Reviewer minors and nitpicks not fixed yet.
 - PR11-05 (scopes review): a named group used across a layer logged only "unknown variant key": it says no group of that name is above, and that a Portal or Layer starts a new chain.
 - PR11-06 (scopes review): the docs said a missing scope is a dev-time error in Marbre: it is a development log, on the unmerged `ui/state-scopes` branch, and Marbre's spec still says layer content keeps its opener's scope (topic 5 says so; the planning thread flips D28).
 - PR11-07 (scopes review, nits): the TextInput JSDoc named `_focus` (not a key; `_focusVisible`); the text-root test's last step ticks once more past its predicate, so a later resend would show; the scope rules left DF-29 (kit values) for topic 5 only, and PR7-16, PR7-17 and PR7-22 say what #11 reversed; topic 5's facade bullet is reflowed; `ViewProps.group` no longer says toggling it remounts the children (PR7-14).
+- DF-14 (no inherited color in drawings) and DF-24 (input color and vector `currentColor`): fixed in PR #12 (inherited color). A `currentColor` with no `color` on a `G` above no longer throws: the facade flags the shape's fill or stroke (a `current` byte in each DRAWING shape, protocol 5) and native paints it with the node's inherited `COLOR` (its own, else the nearest ancestor's, else white, as a span) times the shape's opacity. A `Vector`'s `color` is its node's `COLOR`, so its variants and transitions apply; a `G`'s stays in the drawing. A change patches one paint slot per shape: a hover recoloring 1,000 icons is a paint patch each, with no layout, chunk rebuild, tessellation or allocation (EXPERIMENTS.md, state styles). A TextInput's color is its `COLOR` the same way: INPUT_CONFIG no longer carries one, its variants apply, and the facade's warning is gone. The kit's token colors (`'ink-3'`) still resolve before they reach a prop.
+- PR12-01 (color review): the runtime handshake still said protocol 4 (`craie_runtime_version`, `loadBindings`), so a stale `craie-node.node` passed the load check and failed at its first transaction: each side now answers with its own wire `VERSION`, and a bun test holds the cross-language fixture's header to the JS `VERSION` (Rust's `wire_fixture` decodes it only at the Rust one), so the two can't drift apart unnoticed.
+- PR12-02 (color review): no test had more than one `currentColor` item, so a patch that stopped after the first slot survived: `current_color_resolves_nearest` now has a stroke, a solid, and a shape whose fill and stroke both inherit with different tints, and the harness drawing inherits on its square's fill (non-white tint) and its ring's stroke. With that mutant, the unit test and the incremental-vs-rebuild oracle fail.
+- PR12-03 (color review): svg-import baking `currentColor` was untracked: DF-39.
+- PR12-04 (color review, nit): a color patch walked every prepared item, and `inherits_color` every asset item per lookup: the cached meshes keep their `currentColor` tints beside them (`Meshes::tints`), so a patch walks only those, and a vector's `inherits` is found once per `set_vector`.
+- PR12-05 (color review, nit): "text inherits" wording where inputs and drawings now inherit too: reworded at the listed sites and at four more (animation.rs, host.rs, states_tests.rs, ARCHITECTURE.md).
+- PR12-06 (color review, nit): the GPU test covered `Scene::set_paint` only: `inherited_color_reaches_drawing_pixels` (harness gpu_uploads.rs) renders a Ui on a device: a `currentColor` square paints its parent's `COLOR`, and a new `COLOR` reaches the pixels with no chunk rebuilt.

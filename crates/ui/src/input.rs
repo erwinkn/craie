@@ -54,8 +54,6 @@ pub struct InputState {
     pub editor: Editor,
     pub placeholder: String,
     pub font_size: f32,
-    /// Text color, 0xRRGGBBAA: the input chunk's paint slot 2.
-    pub color: u32,
     /// Selection fill, 0xRRGGBBAA.
     pub selection_color: u32,
     pub multiline: bool,
@@ -77,12 +75,11 @@ pub struct InputState {
 }
 
 impl InputState {
-    fn new(font_size: f32, color: u32, placeholder: String, multiline: bool) -> InputState {
+    fn new(font_size: f32, placeholder: String, multiline: bool) -> InputState {
         InputState {
             editor: Editor::new(font_size),
             placeholder,
             font_size,
-            color,
             selection_color: 0x3584_E47A, // rgba(53,132,228,0.48)
             multiline,
             submit: SubmitKey::Enter,
@@ -222,20 +219,16 @@ impl Inputs {
 
     /// Creates or reconfigures an input node.
     /// Returns whether the change affects layout (size, placeholder,
-    /// wrapping); a color-only change does not.
+    /// wrapping). The text color is the node's inherited color.
     pub fn configure(
         &mut self,
         id: u32,
         font_size: f32,
-        color: u32,
         placeholder: &str,
         multiline: bool,
     ) -> bool {
         match self.map.get_mut(&id) {
             Some(state) => {
-                // The color lives in the chunk's paint record, not in
-                // the editor's layout.
-                state.color = color;
                 let metrics = state.font_size != font_size
                     || state.placeholder != placeholder
                     || state.multiline != multiline;
@@ -256,7 +249,7 @@ impl Inputs {
             None => {
                 self.map.insert(
                     id,
-                    InputState::new(font_size, color, placeholder.to_string(), multiline),
+                    InputState::new(font_size, placeholder.to_string(), multiline),
                 );
                 self.notified.insert(id, String::new());
                 true

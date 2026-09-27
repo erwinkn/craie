@@ -60,7 +60,8 @@ pub mod value_field {
     pub const FILL: u8 = 1 << 0;
     pub const BORDER_COLOR: u8 = 1 << 1;
     pub const RADIUS: u8 = 1 << 2;
-    /// The inherited text color (set or cleared).
+    /// The inherited color of text, inputs and `currentColor` drawings
+    /// (set or cleared).
     pub const COLOR: u8 = 1 << 3;
     pub const OPACITY: u8 = 1 << 4;
     /// The whole matrix.

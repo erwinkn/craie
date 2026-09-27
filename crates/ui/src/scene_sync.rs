@@ -679,15 +679,17 @@ impl Ui {
             let p = self.host.paint[id.index()];
             self.scene.set_paint(id.0, PaintSlot(0), p.fill);
             self.scene.set_paint(id.0, PaintSlot(1), p.border_color);
-            if kind == NodeKind::Input
-                && let Some(state) = self.inputs.get(id.0)
-            {
-                // Slots 2 text, 3 placeholder (half alpha), 5 caret.
-                let c = state.color;
-                self.scene.set_paint(id.0, PaintSlot(2), c);
-                self.scene
-                    .set_paint(id.0, PaintSlot(3), (c & !0xFF) | ((c & 0xFF) / 2));
-                self.scene.set_paint(id.0, PaintSlot(5), c);
+            match kind {
+                NodeKind::Input => {
+                    // Slots 2 text, 3 placeholder (half alpha), 5 caret.
+                    let c = self.host.current_color(id);
+                    self.scene.set_paint(id.0, PaintSlot(2), c);
+                    self.scene
+                        .set_paint(id.0, PaintSlot(3), (c & !0xFF) | ((c & 0xFF) / 2));
+                    self.scene.set_paint(id.0, PaintSlot(5), c);
+                }
+                NodeKind::Vector => self.patch_vector_paint(id),
+                _ => {}
             }
         }
     }
@@ -815,15 +817,15 @@ impl Ui {
         let content_w = (data.rect.size.width - data.insets[0]).max(0.0);
         let (cx, cy) = (data.content[0], data.content[1]);
         let scale = self.scale;
+        let color = self.host.current_color(id);
         let Some(state) = self.inputs.get_mut(id.0) else {
             return;
         };
         state.set_width(content_w);
-        let text_slot = w.paint(state.color);
-        let alpha = (state.color & 0xFF) / 2;
-        let ph_slot = w.paint((state.color & !0xFF) | alpha);
+        let text_slot = w.paint(color);
+        let ph_slot = w.paint((color & !0xFF) | ((color & 0xFF) / 2));
         let sel_slot = w.paint(state.selection_color);
-        let caret_slot = w.paint(state.color);
+        let caret_slot = w.paint(color);
         debug_assert_eq!(text_slot, PaintSlot(2));
         let empty = state.editor.raw_text().is_empty();
         state.editor.refresh(&mut self.text);

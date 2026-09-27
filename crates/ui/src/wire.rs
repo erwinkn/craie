@@ -30,7 +30,7 @@ use taffy::{
 use craie_core::geom::Affine;
 
 use crate::image::Fit;
-use craie_vector::svg::{Drawing, Shape, ShapeKind};
+use craie_vector::svg::{self, Drawing, Shape, ShapeKind};
 use craie_vector::{FillRule, LineCap, LineJoin, Stroke};
 
 use crate::states::{TermDecl, Values, VariantDecl, layout_key, value_field};
@@ -41,7 +41,7 @@ use crate::mutation::{
 };
 
 pub const MAGIC: u32 = 0x3257_5243; // "CRW2"
-pub const VERSION: u16 = 4;
+pub const VERSION: u16 = 5;
 
 pub mod op {
     // structure
@@ -72,10 +72,13 @@ pub mod op {
     pub const SURFACE: u8 = 0x70;
     pub const PAYLOAD: u8 = 0x71;
     /// A vector node's runtime drawing (`craie_vector::svg`): id u32 |
-    /// view box string u32 | count u16 | count × 44-byte shapes (kind
-    /// u8, fill rule u8, join u8, cap u8, geometry string u32, transform
-    /// string u32, dash array string u32, fill u32, stroke u32, stroke
-    /// width f32, miter limit f32, dash offset f32, opacity f32).
+    /// view box string u32 | count u16 | count × 45-byte shapes (kind
+    /// u8, fill rule u8, join u8, cap u8, current u8, geometry string
+    /// u32, transform string u32, dash array string u32, fill u32, stroke
+    /// u32, stroke width f32, miter limit f32, dash offset f32, opacity
+    /// f32). `current` flags a fill or stroke painting with the node's
+    /// inherited color (`svg::CURRENT_FILL`, `CURRENT_STROKE`); its color
+    /// is then the tint.
     pub const DRAWING: u8 = 0x72;
     /// An image node's configuration: id u32 | fit u8 (0 cover, 1
     /// contain, 2 fill). Its bytes come as a PAYLOAD.
@@ -494,7 +497,6 @@ pub fn encode(txn: &Transaction<'_>) -> Vec<u8> {
             Mutation::InputConfig {
                 id,
                 font_size,
-                color,
                 placeholder,
                 multiline,
                 submit,
@@ -503,7 +505,6 @@ pub fn encode(txn: &Transaction<'_>) -> Vec<u8> {
                 ops.push(op::INPUT_CONFIG);
                 u32le(&mut ops, *id);
                 f32le(&mut ops, *font_size);
-                u32le(&mut ops, *color);
                 u32le(&mut ops, s);
                 ops.push(*multiline as u8 | (*submit as u8) << input_flag::SUBMIT_SHIFT);
             }
@@ -584,6 +585,7 @@ pub fn encode(txn: &Transaction<'_>) -> Vec<u8> {
                         sh.fill_rule as u8,
                         sh.line.join as u8,
                         sh.line.cap as u8,
+                        sh.current,
                     ]);
                     for v in refs.into_iter().chain([sh.fill, sh.stroke]) {
                         u32le(&mut ops, v);
@@ -1074,7 +1076,7 @@ pub fn decode(buf: &[u8]) -> Result<Transaction<'_>, WireError> {
                 }
             }
             op::INPUT_CONFIG => {
-                let (id, font_size, color) = (r.u32()?, r.f32()?, r.u32()?);
+                let (id, font_size) = (r.u32()?, r.f32()?);
                 let placeholder = string(r.u32()?)?.into();
                 let flags = r.u8()?;
                 let submit = SubmitKey::from_u8(flags >> input_flag::SUBMIT_SHIFT)
@@ -1082,7 +1084,6 @@ pub fn decode(buf: &[u8]) -> Result<Transaction<'_>, WireError> {
                 Mutation::InputConfig {
                     id,
                     font_size,
-                    color,
                     placeholder,
                     multiline: flags & input_flag::MULTILINE != 0,
                     submit,
@@ -1149,10 +1150,14 @@ pub fn decode(buf: &[u8]) -> Result<Transaction<'_>, WireError> {
                 let id = r.u32()?;
                 let view_box = string(r.u32()?)?.into();
                 let n = r.u16()? as usize;
-                let mut shapes = Vec::with_capacity(n.min(r.remaining() / 44));
+                let mut shapes = Vec::with_capacity(n.min(r.remaining() / 45));
                 for _ in 0..n {
                     let [kind, rule, join, cap] = [r.u8()?, r.u8()?, r.u8()?, r.u8()?];
+                    let current = r.u8()?;
                     let bad = || WireError::BadRef("drawing shape");
+                    if current & !(svg::CURRENT_FILL | svg::CURRENT_STROKE) != 0 {
+                        return Err(bad());
+                    }
                     let kind = ShapeKind::from_u8(kind).ok_or_else(bad)?;
                     let fill_rule = FillRule::from_u8(rule).ok_or_else(bad)?;
                     let join = LineJoin::from_u8(join).ok_or_else(bad)?;
@@ -1169,6 +1174,7 @@ pub fn decode(buf: &[u8]) -> Result<Transaction<'_>, WireError> {
                         fill,
                         fill_rule,
                         stroke,
+                        current,
                         line: Stroke {
                             width,
                             join,

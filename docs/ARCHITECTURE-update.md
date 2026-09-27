@@ -432,7 +432,7 @@ defineStates(["unread", "streaming"])
 </Pressable>
 ```
 
-- Four ops in family 0xB0, still protocol 4: `STATES` (a scope's app
+- Four ops in family 0xB0, added in protocol 4: `STATES` (a scope's app
   bits), `VARIANTS` (a node's table; empty removes it and restores the
   base), `ENVIRONMENT` (breakpoints, default 1,023 and 639 pt as the
   kit's) and `COLOR` (the inherited color). A node becomes a scope with
@@ -475,11 +475,18 @@ defineStates(["unread", "streaming"])
   the span's own color. A span inherits unless its Text sets `color`,
   and a Text's own `color` travels as `COLOR` (its spans send white as
   the fallback), so a new color or a tween repaints spans without a
-  paragraph op, a shape or a layout. An input keeps its config color,
-  and vector `currentColor` reads the Vector's or a `G`'s `color` prop,
-  not `COLOR` (DF-24). A `Portal` or `Layer` starts fresh for both: a
-  Text in a `Portal` under a colored Pressable reads neither its color
-  nor its scope.
+  paragraph op, a shape or a layout. Inputs and drawings inherit the
+  same way (protocol 5, DF-14 and DF-24 closed): a TextInput's `color`
+  is its `COLOR` (INPUT_CONFIG carries none), and a vector shape's
+  `currentColor` with no `color` on a `G` above paints the node's
+  inherited color, white if none, times the shape's opacity; a
+  Vector's own `color` is its `COLOR`. So
+  `<Pressable color="#9aa0aa" _hover={{ color: "#fff" }}>` recolors a
+  `stroke="currentColor"` icon exactly as its label, with no JS: one
+  paint patch per shape, no tessellation (1,000 icons: EXPERIMENTS.md,
+  state styles). A `Portal` or `Layer` starts fresh for both inherited
+  color and scopes: a Text in a `Portal` under a colored Pressable reads
+  neither its color nor its scope.
 - The facade (`@craie/bridge`, re-exported by `@craie/react`):
   `defineStates`; `Pressable` and `TextInput` are always scopes, a
   View with `group` (a name makes `_name` address it) is one, and all
@@ -859,9 +866,10 @@ and that the core owns `ImageId`, dimensions, format and residency).
 choices:
 
 - One op, `DRAWING` (0x72), replaces a Vector node's whole drawing: a
-  view box and up to 4,096 shapes of 44 bytes (kind, fill rule, join,
-  cap, three string refs, fill and stroke colors, width, miter limit,
-  dash offset, opacity). The strings stay SVG syntax and native parses
+  view box and up to 4,096 shapes of 45 bytes (kind, fill rule, join,
+  cap, `current` flags, three string refs, fill and stroke colors,
+  width, miter limit, dash offset, opacity; protocol 5 added the
+  flags). The strings stay SVG syntax and native parses
   them (`craie_vector::svg`, about 600 lines, no dependency). A drawing
   whose strings or numbers do not parse draws nothing (zero intrinsic
   size) and the session goes on, as SVG draws nothing for an empty view
@@ -888,11 +896,15 @@ choices:
 - The dash offset is a plain value, not animatable: `ANIMATE` (0xA1)
   animates node properties, and an offset belongs to a shape, so a
   spinner ring rotates the node instead (`LEDGER.md` DF-13).
-- Paints are plain colors. `currentColor` resolves in the facade to a
-  `color` prop on the `Vector` or a `G`, as `<svg color>` does, and
-  throws without one; inheriting a color from ancestors waits for
-  topic 5 (DF-14). `fillOpacity` and `strokeOpacity` scale the alpha.
-  Gradients stay build-time.
+- Paints are plain colors, or the node's inherited color. The facade
+  resolves `currentColor` to the `color` of the nearest `G` above, as
+  SVG does; without one it sets the shape's `current` flag for that
+  paint and sends a tint (white, alpha the paint's opacity), and native
+  paints `COLOR` (the Vector's own, else the nearest ancestor's, else
+  white) times the tint (topic 5; DF-14 closed). Each such paint has its
+  own slot in the node's chunk, so a color change patches slots and
+  tessellates nothing. `fillOpacity` and `strokeOpacity` scale the
+  alpha. Gradients stay build-time.
 - The facade flattens children into shapes: `Path`, `Circle`,
   `Ellipse`, `Rect`, `Line`, `Polyline`, `Polygon` and `G` (attributes
   inherited, transforms nested, a `G`'s opacity multiplied into its
@@ -900,9 +912,9 @@ choices:
   an `<svg>` element. The Vector's `opacity` is the node's: one layer,
   animatable. Numbers are coerced as SVG reads attributes; a shape with
   one that is not finite is dropped, with a warning. The kit's shapes
-  differ in three ways: token colors must be resolved first, its
+  differ in two ways: token colors must be resolved first, its
   `Path` and `Circle` wrappers use hooks and so throw (shapes must be
-  direct elements, DF-15), and inherited color needs `color` (DF-14).
+  direct elements, DF-15).
 - Cost (exe1, loaded; `cargo run --release -p craie-harness --example
   vectors`, the Rust direct API: no wire, no JS): 200 distinct 24 px
   icons parse in about 0.4 ms and mount in about 2 ms more than 200

@@ -189,7 +189,7 @@ export interface VariantStyle {
   borderColor?: string | number
   borderWidth?: number
   borderRadius?: number
-  /** The color text inherits. */
+  /** The color text, inputs and `currentColor` drawings inherit. */
   color?: string | number
   /** Layout, `opacity` and `transform`. Keys that share a wire field
    * with ones the variant sets (`width` with `height`, the sides of
@@ -222,7 +222,8 @@ export interface ViewProps extends ListenerProps, StateProps, Variants {
    * descendants' read; a name also addresses it (`_name`) from further
    * down. */
   group?: boolean | string
-  /** The color descendant text inherits. */
+  /** The color descendant text, inputs and `currentColor` drawings
+   * inherit. */
   color?: string | number
   /** The View's text descendants form one selection domain: drag to
    * select across them, Cmd/Ctrl+C copies in tree order. */
@@ -309,6 +310,8 @@ export interface TextInputProps extends ListenerProps, Omit<StateProps, "disable
   borderColor?: string | number
   borderWidth?: number
   fontSize?: number
+  /** The text color, as a Text's: without it the input inherits its
+   * ancestors' color (white at the root), and variants apply to it. */
   color?: string | number
   placeholder?: string
   multiline?: boolean
@@ -462,7 +465,8 @@ export interface VectorAssetProps extends VectorBase {
 /** Runtime shapes: `Path`, `Circle`, ... children in a view box. The
  * paint props (`fill`, `stroke`, ...) are defaults the shapes inherit;
  * `opacity` is the node's (as `style.opacity`: the drawing fades as one
- * layer, and animates). */
+ * layer, and animates), and so is `color` (the inherited color
+ * `currentColor` paints with, as a Text's: variants apply to it). */
 export interface VectorShapeProps extends VectorBase, ShapeProps {
   asset?: undefined
   /** "minX minY width height". Empty or zero-size draws nothing. */
@@ -497,11 +501,11 @@ export function Vector(props: VectorProps) {
   const {
     children, viewBox, asset: _, fill, fillOpacity, fillRule, stroke, strokeOpacity,
     strokeWidth, strokeLinecap, strokeLinejoin, strokeMiterlimit, strokeDasharray,
-    strokeDashoffset, color, opacity, transform, ...rest
+    strokeDashoffset, opacity, transform, ...rest
   } = props as VectorShapeProps
   const shapes = flattenShapes(children, {
     fill, fillOpacity, fillRule, stroke, strokeOpacity, strokeWidth, strokeLinecap,
-    strokeLinejoin, strokeMiterlimit, strokeDasharray, strokeDashoffset, color, transform,
+    strokeLinejoin, strokeMiterlimit, strokeDasharray, strokeDashoffset, transform,
   }, viewBox)
   if (opacity !== undefined) {
     const o = Math.min(Math.max(Number(opacity), 0), 1)

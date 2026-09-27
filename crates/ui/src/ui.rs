@@ -71,7 +71,8 @@ pub struct Ui {
     /// without walking the subtree.
     pub(crate) inheritors: HashMap<u32, (InheritKey, Vec<u32>)>,
     /// Bumped when a node gains or loses a color of its own (the walk's
-    /// boundaries move).
+    /// boundaries move), or a drawing starts or stops using
+    /// `currentColor` (an inheritor comes or goes).
     pub(crate) color_bounds: u64,
     /// Last primary press (time, node, x, y) for double-click detection.
     pub(crate) last_click: Option<(Instant, NodeId, f32, f32)>,
