@@ -122,12 +122,15 @@ fn steady_frames_do_not_allocate() {
 }
 
 /// wgpu's own allocations in `Renderer::encode_frame`, measured on Metal
-/// (M5 Max, wgpu 30) with 8 draws in one pass: per frame, and per render
-/// pass after the first. Craie code in that phase holds no containers. A
-/// change here is a visible cost change: re-measure and update with the
-/// reason.
-const WGPU_FRAME: usize = 56;
-const WGPU_PASS: usize = 23;
+/// (M5 Max, wgpu 30), besides the command lists (`recorded` below): per
+/// frame with one pass that draws, and per opacity layer (its own pass,
+/// the composite, and the parent's pass resumed after it). The first
+/// layer costs 67 and each further one 62 to 70 (1 to 5 layers), as
+/// wgpu's resource trackers grow; the budget takes the most. Craie code
+/// in that phase holds no containers. A change here is a visible cost
+/// change: re-measure and update with the reason.
+const WGPU_FRAME: usize = 53;
+const WGPU_LAYER: usize = 70;
 /// wgpu's staging allocations for one small buffer write in
 /// `Renderer::upload`, and the extra tracking cost at the submission that
 /// follows it. Craie's share of prepare (`collect`) is measured apart.
@@ -143,7 +146,9 @@ struct Frame {
     plan: usize,
     encode: usize,
     passes: u32,
-    draws: u32,
+    layers: u32,
+    /// wgpu-core's allocations for the frame's command lists.
+    recorded: usize,
 }
 
 /// A real device, an offscreen target, and a renderer: runs whole frames
@@ -214,6 +219,12 @@ impl GpuFrames {
                 timeout: None,
             })
             .unwrap();
+        let (passes, draws) = pass_commands(&ui.scene().draw_list().cmds);
+        assert_eq!(
+            (passes.len() as u32, draws),
+            (r.stats.passes, r.stats.draw_calls),
+            "the passes Renderer::encode records"
+        );
         Frame {
             render,
             collect,
@@ -221,28 +232,74 @@ impl GpuFrames {
             plan,
             encode,
             passes: r.stats.passes,
-            draws: r.stats.draw_calls,
+            layers: r.stats.layers,
+            recorded: passes.iter().map(|&c| command_list_allocs(c)).sum(),
         }
     }
 }
 
-/// Plus wgpu-core's command recording: each pass records its commands
-/// into a fresh `Vec` that doubles as it fills, so one more reallocation
-/// per doubling of the pass's commands. The base above covers 8 draws; a
-/// pass has at most the frame's draws, so each pass may double once more
-/// per doubling of the frame's draws past 8 (16 or 17 list draws on
-/// Metal: 57, one over the base). Logarithmic in the draws, never linear.
+/// The commands each render pass of `Renderer::encode` records, and the
+/// draws: a pass binds its pipeline and two bind groups before its first
+/// draw and switches pipelines between rects and glyphs and paths; a
+/// layer draws in passes of its own, then composites (pipeline, bind
+/// group, draw), and its parent resumes in a new pass.
+fn pass_commands(cmds: &[craie_scene::DrawCmd]) -> (Vec<u32>, u32) {
+    use craie_scene::DrawCmd;
+    fn walk(cmds: &[DrawCmd], i: &mut usize, passes: &mut Vec<u32>, draws: &mut u32) {
+        loop {
+            let p = passes.len();
+            passes.push(0);
+            let mut bound = 0;
+            loop {
+                let Some(&c) = cmds.get(*i) else { return };
+                *i += 1;
+                let want = match c {
+                    DrawCmd::EndLayer => return,
+                    DrawCmd::BeginLayer { .. } => {
+                        walk(cmds, i, passes, draws);
+                        passes.push(3);
+                        *draws += 1;
+                        break;
+                    }
+                    DrawCmd::Rects { .. } | DrawCmd::Glyphs { .. } => 1,
+                    DrawCmd::Paths { .. } => 2,
+                };
+                if bound != want {
+                    passes[p] += if bound == 0 { 3 } else { 1 };
+                    bound = want;
+                }
+                passes[p] += 1;
+                *draws += 1;
+            }
+        }
+    }
+    let (mut passes, mut draws) = (Vec::new(), 0);
+    walk(cmds, &mut 0, &mut passes, &mut draws);
+    (passes, draws)
+}
+
+/// wgpu-core records each pass's commands into a fresh `Vec` (capacity
+/// 4, then doubling): one allocation per capacity it reaches. Measured on
+/// Metal, one pass of 2 to 62 draws (5 to 65 commands) costs exactly
+/// `WGPU_FRAME` plus this, so the frame's encode grows with the log of
+/// each pass's draws, never linearly.
+fn command_list_allocs(commands: u32) -> usize {
+    match commands {
+        0 => 0,
+        c => c.div_ceil(4).next_power_of_two().ilog2() as usize + 1,
+    }
+}
+
 fn budget(f: &Frame) -> usize {
-    let growth = f.draws.div_ceil(8).next_power_of_two().ilog2() as usize;
-    let passes = f.passes as usize;
-    WGPU_FRAME + WGPU_PASS * (passes - 1) + growth * passes
+    WGPU_FRAME + WGPU_LAYER * f.layers as usize + f.recorded
 }
 
 /// The whole frame on a real device: UI render, renderer prepare
 /// (collect + upload), and draw (plan + encode). Separate budgets per
 /// phase: Craie phases (render, collect, plan) allocate nothing once
 /// warm, changed or not; wgpu phases (upload, encode) cost a fixed
-/// amount per write and per pass, the same every frame.
+/// amount per write and per layer, plus the log of each pass's commands,
+/// the same every frame.
 #[test]
 fn whole_frame_budgets() {
     let Some(mut g) = GpuFrames::new() else {

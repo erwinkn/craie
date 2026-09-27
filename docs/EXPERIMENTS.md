@@ -18,7 +18,7 @@ Mac reruns, labeled "Mac" below, are from the same afternoon (branch
 macOS 26.6.2) on AC power, no thermal or performance warning in
 `pmset -g therm`, not in low power mode. Release builds throughout. The
 Mac wasn't idle: Erwin's own apps (Blender, a browser) kept its load
-average at 7 to 17 (given per section). Runs mostly repeat within 10
+average at 3 to 17 (given per section). Runs mostly repeat within 10
 percent; a few rows move up to 25.
 
 ### Why the first Mac numbers were high
@@ -41,18 +41,23 @@ than on loaded exe1, mostly about twice as fast (1.2 to 10 times).
 - The probe waited on timers that woke late. In the shell these runs
   came from (a background agent's), a plain 30 to 70 ms sleep woke 37 to
   141 ms late at the median and up to 150 ms late (macOS timer
-  coalescing). Raising the thread to user-interactive QoS, a
-  latency-critical `NSProcessInfo` activity or `mach_wait_until` made
-  no difference. Headless, the loop slept until 20 ms before a click
+  coalescing). Nor did the usual remedies help: in 60 sleeps of 30 to
+  70 ms each, the median wake was 37 ms late plain, 55 ms with a
+  latency-critical `NSProcessInfo` activity, 141 ms at user-interactive
+  QoS and 87 ms with `mach_wait_until`, each up to 150 ms (throwaway
+  Swift and Python loops, not kept in the repo; the spread between
+  plain runs, 37 to 82 ms, is as wide as between remedies). Headless,
+  the loop slept until 20 ms before a click
   was due; windowed, a thread slept until each click was due, then
   woke the loop. Both woke late, and E19 counted that as the click
   waiting for native: headless idle round trip p50 / p95 was 23.85 /
   124.67 ms and windowed idle 34.85 / 74.85 ms, almost all of it in
   "wait", with idle native frames at 0.2 to 0.4 ms of CPU. With the probe
-  on, the headless loop now spins to every deadline, and the windowed
-  waker spins to each click: 1.11 / 1.26 ms headless, 0.29 / 0.41 ms
-  windowed. Whether a shell Erwin opens coalesces this much wasn't
-  measured.
+  on, on macOS only, the headless loop now spins to every deadline, and
+  the windowed waker spins to each click: 1.01 / 1.19 ms headless, 0.29
+  / 0.41 ms windowed. Linux timers weren't late, so there both still
+  sleep as before. Whether a shell Erwin opens coalesces this much
+  wasn't measured.
 
 Ruled out, with evidence:
 
@@ -79,10 +84,11 @@ Ruled out, with evidence:
 (`crates/platform-winit/src/probe.rs`, `CRAIE_E19=<csv>`) clicks a
 40x40 marker 1,000 times per load, 30 to 70 ms apart on a schedule
 fixed in advance, not after each answer, so a stall is sampled as often
-as it lasts. Windowed, a thread spins to each due time and wakes the
-event loop, as platform input would; headless, the loop spins to its
-deadlines. (Both used to sleep, and woke late on the Mac: see "Why the
-first Mac numbers were high".) The
+as it lasts. Windowed, a thread wakes the event loop at each due time,
+as platform input would; headless, the loop waits for its deadlines. On
+macOS both spin, since timed waits woke late there (see "Why the first
+Mac numbers were high"); on Linux they sleep, the headless loop until
+20 ms before a deadline and then spinning. The
 app (`bench/e19/app.tsx`) answers the n-th click by filling the marker
 with `n << 8 | 0xff`; native sees the answer in the applied paint, with
 no protocol change. Native stamps each click when it was due,
@@ -127,17 +133,21 @@ earlier set had idle at 15.6 / 34.0 / 44.2 and stream at 70.9 / 105.6 /
 127.5.
 
 Mac (M5 Max, macOS 26.6.2, release, AC power), after the two probe
-fixes. Headless, the same 1800x1400 at 120 Hz, load average 7 to 8:
+fixes. Headless, the same 1800x1400 at 120 Hz, load average 3.0 to 3.6,
+rerun after the PR #15 review (the spin polls an atomic flag, not a
+mutex):
 
 | load      | round trip         | wait        | js          | deliver     | react       | apply       | paint       |
 |-----------|--------------------|-------------|-------------|-------------|-------------|-------------|-------------|
-| idle      | 1.11 / 1.26 / 1.30 | 0.00 / 0.00 | 0.03 / 0.15 | 0.01 / 0.07 | 0.02 / 0.08 | 0.01 / 0.03 | 1.01 / 1.25 |
-| stream    | 1.24 / 8.79 / 9.33 | 0.00 / 1.18 | 0.02 / 0.09 | 0.01 / 0.05 | 0.01 / 0.04 | 0.01 / 0.02 | 1.20 / 8.07 |
-| gc        | 1.01 / 1.29 / 2.75 | 0.00 / 0.05 | 0.06 / 0.98 | 0.03 / 0.71 | 0.03 / 0.13 | 0.02 / 0.10 | 0.93 / 1.57 |
-| stream+gc | 1.76 / 8.79 / 9.58 | 0.00 / 1.30 | 0.07 / 0.49 | 0.04 / 0.47 | 0.03 / 0.12 | 0.02 / 1.36 | 1.52 / 8.08 |
+| idle      | 1.01 / 1.19 / 1.24 | 0.00 / 0.01 | 0.03 / 0.14 | 0.01 / 0.07 | 0.01 / 0.08 | 0.01 / 0.04 | 0.94 / 1.18 |
+| stream    | 1.38 / 8.84 / 9.35 | 0.00 / 1.26 | 0.02 / 0.08 | 0.01 / 0.06 | 0.01 / 0.03 | 0.01 / 0.03 | 1.35 / 8.11 |
+| gc        | 0.93 / 1.16 / 1.46 | 0.00 / 0.01 | 0.03 / 0.33 | 0.02 / 0.29 | 0.02 / 0.07 | 0.01 / 0.03 | 0.87 / 1.15 |
+| stream+gc | 1.39 / 8.73 / 9.46 | 0.00 / 1.27 | 0.04 / 0.28 | 0.02 / 0.22 | 0.01 / 0.10 | 0.01 / 1.20 | 1.28 / 8.08 |
 
 Windowed, the window in front, on the Mac's built-in display, load
-average 9 to 12; paint ends when `present` returned:
+average 9 to 12, measured at c8ad34b (the waker never took the mutex,
+so the review fix doesn't change it); paint ends when `present`
+returned:
 
 | load      | round trip         | wait        | js          | deliver     | react       | apply       | paint       |
 |-----------|--------------------|-------------|-------------|-------------|-------------|-------------|-------------|
@@ -147,11 +157,11 @@ average 9 to 12; paint ends when `present` returned:
 | stream+gc | 0.56 / 1.11 / 1.71 | 0.01 / 0.64 | 0.06 / 0.51 | 0.03 / 0.44 | 0.03 / 0.08 | 0.03 / 0.88 | 0.45 / 0.84 |
 
 Every click was answered in both modes. Major collections paused JS for
-up to 64 ms headless and 53 ms windowed, but only 5 to 9 of 1,000
+up to 50 ms headless and 53 ms windowed, but only 0 to 10 of 1,000
 clicks were in JS during a pause of 2 ms or more (146 to 188 on exe1),
-so they show in the max (56 ms headless gc, 43 ms windowed) and not the
-p99. Native frames took 0.1 to 0.4 ms of CPU (median of per-second
-means; worst 32 ms), at 20 frames a second idle and 76 to 80 under
+so they show in the max (23 ms headless gc, 43 ms windowed) and not the
+p99. Native frames took 0.1 to 0.3 ms of CPU (median of per-second
+means; worst 32 ms), at 20 frames a second idle and 78 to 80 under
 stream. Headless under stream, the p95 of about 9 ms is the loop's own
 pacing: it draws at most one frame per 8.33 ms, and while the stream
 keeps frames coming, a click's answer waits for the next slot.
@@ -245,7 +255,7 @@ Mac (M5 Max, macOS 26.6.2, release, AC power, load average 10 to 17), medians of
 | sparkline, dashed "6 3" | 54 µs | 77 µs | 341 µs |
 | 4,096 shapes sharing one 1 KiB path | | 5,248 µs | 22,688 µs |
 
-The Mac is 1.4 to 4 times faster, most in the frames; the conclusions
+The Mac is 1.36 to 4.3 times faster, most in the frames; the conclusions
 below hold on both.
 
 - A new icon costs about 10 µs over a plain view (parse, validate,
@@ -310,7 +320,7 @@ Mac (M5 Max, macOS 26.6.2, release, AC power, load average 10 to 17), medians of
 | PNG gray, 7.8 MB | 0.001 ms | 21.1 ms | 23.7 ms | 25.2 ms |
 | PNG RGB 16-bit, 46.7 MB | 0.001 ms | 99.6 ms | 111.6 ms | 112.8 ms |
 
-1.6 to 2.4 times as fast as exe1, and the shape is the same: the full
+1.65 to 2.55 times as fast as exe1, and the shape is the same: the full
 decode is 75 to 90 percent of each.
 
 - 80 x 80 is a 40 pt avatar at 2x (a 3,000 x 3,000 center crop);

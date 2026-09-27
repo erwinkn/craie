@@ -62,9 +62,10 @@ def main():
     # Each JS stamp falls between its click's dispatch and apply, unless
     # native and JS read different clocks (probe.rs, `now_ns`).
     skew = [min(j["handler"] - r["dispatched"], r["applied"] - j["committed"]) for r, j in joined]
-    if skew and pct(skew, 50) < 0:
-        sys.exit(f"E19 {label}: JS stamps fall outside dispatch → apply by {-pct(skew, 50) / 1e6:.1f} ms"
-                 " (median): native and JS clocks differ")
+    if skew and min(skew) < 0:
+        out = sum(s < 0 for s in skew)
+        sys.exit(f"E19 {label}: {out} JS stamps fall outside dispatch → apply, by up to"
+                 f" {-min(skew) / 1e6:.3f} ms: native and JS clocks differ")
     print(f"E19 {label}: {len(native)} clicks, {lost} unanswered")
     print(f"  {'ms':<34}{'p50':>8}{'p95':>8}{'p99':>8}{'max':>8}")
     trip = [(r["presented"] - r["due"]) / 1e6 for r in done] + [math.inf] * lost
