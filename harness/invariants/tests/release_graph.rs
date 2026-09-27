@@ -10,9 +10,10 @@ use std::process::Command;
 /// Crates that ship.
 const RELEASE: &[&str] = &["craie-node", "craie-platform-winit"];
 
-/// The shipped target: its graph, whatever the host. Linux graphs differ
-/// (winit draws Wayland decorations with tiny-skia).
-const TARGET: &str = "aarch64-apple-darwin";
+/// The shipped targets: their graphs, whatever the host. Linux is a
+/// development host, not shipped (winit draws Wayland decorations with
+/// tiny-skia there).
+const TARGETS: &[&str] = &["aarch64-apple-darwin", "x86_64-apple-darwin"];
 
 /// Crates that must never appear in a release graph.
 const REFERENCE_ONLY: &[&str] = &[
@@ -33,7 +34,10 @@ const REFERENCE_ONLY: &[&str] = &[
 fn release_graphs_exclude_reference_libraries() {
     let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
     let root = concat!(env!("CARGO_MANIFEST_DIR"), "/../..");
-    for krate in RELEASE {
+    for (krate, target) in RELEASE
+        .iter()
+        .flat_map(|k| TARGETS.iter().map(move |t| (k, t)))
+    {
         let out = Command::new(&cargo)
             .current_dir(root)
             .args([
@@ -46,7 +50,7 @@ fn release_graphs_exclude_reference_libraries() {
                 "--format",
                 "{p}",
                 "--target",
-                TARGET,
+                target,
                 "-p",
                 krate,
             ])
@@ -54,7 +58,7 @@ fn release_graphs_exclude_reference_libraries() {
             .expect("run cargo tree");
         assert!(
             out.status.success(),
-            "cargo tree failed: {}",
+            "cargo tree failed (run `cargo fetch` for other targets' packages): {}",
             String::from_utf8_lossy(&out.stderr)
         );
         let tree = String::from_utf8_lossy(&out.stdout);
@@ -66,7 +70,7 @@ fn release_graphs_exclude_reference_libraries() {
         for bad in REFERENCE_ONLY {
             assert!(
                 !names.contains(bad),
-                "{krate} depends on reference-only crate {bad}"
+                "{krate} ({target}) depends on reference-only crate {bad}"
             );
         }
     }

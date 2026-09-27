@@ -260,3 +260,7 @@ Reviewer minors and nitpicks not fixed yet.
 - S5B-16 (size limits: percentages against the containing block, box
   sizing): fixed after step 5b round 3 (the last); reviewed with the
   step 6 range, which starts at its commit.
+- PR1-01..05 (the release graph checks both Apple targets and says
+  Linux is not shipped, and its failure names `cargo fetch`; the
+  last-resort font test covers the by-name tie-break on every platform;
+  comment accuracy): fixed in the PR #1 review (Linux-host test fixes).
