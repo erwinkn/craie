@@ -13,6 +13,7 @@
 
 use std::collections::VecDeque;
 use std::io::Cursor;
+use std::num::NonZeroU32;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 
@@ -435,9 +436,7 @@ fn bleed(rgba: &mut [u8], w: usize, h: usize) {
                     }
                 }
             }
-            // One check guards all three divisions.
-            #[allow(clippy::manual_checked_ops)]
-            if n > 0 {
+            if let Some(n) = NonZeroU32::new(n) {
                 for c in 0..3 {
                     rgba[i + c] = (sum[c] / n) as u8;
                 }

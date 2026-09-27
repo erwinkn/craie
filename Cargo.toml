@@ -73,7 +73,7 @@ tracing = "=0.1.44"
 [workspace.lints.clippy]
 # `!(x > 0.0)` is the deliberate NaN-rejecting check; `partial_cmp` hides it.
 neg_cmp_op_on_partial_ord = "allow"
-# Tests build taffy styles field by field, with comments between fields.
+# Taffy `Style`s are built field by field (tests, harness, examples).
 field_reassign_with_default = "allow"
 
 [profile.dev]

@@ -859,3 +859,8 @@ Reviewer minors and nitpicks not fixed yet.
 - PR9-04 (gpu-tests review): the mechanism was stated as fact: it is "most likely" in the LEDGER and the run log, which name the binaries fixed.
 - PR9-05 (gpu-tests review, nit): the run log marked #9 merged while open: it merges with this text.
 - PR9-06 (gpu-tests review, nit): one shared `Gpu` helper in craie-render instead of three local copies: not done. It would be public API for tests in a crate checked for wasm32, where `Gpu` is not `Sync`; the copies are four lines each and say why.
+- PR10-01 (clippy review): the `field_reassign_with_default` allow's reason and the PR body said 19 sites, all in ui's tests: it fires at 32, across ui's tests, platform-winit, the harness and `examples/vector` (the deny-by-default `bad_bit_mask` error in craie-ui had stopped clippy before the crates that depend on it). The reason and counts are corrected; the allow stays workspace-wide.
+- PR10-02 (clippy review, nit): `Values::valid`'s `bad_bit_mask` allow also covered the live `layout_keys` check: narrowed to one `let` holding the dead `value_field` check, which stays for when the mask widens.
+- PR10-03 (clippy review, nit): `value_field::ALL` was the literal `0xFF`, so a retired flag would still count as known: it is the OR of the flags (0xFF today).
+- PR10-04 (clippy review, nit): `lists.rs` sliced `reference[..n]`, whose length is `n` by construction: `reference.iter()`.
+- PR10-05 (clippy review, nit): `bleed` allowed `manual_checked_ops` for its `n > 0` check: `NonZeroU32::new(n)` guards the three divisions instead, lint-free.
