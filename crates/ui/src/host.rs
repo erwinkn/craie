@@ -282,6 +282,8 @@ pub struct Host {
     pub vectors: HashMap<u32, VectorData>,
     /// Claim sets (`claims.rs`), id-keyed; NIL keys the window list.
     pub claims: HashMap<u32, crate::claims::ClaimSet>,
+    /// Inherited text colors (`COLOR`), id-keyed: few nodes set one.
+    pub colors: HashMap<u32, u32>,
     /// Item index of a list row (a child of a List node); NIL otherwise.
     pub list_index: Vec<u32>,
     /// List states and scroll anchors (§7).
@@ -335,6 +337,7 @@ impl Host {
             surfaces: HashMap::new(),
             vectors: HashMap::new(),
             claims: HashMap::new(),
+            colors: HashMap::new(),
             list_index: Vec::new(),
             lists: crate::list::Lists::default(),
             revs: Revs::default(),
@@ -461,6 +464,7 @@ impl Host {
         self.surfaces.remove(&id.0);
         self.vectors.remove(&id.0);
         self.claims.remove(&id.0);
+        self.colors.remove(&id.0);
         self.list_index[i] = NIL;
         self.lists.forget(id.0);
         if kind == NodeKind::Surface {
@@ -561,6 +565,7 @@ impl Host {
         self.surfaces.remove(&id.0);
         self.vectors.remove(&id.0);
         self.claims.remove(&id.0);
+        self.colors.remove(&id.0);
         self.list_index[i] = NIL;
         self.lists.forget(id.0);
         let generation = self.nodes[i].generation.wrapping_add(1);
@@ -624,6 +629,31 @@ impl Host {
         self.node(id)
             .filter(|n| n.kind == NodeKind::Text)
             .map(|_| &self.paragraphs[id.index()])
+    }
+
+    /// The nearest inherited color: the node's own `COLOR` or its
+    /// nearest ancestor's.
+    pub fn inherited_color(&self, id: NodeId) -> Option<u32> {
+        if self.colors.is_empty() {
+            return None;
+        }
+        let mut cur = id;
+        while cur.is_node() {
+            if let Some(&c) = self.colors.get(&cur.0) {
+                return Some(c);
+            }
+            cur = self.parent(cur);
+        }
+        None
+    }
+
+    /// The color a span of text node `id` draws in.
+    pub fn span_color(&self, id: NodeId, s: &TextSpan) -> u32 {
+        if s.inherit_color {
+            self.inherited_color(id).unwrap_or(s.color)
+        } else {
+            s.color
+        }
     }
 
     pub fn style(&self, id: NodeId) -> &LayoutRow {

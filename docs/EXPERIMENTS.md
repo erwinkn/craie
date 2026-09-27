@@ -254,6 +254,37 @@ Two older bugs, fixed in the PR #3 review:
   of half the box, at an origin a border offsets. Borders in the
   randomized test found it.
 
+### State styles: native restyle cost (work item 5)
+
+`cargo run --release -p craie-harness --example states_restyle`
+(`harness/invariants/examples/states_restyle.rs`; CPU only, so it runs
+the same on the Mac). Two trees at 1440x900 @2x:
+
+- hover: a 200x40 scope (the row) and N cells 6 pt square elsewhere,
+  each with `_row: { _hover: { backgroundColor } }`. One change is a
+  pointer move into or out of the row, then `render`: the hit test,
+  input bits, restyle, paint patch.
+- breakpoint: 1,000 rows 36 pt tall in a column, each `_narrow: {
+  style: { height: 44 } }`; the window alternates 900 and 1,440 pt
+  wide. Against the same resizes with no tables.
+
+On exe1 (load average 27 to 30), medians of three runs, per change:
+
+| case                                | µs    | allocs | paints patched | layouts |
+|-------------------------------------|-------|--------|----------------|---------|
+| hover, 1 dependent                  | 0.29  | 1      | 1              | 0       |
+| hover, 100 dependents               | 11    | 1      | 100            | 0       |
+| hover, 1,000 dependents             | 235   | 1      | 1,000          | 0       |
+| breakpoint, no tables (resize only) | 759   | 4      | 0              | 1       |
+| breakpoint, 1,000 `_narrow` rows    | 1,283 | 7      | 0              | 1       |
+
+- Hover grows with what it restyles, not with the tree: about 0.2 µs
+  per dependent, one paint patch each and no layout. The runs spread
+  widely (142 to 269 µs at 1,000).
+- A breakpoint restyles 1,000 layout rows for about 0.5 ms more than
+  the resize alone, and still lays out once: the restyle declares the
+  changed `SIZE` before the frame's layout pass.
+
 ## Step 1 — crate split, CRW2, retained scene (2026-09-23)
 
 Conditions: the shared M5 Max ran under heavy load (load average 12 to

@@ -9,6 +9,7 @@ import React, {
   useContext,
   useEffect,
   useLayoutEffect,
+  useMemo,
   useState,
   type ReactNode,
   type Ref,
@@ -30,6 +31,8 @@ import {
   type Hotkey,
   type HostNode,
   type KeyClaim,
+  type ScopeChain,
+  type ScopeRef,
   type SurfaceParam,
   type Transport,
 } from "./host.js"
@@ -84,7 +87,7 @@ export type {
   Transport,
   UiEvent,
 } from "./host.js"
-export { onFrameStats } from "./host.js"
+export { defineStates, onFrameStats } from "./host.js"
 
 /** Pointer position + target passed to pointer/wheel listeners. `x`/`y`
  * are window-absolute logical points; `rx`/`ry` are relative to the
@@ -165,8 +168,47 @@ export interface ListenerProps {
   onContextMenu?: (e: ContextMenuEvt) => void
 }
 
-export interface ViewProps extends ListenerProps {
+/** What a variant overrides. */
+export interface VariantStyle {
+  backgroundColor?: string | number
+  borderColor?: string | number
+  borderWidth?: number
+  borderRadius?: number
+  /** The color text inherits. */
+  color?: string | number
+  /** Layout, `opacity` and `transform`. Keys that share a wire field
+   * with ones the variant sets (`width` with `height`, the sides of
+   * `padding`) keep the element's own values. */
   style?: StyleProps
+}
+/** State and environment variants, resolved natively (no render): a
+ * key names a state of the nearest scope (`_hover`, `_selected`, a
+ * `defineStates` state), an environment condition (`_narrow`,
+ * `_compact`, `_touch`, `_reducedMotion`), or a `group` up the tree
+ * (`_row`, whose states the block then reads). Nesting ANDs; of the
+ * variants that hold, the more specific one wins per property. */
+export type Variants = { [key: `_${string}`]: (VariantStyle & Variants) | undefined }
+
+/** The states a scope sets (hover, press and focus are native's). */
+export interface StateProps {
+  selected?: boolean
+  expanded?: boolean
+  checked?: boolean
+  highlighted?: boolean
+  /** Also masks hover and press, and stops `onPress`. */
+  disabled?: boolean
+  /** Custom states (`defineStates`) by name. */
+  states?: Record<string, boolean>
+}
+
+export interface ViewProps extends ListenerProps, StateProps, Variants {
+  style?: StyleProps
+  /** Makes the View a scope whose states its variants and its
+   * descendants' read; a name also addresses it (`_name`) from further
+   * down. Adding or removing it remounts the children. */
+  group?: boolean | string
+  /** The color descendant text inherits. */
+  color?: string | number
   /** The View's text descendants form one selection domain: drag to
    * select across them, Cmd/Ctrl+C copies in tree order. */
   selectable?: boolean
@@ -191,7 +233,7 @@ export interface PressableProps extends ViewProps {
 /** Text props. A Text nested in a Text has no native node: its text and
  * style become spans of the outermost Text's paragraph, and its pointer
  * listeners (`onPress` too) receive the events over its own span. */
-export interface TextProps extends ListenerProps {
+export interface TextProps extends ListenerProps, Variants {
   style?: StyleProps
   /** Primary pointer released over this text (or this nested span). */
   onPress?: (e: PointerEvt) => void
@@ -217,7 +259,7 @@ export interface TextProps extends ListenerProps {
   children?: ReactNode // strings land on the wire as text
   text?: string
 }
-export interface SurfaceProps extends ListenerProps {
+export interface SurfaceProps extends ListenerProps, Variants {
   style?: StyleProps
   backgroundColor?: string | number
   borderRadius?: number
@@ -242,7 +284,7 @@ export interface BarsProps extends Omit<SurfaceProps, "kind" | "params" | "paylo
   /** Gap between bars, logical points (default 2). */
   gap?: number
 }
-export interface TextInputProps extends ListenerProps {
+export interface TextInputProps extends ListenerProps, Variants {
   accessibilityRole?: AccessibilityRole
   style?: StyleProps
   backgroundColor?: string | number
@@ -272,6 +314,34 @@ export interface TextInputProps extends ListenerProps {
 }
 
 const HostContext = createContext<CraieHost | null>(null)
+const ScopeContext = createContext<ScopeChain | null>(null)
+
+/** A host element with the scope chain its variants read. A scope
+ * heads the chain it and its children see; children get it through
+ * context, so a Portal's content keeps its owner's scopes. */
+function useHost(type: string, props: Record<string, any>, scope = false) {
+  const outer = useContext(ScopeContext)
+  const [ref] = useState<ScopeRef>(() => ({ node: null }))
+  const name = typeof props.group === "string" ? props.group : undefined
+  const chain = useMemo(
+    () => (scope ? { ref, name, parent: outer } : outer),
+    [scope, ref, name, outer],
+  )
+  if (!scope) return createElement(type, outer ? { ...props, __scopes: outer } : props)
+  return createElement(
+    type,
+    { ...props, __scope: ref, __scopes: chain },
+    createElement(ScopeContext.Provider, { value: chain }, props.children),
+  )
+}
+
+/** Renders `children` as a window root, above the app (overlays,
+ * menus, tooltips). They keep the context of where the Portal sits,
+ * scopes included. */
+export function Portal({ children }: { children?: ReactNode }) {
+  const host = useContext(HostContext)
+  return host ? reconciler.createPortal(children, host, null, null) : null
+}
 
 /** Window-level shortcuts, matched after every claim on the focus path
  * and, unless `allowInInput`, not while a text input has focus. The
@@ -301,21 +371,21 @@ export function useFrameStats(): FrameStatsReport | null {
 }
 
 export function View(props: ViewProps) {
-  return createElement("view", props)
+  return useHost("view", props, !!props.group)
 }
 
 /** A View that is a button for assistive technology and fires `onPress`
- * on primary pointer release. */
+ * on primary pointer release. Always a scope. */
 export function Pressable({ onPress, ...props }: PressableProps) {
-  return createElement("view", {
+  return useHost("view", {
     accessibilityRole: "button",
     focusable: true,
     ...props,
     onPointerUp: (e: PointerEvt) => {
       props.onPointerUp?.(e)
-      if ((e.button ?? 1) === 1) onPress?.(e)
+      if ((e.button ?? 1) === 1 && !props.disabled) onPress?.(e)
     },
-  })
+  }, true)
 }
 export function Text({ onPress, ...rest }: TextProps) {
   const props: TextProps = onPress
@@ -331,27 +401,19 @@ export function Text({ onPress, ...rest }: TextProps) {
   // mixed string/expression JSX still forms one paragraph. Nested
   // non-primitive children (styled spans) keep their instances.
   const children = props.children
-  if (
-    props.text === undefined &&
-    children !== undefined &&
-    flattenText(children) !== undefined
-  ) {
-    return createElement("text", {
-      accessibilityRole: "text",
-      ...props,
-      text: flattenText(children),
-      children: undefined,
-    })
+  const flat = props.text === undefined && children !== undefined ? flattenText(children) : undefined
+  if (flat !== undefined) {
+    return useHost("text", { accessibilityRole: "text", ...props, text: flat, children: undefined })
   }
-  return createElement("text", { accessibilityRole: "text", ...props })
+  return useHost("text", { accessibilityRole: "text", ...props })
 }
 
 /** A native drawing surface fed by payload bytes. */
 export function Surface(props: SurfaceProps) {
-  return createElement("surface", props)
+  return useHost("surface", props)
 }
 
-export interface VectorProps extends ListenerProps {
+export interface VectorProps extends ListenerProps, Variants {
   style?: StyleProps
   backgroundColor?: string | number
   borderRadius?: number
@@ -369,12 +431,12 @@ export interface VectorProps extends ListenerProps {
 /** A vector drawing (icons, illustrations) from a prepared asset. An
  * image for assistive technology unless a role is given. */
 export function Vector(props: VectorProps) {
-  return createElement("vector", { accessibilityRole: "image", ...props })
+  return useHost("vector", { accessibilityRole: "image", ...props })
 }
 
 /** Bar chart surface (`SURFACE.bars`). */
 export function Bars({ values, color, maxColor, gap, ...props }: BarsProps) {
-  return createElement("surface", {
+  return useHost("surface", {
     ...props,
     kind: SURFACE.bars,
     params: [color, maxColor ?? 0, { f32: gap ?? 2 }],
@@ -390,11 +452,11 @@ export interface ScrollViewProps extends ViewProps {
 }
 
 export function ScrollView(props: ScrollViewProps) {
-  return createElement("view", {
+  return useHost("view", {
     accessibilityRole: "scrollView",
     ...props,
     style: { overflow: "scroll", ...props.style },
-  })
+  }, !!props.group)
 }
 
 export interface ListProps<T> {
@@ -474,7 +536,7 @@ function keyIndex<T>(items: readonly T[], keyOf: (item: T, i: number) => unknown
 export function TextInput(props: TextInputProps) {
   // focusable by default; a Tab ring that skips the only editable field
   // would surprise.
-  return createElement("input", {
+  return useHost("input", {
     focusable: true,
     accessibilityRole: props.multiline ? "multilineTextInput" : "textInput",
     ...props,

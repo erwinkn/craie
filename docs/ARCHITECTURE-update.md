@@ -416,6 +416,80 @@ bits). This is probably a new subsection of §3.
   with the 64-bit budget).
 - Closes S1: spans get variants through interactive spans (topic 11).
 
+**Built (work item 5).** As targeted, with these choices:
+
+```tsx
+defineStates(["unread", "streaming"])
+<Pressable group="row" selected={selected} states={{ unread: thread.unread }}
+  backgroundColor="#1b1d22" style={{ height: 36, transition: { backgroundColor: { duration: 0.12 } } }}
+  _hover={{ backgroundColor: "#24272e" }}
+  _selected={{ backgroundColor: "#2d3240", _hover: { backgroundColor: "#343a4a" } }}
+  _narrow={{ style: { height: 44 } }}>
+  <Text color="#9aa0aa" _unread={{ color: "#ffffff" }}>{thread.title}</Text>
+  <View style={{ opacity: 0 }} _row={{ _hover: { style: { opacity: 1 } } }} />
+</Pressable>
+```
+
+- Four ops in family 0xB0, still protocol 4: `STATES` (a scope's app
+  bits), `VARIANTS` (a node's table; empty removes it and restores the
+  base), `ENVIRONMENT` (breakpoints, default 1,023 and 639 pt as the
+  kit's) and `COLOR` (the inherited color). A node becomes a scope with
+  its first `STATES`. Bit index is rank: custom states 0 to 53, then
+  hover 54 up to disabled 63; the environment's ranks follow (narrow,
+  compact, touch, reduced motion).
+- Specificity: depth is the number of state and environment bits a
+  variant tests, then the highest rank it tests (a u128 of its masks
+  and environment), then declaration order. In the example, hovering
+  a selected row gives `#343a4a` (depth 2), a selected one `#2d3240`,
+  a hovered one `#24272e`. Variants overlay property by property.
+- A restyle declares only the fields that differ from the last
+  resolved values, so hovering the row above touches its fill and
+  nothing else, and a transition tweens exactly that.
+- Input bits are recomputed from native state after each dispatch and
+  transaction (the hovered node's ancestors, the primary press's, the
+  focused node's), not tracked per event. Focus is visible after a key,
+  or in a text input. A touch change resolves every table (it masks
+  hover everywhere); a width change only the tables that test the
+  environment.
+- A scope that dies makes its terms false; its id, reused, is a new
+  scope (terms hold the generation).
+- The node's own ops on a tabled node set its base, and the table
+  resolves again. `animate` on a tabled node sets the base too, so a
+  variant that overrides the property wins at the next restyle
+  (`LEDGER.md` DF-28).
+- Inherited color: the nearest `COLOR` on the node or an ancestor, else
+  the span's own color. A span inherits unless its Text sets `color`,
+  and a Text's own `color` travels as `COLOR` (its spans send white as
+  the fallback), so a new color or a tween repaints spans without a
+  paragraph op, a shape or a layout. An input keeps its config color,
+  and vector `currentColor` waits for the vector work (DF-24).
+- The facade (`@craie/bridge`, re-exported by `@craie/react`):
+  `defineStates`; `Pressable` is always a scope, a View with `group`
+  (a name makes `_name` address it) is one, and both take `selected`,
+  `expanded`, `checked`, `highlighted`, `disabled` (which also stops
+  `onPress`) and `states`. A `_` key is a state of the nearest scope,
+  an environment key, or a group up the tree; the others are logged
+  once and left out. Scopes flow through React context, so a `Portal`
+  (new: its children are window roots) keeps its owner's. Variant
+  tables resolve to ids and go out at the seal, when their signature
+  changed.
+- A layout value sends whole wire fields: `height: 44` goes with the
+  element's own `width`, `padding.left` with its other sides. A value
+  left out comes from the base, not from another variant.
+- Not yet: transform parts (a variant's transform replaces the whole
+  matrix, DF-21), transitions inside a variant (DF-22), text metrics in
+  variants (DF-23), a platform source for touch and reduced motion
+  (DF-25; `Ui::set_touch` and `set_reduced_motion` exist), variants on a
+  nested Text (interactive spans, DF-26). Hover can oscillate when a
+  hover variant moves the node from under the pointer (DF-27).
+- Cost (`states_restyle`, CPU only, exe1 under load, medians of three;
+  `EXPERIMENTS.md`, "State styles"): a hover change with 1, 100 or 1,000
+  dependents is 0.29, 11 or 235 µs from pointer move to patched paint,
+  one allocation, no layout. Crossing the narrow breakpoint with 1,000
+  `_narrow` rows is 1.28 ms, against 0.76 ms for the same resize with no
+  tables. So a restyle adds about 0.5 µs per node, and a breakpoint is
+  still one layout pass.
+
 ## 6. Stacking and geometry
 
 Changes: §3 and §8 (draw order, layers), §4 (a geometry pass), §13 (hit

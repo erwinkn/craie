@@ -28,6 +28,9 @@ pub mod platform;
 mod reach;
 mod scene_sync;
 pub mod selection;
+pub mod states;
+#[cfg(test)]
+mod states_tests;
 pub mod surface;
 #[cfg(test)]
 mod tests;

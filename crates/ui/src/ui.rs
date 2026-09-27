@@ -50,6 +50,16 @@ pub struct Ui {
     pub(crate) hover: Option<NodeId>,
     /// Node that grabbed the pointer on the last button press.
     pub(crate) pressed: Option<NodeId>,
+    /// That press is of the primary button (the `pressed` state bit).
+    pub(crate) pressed_primary: bool,
+    /// Where the pointer last was, while it is in the window.
+    pub(crate) last_pointer: Option<(f32, f32)>,
+    /// A hover recheck waits for moving spaces to settle.
+    pub(crate) hover_stale: bool,
+    /// State styles (`states.rs`).
+    pub(crate) states: crate::states::States,
+    /// Scratch for tree walks.
+    pub(crate) node_scratch: Vec<NodeId>,
     /// Last primary press (time, node, x, y) for double-click detection.
     pub(crate) last_click: Option<(Instant, NodeId, f32, f32)>,
     /// The text selection (`selection.rs`), whether a press is dragging
@@ -120,6 +130,11 @@ impl Ui {
             focus: None,
             hover: None,
             pressed: None,
+            pressed_primary: false,
+            last_pointer: None,
+            hover_stale: false,
+            states: Default::default(),
+            node_scratch: Vec::new(),
             last_click: None,
             text_selection: None,
             selecting: false,
@@ -156,7 +171,9 @@ impl Ui {
     pub fn settle(&mut self) -> bool {
         let settled = self.settle_moving();
         self.force_paint |= settled;
-        settled
+        // The node under a still pointer, once nothing moves.
+        let rehovered = self.hover_stale && self.rehover();
+        settled || rehovered
     }
 
     /// When the next moving space comes to rest (clock seconds), if any
@@ -440,6 +457,7 @@ impl Ui {
             || !d.paint.is_empty()
             || !d.spatial.is_empty()
             || !self.pending_scrolls.is_empty()
+            || !self.states.queue.is_empty()
         {
             return true;
         }
@@ -464,6 +482,8 @@ impl Ui {
     /// rebuilds the scene. Cheap on a clean tree, but callers should
     /// still gate on `needs_paint`.
     pub fn render(&mut self, size: Size) -> &Scene {
+        self.update_env(size);
+        self.restyle();
         self.run_animations(size);
         self.layout(size);
         self.sync_lists(size);
@@ -480,7 +500,13 @@ impl Ui {
         {
             self.a11y_stale = true;
         }
+        let moved = self.relayout || !self.host.dirty.spatial.is_empty();
         self.paint(size);
+        // Geometry moved under a still pointer: hover follows. A change
+        // restyles, and the host sees `needs_paint` and draws again.
+        if moved || self.hover_stale {
+            self.rehover();
+        }
         &self.scene
     }
 

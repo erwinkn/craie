@@ -254,10 +254,18 @@ impl Ui {
     pub fn dispatch(&mut self, ev: &Event) {
         self.refresh_reach();
         match ev {
-            Event::PointerMove { x, y } => self.pointer_move(*x, *y),
-            Event::PointerDown { x, y, button, mods } => self.pointer_down(*x, *y, *button, *mods),
+            Event::PointerMove { x, y } => {
+                self.last_pointer = Some((*x, *y));
+                self.pointer_move(*x, *y)
+            }
+            Event::PointerDown { x, y, button, mods } => {
+                self.last_pointer = Some((*x, *y));
+                self.states.keyboard = false;
+                self.pointer_down(*x, *y, *button, *mods)
+            }
             Event::PointerUp { x, y, button } => {
                 self.selecting = false;
+                self.pressed_primary = false;
                 // Pointer capture: while a button was held the press
                 // target owns the release, wherever the pointer is.
                 let target = self.pressed.take().or_else(|| self.hit_test(*x, *y));
@@ -290,7 +298,10 @@ impl Ui {
                     self.emit_path(hit, e);
                 }
             }
-            Event::KeyDown(k) => self.key_down(k),
+            Event::KeyDown(k) => {
+                self.states.keyboard = true;
+                self.key_down(k)
+            }
             Event::KeyUp(k) => {
                 if let Some(f) = self.focus {
                     let composing = self
@@ -334,9 +345,59 @@ impl Ui {
                 if !gained {
                     self.hover = None;
                     self.pressed = None;
+                    self.pressed_primary = false;
+                    self.last_pointer = None;
                 }
             }
         }
+        self.restyle();
+    }
+
+    /// Moves the hover to `hit`, synthesizing leave and enter on the
+    /// symmetric difference of the ancestor chains: each chain below
+    /// their common ancestor.
+    fn set_hover(&mut self, hit: Option<NodeId>, x: f32, y: f32) {
+        let common = self.common_ancestor(self.hover, hit).unwrap_or(ROOT);
+        for (from, kind) in [
+            (self.hover, out_kind::POINTER_LEAVE),
+            (hit, out_kind::POINTER_ENTER),
+        ] {
+            let mut cur = from.unwrap_or(ROOT);
+            while cur.is_node() && cur != common {
+                if self.host.interaction(cur).listeners & mask::POINTER_ENTER_LEAVE != 0 {
+                    let mut e = self.event(kind, cur);
+                    e.x = x;
+                    e.y = y;
+                    self.pending_events.push(e);
+                }
+                cur = self.host.parent(cur);
+            }
+        }
+        self.hover = hit;
+    }
+
+    /// Hover at rest: after a frame whose geometry moved, the node under
+    /// a still pointer may have changed. Held while a space is moving
+    /// (a scroll, a transform): `settle` applies it. Returns whether the
+    /// hover changed.
+    pub(crate) fn rehover(&mut self) -> bool {
+        let Some((x, y)) = self.last_pointer else {
+            self.hover_stale = false;
+            return false;
+        };
+        if self.next_settle().is_some() {
+            self.hover_stale = true;
+            return false;
+        }
+        self.hover_stale = false;
+        self.refresh_reach();
+        let hit = self.hit_test(x, y);
+        if hit == self.hover {
+            return false;
+        }
+        self.set_hover(hit, x, y);
+        self.restyle();
+        true
     }
 
     fn pointer_move(&mut self, x: f32, y: f32) {
@@ -354,26 +415,9 @@ impl Ui {
         }
         let hit = self.hit_test(x, y);
         if hit != self.hover {
-            // Synthesize leave/enter on the symmetric difference of the
-            // ancestor chains: each chain below their common ancestor.
-            let common = self.common_ancestor(self.hover, hit).unwrap_or(ROOT);
-            for (from, kind) in [
-                (self.hover, out_kind::POINTER_LEAVE),
-                (hit, out_kind::POINTER_ENTER),
-            ] {
-                let mut cur = from.unwrap_or(ROOT);
-                while cur.is_node() && cur != common {
-                    if self.host.interaction(cur).listeners & mask::POINTER_ENTER_LEAVE != 0 {
-                        let mut e = self.event(kind, cur);
-                        e.x = x;
-                        e.y = y;
-                        self.pending_events.push(e);
-                    }
-                    cur = self.host.parent(cur);
-                }
-            }
-            self.hover = hit;
+            self.set_hover(hit, x, y);
         }
+        self.hover_stale = false;
         // Pointer capture: a pressed node keeps receiving moves outside
         // its bounds (text selection drag, slider behaviors).
         if let Some(target) = self.pressed.or(hit) {
@@ -391,6 +435,7 @@ impl Ui {
     fn pointer_down(&mut self, x: f32, y: f32, button: crate::events::Button, mods: Mods) {
         let hit = self.hit_test(x, y);
         self.pressed = hit;
+        self.pressed_primary = button == crate::events::Button::Primary;
 
         // Focus: nearest focusable/input ancestor of the hit; clicking
         // non-focusable space blurs.

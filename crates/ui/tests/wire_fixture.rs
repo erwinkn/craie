@@ -31,6 +31,7 @@ fn js_fixture_decodes_and_executes() {
     // the string table), both decorations, letter spacing, weight, italic.
     let (s0, s1) = (txn.spans[0], txn.spans[1]);
     assert_eq!((s0.line_height, s0.family), (24.0, craie_ui::mutation::NIL));
+    assert!(s0.inherit_color && !s1.inherit_color);
     assert_eq!(txn.families[s1.family as usize], "monospace");
     assert_eq!((s1.decoration, s1.letter_spacing), (3, 0.5));
     assert_eq!((s1.weight, s1.italic), (700, true));
@@ -185,9 +186,44 @@ fn js_fixture_decodes_and_executes() {
                 Prop::Gap,
                 Value::Gap([LengthPercentage::length(4.0), LengthPercentage::length(6.0)])
             ),
+            (Prop::Color, Value::Color(0xffff_ffff)),
         ]
     );
     assert!(ui.animating());
+
+    // State styles: the root is a scope with `selected` and custom bit 0;
+    // the row's table overlays the selected fill (the narrow variant waits
+    // for a window).
+    let selected = craie_ui::states::state_bit::SELECTED;
+    assert_eq!(ui.state_bits(NodeId(0)), selected | 1);
+    assert!(ui.has_variants(NodeId(5)));
+    assert_eq!(host.paint[5].fill, 0x2d32_40ff);
+    let (mut env, mut variants) = (None, None);
+    for m in txn.mutations.iter() {
+        match m {
+            Mutation::Environment {
+                narrow_max,
+                compact_max,
+            } => env = Some((*narrow_max, *compact_max)),
+            Mutation::Variants { id: 5, variants: v } => variants = Some(v.clone()),
+            _ => {}
+        }
+    }
+    assert_eq!(env, Some((900.0, 500.0)));
+    let v = variants.unwrap();
+    assert_eq!((v.len(), v[1].env, v[1].terms[0].mask), (2, 1, 1));
+    let narrow = &v[1].values;
+    assert_eq!(
+        (narrow.border, narrow.radius, narrow.color),
+        ((0xff, 1.0), 3.0, None)
+    );
+    assert_eq!((narrow.opacity, narrow.transform.0[5]), (0.5, 2.0));
+    assert_eq!(
+        narrow.layout.to_taffy().size.height,
+        Dimension::length(44.0)
+    );
+    assert_eq!(host.colors.get(&0), Some(&0x9aa0_aaff));
+    assert!(!host.colors.contains_key(&2));
 
     // A vector node: the JS-written asset decodes natively.
     assert_eq!(host.kind(NodeId(6)), Some(NodeKind::Vector));

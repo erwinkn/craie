@@ -330,6 +330,9 @@ impl App for HostApp {
         let surface = WindowSurface::new(&gpu, surface, w, h);
         let renderer = Renderer::new(&gpu, surface.config.format);
         let mut ui = Ui::new(window.scale_factor() as f32);
+        // TODO(macOS): `set_reduced_motion` from
+        // NSWorkspace.accessibilityDisplayShouldReduceMotion (and its
+        // change notification); `set_touch` stays false on desktop.
         ui.set_time(self.start.elapsed().as_secs_f64());
         for (kind, painter) in self.surfaces.drain(..) {
             ui.register_surface(kind, painter);
@@ -453,6 +456,8 @@ impl App for HostApp {
         if inner.ui.settle() {
             window.request_redraw();
         }
+        // Hover at rest may have entered or left nodes.
+        Inner::flush_out(&mut inner.ui, &self.session);
         self.probe_clicks(window);
     }
 
@@ -516,8 +521,9 @@ impl App for HostApp {
             p.finish(&self.session);
         }
         // Running animations advance every frame: ask for the next one
-        // (presentation paces it). Idle requests none.
-        if inner.ui.animating() {
+        // (presentation paces it). So does a restyle after the frame
+        // (hover at rest). Idle requests none.
+        if inner.ui.animating() || inner.ui.needs_paint() {
             window.request_redraw();
         }
         let tweens = inner.ui.animation_count();

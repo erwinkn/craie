@@ -51,6 +51,11 @@ const enum Op {
   // animation
   Transition = 0xa0,
   Animate = 0xa1,
+  // state styles
+  States = 0xb0,
+  Variants = 0xb1,
+  Environment = 0xb2,
+  Color = 0xb3,
 }
 
 /** Animatable properties — mirror animation.rs `Prop`. */
@@ -63,6 +68,8 @@ export const ANIM_PROP = {
   height: 5,
   padding: 6,
   gap: 7,
+  /** The inherited text color: tweens between two set colors. */
+  color: 8,
 } as const
 export type AnimProp = keyof typeof ANIM_PROP
 
@@ -114,6 +121,7 @@ const PAINT_FIELD = { FILL: 1 << 0, RADIUS: 1 << 1, BORDER: 1 << 2 } as const
 const SPAN_ITALIC = 1 << 0
 const SPAN_UNDERLINE = 1 << 1
 const SPAN_LINE_THROUGH = 1 << 2
+const SPAN_INHERIT_COLOR = 1 << 3
 /** Span decoration bits (`TextSpanIn.decoration`). */
 export const DECORATION = { underline: 1, lineThrough: 2 } as const
 
@@ -540,7 +548,59 @@ export interface TextSpanIn {
   /** Absolute line height, logical points; span zero's applies to the
    * paragraph. */
   lineHeight?: number
+  /** Draw in the nearest inherited color (`Encoder.color` on the text
+   * or an ancestor); `color` when there is none. */
+  inheritColor?: boolean
 }
+
+/** State bit indices — mirror states.rs `state_bit`. Bits below
+ * `CUSTOM_STATES` are custom states, in declaration order. A higher bit
+ * outranks a lower one at equal depth. */
+export const STATE_BIT = {
+  hover: 54,
+  focusWithin: 55,
+  focusVisible: 56,
+  focusVisibleWithin: 57,
+  expanded: 58,
+  selected: 59,
+  checked: 60,
+  highlighted: 61,
+  pressed: 62,
+  disabled: 63,
+} as const
+export type StateName = keyof typeof STATE_BIT
+export const CUSTOM_STATES = 54
+/** Environment bits — mirror states.rs `env_bit`. */
+export const ENV_BIT = { narrow: 1, compact: 2, touch: 4, reducedMotion: 8 } as const
+export type EnvName = keyof typeof ENV_BIT
+
+/** A variant's values; absent ones are not overridden. */
+export interface VariantValues {
+  fill?: number
+  /** Border color and width, together. */
+  border?: { color: number; width: number }
+  radius?: number
+  /** The inherited text color; `null` clears it. */
+  color?: number | null
+  opacity?: number
+  transform?: Affine
+  /** Layout fields (whole wire fields: `height` alone sends width too). */
+  layout?: StyleProps
+}
+
+/** A variant: `values` apply while every term's scope holds all bits of
+ * its `mask` and the environment has every bit of `env`. */
+export interface VariantIn {
+  terms: readonly { scope: number; mask: bigint }[]
+  env: number
+  values: VariantValues
+}
+
+// Variant value bits — mirror states.rs `value_field`.
+const VALUE_FIELD = {
+  FILL: 1 << 0, BORDER: 1 << 1, RADIUS: 1 << 2, COLOR: 1 << 3,
+  OPACITY: 1 << 4, TRANSFORM: 1 << 5, LAYOUT: 1 << 6,
+} as const
 
 export type Affine = [number, number, number, number, number, number]
 export const IDENTITY: Affine = [1, 0, 0, 1, 0, 0]
@@ -749,6 +809,7 @@ export class Encoder {
     const key = JSON.stringify(spans.map(sp => [
       sp.start, sp.fontSize, sp.color >>> 0, sp.weight ?? 400, sp.italic ? 1 : 0,
       sp.decoration ?? 0, sp.letterSpacing ?? 0, sp.lineHeight ?? 0, sp.fontFamily || null,
+      sp.inheritColor ? 1 : 0,
     ]))
     let start = this.spanIx.get(key)
     if (start === undefined) {
@@ -764,7 +825,8 @@ export class Encoder {
         w.u8(
           (sp.italic ? SPAN_ITALIC : 0) |
           (d & DECORATION.underline ? SPAN_UNDERLINE : 0) |
-          (d & DECORATION.lineThrough ? SPAN_LINE_THROUGH : 0),
+          (d & DECORATION.lineThrough ? SPAN_LINE_THROUGH : 0) |
+          (sp.inheritColor ? SPAN_INHERIT_COLOR : 0),
         )
         w.u8(0)
         w.u32(sp.fontFamily ? this.strRef(sp.fontFamily) : NIL)
@@ -954,7 +1016,7 @@ export class Encoder {
   animate(id: number, prop: AnimProp, value: readonly number[], timing: Timing) {
     const b = this.ops
     const code = ANIM_PROP[prop]
-    const want = [6, 1, 1, 1, 1, 1, 4, 2][code]
+    const want = [6, 1, 1, 1, 1, 1, 4, 2, 1][code]
     if (want === undefined || value.length !== want || !value.every(Number.isFinite)) {
       throw Error(`bad ${String(prop)} animation target`)
     }
@@ -962,9 +1024,69 @@ export class Encoder {
     b.u8(Op.Animate)
     b.u32(id)
     b.u8(code)
-    if (prop === "backgroundColor" || prop === "borderColor") b.u32(value[0]! >>> 0)
+    if (prop === "backgroundColor" || prop === "borderColor" || prop === "color") b.u32(value[0]! >>> 0)
     else for (const v of value) b.f32(v)
     putTiming(b, t)
+  }
+
+  /** Sets scope `id`'s app state bits (`STATE_BIT`, custom bits); the
+   * node becomes a scope. Input bits (hover, pressed, focus) are
+   * native's. */
+  states(id: number, bits: bigint) {
+    this.ops.u8(Op.States)
+    this.ops.u32(id)
+    this.ops.u64(bits)
+  }
+
+  /** Replaces a node's variant table; none removes it and restores the
+   * values the node's own props set. */
+  variants(id: number, variants: readonly VariantIn[]) {
+    const b = this.ops
+    b.u8(Op.Variants)
+    b.u32(id)
+    b.u16(variants.length)
+    for (const v of variants) {
+      b.u8(v.terms.length)
+      b.u8(v.env)
+      for (const t of v.terms) {
+        b.u32(t.scope)
+        b.u64(t.mask)
+      }
+      const x = v.values
+      const has = (k: keyof VariantValues) => x[k] !== undefined
+      b.u8(
+        (has("fill") ? VALUE_FIELD.FILL : 0) |
+          (has("border") ? VALUE_FIELD.BORDER : 0) |
+          (has("radius") ? VALUE_FIELD.RADIUS : 0) |
+          (has("color") ? VALUE_FIELD.COLOR : 0) |
+          (has("opacity") ? VALUE_FIELD.OPACITY : 0) |
+          (has("transform") ? VALUE_FIELD.TRANSFORM : 0) |
+          (has("layout") ? VALUE_FIELD.LAYOUT : 0),
+      )
+      if (x.fill !== undefined) b.u32(x.fill >>> 0)
+      if (x.border !== undefined) { b.u32(x.border.color >>> 0); b.f32(x.border.width) }
+      if (x.radius !== undefined) b.f32(x.radius)
+      if (x.color !== undefined) { b.u8(x.color === null ? 0 : 1); b.u32((x.color ?? 0) >>> 0) }
+      if (x.opacity !== undefined) b.f32(x.opacity)
+      if (x.transform !== undefined) for (const m of x.transform) b.f32(m)
+      if (x.layout !== undefined) putStyle(b, x.layout)
+    }
+  }
+
+  /** The window-width breakpoints of `narrow` and `compact` (logical
+   * points, inclusive). */
+  environment(narrowMax: number, compactMax: number) {
+    this.ops.u8(Op.Environment)
+    this.ops.f32(narrowMax)
+    this.ops.f32(compactMax)
+  }
+
+  /** Sets (or with `null` clears) the color a node's text inherits. */
+  color(id: number, color: number | null) {
+    this.ops.u8(Op.Color)
+    this.ops.u32(id)
+    this.ops.u8(color === null ? 0 : 1)
+    this.ops.u32((color ?? 0) >>> 0)
   }
 
   /** Seals the transaction and resets every table for the next one. */

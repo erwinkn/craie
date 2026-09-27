@@ -249,6 +249,106 @@ Reviewer minors and nitpicks not fixed yet.
 - Resolves in: the winit 0.31 upgrade, or a macOS-only position read
   if a drop target needs it first.
 
+### DF-21: a variant's transform replaces the whole matrix
+
+- Source: work item 5 (state styles).
+- Where: crates/ui/src/states.rs (`Values::transform`).
+- Claim: a variant carries one 2D affine, as `TRANSFORM` does. With
+  `style={{ transform: rotate }}` and `_hover={{ style: { transform:
+  scale(1.02) } }}`, hovering drops the rotation. Marbre's `scale`,
+  `rotate` and `translateX/Y` are separate keys that compose.
+- Why deferred: parts need a transform made of parts on the wire, for
+  the base and the animation driver too, not only in variants.
+- Resolves in: when a Marbre component overrides one transform part in
+  a variant; until then the facade author writes the composed matrix.
+
+### DF-22: transitions and animations inside a variant
+
+- Source: work item 5.
+- Where: packages/bridge/src/host.ts (`variantValues`).
+- Claim: a variant can change what a property is, not how it moves. A
+  `transition` or `animation` inside `_hover` is ignored; the element's
+  own `transition` applies to every change, whichever state caused it.
+- Why deferred: Marbre's per-state timing is presets (enter, loop),
+  which is work item 6.
+- Resolves in: work item 6 (motion presets).
+
+### DF-23: text metrics in variants
+
+- Source: work item 5.
+- Where: packages/bridge/src/host.ts (`variantValues`).
+- Claim: a variant on a Text can set `color` only. A `fontSize`,
+  `weight` or `lineHeight` under `_hover` or `_narrow` is logged and
+  dropped. Box values on a Text are dropped the same way, since a Text
+  has no box.
+- Why deferred: metrics reshape the paragraph, so they belong with the
+  text pipeline's own ops, not in the paint-and-layout overlay.
+- Resolves in: when a component needs a responsive type size; the
+  facade can re-render with a different variant meanwhile.
+
+### DF-24: input color and vector currentColor
+
+- Source: work item 5.
+- Where: crates/ui/src/host.rs (`Host::colors`), the text input config,
+  the vector path.
+- Claim: `COLOR` reaches spans only. A TextInput keeps its config
+  color (the facade warns on `color` in its variants), and a vector's
+  `currentColor` doesn't read the inherited color yet.
+- Why deferred: the input's color lives in its editor config, and
+  vectors are PR #5's.
+- Resolves in: after the vectors work merges, as one lookup of
+  `Host::colors` for both.
+
+### DF-25: no platform source for touch and reduced motion
+
+- Source: work item 5.
+- Where: crates/platform-winit/src/app.rs (TODO(macOS)),
+  crates/ui/src/states.rs (`Ui::set_touch`, `Ui::set_reduced_motion`).
+- Claim: the `_touch` and `_reducedMotion` bits exist and resolve, but
+  nothing sets them: the driver leaves both false.
+- Why deferred: on macOS, reduced motion is
+  `NSWorkspace.accessibilityDisplayShouldReduceMotion` plus its change
+  notification, and touch stays false on desktop. It needs an objc
+  call on the Mac.
+- Resolves in: the next macOS pass.
+
+### DF-26: variants on a nested Text
+
+- Source: work item 5.
+- Where: packages/bridge/src/host.ts (`emitComposite`).
+- Claim: a nested Text is a span, not a node, so it has no table:
+  `<Text>see <Text _hover={…}>docs</Text></Text>` logs a warning and
+  the span stays as is.
+- Why deferred: interactive spans become scopes with topic 11.
+- Resolves in: topic 11 (interactive spans).
+
+### DF-27: hover can oscillate
+
+- Source: work item 5.
+- Where: crates/ui/src/states.rs (hover at rest).
+- Claim: hover resolves again after a restyle with the pointer at
+  rest. A variant that moves or shrinks the hovered node away from the
+  pointer (`_hover: { style: { marginLeft: 40 } }`) unhovers it, which
+  restores it under the pointer, and so on, one frame each.
+- Why deferred: the web has the same loop; it's an authoring mistake,
+  and nothing in Marbre does it. A guard (freeze hover for a frame
+  after it changes layout) would hide real updates.
+- Resolves in: if a real component hits it.
+
+### DF-28: animate on a tabled node
+
+- Source: work item 5.
+- Where: crates/ui/src/animation.rs (`intercept`), crates/ui/src/states.rs.
+- Claim: `ANIMATE` on a node with a variant table sets its base and
+  runs. If a variant in effect sets the same property, the restyle in
+  the same frame declares the variant's value, which retargets the
+  animation there (or cuts it, with no transition). Once the variant
+  turns off, the node shows the animated base.
+- Why deferred: the owner of a property under a variant is the table;
+  explicit animations on the same property are rare, and work item 6
+  decides how presets and variants mix.
+- Resolves in: work item 6.
+
 ## Closed
 
 - DF-8 (2026-09-24, same day): `native_reflow_publishes_after_the_frame`
