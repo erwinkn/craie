@@ -17,6 +17,7 @@ import {
   EVENT_KIND,
   EVENT_MASK,
   FIT,
+  INTERACTION,
   NIL,
   PRESS_FLAG,
   PRESS_PHASE,
@@ -278,10 +279,16 @@ export interface HostNode {
   initial: HostNode[]
   /** List nodes only. */
   list?: ListKeys
-  /** Layer containers only: the layer it was opened from (null: none),
-   * the children React placed in it, and the open layers opened from
-   * it. Open while it has either. */
-  layer?: { owner: HostNode | null; kids: Set<HostNode>; owned: Set<HostNode> }
+  /** Layer containers only: the layer it was opened from (`outer`,
+   * null: none), the node that owns it natively (a FocusTrap's, else
+   * `outer`), the children React placed in it, and the open layers
+   * opened from it. Open while it has children or open layers. */
+  layer?: {
+    outer: HostNode | null
+    owner: OwnerRef | null
+    kids: Set<HostNode>
+    owned: Set<HostNode>
+  }
   /** Text nodes: nested text nodes, in order. They have no native node
    * (virtual); their text and style become spans of the root's
    * paragraph. */
@@ -501,6 +508,15 @@ function pressFlags(props: Record<string, any>): number {
     (props.preventFocusOnPress ? PRESS_FLAG.keepFocus : 0)
 }
 
+/** `INTERACTION` flags of a node's props. */
+function interactionFlags(props: Record<string, any>): number {
+  return (props.focusable ? INTERACTION.focusable : 0) |
+    (props.selectable ? INTERACTION.selectable : 0) |
+    (props.inert ? INTERACTION.inert : 0) |
+    (props.autoFocus ? INTERACTION.autoFocus : 0) |
+    pressFlags(props) << INTERACTION.pressShift
+}
+
 function listenerMask(props: Record<string, any>): number {
   let mask = 0
   for (const name in LISTENERS) {
@@ -601,6 +617,11 @@ export function onFrameStats(listener: (s: FrameStats) => void): () => void {
 /** A scope: an element whose state bits variants read (Pressable, a
  * View with `group`). `node` is its host node, once created. */
 export interface ScopeRef {
+  node: HostNode | null
+}
+/** What owns the layers opened below an element (`Layer`,
+ * `FocusTrap`): `node` is its host node, once created. */
+export interface OwnerRef {
   node: HostNode | null
 }
 /** The scopes an element sees, nearest first (itself, when a scope). */
@@ -812,6 +833,7 @@ export class CraieHost {
   private seal() {
     this.flushTexts()
     this.flushVariants()
+    this.flushLayers()
     if (this.windowDirty) {
       this.windowDirty = false
       this.sendClaims(NIL, this.windowClaims, this.windowDeclared())
@@ -962,11 +984,11 @@ export class CraieHost {
       r.paragraphRev = ((r.paragraphRev ?? 0) + 1) >>> 0
       this.encoder.paragraph(r.id, text, spans)
     }
-    const press = pressFlags(r.props)
-    const interaction = `${mask},${!!r.props.focusable},${!!r.props.selectable},${press}`
+    const flags = interactionFlags(r.props)
+    const interaction = `${mask},${flags}`
     if (interaction !== r.sentInteraction) {
       r.sentInteraction = interaction
-      this.encoder.interaction(r.id, mask, !!r.props.focusable, !!r.props.selectable, press)
+      this.encoder.interaction(r.id, mask, flags)
     }
   }
 
@@ -1235,10 +1257,11 @@ export class CraieHost {
   }
 
   /** A layer container: a view filling the window under the root, above
-   * the layer it was opened from (`owner`). Opened on its first child. */
-  layer(owner: HostNode | null, z: number): HostNode {
+   * the layer it was opened from (`outer`), owned natively by `owner`'s
+   * node (a FocusTrap's, else `outer`). Opened on its first child. */
+  layer(outer: HostNode | null, owner: OwnerRef | null, z: number): HostNode {
     const n = this.node("view", { style: { width: "100%", height: "100%", zIndex: z } })
-    n.layer = { owner, kids: new Set(), owned: new Set() }
+    n.layer = { outer, owner, kids: new Set(), owned: new Set() }
     return n
   }
 
@@ -1260,14 +1283,29 @@ export class CraieHost {
 
   private openLayer(n: HostNode) {
     if (n.mounted || !n.layer) return
-    const owner = n.layer.owner
-    if (owner) {
-      this.openLayer(owner)
-      owner.layer!.owned.add(n)
+    const outer = n.layer.outer
+    if (outer) {
+      this.openLayer(outer)
+      outer.layer!.owned.add(n)
     }
     this.materialize(n, null, null)
     this.layers.push(n)
-    if (this.ready()) this.encoder.layer(n.id, owner ? owner.id : NIL)
+    // The owner's id at the seal: a portal's children commit before its
+    // ancestors, so a FocusTrap around it may have none yet.
+    if (this.ready()) this.dirtyLayers.push(n)
+  }
+
+  /** Layers opened in this commit, in open order. */
+  private dirtyLayers: HostNode[] = []
+
+  /** Sends each layer opened in this commit with its owner. */
+  private flushLayers() {
+    for (const n of this.dirtyLayers) {
+      if (!n.mounted) continue
+      const o = n.layer!.owner?.node
+      this.encoder.layer(n.id, o?.mounted ? o.id : NIL)
+    }
+    this.dirtyLayers = []
   }
 
   /** Closes a layer with neither children nor open layers it owns, and
@@ -1277,9 +1315,9 @@ export class CraieHost {
     const l = n.layer!
     if (!n.mounted || l.kids.size > 0 || l.owned.size > 0) return
     this.release(n)
-    if (!l.owner) return
-    l.owner.layer!.owned.delete(n)
-    this.closeIdle(l.owner)
+    if (!l.outer) return
+    l.outer.layer!.owned.delete(n)
+    this.closeIdle(l.outer)
   }
 
   place(parent: HostNode | null, child: HostNode, before: HostNode | null) {
@@ -1635,16 +1673,20 @@ export class CraieHost {
       }
     }
 
-    // Listener mask, focusable and press flags (a text root's: at the
-    // seal).
+    // Listener mask, interaction and press flags (a text root's: at
+    // the seal).
     const oldMask = listenerMask(oldProps), newMask = listenerMask(props)
-    const newPress = pressFlags(props)
-    if (
-      n.kind !== 1 &&
-      (oldMask !== newMask || !!oldProps.focusable !== !!props.focusable ||
-        !!oldProps.selectable !== !!props.selectable || pressFlags(oldProps) !== newPress)
-    ) {
-      enc.interaction(id, newMask, !!props.focusable, !!props.selectable, newPress)
+    const newFlags = interactionFlags(props)
+    if (n.kind !== 1 && (oldMask !== newMask || interactionFlags(oldProps) !== newFlags)) {
+      enc.interaction(id, newMask, newFlags)
+    }
+
+    // A FocusTrap's node: it owns the layers opened inside it, and
+    // carries the trap's flags.
+    const owner: OwnerRef | undefined = props.__owner
+    if (owner) owner.node = n
+    if (props.__trap !== undefined && props.__trap !== oldProps.__trap) {
+      enc.trap(id, props.__trap)
     }
 
     // Claims: a new version when the declaration changes; the handlers

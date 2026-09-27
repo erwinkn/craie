@@ -39,9 +39,10 @@ use crate::mutation::{
     Anchor, Claim, Command, ItemDesc, ItemTemplate, Mutation, NIL, NodeKind, Role, SubmitKey,
     TextSpan, Transaction, reported,
 };
+pub use crate::mutation::{interaction_flag, trap_flag};
 
 pub const MAGIC: u32 = 0x3257_5243; // "CRW2"
-pub const VERSION: u16 = 7;
+pub const VERSION: u16 = 8;
 
 pub mod op {
     // structure
@@ -70,6 +71,8 @@ pub mod op {
     /// id u32 (NIL: the window list) | version u32 | count u16 |
     /// count × (kind u8, flags u8, mods u8, 0 u8, key u32)
     pub const CLAIMS: u8 = 0x61;
+    /// id u32 | flags u8 (`trap_flag`): the node is a focus trap.
+    pub const TRAP: u8 = 0x62;
     // payload
     pub const SURFACE: u8 = 0x70;
     pub const PAYLOAD: u8 = 0x71;
@@ -144,15 +147,6 @@ pub mod input_flag {
     pub const MULTILINE: u8 = 1 << 0;
     /// Bits 1 and 2: the submit key (`SubmitKey` as u8).
     pub const SUBMIT_SHIFT: u8 = 1;
-}
-
-/// Interaction flag bits.
-pub mod interaction_flag {
-    pub const FOCUSABLE: u8 = 1 << 0;
-    pub const SELECTABLE: u8 = 1 << 1;
-    /// Bits 4 to 6: the press flags (`mutation::press`), shifted.
-    pub const PRESS_SHIFT: u8 = 4;
-    pub const ALL: u8 = FOCUSABLE | SELECTABLE | crate::mutation::press::ALL << PRESS_SHIFT;
 }
 
 /// Text span flag bits.
@@ -532,24 +526,17 @@ pub fn encode(txn: &Transaction<'_>) -> Vec<u8> {
             Mutation::Interaction {
                 id,
                 listeners,
-                focusable,
-                selectable,
-                press,
+                flags,
             } => {
                 ops.push(op::INTERACTION);
                 u32le(&mut ops, *id);
                 u32le(&mut ops, *listeners);
-                ops.push(
-                    if *focusable {
-                        interaction_flag::FOCUSABLE
-                    } else {
-                        0
-                    } | if *selectable {
-                        interaction_flag::SELECTABLE
-                    } else {
-                        0
-                    } | press << interaction_flag::PRESS_SHIFT,
-                );
+                ops.push(*flags);
+            }
+            Mutation::Trap { id, flags } => {
+                ops.push(op::TRAP);
+                u32le(&mut ops, *id);
+                ops.push(*flags);
             }
             Mutation::Claims {
                 id,
@@ -1129,10 +1116,15 @@ pub fn decode(buf: &[u8]) -> Result<Transaction<'_>, WireError> {
                 Mutation::Interaction {
                     id,
                     listeners,
-                    focusable: flags & interaction_flag::FOCUSABLE != 0,
-                    selectable: flags & interaction_flag::SELECTABLE != 0,
-                    press: flags >> interaction_flag::PRESS_SHIFT,
+                    flags,
                 }
+            }
+            op::TRAP => {
+                let (id, flags) = (r.u32()?, r.u8()?);
+                if flags & !trap_flag::ALL != 0 {
+                    return Err(WireError::BadRef("trap flags"));
+                }
+                Mutation::Trap { id, flags }
             }
             op::CLAIMS => {
                 let (id, version) = (r.u32()?, r.u32()?);

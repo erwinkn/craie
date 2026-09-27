@@ -297,19 +297,23 @@ Reviewer minors and nitpicks not fixed yet.
 - Why deferred: both need an isolated layer per group or shape.
 - Resolves in: group layers (DF-6).
 
-### DF-17: Tab and accessibility reach layers after the app
+### DF-17: accessibility reads layers after the app
 
 - Source: sibling z and layers (work item 4) implementation (own
   finding).
-- Where: crates/ui/src/dispatch.rs (`focusables`), crates/ui/src/a11y.rs.
+- Where: crates/ui/src/a11y.rs.
 - Claim: a layer container is a root-level node after the app's roots,
-  and Tab and the accessibility tree keep tree order. So Tab reaches a
-  menu opened from a toolbar button only after every focusable node of
-  the app, and a screen reader reads layers last, in open order.
-- Why deferred: where focus goes into and out of a layer is work item
-  3's (focus traps, `modal`, owners' scopes); reading a layer next to
-  its owner is the accessibility pass's (topic 13).
-- Resolves in: work item 3, then topic 13.
+  and the accessibility tree keeps tree order. So a screen reader reads
+  a menu opened from a toolbar button after the whole app, in open
+  order, not next to the button.
+- Partly resolved (work item 3, focus traps): Tab follows owners. An
+  owned layer's focusables come right after its owner's subtree
+  (`trap.rs`, `tab_order`), traps and `modal` include the layers they
+  own, and a modal leaves only its scope in the accessibility tree.
+- Why deferred: reading a layer next to its owner is the accessibility
+  pass's (topic 13): AccessKit children would have to leave tree order,
+  or the owner point at the layer (`aria-owns`, `controls`).
+- Resolves in: topic 13.
 
 ### DF-18: a z change walks the whole tree for the draw order
 
@@ -326,22 +330,6 @@ Reviewer minors and nitpicks not fixed yet.
 - Resolves in: an incremental draw-order patch for structure changes,
   if reordering or inserting in large trees shows up in a frame
   profile (it would serve inserts and moves too).
-
-### DF-19: layers owned coarsely
-
-- Source: sibling z and layers (work item 4) implementation (own
-  finding).
-- Where: packages/bridge/src/index.ts (`Layer`).
-- Claim: a `Layer`'s owner is the enclosing `Layer`'s container, and a
-  top-level `Layer` has none. So an unowned layer with a negative z
-  sorts under the app (the kit's layer tokens are all positive), and
-  owners know nothing finer than a layer (a trap inside it). The other
-  way round, a top-level `Layer` defaults to z 0: an app root with a
-  positive `zIndex` covers every unowned layer.
-- Why deferred: the native op takes any node as owner; finding a finer
-  one (the trap, or the host node that opened the layer) is work item
-  3's, with focus traps.
-- Resolves in: work item 3.
 
 ### DF-21: a variant's transform replaces the whole matrix
 
@@ -724,7 +712,40 @@ Reviewer minors and nitpicks not fixed yet.
 - Resolves in: when a screen puts a link in ticking text; the paragraph
   op would then carry span owners, and only an owner change would cancel.
 
+### DF-47: a `FocusTrap` is a layout box
+
+- Source: work item 3 (focus traps) implementation (own finding).
+- Where: packages/bridge/src/index.ts (`FocusTrap`).
+- Claim: the trap is a View, so it takes part in layout: in a row, its
+  children lay out in the trap's box, not in the row. The web kit's
+  trap adds no box.
+- Why deferred: Craie's layout has no `display: contents`. The trap
+  takes a `style` meanwhile.
+- Resolves in: `display: contents` in the owned layout engine, or the
+  trap op on the first child (one child only).
+
+### DF-48: `autoFocus` outside a trap does not focus on mount
+
+- Source: work item 3 (focus traps) implementation (own finding).
+- Where: crates/ui/src/trap.rs, packages/bridge/src/index.ts
+  (`autoFocus`).
+- Claim: `autoFocus` only marks what a trap focuses when it activates.
+  A `TextInput autoFocus` in a page that has no trap is not focused
+  when it mounts, as React Native's would be.
+- Why deferred: out of the traps' scope; the kit calls `focus()` from
+  an effect meanwhile.
+- Resolves in: focus on mount for an `AUTO_FOCUS` node outside traps
+  (the settle pass has the flag), if the kit needs it.
+
 ## Closed
+
+- DF-19 (work item 3, focus traps): layers owned coarsely. A `Layer`
+  opened inside a `FocusTrap` is owned by the trap's node, found through
+  React context, else by the enclosing layer's container; a trap's
+  scope, `modal` exemption and Tab position follow owners. Still true
+  and accepted: a top-level `Layer` has no owner, so one with a
+  negative z sorts under the app, and one at z 0 goes under an app root
+  with a positive `zIndex` (the kit's layer tokens are all positive).
 
 - DF-8 (2026-09-24, same day): `native_reflow_publishes_after_the_frame`
   failed; I first recorded it as caused by the machine (the display had

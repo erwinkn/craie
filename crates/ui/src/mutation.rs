@@ -126,12 +126,6 @@ impl Role {
     }
 }
 
-/// States a node reports to assistive technology even while clear:
-/// the facade sets a bit when the state prop was given at all, so
-/// `expanded={false}` is "collapsed" and a node without `expanded` is
-/// neither. `checked` needs no bit: the check roles always report it,
-/// other roles never do. `a11y.rs` reports `SELECTED` on selectable
-/// roles only.
 /// A node's press flags (`Interaction::press`, `press.rs`).
 pub mod press {
     /// Presses stop here: press events and `ACTIVATE` go to the
@@ -146,6 +140,42 @@ pub mod press {
     pub const ALL: u8 = PRESSABLE | DISABLED | KEEP_FOCUS;
 }
 
+/// Interaction flag bits.
+pub mod interaction_flag {
+    pub const FOCUSABLE: u8 = 1 << 0;
+    /// Its text descendants form one selection domain.
+    pub const SELECTABLE: u8 = 1 << 1;
+    /// No hit testing, focus or accessibility for the node and its
+    /// subtree (layers it owns excepted).
+    pub const INERT: u8 = 1 << 2;
+    /// The node a trap focuses when it activates.
+    pub const AUTO_FOCUS: u8 = 1 << 3;
+    /// Bits 4 to 6: the press flags (`press`), shifted.
+    pub const PRESS_SHIFT: u8 = 4;
+    pub const ALL: u8 =
+        FOCUSABLE | SELECTABLE | INERT | AUTO_FOCUS | super::press::ALL << PRESS_SHIFT;
+}
+
+/// Focus trap flag bits (`Mutation::Trap`).
+pub mod trap_flag {
+    /// Tab cycles inside; clear, the trap is off.
+    pub const ACTIVE: u8 = 1 << 0;
+    /// Everything outside the trap and the layers it owns is inert.
+    pub const MODAL: u8 = 1 << 1;
+    /// Activating focuses the trap's `AUTO_FOCUS` node, else its first
+    /// focusable, unless focus is already inside.
+    pub const AUTO_FOCUS: u8 = 1 << 2;
+    /// Deactivating returns focus to where it was on activation.
+    pub const RESTORE_FOCUS: u8 = 1 << 3;
+    pub const ALL: u8 = ACTIVE | MODAL | AUTO_FOCUS | RESTORE_FOCUS;
+}
+
+/// States a node reports to assistive technology even while clear:
+/// the facade sets a bit when the state prop was given at all, so
+/// `expanded={false}` is "collapsed" and a node without `expanded` is
+/// neither. `checked` needs no bit: the check roles always report it,
+/// other roles never do. `a11y.rs` reports `SELECTED` on selectable
+/// roles only.
 pub mod reported {
     pub const EXPANDED: u8 = 1 << 0;
     pub const SELECTED: u8 = 1 << 1;
@@ -401,14 +431,18 @@ pub enum Mutation<'a> {
         text: Cow<'a, str>,
     },
     // interaction
+    /// `flags`: `interaction_flag` bits.
     Interaction {
         id: u32,
         listeners: u32,
-        focusable: bool,
-        /// Its text descendants form one selection domain.
-        selectable: bool,
-        /// Press flags (`press`).
-        press: u8,
+        /// The press flags among them, shifted.
+        flags: u8,
+    },
+    /// Makes the node a focus trap (`trap.rs`), or updates one; `flags`
+    /// are `trap_flag` bits, and a trap without `ACTIVE` is inactive.
+    Trap {
+        id: u32,
+        flags: u8,
     },
     /// Replaces the node's claims (`claims.rs`; empty clears). `id` NIL
     /// is the window list.
@@ -526,6 +560,7 @@ impl Mutation<'_> {
             | Mutation::Role { id, .. }
             | Mutation::Label { id, .. }
             | Mutation::Interaction { id, .. }
+            | Mutation::Trap { id, .. }
             | Mutation::Claims { id, .. }
             | Mutation::Surface { id, .. }
             | Mutation::Payload { id, .. }
@@ -865,17 +900,16 @@ impl<'a> Transaction<'a> {
         focusable: bool,
         press: u8,
     ) -> &mut Self {
-        self.push(Mutation::Interaction {
+        let focusable = u8::from(focusable) * interaction_flag::FOCUSABLE;
+        self.interaction_bits(
             id,
             listeners,
-            focusable,
-            selectable: false,
-            press,
-        })
+            focusable | press << interaction_flag::PRESS_SHIFT,
+        )
     }
 
-    /// Interaction with every flag: `selectable` makes the node's text
-    /// descendants one selection domain.
+    /// Interaction with the focusable and selectable flags: `selectable`
+    /// makes the node's text descendants one selection domain.
     pub fn interaction_flags(
         &mut self,
         id: u32,
@@ -883,13 +917,30 @@ impl<'a> Transaction<'a> {
         focusable: bool,
         selectable: bool,
     ) -> &mut Self {
+        let mut flags = 0;
+        if focusable {
+            flags |= interaction_flag::FOCUSABLE;
+        }
+        if selectable {
+            flags |= interaction_flag::SELECTABLE;
+        }
+        self.interaction_bits(id, listeners, flags)
+    }
+
+    /// Interaction with raw `interaction_flag` bits (`INERT`,
+    /// `AUTO_FOCUS`, the shifted press flags).
+    pub fn interaction_bits(&mut self, id: u32, listeners: u32, flags: u8) -> &mut Self {
         self.push(Mutation::Interaction {
             id,
             listeners,
-            focusable,
-            selectable,
-            press: 0,
+            flags,
         })
+    }
+
+    /// Makes `id` a focus trap with `trap_flag` bits (no `ACTIVE`:
+    /// inactive).
+    pub fn trap(&mut self, id: u32, flags: u8) -> &mut Self {
+        self.push(Mutation::Trap { id, flags })
     }
 
     /// The node's claims (NIL: the window list), known to JS as `version`.

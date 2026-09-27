@@ -5,9 +5,9 @@
 use craie_core::Affine;
 use craie_ui::claims::{Claim, chord_flag, claim_kind};
 use craie_ui::events::{Key, Mods};
-use craie_ui::host::NodeId;
+use craie_ui::host::{NodeFlags, NodeId};
 use craie_ui::input::SubmitKey;
-use craie_ui::mutation::{Mutation, NodeKind, Role, press, reported};
+use craie_ui::mutation::{Mutation, NodeKind, Role, press, reported, trap_flag};
 use craie_ui::states::layout_key;
 use craie_ui::surface;
 use craie_ui::ui::Ui;
@@ -66,7 +66,21 @@ fn js_fixture_decodes_and_executes() {
     assert_eq!(host.kind(NodeId(2)), Some(NodeKind::Input));
     let i = host.interaction(NodeId(2));
     assert_eq!(i.listeners, 0x7ff);
-    assert!(i.focusable);
+    assert!(i.focusable && i.auto_focus && !i.selectable);
+    // The vector 8 is inert; the layer 7 a modal focus trap.
+    assert!(
+        host.node(NodeId(8))
+            .unwrap()
+            .flags
+            .contains(NodeFlags::INERT)
+    );
+    assert!(txn.mutations.iter().any(|m| matches!(
+        m,
+        Mutation::Trap {
+            id: 7,
+            flags: trap_flag::ALL
+        }
+    )));
     assert_eq!(i.role, Role::MultilineTextInput);
     assert_eq!(i.reported, 0);
     // The root: a switch reporting expanded and selected while clear.

@@ -296,9 +296,107 @@ event (`executor.rs:545`).
 
 **Open.**
 
-- O1. Where focus goes when the focused node is removed. Proposal: inside
-  an active trap, to the trap's auto-focus target, else its first focusable
-  node; outside traps, nowhere, as browsers do, with a blur event.
+- O1, closed (work item 3): as proposed. When the focused node is
+  removed or becomes inert, focus goes to the target of the innermost
+  active trap that held it (its auto-focus node, else its first
+  focusable); outside traps, nowhere, with a blur event.
+
+**Built (work item 3, traps and inert).** Focus traps, `modal`, `inert`
+and finer layer owners, as targeted. Focus groups are another PR;
+presses, activation, keep-focus and focus-visible are #17's (the next
+Built paragraph). The example:
+
+```tsx
+<Pressable onPress={() => setOpen(true)}>Delete…</Pressable>
+{open && (
+  <Layer z={70}>
+    <FocusTrap modal>
+      <View accessibilityRole="dialog">
+        <Pressable onPress={close}>Cancel</Pressable>
+        <Pressable autoFocus onPress={remove}>Delete</Pressable>
+        <MoreButton />  {/* opens <Layer z={50}><Menu/></Layer> */}
+      </View>
+    </FocusTrap>
+  </Layer>
+)}
+```
+
+Opening focuses Delete. Tab cycles Cancel, Delete, More, then the menu's
+items when it is open. The app stops answering the pointer, Tab and
+assistive technology. Closing returns focus to "Delete…".
+
+- **Encoding** (protocol 8). Interaction flag bits 2 (`INERT`) and 3
+  (`AUTO_FOCUS`), next to #17's press bits 4 to 6; op 0x62 `TRAP` (`id u32 | flags u8`: `ACTIVE`,
+  `MODAL`, `AUTO_FOCUS`, `RESTORE_FOCUS`). 0x63 stays free. The facade's
+  `FocusTrap` is a View carrying the op, so a trap is any node.
+- **Settling.** Trap flags take effect at the end of the transaction
+  (`trap.rs`, `settle_traps`), after the tree is complete. In order:
+  deactivations restore focus; new traps activate and auto-focus; a
+  lost focus moves (O1); the modal gate is rebuilt. Restore needs the
+  saved (id, generation) still live, focusable, shown and not inert;
+  a reused id fails the generation check. Nested traps that activate
+  together restore once, through the outer one: closing only the inner
+  one keeps focus inside the outer one.
+- **Scope.** A trap's scope is its subtree plus the layers it owns, and
+  theirs: a root-level layer's scope parent is its owner. Owner cycles
+  and owners out of the tree own nothing.
+- **Nesting.** Tab cycles in the innermost active trap holding the
+  focus, else in the top modal, else the window. The top modal is the
+  most recently activated. An inner modal (a menu trap in the dialog's
+  layer, made modal) makes the outer dialog's content inert as well;
+  closing it gives the dialog back.
+- **Modal and hit testing.** The top modal defines a gate: its roots
+  (the trap and the root-level layers in its scope) and their tree
+  ancestors (the path), both sorted. The hit test restricts where it
+  starts rather than checking candidates' ancestors. Under a gated
+  parent, a child is classified by binary search: a root is tested
+  normally, a path node passes through (children only, never itself),
+  and anything else is skipped. With no modal the cost is one bool and
+  the `INERT` flag test per visited node, still allocation-free (E15
+  below). A press outside the modal keeps the focus.
+- **Inert.** A node flag (`NodeFlags::INERT`). The hit test stops at it
+  and the point falls through to what is below. Tab, `focus()` and the
+  accessibility Focus action skip it, and the accessibility tree drops
+  the subtree. Layers an inert node owns escape it, as portals escape
+  an inert DOM parent. A hovered node that becomes inert gets its leave
+  event on the next frame. A press in progress on a node that becomes
+  inert, or falls outside a new modal, is cancelled with #17's
+  cancel event (`PRESS` out, no `ACTIVATE`), the pointer press and the
+  Space press alike.
+- **Owners** (DF-19). The facade's `Layer` reads its owner from React
+  context: the nearest `FocusTrap`'s node, else the enclosing layer's
+  container. So `<MoreButton/>`'s menu is owned by the dialog's trap,
+  and a toast opened in the dialog's layer outside the trap by the
+  layer. Layer ops are sent when the transaction seals, after the
+  owner's node exists.
+- **Tab order** (DF-17). Tree order within the scope, each owned layer
+  right after its owner's subtree, unowned layers after the app:
+
+  ```text
+  app: Delete…, Save;  dialog layer: Cancel, Delete, More;  menu layer (owner: trap): Rename
+  window order: Delete…, Save, Cancel, Delete, More, Rename
+  ```
+
+  Each Tab walks its scope once: O(nodes in scope), plus a pass over
+  the root-level children for owned layers, sorted by owner. That is
+  E15's "Tab" row, the same order of magnitude as before (it collected
+  every focusable in the window). Shift+Tab with no focus now goes to
+  the last focusable.
+- **Accessibility.** Inert subtrees leave the AccessKit tree. Under a
+  modal, nodes outside it leave too, and the path nodes above it stay
+  as bare containers. The active modal trap node sets AccessKit's
+  `modal`. Reading a layer next to its owner stays topic 13's (DF-17).
+- **Removal.** Removing the focused node sends its blur at once, with
+  its generation (it used to clear silently). Escape is not handled:
+  that is the kit's (a `keymap`).
+- **Deferred.** The trap is a layout box (DF-47). `autoFocus` outside a
+  trap does nothing on mount (DF-48).
+- **Cost** (E15, exe1, load 15 to 22, no trap open). Hit tests keep 0
+  allocations and stay within noise: at 100k nodes, walk 766 to 1,294
+  µs against 906 to 1,693 before, index 5.8 to 62 µs against 5.5 to
+  52. Tab through 1,000 focusables takes one allocation fewer; at 100k
+  nodes 515 to 746 µs against 455 to 760. With no active trap, Tab
+  skips the scope lookup.
 
 **Built (work item 3, presses and activation).** Innermost press, one
 activate, keep focus and focus-visible as targeted (traps, groups and
@@ -748,9 +846,11 @@ with these choices:
   ms at 100k nodes, against 2.5 to 3.7 ms after a transform
   (`LEDGER.md`, DF-18). Hit tests stay allocation-free: 7 to 12 µs at
   100k nodes, with or without z.
-- Focus traps, `modal` and `inert` stay with work item 3, which will
-  set finer owners (a trap inside the layer) through the same op
-  (DF-19). Tab and accessibility reach layers after the app (DF-17).
+- Focus traps, `modal` and `inert` are built (topic 3, work item 3).
+  A layer opened inside a `FocusTrap` is owned by the trap's node, else
+  by the enclosing layer's container, through the same op (DF-19).
+  Tab reaches an owned layer right after its owner's subtree; the
+  accessibility tree still reads layers after the app (DF-17).
 
 ## 7. Motion
 
@@ -1397,7 +1497,6 @@ The order follows the dependencies:
 
 | Id | Topic | Question |
 | --- | --- | --- |
-| O1 | Focus | Where focus goes when the focused node is removed |
 | O2 | Geometry | The expression grammar, and its mapping to CSS Anchor Positioning and Floating UI on web |
 | O3 | Shaders | One translated shader source or one per platform |
 | O4 | Shaders | The GPU budget's value and scaling |
@@ -1408,3 +1507,4 @@ The order follows the dependencies:
 
 Closed in review: K1, K2 (topic 2), F1 (topic 3), S1, S2 (topic 5), M1,
 M2, M3 (topic 7), I1 (topic 11), L1 (topic 6), V1, V2 (topic 12).
+Closed in implementation: O1 (topic 3, work item 3).

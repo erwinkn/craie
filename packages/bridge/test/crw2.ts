@@ -98,6 +98,7 @@ export function readFrame(buf: Uint8Array): Frame {
       case 0x50: op.f.push(u8(), u8()); break // role, reported
       case 0x51: op.s = strings[u32()]; break // label
       case 0x60: op.f.push(u32(), u8()); break // interaction
+      case 0x62: op.f.push(u8()); break // trap flags
       case 0x61: { // claims: version, count x (kind, flags, mods, 0, key)
         op.f.push(u32())
         const n = u16()

@@ -14,7 +14,7 @@
 // across transactions.
 
 const MAGIC = 0x3257_5243 // "CRW2" little-endian
-export const VERSION = 7
+export const VERSION = 8
 export const NIL = 0xffff_ffff // no node / append / default style
 
 const enum Op {
@@ -39,6 +39,7 @@ const enum Op {
   // interaction
   Interaction = 0x60,
   Claims = 0x61,
+  Trap = 0x62,
   // payload
   Surface = 0x70,
   Payload = 0x71,
@@ -264,6 +265,13 @@ export type ImageFit = keyof typeof FIT
 /** Claim kinds and chord flags — mirror claims.rs. */
 export const CLAIM_KIND = { key: 1, paste: 2, copy: 3, cut: 4, drop: 5, contextMenu: 6 } as const
 export const CHORD_FLAG = { named: 1, noRepeat: 2, inInput: 4 } as const
+/** Interaction op flag bits — mirror mutation.rs `interaction_flag`.
+ * `inert`: no hit testing, focus or accessibility for the node and its
+ * subtree. `autoFocus`: the node a focus trap focuses on activation.
+ * Bits 4 to 6 are the `PRESS_FLAG` bits, shifted by `pressShift`. */
+export const INTERACTION = { focusable: 1, selectable: 2, inert: 4, autoFocus: 8, pressShift: 4 } as const
+/** Trap op flag bits — mirror mutation.rs `trap_flag`. */
+export const TRAP = { active: 1, modal: 2, autoFocus: 4, restoreFocus: 8 } as const
 /** Modifier bits (key records, pointer records, chords) — mirror
  * events.rs `Mods`. */
 export const MODS = { shift: 1, ctrl: 2, alt: 4, meta: 8 } as const
@@ -1044,13 +1052,24 @@ export class Encoder {
     this.ops.u32(id)
     this.ops.u32(s)
   }
-  /** Listener mask and flags: `selectable` makes the node's text
-   * descendants one selection domain; `press` is `PRESS_FLAG` bits. */
-  interaction(id: number, listeners: number, focusable: boolean, selectable = false, press = 0) {
+  /** Listener mask and `INTERACTION` flags: `selectable` makes the
+   * node's text descendants one selection domain; `inert` takes its
+   * subtree out of hit testing, focus and accessibility; `autoFocus`
+   * marks a trap's first focus; the press flags sit in bits 4 to 6. */
+  interaction(id: number, listeners: number, flags: number) {
     this.ops.u8(Op.Interaction)
     this.ops.u32(id)
     this.ops.u32(listeners >>> 0)
-    this.ops.u8((focusable ? 1 : 0) | (selectable ? 2 : 0) | (press & 7) << 4)
+    this.ops.u8(flags)
+  }
+  /** A focus trap on `id` (`TRAP` flags). While active, Tab cycles in
+   * its scope (its subtree and the layers it owns); modal, everything
+   * else is inert. Clearing `active` deactivates it, as removing the
+   * node does. */
+  trap(id: number, flags: number) {
+    this.ops.u8(Op.Trap)
+    this.ops.u32(id)
+    this.ops.u8(flags)
   }
   /** A node's claim set (id NIL: the window list), replacing the one
    * before; an empty set removes it. */
