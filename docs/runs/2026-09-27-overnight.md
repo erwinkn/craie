@@ -42,6 +42,7 @@ Times are UTC.
 | 04:18 | PR #7 review: no blockers, 2 majors (transitions ran on mount and on the first frame; layout values in a variant took their partner fields from the base, not from other variants), 13 minors; its track fixes them after merging main |
 | 04:22 | PR #8 review: 1 blocker (decoding was not memory-bounded: a 249 KB PNG with a 16,000×16,000 header took 1.25 GB), 7 majors; its track fixes them |
 | 04:35 | PR #5 review fixed (`LEDGER.md` PR5-01..13), main merged in, reverified (CI, 337 workspace tests, smoke, macOS type-check) and merged; PR #8 retargeted to main first |
+| 04:47 | PR #7 review fixed (`LEDGER.md` PR7-01..22: first values snap, layout resolves per key, Suspense wins, disabled is fully disabled), main merged in twice, reverified (CI, 363 workspace tests, bun 80, smoke, macOS type-check) and merged |
 
 ## PRs
 
@@ -53,7 +54,7 @@ Times are UTC.
 | [#4](https://github.com/erwinkn/craie/pull/4) | Claims and keys (work item 1): key records, keymaps, paste and drop claims; protocol 4 | Merged |
 | [#5](https://github.com/erwinkn/craie/pull/5) | Runtime vector shapes (work item 8, part 1): SVG path strings parsed natively, dashes, a shared mesh cache | Merged |
 | [#6](https://github.com/erwinkn/craie/pull/6) | Sibling z and layers (work item 4, first half): `zIndex` among siblings, layer containers that never sort below their owner | Merged |
-| [#7](https://github.com/erwinkn/craie/pull/7) | State styles (work item 5): hover, press, focus, app states and breakpoints restyle natively; inherited color | In review |
+| [#7](https://github.com/erwinkn/craie/pull/7) | State styles (work item 5): hover, press, focus, app states and breakpoints restyle natively; inherited color | Merged |
 | [#8](https://github.com/erwinkn/craie/pull/8) | Images (work item 8, part 2): decoded off-thread at the drawn size, drawn from the glyph atlas | In review |
 
 ## Numbers
