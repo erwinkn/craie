@@ -458,6 +458,8 @@ above (116 µs was measured at load 10):
   up its meshes in the vector cache (a hash map) to find its
   `currentColor` items; not profiled. Neither is a concern at this
   size.
+- Measured before R12-04 moved each drawing's tints beside its
+  meshes, and not rerun: the icon row is an upper bound.
 
 ## Step 1 — crate split, CRW2, retained scene (2026-09-23)
 
