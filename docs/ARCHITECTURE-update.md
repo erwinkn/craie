@@ -738,13 +738,14 @@ defineStates(["unread", "streaming"])
   4/6, and `_narrow: { height: 44 }` keeps whatever width applies
   (another variant's or the base). Suspense's `display: none` wins over
   a variant's `display`. Border color and width are separate values.
-- Not yet: transform parts (a variant's transform replaces the whole
-  matrix, DF-21), transitions inside a variant (DF-22), text metrics in
+- Not yet: transitions inside a variant (DF-22), text metrics in
   variants (DF-23), a platform source for touch and reduced motion
   (DF-25; `Ui::set_touch` and `set_reduced_motion` exist), variants on a
-  nested Text (interactive spans, DF-26), z, pointer events, visibility
-  and percent translate in variants (DF-29). Hover can oscillate when a
-  hover variant moves the node from under the pointer (DF-27).
+  nested Text (interactive spans, DF-26), z, pointer events and
+  visibility in variants (DF-29). Hover can oscillate when a hover
+  variant moves the node from under the pointer (DF-27). Transform
+  parts, percent translates included, apply per part since work item 6
+  (topic 7, DF-21 closed).
 - Cost (`states_restyle`, CPU only, exe1 at load about 10, medians of
   three; `EXPERIMENTS.md`, "State styles"): a hover change with 1, 100
   or 1,000 dependents is 0.27, 11 or 116 µs from pointer move to
@@ -951,6 +952,90 @@ Changes: §12, §3 (spatial store).
   how a node animates at mount.
 - M3 is settled in the kit spec: a retargeted spring keeps its velocity on
   Craie and loses it on web and React Native, which are approximated.
+
+**Built (work item 6, transform parts).** Transform parts as targeted;
+the animation op, exits, loops and scroll timelines are later parts of
+item 6. The example:
+
+```tsx
+<Pressable
+  style={{ rotate: "12deg", transition: { scale: { duration: 120 } } }}
+  _hover={{ style: { scale: 1.02 } }}
+  _pressed={{ style: { scale: 0.98 } }}
+/>
+```
+
+The base sends rotate alone. Hovering tweens scale 1 to 1.02 over
+120 ms and the node stays turned 12 degrees. Before, the variant's
+matrix replaced the whole transform, so hovering dropped the rotation
+(DF-21). Durations are milliseconds, as for every facade timing.
+
+- **Storage.** The spatial row (`host::Spatial`) holds `Parts`
+  (translate `[x, y, fx, fy]`, rotate in radians, scale `[x, y]`, the
+  free matrix) and a cached `composed = T·R·S·M`. `set_spatial` is the
+  one writer: it applies a patch of the changed parts and recomposes
+  only when one of them changed. A composition that overflows leaves
+  the row unchanged, as a bad matrix did before.
+- **Percent translate.** `fx` and `fy` are fractions of the border box
+  (0.5 is 50%), added when the row is read: `Spatial::local(size)`
+  adds `fx·width` and `fy·height` to the composed translation, then
+  applies it about the center. It is read where the size is already
+  known: the scene sync, the hit test, reach bounds, list placement and
+  the frame chain. So a percent translate follows a resize without an
+  op. Per hit or frame this costs two multiply-adds on top of the
+  existing `about`, with no allocation (`harness/invariants`
+  allocations test: parts patches, a rotate tween and hit tests through
+  the turned node allocate nothing).
+- **Encoding** (protocol 9; #18 took 8). No new op: SPATIAL (0x20)
+  gains mask bits 3 `TRANSLATE` (4 f32), 4 `ROTATE` (f32) and 5 `SCALE`
+  (2 f32), in payload order after the matrix, opacity and z. A part is
+  one more optional field of the same row, as opacity is, and an op
+  setting several parts stays one op. The variant value mask widens
+  from u8 to u16, with bits 8 to 12 for translate x and y (each
+  `[points, fraction]`), rotate, and scale x and y. `ANIM_PROP` appends
+  `translate` 9, `rotate` 10 and `scale` 11. `transform` (0) now means
+  the free matrix only.
+- **Tweens.** Each part is its own property, with its own transition
+  and running tween, so an `animate("rotate", 360)`, a hover scale and
+  a translate transition run on one node at once. Translate lerps all
+  four components, so 10 to "100%" passes 5pt + 50%, as a CSS `calc()`
+  would. Rotate lerps the angle, so 0 to 360 degrees is a full turn
+  that is upside down halfway. Scale lerps both axes. Decomposition
+  stays for the free matrix only.
+- **Variants.** A variant sets the parts it names, per axis: `_pressed:
+  { style: { translateY: "10%" } }` keeps the base translate x, and a
+  scale keeps the rotate. Marbre cascades `translateX` and `translateY`
+  separately too.
+- **Facade keys.** `translate` (a length, "50%", or `[x, y]`; one value
+  moves x alone, as CSS), `translateX`, `translateY`, `rotate` (a
+  number is degrees, as in Marbre's kit; strings take "deg", "rad",
+  "grad" or "turn"), `scale` (a factor or `[x, y]`), `scaleX`,
+  `scaleY`. Axis keys override their axis of the pair. `transform`
+  stays an RN list. All of these go in `style`, in variants too;
+  `transition` and `animate` take `translate`, `rotate` and `scale`.
+- **An RN transform list folds into the free matrix.** A list is
+  ordered and can repeat steps (`[{ rotate }, { translateX }, {
+  rotate }]`), so it has no single value per part. CSS `transform`
+  also composes after the individual properties. So `{ rotate: 12,
+  transform: [{ skewX: "10deg" }] }` is R·skew, as in a browser. A
+  bare number in a list stays radians, as before. It differs from
+  `style.rotate` but keeps existing lists unchanged. The angle parser
+  now rejects unknown units: "12grad" used to match the "rad" suffix
+  and read as 12 radians.
+- **Kit mapping.** Marbre's `transition: { property: "transform" }`
+  covers CSS `transform`, `translate`, `rotate` and `scale`. The kit
+  adapter should expand it to those four keys.
+- Tests: `crates/ui/src/parts_tests.rs` checks the composition order
+  against a hand-computed matrix, per-part tweens (10pt to 100%
+  included), rotate 0 to 360 passing 180, a variant's scale keeping the
+  base rotate next to an `animate` on translate, percent translate
+  after a resize, and hit testing plus drawn bounds of a turned and
+  scaled node. `packages/bridge/test/parts.test.ts` covers the keys,
+  the per-change diff and the encoding. The cross-language fixture
+  carries every part, and the invariants generator sends parts, so the
+  incremental-equals-rebuild check covers them.
+- Not yet: percentages inside an RN transform list (DF-49; use
+  `translate`).
 
 ## 8. Paint and text styling
 

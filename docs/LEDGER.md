@@ -331,19 +331,6 @@ Reviewer minors and nitpicks not fixed yet.
   if reordering or inserting in large trees shows up in a frame
   profile (it would serve inserts and moves too).
 
-### DF-21: a variant's transform replaces the whole matrix
-
-- Source: work item 5 (state styles).
-- Where: crates/ui/src/states.rs (`Values::transform`).
-- Claim: a variant carries one 2D affine, as `TRANSFORM` does. With
-  `style={{ transform: rotate }}` and `_hover={{ style: { transform:
-  scale(1.02) } }}`, hovering drops the rotation. Marbre's `scale`,
-  `rotate` and `translateX/Y` are separate keys that compose.
-- Why deferred: parts need a transform made of parts on the wire, for
-  the base and the animation driver too, not only in variants.
-- Resolves in: when a Marbre component overrides one transform part in
-  a variant; until then the facade author writes the composed matrix.
-
 ### DF-22: transitions and animations inside a variant
 
 - Source: work item 5.
@@ -427,8 +414,9 @@ Reviewer minors and nitpicks not fixed yet.
 - Source: work item 5; the PR #7 review (PR7-12).
 - Where: packages/bridge/src/host.ts (`variantValues`).
 - Claim: Marbre's variants also set `z`, `pointerEvents`,
-  `visibility`, elevation and the focus ring, and percent translates;
-  Craie's apply paint, opacity, a transform matrix and layout only.
+  `visibility`, elevation and the focus ring; Craie's apply paint,
+  opacity, transform parts (percent translates included, since work
+  item 6) and layout only.
   `_hover={{ pointerEvents: "none" }}` or `style: { zIndex: 2 }` in a
   variant is logged once and left out, as is every other key a variant
   does not apply.
@@ -741,7 +729,28 @@ Reviewer minors and nitpicks not fixed yet.
 - Resolves in: focus on mount for any `AUTO_FOCUS` node (the settle
   pass already sees each one mount), if the kit needs it.
 
+### DF-49: no percentages in an RN transform list
+
+- Source: work item 6 (transform parts).
+- Where: packages/bridge/src/wire.ts (`transformMatrix`).
+- Claim: React Native accepts `{ translateX: "50%" }` in a transform
+  list; Craie's list takes points only, because it folds into the free
+  matrix, which has no size-relative part. `style.translate: ["50%",
+  0]` does the same and follows the size.
+- Why deferred: the wire's fractions add straight to the translation,
+  so a list's percent step maps onto them only when no rotate, scale or
+  skew comes before it in the list; anything else needs a size-relative
+  term per matrix column. No ported screen writes one.
+- Resolves in: when a ported component writes a percent translate in a
+  list.
+
 ## Closed
+
+- DF-21 (work item 6, transform parts): a variant's transform replaced
+  the whole matrix. The spatial row now holds translate, rotate, scale
+  and the free matrix as parts, and a variant sets only the parts it
+  names, per axis: `_hover: { style: { scale: 1.02 } }` keeps the base
+  `rotate`.
 
 - DF-19 (work item 3, focus traps): layers owned coarsely. A `Layer`
   opened inside a `FocusTrap` is owned by the trap's node, found through
