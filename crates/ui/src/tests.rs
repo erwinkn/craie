@@ -860,6 +860,8 @@ fn wire_roundtrip_is_exact() {
         )
         .list_index(1, 1)
         .scroll_anchor(0, crate::mutation::Anchor::StickToEnd)
+        .z(0, -7)
+        .layer(4, 0)
         .detach(2)
         .remove(3);
     let buf = wire::encode(&t);

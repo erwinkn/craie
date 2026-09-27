@@ -24,6 +24,9 @@ pub mod input;
 pub mod layout;
 pub mod list;
 pub mod mutation;
+mod order;
+#[cfg(test)]
+mod order_tests;
 pub mod platform;
 mod reach;
 mod scene_sync;

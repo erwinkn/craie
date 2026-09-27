@@ -47,6 +47,8 @@ pub mod op {
     pub const LAYOUT: u8 = 0x10;
     // spatial
     pub const SPATIAL: u8 = 0x20;
+    /// id u32 | owner u32 (NIL: none): a layer container (`order.rs`).
+    pub const LAYER: u8 = 0x22;
     // paint
     pub const PAINT: u8 = 0x30;
     // text
@@ -81,6 +83,8 @@ pub mod spatial_field {
     pub const TRANSFORM: u8 = 1 << 0;
     /// One f32 in [0, 1].
     pub const OPACITY: u8 = 1 << 1;
+    /// One i32: the order among siblings (higher paints later).
+    pub const Z: u8 = 1 << 2;
 }
 
 /// PAINT op field mask bits.
@@ -389,6 +393,7 @@ pub fn encode(txn: &Transaction<'_>) -> Vec<u8> {
                 id,
                 transform,
                 opacity,
+                z,
             } => {
                 ops.push(op::SPATIAL);
                 u32le(&mut ops, *id);
@@ -399,6 +404,9 @@ pub fn encode(txn: &Transaction<'_>) -> Vec<u8> {
                 if opacity.is_some() {
                     mask |= spatial_field::OPACITY;
                 }
+                if z.is_some() {
+                    mask |= spatial_field::Z;
+                }
                 ops.push(mask);
                 if let Some(t) = transform {
                     for v in t.0 {
@@ -408,6 +416,14 @@ pub fn encode(txn: &Transaction<'_>) -> Vec<u8> {
                 if let Some(o) = opacity {
                     f32le(&mut ops, *o);
                 }
+                if let Some(z) = z {
+                    u32le(&mut ops, *z as u32);
+                }
+            }
+            Mutation::Layer { id, owner } => {
+                ops.push(op::LAYER);
+                u32le(&mut ops, *id);
+                u32le(&mut ops, *owner);
             }
             Mutation::Paint {
                 id,
@@ -878,7 +894,9 @@ pub fn decode(buf: &[u8]) -> Result<Transaction<'_>, WireError> {
             op::SPATIAL => {
                 let id = r.u32()?;
                 let mask = r.u8()?;
-                if mask & !(spatial_field::TRANSFORM | spatial_field::OPACITY) != 0 {
+                if mask & !(spatial_field::TRANSFORM | spatial_field::OPACITY | spatial_field::Z)
+                    != 0
+                {
                     return Err(WireError::BadRef("spatial mask"));
                 }
                 let transform = if mask & spatial_field::TRANSFORM != 0 {
@@ -895,12 +913,22 @@ pub fn decode(buf: &[u8]) -> Result<Transaction<'_>, WireError> {
                 } else {
                     None
                 };
+                let z = if mask & spatial_field::Z != 0 {
+                    Some(r.u32()? as i32)
+                } else {
+                    None
+                };
                 Mutation::Spatial {
                     id,
                     transform,
                     opacity,
+                    z,
                 }
             }
+            op::LAYER => Mutation::Layer {
+                id: r.u32()?,
+                owner: r.u32()?,
+            },
             op::PAINT => {
                 let id = r.u32()?;
                 let mask = r.u8()?;

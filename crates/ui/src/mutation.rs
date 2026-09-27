@@ -297,10 +297,21 @@ pub enum Mutation<'a> {
         style: u32,
     },
     // spatial
+    /// `z` orders the node among its siblings (`order.rs`).
     Spatial {
         id: u32,
         transform: Option<Affine>,
         opacity: Option<f32>,
+        z: Option<i32>,
+    },
+    /// Makes `id` (a View) a layer container: hit testing passes through
+    /// its own box, and it never sorts below the sibling holding `owner`
+    /// (NIL: no owner). An owner that is not under `id`'s parent, or is
+    /// under `id` itself, holds no sibling: the layer sorts as unowned.
+    /// Removing the owner makes it unowned for good.
+    Layer {
+        id: u32,
+        owner: u32,
     },
     // paint
     Paint {
@@ -415,6 +426,7 @@ impl Mutation<'_> {
             | Mutation::Remove { id }
             | Mutation::Layout { id, .. }
             | Mutation::Spatial { id, .. }
+            | Mutation::Layer { id, .. }
             | Mutation::Paint { id, .. }
             | Mutation::Paragraph { id, .. }
             | Mutation::InputConfig { id, .. }
@@ -516,6 +528,7 @@ impl<'a> Transaction<'a> {
             id,
             transform: Some(t),
             opacity: None,
+            z: None,
         })
     }
 
@@ -524,7 +537,21 @@ impl<'a> Transaction<'a> {
             id,
             transform: None,
             opacity: Some(o),
+            z: None,
         })
+    }
+
+    pub fn z(&mut self, id: u32, z: i32) -> &mut Self {
+        self.push(Mutation::Spatial {
+            id,
+            transform: None,
+            opacity: None,
+            z: Some(z),
+        })
+    }
+
+    pub fn layer(&mut self, id: u32, owner: u32) -> &mut Self {
+        self.push(Mutation::Layer { id, owner })
     }
 
     pub fn paint(

@@ -27,6 +27,7 @@ const enum Op {
   Layout = 0x10,
   // spatial
   Spatial = 0x20,
+  Layer = 0x22,
   // paint
   Paint = 0x30,
   // text
@@ -109,7 +110,7 @@ export interface ItemDesc {
 }
 
 // Field mask bits — mirror wire.rs `spatial_field` / `paint_field`.
-const SPATIAL_FIELD = { TRANSFORM: 1 << 0, OPACITY: 1 << 1 } as const
+const SPATIAL_FIELD = { TRANSFORM: 1 << 0, OPACITY: 1 << 1, Z: 1 << 2 } as const
 const PAINT_FIELD = { FILL: 1 << 0, RADIUS: 1 << 1, BORDER: 1 << 2 } as const
 const SPAN_ITALIC = 1 << 0
 const SPAN_UNDERLINE = 1 << 1
@@ -345,6 +346,10 @@ export interface StyleProps {
   transform?: Transform
   /** Spatial: group opacity in [0, 1]. */
   opacity?: number
+  /** Spatial: the order among siblings, an integer (React Native's
+   * `zIndex`: no stacking contexts, ties keep tree order). Never
+   * relayouts; Tab order and accessibility keep tree order. */
+  zIndex?: number
   /** Not layout: declared transitions, sent in their own op. */
   transition?: Transitions
 }
@@ -436,8 +441,9 @@ function edge4<T>(v: Edges<T> | undefined, zero: T): [T, T, T, T] {
 function canon(v: unknown): string {
   if (v === null || typeof v !== "object") return JSON.stringify(v)!
   if (Array.isArray(v)) return `[${v.map(canon).join(",")}]`
+  // An undefined field is an absent one (`putStyle` skips both).
   const o = v as Record<string, unknown>
-  return `{${Object.keys(o).sort().map(k => `${JSON.stringify(k)}:${canon(o[k])}`).join(",")}}`
+  return `{${Object.keys(o).filter(k => o[k] !== undefined).sort().map(k => `${JSON.stringify(k)}:${canon(o[k])}`).join(",")}}`
 }
 
 const OVERFLOW: Record<string, number> = { visible: 0, clip: 1, hidden: 2, scroll: 3 }
@@ -628,12 +634,21 @@ export function transformMatrix(t: Transform | undefined): Affine {
   return m
 }
 
-/** The layout part of a style: everything but the spatial keys. */
+/** The layout part of a style: everything but the spatial keys, or
+ * undefined when nothing is left (`{ zIndex: 1 }` has no layout, like
+ * no style at all). */
 export function layoutPart(s: StyleProps | undefined): StyleProps | undefined {
   if (!s) return undefined
-  if (s.transform === undefined && s.opacity === undefined && s.transition === undefined) return s
-  const { transform: _t, opacity: _o, transition: _tr, ...rest } = s
-  return rest
+  let rest = s
+  if (
+    s.transform !== undefined || s.opacity !== undefined || s.zIndex !== undefined ||
+    s.transition !== undefined
+  ) {
+    const { transform: _t, opacity: _o, zIndex: _z, transition: _tr, ...layout } = s
+    rest = layout
+  }
+  for (const k in rest) if (rest[k as keyof StyleProps] !== undefined) return rest
+  return undefined
 }
 
 /** Key-order-independent stringify for style interning. */
@@ -709,17 +724,28 @@ export class Encoder {
     this.ops.u32(id)
     this.ops.u32(ref)
   }
-  /** Transform (CSS matrix about the center) and/or opacity. */
-  spatial(id: number, transform?: Affine, opacity?: number) {
+  /** Transform (CSS matrix about the center), opacity and/or z (an
+   * i32: the order among siblings). */
+  spatial(id: number, transform?: Affine, opacity?: number, z?: number) {
     const b = this.ops
     b.u8(Op.Spatial)
     b.u32(id)
     b.u8(
       (transform !== undefined ? SPATIAL_FIELD.TRANSFORM : 0) |
-        (opacity !== undefined ? SPATIAL_FIELD.OPACITY : 0),
+        (opacity !== undefined ? SPATIAL_FIELD.OPACITY : 0) |
+        (z !== undefined ? SPATIAL_FIELD.Z : 0),
     )
     if (transform !== undefined) for (const v of transform) b.f32(v)
     if (opacity !== undefined) b.f32(opacity)
+    if (z !== undefined) b.u32(z >>> 0)
+  }
+  /** Makes `id` a layer container: hit testing passes through its own
+   * box, and it never sorts below the sibling holding `owner` (NIL:
+   * none). */
+  layer(id: number, owner: number) {
+    this.ops.u8(Op.Layer)
+    this.ops.u32(id)
+    this.ops.u32(owner)
   }
   /** Masked paint update: fill, corner radius, border (color, width). */
   paint(

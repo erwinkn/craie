@@ -99,7 +99,9 @@ impl Ui {
 
     /// Deepest node containing (x, y) logical, honoring transforms, clip
     /// chains, scroll offsets, and `display: none`. Skips the subtrees
-    /// whose reach misses the point (`reach.rs`).
+    /// whose reach misses the point (`reach.rs`). Allocation-free once
+    /// paint orders are fresh (after `render` or within `dispatch`);
+    /// between a transaction and those, a stale parent sorts on the spot.
     pub fn hit_test(&self, x: f32, y: f32) -> Option<NodeId> {
         self.hit_roots(Point::new(x, y), true)
     }
@@ -110,8 +112,7 @@ impl Ui {
     }
 
     fn hit_roots(&self, p: Point, prune: bool) -> Option<NodeId> {
-        for i in (0..self.host.child_count(ROOT)).rev() {
-            let root = self.host.child_at(ROOT, i);
+        for &root in self.host.paint_order(ROOT).iter().rev() {
             if let Some(hit) = self.hit_node(root, p, prune) {
                 return Some(hit);
             }
@@ -149,13 +150,17 @@ impl Ui {
         if !clips || in_clip(q, &clip, radius, open) {
             let [sx, sy] = self.scroll_offset_if_scrolls(id);
             let cp = Point::new(q.x + sx, q.y + sy);
-            // Children paint above their parent and later siblings above
-            // earlier ones: test them last to first.
-            for &child in self.host.children(id).iter().rev() {
+            // Children paint above their parent, in paint order
+            // (`order.rs`): test them last to first.
+            for &child in self.host.paint_order(id).iter().rev() {
                 if let Some(hit) = self.hit_node(child, cp, prune) {
                     return Some(hit);
                 }
             }
+        }
+        // A layer container passes through (`box-none`).
+        if node.flags.contains(NodeFlags::LAYER) {
+            return None;
         }
         let own_radius = if self.host.kind(id).is_some_and(|k| k.has_box()) {
             self.host.paint[id.index()].radius
@@ -252,6 +257,7 @@ impl Ui {
     /// Handles one normalized platform event: native consumption
     /// (scroll, editing, focus) plus JS emission into `pending_events`.
     pub fn dispatch(&mut self, ev: &Event) {
+        self.host.refresh_orders();
         self.refresh_reach();
         match ev {
             Event::PointerMove { x, y } => self.pointer_move(*x, *y),
