@@ -361,27 +361,39 @@ the same on the Mac). Two trees at 1440x900 @2x:
 - hover: a 200x40 scope (the row) and N cells 6 pt square elsewhere,
   each with `_row: { _hover: { backgroundColor } }`. One change is a
   pointer move into or out of the row, then `render`: the hit test,
-  input bits, restyle, paint patch.
+  input bits, restyle, paint patch. The baseline makes the same moves
+  over 1,000 cells with no table and a row that only listens for enter
+  and leave.
 - breakpoint: 1,000 rows 36 pt tall in a column, each `_narrow: {
   style: { height: 44 } }`; the window alternates 900 and 1,440 pt
-  wide. Against the same resizes with no tables.
+  wide. Against the same resizes with no tables, and with no tables but
+  a transaction per crossing that sets the 1,000 heights (what an app
+  without variants sends, JS time excluded).
 
-On exe1 (load average 27 to 30), medians of three runs, per change:
+Events drain into a buffer kept across changes, so the allocations are
+the UI's own. On exe1 (load average about 10), medians of three runs,
+per change:
 
-| case                                | µs    | allocs | paints patched | layouts |
-|-------------------------------------|-------|--------|----------------|---------|
-| hover, 1 dependent                  | 0.29  | 1      | 1              | 0       |
-| hover, 100 dependents               | 11    | 1      | 100            | 0       |
-| hover, 1,000 dependents             | 235   | 1      | 1,000          | 0       |
-| breakpoint, no tables (resize only) | 759   | 4      | 0              | 1       |
-| breakpoint, 1,000 `_narrow` rows    | 1,283 | 7      | 0              | 1       |
+| case                                        | µs    | allocs | paints patched | layouts |
+|---------------------------------------------|-------|--------|----------------|---------|
+| hover, no scopes (1,000 cells)              | 4.2   | 0      | 0              | 0       |
+| hover, 1 dependent                          | 0.27  | 0      | 1              | 0       |
+| hover, 100 dependents                       | 11    | 0      | 100            | 0       |
+| hover, 1,000 dependents                     | 116   | 0      | 1,000          | 0       |
+| breakpoint, no tables (resize only)         | 301   | 4      | 0              | 1       |
+| breakpoint, no tables, 1,000 heights sent   | 504   | 7      | 0              | 1       |
+| breakpoint, 1,000 `_narrow` rows            | 637   | 7      | 0              | 1       |
 
-- Hover grows with what it restyles, not with the tree: about 0.2 µs
-  per dependent, one paint patch each and no layout. The runs spread
-  widely (142 to 269 µs at 1,000).
-- A breakpoint restyles 1,000 layout rows for about 0.5 ms more than
-  the resize alone, and still lays out once: the restyle declares the
-  changed `SIZE` before the frame's layout pass.
+- Hover grows with what it restyles, not with the tree: 1,000
+  dependents cost about 112 µs over the same move with none, about
+  0.11 µs each, one paint patch each, no layout and no allocation.
+  (The first run of this table showed one allocation per change: it
+  was the harness's event vector, regrown after each `take_events`.)
+- A breakpoint still lays out once. Of the 336 µs over the resize
+  alone, about 200 µs is the layout work that 1,000 new heights cause
+  anyway (the heights-sent row), and about 130 µs, 0.13 µs a row, is
+  the restyle. The first table (load 27 to 30) put the whole
+  difference on the restyle.
 
 ## Step 1 — crate split, CRW2, retained scene (2026-09-23)
 

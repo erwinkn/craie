@@ -280,6 +280,8 @@ impl Ui {
                 }
             }
             Event::Wheel { x, y, dx, dy } => {
+                // The pointer is there: hover at rest tests from here.
+                self.last_pointer = Some((*x, *y));
                 let hit = self.hit_test(*x, *y);
                 if let Some(hit) = hit {
                     // Consume vertically or horizontally scrollable
@@ -305,7 +307,12 @@ impl Ui {
                 }
             }
             Event::KeyDown(k) => {
-                self.states.keyboard = true;
+                // As browsers: a bare modifier or a shortcut chord keeps
+                // the pointer's modality (no focus ring on Cmd+C).
+                let bare = k.key == Key::Unknown && k.char.is_none();
+                if !bare && !(k.mods.ctrl || k.mods.alt || k.mods.meta) {
+                    self.states.keyboard = true;
+                }
                 self.key_down(k)
             }
             Event::KeyUp(k) => {
@@ -346,6 +353,14 @@ impl Ui {
             Event::Drop { x, y, paths } => {
                 let hit = self.hit_test(*x, *y).or(self.focus);
                 self.pointer_claim(hit, claim_kind::DROP, *x, *y, paths.join("\0"));
+            }
+            // Hover ends where it was, and nothing tests it at rest.
+            Event::PointerLeave => {
+                if let Some((x, y)) = self.last_pointer.take()
+                    && self.hover.is_some()
+                {
+                    self.set_hover(None, x, y);
+                }
             }
             Event::Focus(gained) => {
                 if !gained {
@@ -391,6 +406,12 @@ impl Ui {
             self.hover_stale = false;
             return false;
         };
+        // Nothing reads the hover: skip the hit test (a new reader sets
+        // `hover_stale`).
+        if self.states.hover_tables == 0 && self.host.hover_listeners == 0 {
+            self.hover_stale = false;
+            return false;
+        }
         if self.next_settle().is_some() {
             self.hover_stale = true;
             return false;

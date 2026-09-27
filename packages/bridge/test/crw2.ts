@@ -11,7 +11,7 @@ export interface Op {
   /** CLAIMS: the claim set (`f` holds the version). */
   claims?: { kind: number; flags: number; mods: number; key: number }[]
   /** VARIANTS: each variant's terms, env, and values in wire order (a
-   * layout value contributes its style mask). */
+   * layout value contributes its layout keys). */
   variants?: { terms: { scope: number; mask: bigint }[]; env: number; values: number[] }[]
   /** STATES: the bits. */
   bits?: bigint
@@ -163,12 +163,13 @@ export function readFrame(buf: Uint8Array): Frame {
           for (let k = 0; k < nTerms; k++) terms.push({ scope: u32(), mask: u64() })
           const m = u8(), values = [m]
           if (m & 1) values.push(u32())
-          if (m & 2) values.push(u32(), f32())
+          if (m & 2) values.push(u32())
           if (m & 4) values.push(f32())
           if (m & 8) values.push(u8(), u32())
           if (m & 16) values.push(f32())
           if (m & 32) for (let k = 0; k < 6; k++) values.push(f32())
-          if (m & 64) { values.push(Number(dv.getBigUint64(at, true))); skipStyle() }
+          if (m & 64) { const keys = u64(); values.push(Number(keys)); skipFields(keyFields(keys)) }
+          if (m & 128) values.push(f32())
           op.variants.push({ terms, env, values })
         }
         break
@@ -183,6 +184,9 @@ export function readFrame(buf: Uint8Array): Frame {
 
   function skipStyle() {
     const mask = dv.getBigUint64(at, true); at += 8
+    skipFields(mask)
+  }
+  function skipFields(mask: bigint) {
     const lp = () => { const t = u8(); if (t < 2) at += 4 }
     const dim = () => { const t = u8(); if (t <= 1 || t === 5 || t === 6) at += 4 }
     for (let bit = 0; bit < 21; bit++) {
@@ -196,4 +200,18 @@ export function readFrame(buf: Uint8Array): Frame {
       else at += 2
     }
   }
+}
+
+/** The style fields carrying layout keys (states.rs `layout_key::fields`):
+ * the first eight keys are their fields; then gap 2, size 2, min 2,
+ * max 2, padding 4, margin 4, border 4, inset 4, then one each. */
+function keyFields(keys: bigint): bigint {
+  let fields = keys & 0xffn
+  const widths = [2, 2, 2, 2, 4, 4, 4, 4, 1, 1, 1, 1, 2]
+  let at = 8n
+  widths.forEach((w, i) => {
+    if ((keys >> at) & ((1n << BigInt(w)) - 1n)) fields |= 1n << BigInt(8 + i)
+    at += BigInt(w)
+  })
+  return fields
 }

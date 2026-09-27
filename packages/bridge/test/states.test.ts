@@ -1,9 +1,8 @@
 import { test, expect } from "bun:test"
-import { createElement, useState } from "react"
+import { createElement, StrictMode, Suspense, useState } from "react"
 import { createRoot, defineStates, Portal, Pressable, Text, View } from "../src/index.js"
-import { pairedLayout } from "../src/host.js"
 import type { Transport, UiEvent } from "../src/host.js"
-import { ENV_BIT, STATE_BIT } from "../src/wire.js"
+import { ENV_BIT, layoutKeys, STATE_BIT } from "../src/wire.js"
 import { readFrame, type Op } from "./crw2.js"
 
 class FakeTransport implements Transport {
@@ -56,7 +55,7 @@ test("_ keys flatten depth first; nesting ANDs; env and scope names apply", asyn
     [[[row!, bit("selected") | bit("hover")]], 0, 1],
     [[], ENV_BIT.narrow, 64],
   ])
-  expect(own[3]!.values[1]).toBe(1 << 9) // SIZE: height travels with width
+  expect(own[3]!.values[1]).toBe(1 << 11) // the height key alone
   // `_row` reads the named scope; a bare `_hover` the nearest (itself).
   const kid = tables.find(o => o.id === inner)!.variants!
   expect(kid.map(v => [v.terms.map(x => x.scope), v.values[0]])).toEqual([
@@ -65,14 +64,31 @@ test("_ keys flatten depth first; nesting ANDs; env and scope names apply", asyn
   ])
 })
 
-test("pairing fills the rest of each wire field from the base", () => {
-  expect(pairedLayout({ height: 44 }, { width: 200, height: 36 })).toEqual({ width: 200, height: 44 })
-  expect(pairedLayout({ padding: { left: 4 } }, { padding: 12 }))
-    .toEqual({ padding: { left: 4, right: 12, top: 12, bottom: 12 } })
-  expect(pairedLayout({ top: 3 }, { inset: 1, left: 2 }))
-    .toEqual({ left: 2, right: 1, top: 3, bottom: 1 })
-  expect(pairedLayout({ gap: { height: 8 } }, { gap: 4 })).toEqual({ gap: { width: 4, height: 8 } })
-  expect(pairedLayout({ flexGrow: 1 }, { width: 5 })).toEqual({ flexGrow: 1 })
+test("layout values travel per key: axes and sides on their own", async () => {
+  const k = (...bits: number[]) => bits.reduce((m, b) => m | (1n << BigInt(b)), 0n)
+  expect(layoutKeys({ height: 44 })).toBe(k(11))
+  expect(layoutKeys({ padding: 4 })).toBe(k(16, 17, 18, 19))
+  expect(layoutKeys({ padding: { left: 4, right: 4 } })).toBe(k(16, 17))
+  expect(layoutKeys({ inset: 0, top: 3 })).toBe(k(28, 29, 30, 31))
+  expect(layoutKeys({ top: 3 })).toBe(k(30))
+  expect(layoutKeys({ gap: { height: 8 } })).toBe(k(9))
+  expect(layoutKeys({ overflow: { y: "scroll" } })).toBe(k(37))
+  expect(layoutKeys({ flexGrow: 1 })).toBe(k(33))
+
+  // px 16, py 12, narrow px 4, compact py 6: each variant sends only
+  // its sides, so at compact width both apply (native composes them).
+  const t = new FakeTransport()
+  createRoot(t).renderSync(createElement(View, {
+    style: { padding: { left: 16, right: 16, top: 12, bottom: 12 } },
+    _narrow: { style: { padding: { left: 4, right: 4 } } },
+    _compact: { style: { padding: { top: 6, bottom: 6 } } },
+  }))
+  await tick()
+  const [table] = t.ops().filter(o => o.tag === 0xb1)
+  expect(table!.variants!.map(v => [v.env, v.values[1]])).toEqual([
+    [ENV_BIT.narrow, Number(k(16, 17))],
+    [ENV_BIT.compact, Number(k(18, 19))],
+  ])
 })
 
 test("the seal sends a table only when its signature changes", async () => {
@@ -209,4 +225,136 @@ test("disabled stops onPress; color transitions travel as prop 8", async () => {
   await tick()
   t.event!(up)
   expect(presses).toBe(1)
+})
+
+test("toggling group keeps the children mounted", async () => {
+  const t = new FakeTransport()
+  const root = createRoot(t)
+  const app = (group?: string) => createElement(View, { group },
+    createElement(View, { _g: { _hover: { borderRadius: 4 } } }), createElement(Text, {}, "a"))
+  const log = console.error
+  console.error = () => {} // `_g` has no scope yet
+  try {
+    root.renderSync(app())
+    await tick()
+  } finally {
+    console.error = log
+  }
+  root.renderSync(app("g"))
+  await tick()
+  const ops = t.ops()
+  expect(ops.filter(o => o.tag === 0x01 || o.tag === 0x04)).toEqual([])
+  // The View is now a scope, and the child's `_g` finds it.
+  const scope = ops.find(o => o.tag === 0xb0)!.id
+  const table = ops.find(o => o.tag === 0xb1)!
+  expect(table.variants!.map(v => v.terms.map(x => x.scope))).toEqual([[scope]])
+})
+
+test("StrictMode mounts one scope and its tables point at it", async () => {
+  const t = new FakeTransport()
+  createRoot(t).renderSync(createElement(StrictMode, null,
+    createElement(Pressable, { selected: true }, createElement(View, { _selected: { borderRadius: 4 } }))))
+  await tick()
+  const ops = t.all()
+  const states = ops.filter(o => o.tag === 0xb0)
+  expect(states.map(o => o.bits)).toEqual([bit("selected")])
+  expect(created(ops, 0)).toContain(states[0]!.id)
+  const table = ops.find(o => o.tag === 0xb1)!
+  expect(table.variants![0]!.terms.map(x => x.scope)).toEqual([states[0]!.id])
+})
+
+test("Suspense: a hidden node's variants set no display, and come back on reveal", async () => {
+  const t = new FakeTransport()
+  const root = createRoot(t)
+  let wake!: () => void
+  const pending = new Promise<void>(r => { wake = r })
+  let suspend = false
+  function Lazy() {
+    if (suspend) throw pending
+    return null
+  }
+  const app = () => createElement(Pressable, {},
+    createElement(Suspense, { fallback: null },
+      createElement(View, { _hover: { style: { display: "flex", width: 10 } } }),
+      createElement(Lazy)))
+  root.renderSync(app())
+  await tick()
+  const key = (ops: Op[]) => ops.filter(o => o.tag === 0xb1).map(o => o.variants!.map(v => v.values[1]))
+  const display = 1 << 0, width = 1 << 10
+  expect(key(t.all())).toEqual([[display | width]])
+  t.frames.length = 0
+  suspend = true
+  root.renderSync(app())
+  await tick()
+  expect(key(t.all())).toEqual([[width]])
+  t.frames.length = 0
+  suspend = false
+  wake()
+  await pending
+  root.renderSync(app())
+  await tick()
+  expect(key(t.all())).toEqual([[display | width]])
+})
+
+test("variant keys that do not apply are logged once each", async () => {
+  const errors: string[] = []
+  const log = console.error
+  console.error = (m: string) => errors.push(m)
+  try {
+    // Types reject these; untyped callers get the log.
+    const t = new FakeTransport()
+    createRoot(t).renderSync(createElement(Pressable, {},
+      createElement(View, { _hover: { pointerEvents: "none", visibility: "hidden", style: { zIndex: 2 } } } as any),
+      createElement(View, { _hover: { pointerEvents: "none" } } as any)))
+    await tick()
+  } finally {
+    console.error = log
+  }
+  expect(errors.filter(e => e.includes(`"pointerEvents"`)).length).toBe(1)
+  expect(errors.filter(e => e.includes(`"visibility"`)).length).toBe(1)
+  expect(errors.some(e => e.includes("style.zIndex"))).toBe(true)
+})
+
+test("a disabled Pressable is not focusable; border color and width travel apart", async () => {
+  const t = new FakeTransport()
+  const root = createRoot(t)
+  const app = (disabled: boolean) => createElement(Pressable, {
+    disabled,
+    _hover: { borderColor: "#fff" },
+    _focusVisible: { borderWidth: 2 },
+  })
+  root.renderSync(app(true))
+  await tick()
+  const flags = (ops: Op[]) => ops.filter(o => o.tag === 0x60).map(o => o.f[1]! & 1)
+  expect(flags(t.ops())).toEqual([0])
+  const table = t.ops().find(o => o.tag === 0xb1)!
+  expect(table.variants!.map(v => v.values)).toEqual([[2, 0xffff_ffff], [128, 2]])
+  root.renderSync(app(false))
+  await tick()
+  expect(flags(t.ops())).toEqual([1])
+})
+
+test("a Text with no color inherits, white when nothing above sets one", async () => {
+  const t = new FakeTransport()
+  createRoot(t).renderSync(createElement(Text, {}, "a"))
+  await tick()
+  const f = readFrame(t.frames[0]!)
+  expect(f.spans.map(s => [s.inheritColor, s.color])).toEqual([[true, 0xffff_ffff]])
+  expect(f.ops.filter(o => o.tag === 0xb3)).toEqual([])
+})
+
+test("COLOR stays with the native tree; scopes cross a Portal", async () => {
+  const t = new FakeTransport()
+  createRoot(t).renderSync(createElement(Pressable, { color: "#9aa0aa", group: "menu" },
+    createElement(Portal, {}, createElement(Text, { _menu: { _hover: { color: "#fff" } } }, "item"))))
+  await tick()
+  const ops = t.ops()
+  const menu = ops.find(o => o.tag === 0xb0)!.id
+  // The one COLOR is on the Pressable; the Text is a window root, so
+  // natively it has no COLOR above and draws its own (white) color.
+  expect(ops.filter(o => o.tag === 0xb3).map(o => o.id)).toEqual([menu])
+  const text = created(ops, 1)[0]!
+  expect(ops.find(o => o.tag === 0x02 && o.id === text)!.f[0]).toBe(0xffff_ffff)
+  const table = ops.find(o => o.tag === 0xb1 && o.id === text)!
+  expect(table.variants![0]!.terms.map(x => x.scope)).toEqual([menu])
 })

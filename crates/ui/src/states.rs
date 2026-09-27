@@ -23,7 +23,6 @@ use crate::geom::Size;
 use crate::host::NodeId;
 use crate::mutation::NodeKind;
 use crate::ui::Ui;
-use crate::wire::field;
 
 /// State bits of a scope. Bit index = rank: at equal depth, the variant
 /// on the later rank wins.
@@ -59,19 +58,88 @@ pub mod env_bit {
 /// `Values` presence bits, in wire order.
 pub mod value_field {
     pub const FILL: u8 = 1 << 0;
-    /// Color and width, together.
-    pub const BORDER: u8 = 1 << 1;
+    pub const BORDER_COLOR: u8 = 1 << 1;
     pub const RADIUS: u8 = 1 << 2;
     /// The inherited text color (set or cleared).
     pub const COLOR: u8 = 1 << 3;
     pub const OPACITY: u8 = 1 << 4;
     /// The whole matrix.
     pub const TRANSFORM: u8 = 1 << 5;
-    /// The layout fields in `Values::layout_mask`.
+    /// The layout keys in `Values::layout_keys`.
     pub const LAYOUT: u8 = 1 << 6;
+    pub const BORDER_WIDTH: u8 = 1 << 7;
     /// Values only nodes with a box hold.
-    pub const BOX: u8 = FILL | BORDER | RADIUS;
-    pub const ALL: u8 = (1 << 7) - 1;
+    pub const BOX: u8 = FILL | BORDER_COLOR | RADIUS | BORDER_WIDTH;
+    pub const ALL: u8 = 0xFF;
+}
+
+/// Layout keys: one per property, axis and side, so two variants that
+/// set different parts of one wire field compose (`_narrow` sets
+/// `padding.left`, `_compact` sets `padding.top`: both apply). Sides go
+/// left, right, top, bottom.
+pub mod layout_key {
+    use crate::wire::field;
+
+    pub const DISPLAY: u64 = 1 << 0;
+    pub const POSITION: u64 = 1 << 1;
+    pub const FLEX_DIRECTION: u64 = 1 << 2;
+    pub const FLEX_WRAP: u64 = 1 << 3;
+    pub const JUSTIFY_CONTENT: u64 = 1 << 4;
+    pub const ALIGN_ITEMS: u64 = 1 << 5;
+    pub const ALIGN_CONTENT: u64 = 1 << 6;
+    pub const ALIGN_SELF: u64 = 1 << 7;
+    /// Column gap (`gap.width`), then row gap.
+    pub const GAP_WIDTH: u64 = 1 << 8;
+    pub const GAP_HEIGHT: u64 = 1 << 9;
+    pub const WIDTH: u64 = 1 << 10;
+    pub const HEIGHT: u64 = 1 << 11;
+    pub const MIN_WIDTH: u64 = 1 << 12;
+    pub const MIN_HEIGHT: u64 = 1 << 13;
+    pub const MAX_WIDTH: u64 = 1 << 14;
+    pub const MAX_HEIGHT: u64 = 1 << 15;
+    pub const PADDING_LEFT: u64 = 1 << 16;
+    pub const PADDING_RIGHT: u64 = 1 << 17;
+    pub const PADDING_TOP: u64 = 1 << 18;
+    pub const PADDING_BOTTOM: u64 = 1 << 19;
+    pub const MARGIN_LEFT: u64 = 1 << 20;
+    pub const MARGIN_RIGHT: u64 = 1 << 21;
+    pub const MARGIN_TOP: u64 = 1 << 22;
+    pub const MARGIN_BOTTOM: u64 = 1 << 23;
+    pub const BORDER_LEFT: u64 = 1 << 24;
+    pub const BORDER_RIGHT: u64 = 1 << 25;
+    pub const BORDER_TOP: u64 = 1 << 26;
+    pub const BORDER_BOTTOM: u64 = 1 << 27;
+    pub const INSET_LEFT: u64 = 1 << 28;
+    pub const INSET_RIGHT: u64 = 1 << 29;
+    pub const INSET_TOP: u64 = 1 << 30;
+    pub const INSET_BOTTOM: u64 = 1 << 31;
+    pub const FLEX_BASIS: u64 = 1 << 32;
+    pub const FLEX_GROW: u64 = 1 << 33;
+    pub const FLEX_SHRINK: u64 = 1 << 34;
+    pub const ASPECT_RATIO: u64 = 1 << 35;
+    pub const OVERFLOW_X: u64 = 1 << 36;
+    pub const OVERFLOW_Y: u64 = 1 << 37;
+    pub const ALL: u64 = (1 << 38) - 1;
+
+    /// The wire style fields (`wire::field`) that carry `keys`.
+    pub fn fields(keys: u64) -> u64 {
+        let any = |k: u64, f: u64| if keys & k != 0 { f } else { 0 };
+        // The first eight keys are their fields.
+        (keys & 0xFF)
+            | any(GAP_WIDTH | GAP_HEIGHT, field::GAP)
+            | any(WIDTH | HEIGHT, field::SIZE)
+            | any(MIN_WIDTH | MIN_HEIGHT, field::MIN_SIZE)
+            | any(MAX_WIDTH | MAX_HEIGHT, field::MAX_SIZE)
+            | any(0xF << 16, field::PADDING)
+            | any(0xF << 20, field::MARGIN)
+            | any(0xF << 24, field::BORDER)
+            | any(0xF << 28, field::INSET)
+            | any(FLEX_BASIS, field::FLEX_BASIS)
+            | any(FLEX_GROW, field::FLEX_GROW)
+            | any(FLEX_SHRINK, field::FLEX_SHRINK)
+            | any(ASPECT_RATIO, field::ASPECT_RATIO)
+            | any(OVERFLOW_X | OVERFLOW_Y, field::OVERFLOW)
+    }
 }
 
 /// A set of style values: a base or a variant's. Fields outside `mask`
@@ -87,8 +155,8 @@ pub struct Values {
     pub color: Option<u32>,
     pub opacity: f32,
     pub transform: Affine,
-    /// Wire style field bits (`wire::field`) of `layout` that apply.
-    pub layout_mask: u64,
+    /// The keys of `layout` that apply (`layout_key`).
+    pub layout_keys: u64,
     pub layout: LayoutRow,
 }
 
@@ -102,7 +170,7 @@ impl Default for Values {
             color: None,
             opacity: 1.0,
             transform: Affine::IDENTITY,
-            layout_mask: 0,
+            layout_keys: 0,
             layout: crate::host::default_style(),
         }
     }
@@ -112,7 +180,7 @@ impl Values {
     /// In range: finite, opacity in [0, 1], known bits.
     pub fn valid(&self) -> bool {
         self.mask & !value_field::ALL == 0
-            && self.layout_mask & !field::ALL == 0
+            && self.layout_keys & !layout_key::ALL == 0
             && self.border.1.is_finite()
             && self.radius.is_finite()
             && (0.0..=1.0).contains(&self.opacity)
@@ -127,8 +195,11 @@ impl Values {
         if m & FILL != 0 {
             self.fill = x.fill;
         }
-        if m & BORDER != 0 {
-            self.border = x.border;
+        if m & BORDER_COLOR != 0 {
+            self.border.0 = x.border.0;
+        }
+        if m & BORDER_WIDTH != 0 {
+            self.border.1 = x.border.1;
         }
         if m & RADIUS != 0 {
             self.radius = x.radius;
@@ -144,16 +215,16 @@ impl Values {
         }
         if let Some(src) = &v.layout {
             let dst = layout.get_or_insert_with(|| self.layout.to_taffy());
-            copy_fields(dst, src, x.layout_mask);
+            copy_keys(dst, src, x.layout_keys);
         }
     }
 }
 
-/// Copies the wire style fields in `mask` from `src` to `dst`.
-fn copy_fields(dst: &mut Style, src: &Style, mask: u64) {
+/// Copies the layout keys in `keys` from `src` to `dst`.
+fn copy_keys(dst: &mut Style, src: &Style, keys: u64) {
     macro_rules! copy {
-        ($($bit:ident => $($f:ident),+;)*) => {
-            $(if mask & field::$bit != 0 { $(dst.$f = src.$f.clone();)+ })*
+        ($($key:ident => $($f:ident).+;)*) => {
+            $(if keys & layout_key::$key != 0 { dst$(.$f)+ = src$(.$f)+.clone(); })*
         };
     }
     copy! {
@@ -165,19 +236,36 @@ fn copy_fields(dst: &mut Style, src: &Style, mask: u64) {
         ALIGN_ITEMS => align_items;
         ALIGN_CONTENT => align_content;
         ALIGN_SELF => align_self;
-        GAP => gap;
-        SIZE => size;
-        MIN_SIZE => min_size;
-        MAX_SIZE => max_size;
-        PADDING => padding;
-        MARGIN => margin;
-        BORDER => border;
-        INSET => inset;
+        GAP_WIDTH => gap.width;
+        GAP_HEIGHT => gap.height;
+        WIDTH => size.width;
+        HEIGHT => size.height;
+        MIN_WIDTH => min_size.width;
+        MIN_HEIGHT => min_size.height;
+        MAX_WIDTH => max_size.width;
+        MAX_HEIGHT => max_size.height;
+        PADDING_LEFT => padding.left;
+        PADDING_RIGHT => padding.right;
+        PADDING_TOP => padding.top;
+        PADDING_BOTTOM => padding.bottom;
+        MARGIN_LEFT => margin.left;
+        MARGIN_RIGHT => margin.right;
+        MARGIN_TOP => margin.top;
+        MARGIN_BOTTOM => margin.bottom;
+        BORDER_LEFT => border.left;
+        BORDER_RIGHT => border.right;
+        BORDER_TOP => border.top;
+        BORDER_BOTTOM => border.bottom;
+        INSET_LEFT => inset.left;
+        INSET_RIGHT => inset.right;
+        INSET_TOP => inset.top;
+        INSET_BOTTOM => inset.bottom;
         FLEX_BASIS => flex_basis;
         FLEX_GROW => flex_grow;
         FLEX_SHRINK => flex_shrink;
         ASPECT_RATIO => aspect_ratio;
-        OVERFLOW => overflow;
+        OVERFLOW_X => overflow.x;
+        OVERFLOW_Y => overflow.y;
     }
 }
 
@@ -224,10 +312,15 @@ pub(crate) struct Table {
     pub base: Values,
     /// The last resolution declared: restyle declares only what differs.
     pub(crate) resolved: Values,
-    /// Ascending specificity: (depth, ranks, declaration order).
+    /// Ascending specificity: (depth, latest rank, declaration order).
     variants: Vec<Variant>,
     /// Some variant reads the environment.
     uses_env: bool,
+    /// Some variant reads a hover bit.
+    uses_hover: bool,
+    /// Not resolved yet: its first values go to the rows directly, with
+    /// no transition (nothing was on screen to move from).
+    fresh: bool,
 }
 
 /// A scope: its bits, and the nodes whose tables read them (exact).
@@ -249,12 +342,12 @@ impl Scope {
         }
     }
 
-    /// The bits variants see: disabled stops hover and pressed, touch
-    /// stops hover.
+    /// The bits variants see: disabled stops hover, pressed and focus
+    /// visible; touch stops hover.
     fn effective(&self, env: u8) -> u64 {
         let mut b = self.app | self.input;
         if b & state_bit::DISABLED != 0 {
-            b &= !(state_bit::HOVER | state_bit::PRESSED);
+            b &= !(state_bit::HOVER | state_bit::PRESSED | state_bit::FOCUS_VISIBLE);
         }
         if env & env_bit::TOUCH != 0 {
             b &= !state_bit::HOVER;
@@ -273,11 +366,33 @@ pub struct States {
     /// Scopes holding input bits after the last refresh.
     held: Vec<(u32, u64)>,
     next_held: Vec<(u32, u64)>,
+    /// What the input bits were computed from: they hold while it does.
+    input_key: Option<InputKey>,
+    /// Tables that read a hover bit: without them (and hover
+    /// listeners), hover at rest need not hit-test.
+    pub(crate) hover_tables: usize,
+    /// Declarations go to the rows directly, not through transitions.
+    pub(crate) snapping: bool,
+    /// The environment has been set from a window size.
+    sized: bool,
+    /// The next restyle snaps every table (the first size's).
+    snap_next: bool,
     pub(crate) env: u8,
     narrow_max: f32,
     compact_max: f32,
     /// Keyboard modality: the last key or pointer press was a key.
     pub(crate) keyboard: bool,
+}
+
+/// Hover, the primary press, focus, keyboard modality, and the tree's
+/// shape: the input bits are a function of these.
+#[derive(Clone, Copy, PartialEq)]
+struct InputKey {
+    hover: Option<NodeId>,
+    pressed: Option<NodeId>,
+    focus: Option<NodeId>,
+    keyboard: bool,
+    structure: craie_core::rev::Rev,
 }
 
 impl Default for States {
@@ -289,6 +404,11 @@ impl Default for States {
             scratch: Vec::new(),
             held: Vec::new(),
             next_held: Vec::new(),
+            input_key: None,
+            hover_tables: 0,
+            snapping: false,
+            sized: false,
+            snap_next: false,
             env: 0,
             narrow_max: 1023.0,
             compact_max: 639.0,
@@ -333,6 +453,32 @@ impl States {
         }
     }
 
+    fn insert_table(&mut self, id: u32, t: Table) {
+        self.hover_tables += t.uses_hover as usize;
+        self.tables.insert(id, t);
+    }
+
+    fn remove_table(&mut self, id: u32) -> Option<Table> {
+        let t = self.tables.remove(&id)?;
+        self.hover_tables -= t.uses_hover as usize;
+        Some(t)
+    }
+
+    /// A scope for `id`'s occupant of `generation`, new or reset. Input
+    /// bits are recomputed at the next restyle: the new scope may hold
+    /// some.
+    fn scope(&mut self, id: u32, generation: u16) -> &mut Scope {
+        let s = self.scopes.entry(id).or_insert_with(|| {
+            self.input_key = None;
+            Scope::new(generation)
+        });
+        if s.generation != generation {
+            *s = Scope::new(generation);
+            self.input_key = None;
+        }
+        s
+    }
+
     fn queue_dependents(&mut self, scope: u32) {
         if let Some(s) = self.scopes.get(&scope) {
             for &d in &s.dependents {
@@ -353,13 +499,15 @@ impl States {
     }
 }
 
-/// Specificity: (depth, ranks). Depth counts the bits a variant needs;
-/// ranks is their union with environment bits above the state bits, so
-/// comparing it as an integer compares the highest differing rank.
-fn specificity(d: &VariantDecl) -> (u32, u128) {
+/// Specificity: (depth, latest rank). Depth counts the bits a variant
+/// needs; its latest rank is the highest of them, environment bits
+/// ranking above state bits. So `_focusVisible` (bit 56) beats `_hover`
+/// (54), and `_narrow._hover` against `_selected._hover` compares only
+/// narrow against selected. Declaration order breaks the remaining ties.
+fn specificity(d: &VariantDecl) -> (u32, u32) {
     let depth = d.terms.iter().map(|t| t.mask.count_ones()).sum::<u32>() + d.env.count_ones();
     let ranks = d.terms.iter().fold(0u128, |r, t| r | t.mask as u128) | (d.env as u128) << 64;
-    (depth, ranks)
+    (depth, 128 - ranks.leading_zeros())
 }
 
 impl Ui {
@@ -367,6 +515,7 @@ impl Ui {
     /// end of `execute` and `dispatch` and at the top of `render`.
     pub(crate) fn restyle(&mut self) {
         self.refresh_input_bits();
+        let snap = std::mem::take(&mut self.states.snap_next);
         if self.states.queue.is_empty() {
             return;
         }
@@ -378,13 +527,16 @@ impl Ui {
             };
             let next = self.states.resolve(t);
             let prev = t.resolved;
-            if next == prev {
-                continue;
-            }
+            let fresh = t.fresh || snap;
             if let Some(t) = self.states.tables.get_mut(&id) {
                 t.resolved = next;
+                t.fresh = false;
             }
-            self.declare_values(NodeId(id), &prev, &next);
+            if next != prev {
+                self.states.snapping = fresh;
+                self.declare_values(NodeId(id), &prev, &next);
+                self.states.snapping = false;
+            }
         }
         self.states.scratch = ids;
     }
@@ -408,7 +560,8 @@ impl Ui {
         }
         let fill = changed(FILL, prev.fill == next.fill);
         let radius = changed(RADIUS, prev.radius == next.radius);
-        let border = changed(BORDER, prev.border == next.border);
+        let border = changed(BORDER_COLOR, prev.border.0 == next.border.0)
+            || changed(BORDER_WIDTH, prev.border.1 == next.border.1);
         if fill || radius || border {
             self.declare_paint(
                 node,
@@ -423,12 +576,24 @@ impl Ui {
     }
 
     /// Recomputes the input bits from hover, the primary press, and
-    /// focus: O(depth) over their ancestor chains. Queues the dependents
-    /// of scopes whose bits changed.
+    /// focus: O(depth) over their ancestor chains, only when one of
+    /// them, the modality or the tree's shape changed. Queues the
+    /// dependents of scopes whose bits changed.
     fn refresh_input_bits(&mut self) {
         if self.states.scopes.is_empty() && self.states.held.is_empty() {
             return;
         }
+        let key = InputKey {
+            hover: self.hover,
+            pressed: self.pressed.filter(|_| self.pressed_primary),
+            focus: self.focus,
+            keyboard: self.states.keyboard,
+            structure: self.host.revs.structure,
+        };
+        if self.states.input_key == Some(key) {
+            return;
+        }
+        self.states.input_key = Some(key);
         let mut next = std::mem::take(&mut self.states.next_held);
         next.clear();
         let mut add = |ui: &Ui, from: Option<NodeId>, own: u64, within: u64| {
@@ -477,20 +642,24 @@ impl Ui {
     pub(crate) fn set_app_bits(&mut self, id: u32, bits: u64) {
         let generation = self.host.node(NodeId(id)).map_or(0, |n| n.generation);
         let st = &mut self.states;
-        let s = st
-            .scopes
-            .entry(id)
-            .or_insert_with(|| Scope::new(generation));
-        if s.app != bits {
-            s.app = bits;
-            st.queue_dependents(id);
+        let s = st.scope(id, generation);
+        let changed = s.app ^ bits;
+        if changed == 0 {
+            return;
+        }
+        s.app = bits;
+        st.queue_dependents(id);
+        // Assistive technology reports it.
+        if changed & state_bit::DISABLED != 0 {
+            self.host.revs.semantic.bump();
+            self.host.dirty.semantic.push(id);
         }
     }
 
     /// Replaces the node's variant table; an empty list removes it and
     /// declares the base.
     pub(crate) fn set_variants(&mut self, id: u32, decls: &[VariantDecl]) {
-        let old = self.states.tables.remove(&id);
+        let old = self.states.remove_table(id);
         if let Some(t) = &old {
             self.states.unlink(id, t);
         }
@@ -500,14 +669,14 @@ impl Ui {
             }
             return;
         }
-        let (base, resolved) = match old {
-            Some(t) => (t.base, t.resolved),
+        let (base, resolved, fresh) = match old {
+            Some(t) => (t.base, t.resolved, t.fresh),
             None => {
                 let b = self.capture_base(NodeId(id));
-                (b, b)
+                (b, b, true)
             }
         };
-        let mut keyed: Vec<((u32, u128), Variant)> = decls
+        let mut keyed: Vec<((u32, u32), Variant)> = decls
             .iter()
             .map(|d| {
                 let terms = d
@@ -540,23 +709,24 @@ impl Ui {
                 continue;
             }
             linked.push(t.scope);
-            let s = st
-                .scopes
-                .entry(t.scope)
-                .or_insert_with(|| Scope::new(t.generation));
-            if s.generation != t.generation {
-                *s = Scope::new(t.generation);
-            }
-            s.dependents.push(id);
+            st.scope(t.scope, t.generation).dependents.push(id);
         }
         let uses_env = variants.iter().any(|v| v.env != 0);
-        st.tables.insert(
+        let uses_hover = variants
+            .iter()
+            .flat_map(|v| &v.terms)
+            .any(|t| t.mask & state_bit::HOVER != 0);
+        // Hover at rest was not tracked without a reader: refresh it.
+        self.hover_stale |= uses_hover && st.hover_tables == 0 && self.host.hover_listeners == 0;
+        st.insert_table(
             id,
             Table {
                 base,
                 resolved,
                 variants,
                 uses_env,
+                uses_hover,
+                fresh,
             },
         );
         st.queue.push(id);
@@ -575,7 +745,7 @@ impl Ui {
         let s = self.host.spatial[i];
         let mut v = Values {
             mask: TRANSFORM | OPACITY | COLOR | LAYOUT,
-            layout_mask: field::ALL,
+            layout_keys: layout_key::ALL,
             transform: s.transform,
             opacity: s.opacity,
             color: self.host.colors.get(&node.0).copied(),
@@ -615,13 +785,24 @@ impl Ui {
             }
             st.held.retain(|e| e.0 != node.0);
         }
-        if let Some(t) = st.tables.remove(&node.0) {
+        if let Some(t) = st.remove_table(node.0) {
             st.unlink(node.0, &t);
         }
     }
 
+    /// Sets the environment from the window's size (logical) before the
+    /// first frame, so the first styles are the window's: the platform
+    /// calls it at creation. Without it, the first frame does, and
+    /// every table resolved before snaps to it with no transition.
+    pub fn set_window_size(&mut self, size: Size) {
+        self.update_env(size);
+    }
+
     /// Updates the width breakpoints from the frame size (logical).
     pub(crate) fn update_env(&mut self, size: Size) {
+        // The first size: what it restyles was never on screen.
+        self.states.snap_next |= !self.states.sized;
+        self.states.sized = true;
         let st = &self.states;
         let mut env = st.env & (env_bit::TOUCH | env_bit::REDUCED_MOTION);
         if size.width <= st.narrow_max {

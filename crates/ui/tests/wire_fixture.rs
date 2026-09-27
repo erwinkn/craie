@@ -8,6 +8,7 @@ use craie_ui::events::{Key, Mods};
 use craie_ui::host::NodeId;
 use craie_ui::input::SubmitKey;
 use craie_ui::mutation::{Mutation, NodeKind, Role};
+use craie_ui::states::layout_key;
 use craie_ui::surface;
 use craie_ui::ui::Ui;
 use craie_ui::wire;
@@ -230,6 +231,7 @@ fn js_fixture_decodes_and_executes() {
         narrow.layout.to_taffy().size.height,
         Dimension::length(44.0)
     );
+    assert_eq!(narrow.layout_keys, layout_key::WIDTH | layout_key::HEIGHT);
     assert_eq!(host.colors.get(&0), Some(&0x9aa0_aaff));
     assert!(!host.colors.contains_key(&2));
 

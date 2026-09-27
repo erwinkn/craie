@@ -193,13 +193,16 @@ makes a node a layer container. The state family (0xB0, protocol 4, work
 item 5): `STATES` sets a scope's app bits (u64; the input bits are
 native's, and setting one fails validation); `VARIANTS` replaces a
 node's variant table (per variant: terms of a scope id and a u64 mask,
-environment bits, then values under a u8 mask: fill, border, radius,
-text color, opacity, transform, and a layout style in the table
-encoding), and a count of 0 removes it; `ENVIRONMENT` sets the narrow
+environment bits, then values under a u8 mask: fill, border color,
+radius, text color, opacity, transform, layout, border width; layout
+is a u64 of keys, one per property, axis and side, then the style
+fields that hold them, so `_narrow: { padding: { left: 4 } }` and
+`_compact: { padding: { top: 6 } }` both apply), and a count of 0
+removes it (at most 256 variants of 8 terms); `ENVIRONMENT` sets the narrow
 and compact breakpoints; `COLOR` sets or clears the color a node's
 text inherits. Span flag bit 3 marks a span that inherits its color.
-Validation rejects dead nodes and scopes, unknown bits, box values on
-text, and non-finite breakpoints. Ops are u8-tagged,
+Validation rejects dead nodes and scopes, unknown bits and layout
+keys, box values on text, oversized tables, and non-finite breakpoints. Ops are u8-tagged,
 grouped by family in the high nibble. `wire::decode` yields a
 `Transaction` of `Mutation`s; the Rust builder produces the same type;
 `Ui::execute` validates the whole transaction, then applies it with no
@@ -997,8 +1000,11 @@ routed per property in call order; releasing a node resolves its
 pending calls as removed. State variants feed the same path (work item
 5): a restyle declares only the fields that differ from the values last
 resolved, through the mutation's own interception, so a declared
-transition tweens a hover fill. The inherited text color (prop 8)
-tweens between two set colors; from none it jumps.
+transition tweens a hover fill. A table's first resolution, and the
+first frame's environment, write directly (a row mounted selected
+does not fade in), and cancel an animation on the same property. The
+inherited text color (prop 8) tweens between two set colors; from none
+it jumps.
 
 **Target.** A native transition driver on the UI thread.
 
@@ -1089,14 +1095,20 @@ the dropped paths, or the position) and no default; JS answers with
 path, and to no one when nothing has focus. Escape has no action in an
 input; Enter follows the input's submit key (`enter`, `mod+enter`, or
 `none`, with exact modifiers).
-State bits (work item 5): after every dispatch and transaction, native
-recomputes the input bits of every scope: hover on the hovered node's
-ancestors, pressed on the primary press's, focus-within on the focused
-node's, and focus-visible when the last input was a key or focus is in
-a text input. A change restyles only the tables that read the scope.
-Hover follows geometry at rest: after a frame that moved geometry,
-native hit-tests the still pointer again, and during a scroll it holds
-until the settle signal.
+State bits (work item 5): after every dispatch, transaction and
+accessibility action, native recomputes the input bits of the scopes
+on three ancestor chains, and only when the hovered node, the press,
+the focus, the modality or the tree changed: hover on the hovered
+node's ancestors, pressed on the primary press's, focus-within on the
+focused node's, and focus-visible when the last input was a key (not
+a bare modifier or a Cmd, Ctrl or Alt chord) or focus is in a text
+input. Disabled masks hover, pressed and focus-visible. A change
+restyles only the tables that read the scope. Hover follows geometry
+at rest: after a frame that moved geometry, native hit-tests the still
+pointer again (only if a table or listener reads hover), and during a
+scroll it holds until the settle signal. Leaving the window clears the
+pointer; a wheel event sets it. Detaching or removing a node ends a
+press inside it; focus stays on a node that moves.
 
 **Target.** The same model over the new stores. Pointer ids and types
 rather than mouse-only concepts. Hit testing stays bounds plus clip

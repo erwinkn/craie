@@ -323,7 +323,9 @@ const ScopeContext = createContext<ScopeChain | null>(null)
 
 /** A host element with the scope chain its variants read. A scope
  * heads the chain it and its children see; children get it through
- * context, so a Portal's content keeps its owner's scopes. */
+ * context, so a Portal's content keeps its owner's scopes. The
+ * Provider is there even when the element is no scope, so toggling
+ * `group` keeps the children mounted. */
 function useHost(type: string, props: Record<string, any>, scope = false) {
   const outer = useContext(ScopeContext)
   const [ref] = useState<ScopeRef>(() => ({ node: null }))
@@ -332,10 +334,11 @@ function useHost(type: string, props: Record<string, any>, scope = false) {
     () => (scope ? { ref, name, parent: outer } : outer),
     [scope, ref, name, outer],
   )
-  if (!scope) return createElement(type, outer ? { ...props, __scopes: outer } : props)
+  const own = scope ? { __scope: ref, __scopes: chain } : outer ? { __scopes: outer } : {}
+  if (props.children === undefined) return createElement(type, { ...props, ...own })
   return createElement(
     type,
-    { ...props, __scope: ref, __scopes: chain },
+    { ...props, ...own },
     createElement(ScopeContext.Provider, { value: chain }, props.children),
   )
 }
@@ -384,8 +387,8 @@ export function View(props: ViewProps) {
 export function Pressable({ onPress, ...props }: PressableProps) {
   return useHost("view", {
     accessibilityRole: "button",
-    focusable: true,
     ...props,
+    focusable: !props.disabled && (props.focusable ?? true),
     onPointerUp: (e: PointerEvt) => {
       props.onPointerUp?.(e)
       if ((e.button ?? 1) === 1 && !props.disabled) onPress?.(e)

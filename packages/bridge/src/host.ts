@@ -645,68 +645,24 @@ function flattenVariants(
   return out
 }
 
-type Side = "left" | "right" | "top" | "bottom"
-const SIDES: readonly Side[] = ["left", "right", "top", "bottom"]
+/** Variant block keys that apply; `_` keys nest. */
+const VARIANT_KEYS = new Set(["backgroundColor", "borderColor", "borderWidth", "borderRadius", "color", "style"])
 
-/** Edge values as an object (`12` -> every side 12). */
-function sides<T>(v: T | Partial<Record<Side, T>> | undefined): Partial<Record<Side, T>> {
-  if (v === undefined) return {}
-  if (v !== null && typeof v === "object") return v as Partial<Record<Side, T>>
-  return { left: v as T, right: v as T, top: v as T, bottom: v as T }
-}
-
-/** A variant's layout, each wire field whole: a field carries several
- * keys (`height` travels with `width`, `padding.left` with the other
- * sides), so the keys the variant leaves out come from the base. */
-export function pairedLayout(v: StyleProps, base: StyleProps): StyleProps {
-  const out: Record<string, unknown> = { ...v }
-  const pair = (a: keyof StyleProps, b: keyof StyleProps) => {
-    if (v[a] === undefined && v[b] === undefined) return
-    out[a] = v[a] ?? base[a]
-    out[b] = v[b] ?? base[b]
-  }
-  pair("width", "height")
-  pair("minWidth", "minHeight")
-  pair("maxWidth", "maxHeight")
-  for (const k of ["padding", "margin", "borderWidth"] as const) {
-    if (v[k] !== undefined) out[k] = { ...sides<unknown>(base[k]), ...sides<unknown>(v[k]) }
-  }
-  if (typeof v.gap === "object") {
-    const g = typeof base.gap === "number" ? { width: base.gap, height: base.gap } : base.gap
-    out.gap = { ...g, ...v.gap }
-  }
-  if (typeof v.overflow === "object") {
-    const o = typeof base.overflow === "string" ? { x: base.overflow, y: base.overflow } : base.overflow
-    out.overflow = { ...o, ...v.overflow }
-  }
-  if (v.inset !== undefined || SIDES.some(k => v[k] !== undefined)) {
-    // Explicit sides: a side key beats `inset`, in the variant and the base.
-    const vi = sides(v.inset), bi = sides(base.inset)
-    delete out.inset
-    for (const k of SIDES) out[k] = v[k] ?? vi[k] ?? base[k] ?? bi[k] ?? "auto"
-  }
-  return out as StyleProps
-}
-
-/** A variant block's values in wire form (`undefined`: none). Border
- * color and width travel together, the one left out from the base. */
-function variantValues(
-  n: HostNode,
-  block: Record<string, any>,
-  props: Record<string, any>,
-  base: StyleProps | undefined,
-): VariantValues | undefined {
+/** A variant block's values in wire form (`undefined`: none). Each
+ * layout key applies on its own, over the base and less specific
+ * variants. A hidden node (`hidden`, Suspense) stays hidden: variants
+ * set no `display` on it. */
+function variantValues(n: HostNode, block: Record<string, any>, hidden: boolean): VariantValues | undefined {
   const v: VariantValues = {}
   const boxed = n.kind !== 1
   const style: StyleProps | undefined = block.style
+  for (const k in block) {
+    if (k[0] !== "_" && !VARIANT_KEYS.has(k)) warnOnce(`a variant does not apply "${k}" (LEDGER DF-29)`)
+  }
   if (boxed) {
     if (block.backgroundColor !== undefined) v.fill = color(block.backgroundColor)
-    if (block.borderColor !== undefined || block.borderWidth !== undefined) {
-      v.border = {
-        color: color(block.borderColor ?? props.borderColor),
-        width: block.borderWidth ?? props.borderWidth ?? 0,
-      }
-    }
+    if (block.borderColor !== undefined) v.borderColor = color(block.borderColor)
+    if (block.borderWidth !== undefined) v.borderWidth = block.borderWidth
     if (block.borderRadius !== undefined) v.radius = block.borderRadius
   } else if (["backgroundColor", "borderColor", "borderWidth", "borderRadius"].some(k => k in block)) {
     warnOnce("a Text variant sets no box paint: wrap it in a View")
@@ -717,10 +673,13 @@ function variantValues(
   }
   if (style?.opacity !== undefined) v.opacity = style.opacity
   if (style?.transform !== undefined) v.transform = transformMatrix(style.transform)
+  if (style?.zIndex !== undefined) warnOnce("a variant does not apply style.zIndex (LEDGER DF-29)")
+  if (style?.transition !== undefined) warnOnce("a variant does not apply style.transition (LEDGER DF-22)")
   const layout = layoutPart(style)
   if (layout) {
     const { transition: _, ...rest } = layout
-    if (Object.keys(rest).length) v.layout = pairedLayout(rest, base ?? {})
+    if (hidden) delete rest.display
+    if (Object.keys(rest).length) v.layout = rest
   }
   return Object.keys(v).length ? v : undefined
 }
@@ -958,9 +917,9 @@ export class CraieHost {
     for (const n of this.dirtyVariants) {
       if (!n.mounted || n.textParent) continue
       const list: VariantIn[] = []
-      const base = layoutOf(n.props, n.suspended)
+      const hidden = !!(n.props.hidden || n.suspended)
       for (const p of flattenVariants(n.props, n.props.__scopes ?? null)) {
-        const values = variantValues(n, p.block, n.props, base)
+        const values = variantValues(n, p.block, hidden)
         if (!values) continue
         const terms = []
         for (const [ref, mask] of p.terms) {
@@ -1318,6 +1277,8 @@ export class CraieHost {
     n.suspended = hidden
     const layout = layoutOf(n.props, n.suspended)
     if (styleKey(layout) !== before && this.ready()) this.encoder.layout(n.id, layout)
+    // Its variants' `display` stops (or resumes) applying.
+    if (n.sentVariants || hasVariantKeys(n.props)) this.dirtyVariants.add(n)
   }
 
   /** Prop diff -> ops for the fields that changed. */

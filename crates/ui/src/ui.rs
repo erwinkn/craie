@@ -14,6 +14,8 @@
 //! pixels.
 
 use std::collections::HashMap;
+
+use craie_core::rev::Rev;
 use std::time::Instant;
 
 use crate::events::{Event, Mods, UiEvent};
@@ -29,6 +31,10 @@ use crate::scene_sync::SceneSync;
 use crate::surface::{self, Quad, SurfacePainter};
 use crate::text::TextEngine;
 use crate::wire::{self, WireError};
+
+/// What a color root's inheritor list holds for: `revs.structure`,
+/// `revs.text_content`, and `Ui::color_bounds`.
+pub(crate) type InheritKey = (Rev, Rev, u64);
 
 pub struct Ui {
     pub host: Host,
@@ -60,6 +66,13 @@ pub struct Ui {
     pub(crate) states: crate::states::States,
     /// Scratch for tree walks.
     pub(crate) node_scratch: Vec<NodeId>,
+    /// Per color root, the text nodes inheriting its color, and what
+    /// that list holds for: a color tween repaints them each frame
+    /// without walking the subtree.
+    pub(crate) inheritors: HashMap<u32, (InheritKey, Vec<u32>)>,
+    /// Bumped when a node gains or loses a color of its own (the walk's
+    /// boundaries move).
+    pub(crate) color_bounds: u64,
     /// Last primary press (time, node, x, y) for double-click detection.
     pub(crate) last_click: Option<(Instant, NodeId, f32, f32)>,
     /// The text selection (`selection.rs`), whether a press is dragging
@@ -135,6 +148,8 @@ impl Ui {
             hover_stale: false,
             states: Default::default(),
             node_scratch: Vec::new(),
+            inheritors: HashMap::new(),
+            color_bounds: 0,
             last_click: None,
             text_selection: None,
             selecting: false,
@@ -266,6 +281,11 @@ impl Ui {
         std::mem::take(&mut self.pending_events)
     }
 
+    /// `take_events` into `out`: both buffers keep their capacity.
+    pub fn drain_events(&mut self, out: &mut Vec<UiEvent>) {
+        out.append(&mut self.pending_events);
+    }
+
     /// An outbound event for `id`, stamped with the node's generation so
     /// the JS side can drop events for a recycled id.
     pub(crate) fn event(&self, kind: u8, id: NodeId) -> UiEvent {
@@ -345,6 +365,8 @@ impl Ui {
             Action::ScrollIntoView => self.scroll_into_view(id),
             _ => {}
         }
+        // Focus moved: its scopes' bits (`_focusWithin`) follow.
+        self.restyle();
     }
 
     /// One "page" scroll step: the node's own extent, or 48pt.

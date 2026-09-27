@@ -481,12 +481,10 @@ function canon(v: unknown): string {
 
 const OVERFLOW: Record<string, number> = { visible: 0, clip: 1, hidden: 2, scroll: 3 }
 
-/** Serializes `s`'s present fields positionally under `mask`. */
-function putStyle(w: Writer, s: StyleProps) {
+/** The style fields `s` has (`states.rs` `wire::field` bits). */
+function styleMask(s: StyleProps): bigint {
   let mask = 0n
   const m = (bit: number) => { mask |= 1n << BigInt(bit) }
-  // Two passes would be needed for a tight mask-first encoding; instead we
-  // compute the mask from present fields, then write fields in order.
   if (s.display !== undefined) m(0)
   if (s.position !== undefined) m(1)
   if (s.flexDirection !== undefined) m(2)
@@ -502,62 +500,73 @@ function putStyle(w: Writer, s: StyleProps) {
   if (s.padding !== undefined) m(12)
   if (s.margin !== undefined) m(13)
   if (s.borderWidth !== undefined) m(14)
-  const hasInset = s.inset !== undefined || s.left !== undefined || s.right !== undefined
-    || s.top !== undefined || s.bottom !== undefined
-  if (hasInset) m(15)
+  if (s.inset !== undefined || s.left !== undefined || s.right !== undefined
+    || s.top !== undefined || s.bottom !== undefined) m(15)
   if (s.flexBasis !== undefined) m(16)
   if (s.flexGrow !== undefined) m(17)
   if (s.flexShrink !== undefined) m(18)
   if (s.aspectRatio !== undefined) m(19)
   if (s.overflow !== undefined) m(20)
+  return mask
+}
 
+/** Serializes `s`'s present fields: the mask, then the fields. */
+function putStyle(w: Writer, s: StyleProps) {
+  const mask = styleMask(s)
   w.u64(mask)
+  putStyleFields(w, s, mask)
+}
+
+/** Serializes the fields in `mask` positionally; absent parts of a
+ * field (the height of a SIZE) take their defaults. */
+function putStyleFields(w: Writer, s: StyleProps, mask: bigint) {
+  const has = (bit: number) => (mask & (1n << BigInt(bit))) !== 0n
   const kw = (v: keyof typeof KW | undefined) => (v === undefined ? UNSET : KW[v]!)
 
-  if (s.display !== undefined) w.u8(s.display === "none" ? 1 : 0)
-  if (s.position !== undefined) w.u8(s.position === "absolute" ? 1 : 0)
-  if (s.flexDirection !== undefined)
-    w.u8({ row: 0, column: 1, "row-reverse": 2, "column-reverse": 3 }[s.flexDirection])
-  if (s.flexWrap !== undefined)
-    w.u8({ nowrap: 0, wrap: 1, "wrap-reverse": 2 }[s.flexWrap])
-  if (s.justifyContent !== undefined) w.u8(kw(s.justifyContent))
-  if (s.alignItems !== undefined) w.u8(kw(s.alignItems))
-  if (s.alignContent !== undefined) w.u8(kw(s.alignContent))
-  if (s.alignSelf !== undefined) w.u8(kw(s.alignSelf))
-  if (s.gap !== undefined) {
-    const g = s.gap
+  if (has(0)) w.u8(s.display === "none" ? 1 : 0)
+  if (has(1)) w.u8(s.position === "absolute" ? 1 : 0)
+  if (has(2))
+    w.u8({ row: 0, column: 1, "row-reverse": 2, "column-reverse": 3 }[s.flexDirection ?? "row"])
+  if (has(3))
+    w.u8({ nowrap: 0, wrap: 1, "wrap-reverse": 2 }[s.flexWrap ?? "nowrap"])
+  if (has(4)) w.u8(kw(s.justifyContent))
+  if (has(5)) w.u8(kw(s.alignItems))
+  if (has(6)) w.u8(kw(s.alignContent))
+  if (has(7)) w.u8(kw(s.alignSelf))
+  if (has(8)) {
+    const g = s.gap ?? 0
     if (typeof g === "number") { putLP(w, g); putLP(w, g) }
     else { putLP(w, g.width ?? 0); putLP(w, g.height ?? 0) }
   }
-  if (s.width !== undefined || s.height !== undefined) {
+  if (has(9)) {
     putDim(w, s.width ?? "auto")
     putDim(w, s.height ?? "auto")
   }
-  if (s.minWidth !== undefined || s.minHeight !== undefined) {
+  if (has(10)) {
     putLPA(w, s.minWidth ?? "auto")
     putLPA(w, s.minHeight ?? "auto")
   }
-  if (s.maxWidth !== undefined || s.maxHeight !== undefined) {
+  if (has(11)) {
     putLPA(w, s.maxWidth ?? "auto")
     putLPA(w, s.maxHeight ?? "auto")
   }
-  if (s.padding !== undefined) for (const e of edge4(s.padding, 0)) putLP(w, e)
+  if (has(12)) for (const e of edge4(s.padding, 0)) putLP(w, e)
   // Unset margin sides are 0 (CSS and React Native), not auto.
-  if (s.margin !== undefined) for (const e of edge4<LengthPctAuto>(s.margin, 0)) putLPA(w, e)
-  if (s.borderWidth !== undefined) for (const e of edge4(s.borderWidth, 0)) putLP(w, e)
-  if (hasInset) {
+  if (has(13)) for (const e of edge4<LengthPctAuto>(s.margin, 0)) putLPA(w, e)
+  if (has(14)) for (const e of edge4(s.borderWidth, 0)) putLP(w, e)
+  if (has(15)) {
     const base = edge4(s.inset, "auto" as const)
     putLPA(w, s.left ?? base[0])
     putLPA(w, s.right ?? base[1])
     putLPA(w, s.top ?? base[2])
     putLPA(w, s.bottom ?? base[3])
   }
-  if (s.flexBasis !== undefined) putDim(w, s.flexBasis)
-  if (s.flexGrow !== undefined) w.f32(s.flexGrow)
-  if (s.flexShrink !== undefined) w.f32(s.flexShrink)
-  if (s.aspectRatio !== undefined) w.f32(s.aspectRatio)
-  if (s.overflow !== undefined) {
-    const o = s.overflow
+  if (has(16)) putDim(w, s.flexBasis ?? "auto")
+  if (has(17)) w.f32(s.flexGrow ?? 0)
+  if (has(18)) w.f32(s.flexShrink ?? 1)
+  if (has(19)) w.f32(s.aspectRatio ?? NaN)
+  if (has(20)) {
+    const o = s.overflow ?? "visible"
     if (typeof o === "string") { w.u8(OVERFLOW[o]!); w.u8(OVERFLOW[o]!) }
     else { w.u8(OVERFLOW[o.x ?? "visible"]!); w.u8(OVERFLOW[o.y ?? "visible"]!) }
   }
@@ -584,6 +593,60 @@ export interface TextSpanIn {
   inheritColor?: boolean
 }
 
+/** The layout keys `s` sets — mirror states.rs `layout_key`: one per
+ * property, axis and side (left, right, top, bottom), so two variants
+ * setting different sides of `padding` both apply: `padding: { left: 4 }`
+ * is one key, `padding: 4` four. */
+export function layoutKeys(s: StyleProps): bigint {
+  let keys = 0n
+  const k = (bit: number) => { keys |= 1n << BigInt(bit) }
+  // Four sides from bit `at`: a single value sets all four.
+  const sides = (v: unknown, at: number) => {
+    if (v === undefined) return
+    if (v === null || typeof v !== "object") { for (let i = 0; i < 4; i++) k(at + i); return }
+    const o = v as Record<string, unknown>
+    ;["left", "right", "top", "bottom"].forEach((side, i) => { if (o[side] !== undefined) k(at + i) })
+  }
+  const axes = (v: unknown, x: string, y: string, at: number) => {
+    if (v === undefined) return
+    if (v === null || typeof v !== "object") { k(at); k(at + 1); return }
+    const o = v as Record<string, unknown>
+    if (o[x] !== undefined) k(at)
+    if (o[y] !== undefined) k(at + 1)
+  }
+  const one = [s.display, s.position, s.flexDirection, s.flexWrap, s.justifyContent,
+    s.alignItems, s.alignContent, s.alignSelf]
+  one.forEach((v, i) => { if (v !== undefined) k(i) })
+  axes(s.gap, "width", "height", 8)
+  if (s.width !== undefined) k(10)
+  if (s.height !== undefined) k(11)
+  if (s.minWidth !== undefined) k(12)
+  if (s.minHeight !== undefined) k(13)
+  if (s.maxWidth !== undefined) k(14)
+  if (s.maxHeight !== undefined) k(15)
+  sides(s.padding, 16)
+  sides(s.margin, 20)
+  sides(s.borderWidth, 24)
+  sides(s.inset, 28)
+  ;[s.left, s.right, s.top, s.bottom].forEach((v, i) => { if (v !== undefined) k(28 + i) })
+  if (s.flexBasis !== undefined) k(32)
+  if (s.flexGrow !== undefined) k(33)
+  if (s.flexShrink !== undefined) k(34)
+  if (s.aspectRatio !== undefined) k(35)
+  axes(s.overflow, "x", "y", 36)
+  return keys
+}
+
+/** The style fields that carry `keys` (states.rs `layout_key::fields`). */
+function keyFields(keys: bigint): bigint {
+  const any = (bits: bigint, field: number) => ((keys & bits) !== 0n ? 1n << BigInt(field) : 0n)
+  return (keys & 0xffn)
+    | any(0b11n << 8n, 8) | any(1n << 10n | 1n << 11n, 9) | any(0b11n << 12n, 10)
+    | any(0b11n << 14n, 11) | any(0xfn << 16n, 12) | any(0xfn << 20n, 13)
+    | any(0xfn << 24n, 14) | any(0xfn << 28n, 15) | any(1n << 32n, 16)
+    | any(1n << 33n, 17) | any(1n << 34n, 18) | any(1n << 35n, 19) | any(0b11n << 36n, 20)
+}
+
 /** State bit indices — mirror states.rs `state_bit`. Bits below
  * `CUSTOM_STATES` are custom states, in declaration order. A higher bit
  * outranks a lower one at equal depth. */
@@ -608,14 +671,15 @@ export type EnvName = keyof typeof ENV_BIT
 /** A variant's values; absent ones are not overridden. */
 export interface VariantValues {
   fill?: number
-  /** Border color and width, together. */
-  border?: { color: number; width: number }
+  borderColor?: number
+  borderWidth?: number
   radius?: number
   /** The inherited text color; `null` clears it. */
   color?: number | null
   opacity?: number
   transform?: Affine
-  /** Layout fields (whole wire fields: `height` alone sends width too). */
+  /** Layout values: each key it sets applies on its own (`height`
+   * alone keeps the width that applies). */
   layout?: StyleProps
 }
 
@@ -629,8 +693,8 @@ export interface VariantIn {
 
 // Variant value bits — mirror states.rs `value_field`.
 const VALUE_FIELD = {
-  FILL: 1 << 0, BORDER: 1 << 1, RADIUS: 1 << 2, COLOR: 1 << 3,
-  OPACITY: 1 << 4, TRANSFORM: 1 << 5, LAYOUT: 1 << 6,
+  FILL: 1 << 0, BORDER_COLOR: 1 << 1, RADIUS: 1 << 2, COLOR: 1 << 3,
+  OPACITY: 1 << 4, TRANSFORM: 1 << 5, LAYOUT: 1 << 6, BORDER_WIDTH: 1 << 7,
 } as const
 
 export type Affine = [number, number, number, number, number, number]
@@ -1130,20 +1194,26 @@ export class Encoder {
       const has = (k: keyof VariantValues) => x[k] !== undefined
       b.u8(
         (has("fill") ? VALUE_FIELD.FILL : 0) |
-          (has("border") ? VALUE_FIELD.BORDER : 0) |
+          (has("borderColor") ? VALUE_FIELD.BORDER_COLOR : 0) |
           (has("radius") ? VALUE_FIELD.RADIUS : 0) |
           (has("color") ? VALUE_FIELD.COLOR : 0) |
           (has("opacity") ? VALUE_FIELD.OPACITY : 0) |
           (has("transform") ? VALUE_FIELD.TRANSFORM : 0) |
-          (has("layout") ? VALUE_FIELD.LAYOUT : 0),
+          (has("layout") ? VALUE_FIELD.LAYOUT : 0) |
+          (has("borderWidth") ? VALUE_FIELD.BORDER_WIDTH : 0),
       )
       if (x.fill !== undefined) b.u32(x.fill >>> 0)
-      if (x.border !== undefined) { b.u32(x.border.color >>> 0); b.f32(x.border.width) }
+      if (x.borderColor !== undefined) b.u32(x.borderColor >>> 0)
       if (x.radius !== undefined) b.f32(x.radius)
       if (x.color !== undefined) { b.u8(x.color === null ? 0 : 1); b.u32((x.color ?? 0) >>> 0) }
       if (x.opacity !== undefined) b.f32(x.opacity)
       if (x.transform !== undefined) for (const m of x.transform) b.f32(m)
-      if (x.layout !== undefined) putStyle(b, x.layout)
+      if (x.layout !== undefined) {
+        const keys = layoutKeys(x.layout)
+        b.u64(keys)
+        putStyleFields(b, x.layout, keyFields(keys))
+      }
+      if (x.borderWidth !== undefined) b.f32(x.borderWidth)
     }
   }
 

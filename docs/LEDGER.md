@@ -386,9 +386,9 @@ Reviewer minors and nitpicks not fixed yet.
 - Source: work item 5.
 - Where: packages/bridge/src/host.ts (`variantValues`).
 - Claim: a variant on a Text can set `color` only. A `fontSize`,
-  `weight` or `lineHeight` under `_hover` or `_narrow` is logged and
-  dropped. Box values on a Text are dropped the same way, since a Text
-  has no box.
+  `weight` or `lineHeight` under `_hover` or `_narrow` is logged once
+  (`a variant does not apply "fontSize"`) and left out. Box values on a
+  Text are left out the same way, since a Text has no box.
 - Why deferred: metrics reshape the paragraph, so they belong with the
   text pipeline's own ops, not in the paint-and-layout overlay.
 - Resolves in: when a component needs a responsive type size; the
@@ -400,12 +400,15 @@ Reviewer minors and nitpicks not fixed yet.
 - Where: crates/ui/src/host.rs (`Host::colors`), the text input config,
   the vector path.
 - Claim: `COLOR` reaches spans only. A TextInput keeps its config
-  color (the facade warns on `color` in its variants), and a vector's
-  `currentColor` doesn't read the inherited color yet.
-- Why deferred: the input's color lives in its editor config, and
-  vectors are PR #5's.
-- Resolves in: after the vectors work merges, as one lookup of
-  `Host::colors` for both.
+  color (the facade warns on `color` in its variants). A vector's
+  `currentColor` resolves in the facade to the `color` prop of the
+  `Vector` or a `G` above (PR #5, DF-14), not to the inherited `COLOR`:
+  `<Pressable color="#9aa0aa" _hover={{ color: "#fff" }}>` recolors its
+  label but not an icon drawn with `currentColor`.
+- Why deferred: the input's color lives in its editor config, and a
+  drawing's colors are resolved before they reach native.
+- Resolves in: one lookup of `Host::colors` at paint for both, which
+  closes DF-14 too.
 
 ### DF-25: no platform source for touch and reduced motion
 
@@ -448,14 +451,41 @@ Reviewer minors and nitpicks not fixed yet.
 - Source: work item 5.
 - Where: crates/ui/src/animation.rs (`intercept`), crates/ui/src/states.rs.
 - Claim: `ANIMATE` on a node with a variant table sets its base and
-  runs. If a variant in effect sets the same property, the restyle in
-  the same frame declares the variant's value, which retargets the
-  animation there (or cuts it, with no transition). Once the variant
-  turns off, the node shows the animated base.
+  runs. If a variant in effect sets the same property (for layout, the
+  same key), the restyle in the same frame declares the variant's
+  value, which retargets the animation there, or with no transition
+  cancels it: `animate(width, 160)` under `_narrow: { style: { width:
+  60 } }` in a narrow window ends at once with reason `cancelled`, and
+  the width stays 60. Under `_narrow: { style: { height: 44 } }` it
+  runs (before the per-key fix, PR7-02, the variant's paired width cut
+  it). Once the variant turns off, the node shows the animated base.
 - Why deferred: the owner of a property under a variant is the table;
   explicit animations on the same property are rare, and work item 6
   decides how presets and variants mix.
 - Resolves in: work item 6.
+
+### DF-29: kit values variants do not apply
+
+- Source: work item 5; the PR #7 review (PR7-12, PR7-16).
+- Where: packages/bridge/src/host.ts (`variantValues`).
+- Claim: Marbre's variants also set `z`, `pointerEvents`,
+  `visibility`, elevation and the focus ring, and percent translates;
+  Craie's apply paint, opacity, a transform matrix and layout only.
+  `_hover={{ pointerEvents: "none" }}` or `style: { zIndex: 2 }` in a
+  variant is logged once and left out, as is every other key a variant
+  does not apply.
+- Also: `_hover` on an element that is no scope means the nearest
+  scope's hover in Craie, the element's own on Marbre web (`<Text
+  _hover>` in questions.tsx, Icon `_hover` in tool-run.tsx). Inside a
+  Pressable they agree; a bare `<Text _hover>` outside one logs "needs
+  a scope" and does nothing.
+- Why deferred: each needs its own native value in the table (z
+  re-sorts the parent, pointer events and visibility change hit
+  testing, the focus ring and elevation are paint sources), and none
+  is on a screen the kit ports first. An implicit scope per `_hover`
+  element would make every such node a scope.
+- Resolves in: when a ported component needs one; the Marbre port
+  flags the `_hover` difference.
 
 ## Closed
 
@@ -629,3 +659,25 @@ Reviewer minors and nitpicks not fixed yet.
 - PR6-09 (zorder review): between a transaction and a refresh, a direct `hit_test` sorts stale parents on the spot: documented on `hit_test` (it takes `&self`, so it cannot refresh lazily).
 - PR6-10 (zorder review): EXPERIMENTS says the frame column excludes the re-sort; DF-19 adds that an app root with a positive `zIndex` covers unowned layers; DF-20 is closed.
 - DF-20 (an owner-only layer closed when Suspense hid it): fixed in the PR #6 review (PR6-01); a Suspense hide removes no layer's children, so nothing closes.
+- PR7-01 (states review): transitions fired on mount and on the first frame (a row mounted selected faded in; a narrow window at launch tweened its heights): a table's first resolution and the first `render`'s environment write straight to the rows and cancel an animation on the same property (`set_window_size` gives the drivers the size before the first frame); tested with a fill transition at mount and at the first narrow frame.
+- PR7-02 (states review): layout values were paired with the element's base per wire field, so `_narrow: { padding: { left: 4, right: 4 } }` carried the base's top and bottom over `_compact`'s: layout travels as a u64 of keys, one per property, axis and side, then the fields that hold them, and native composes per key; the facade's pairing is gone. Padding 16/12 with `_narrow` 4 and `_compact` 6 on the sides gives 4/6 at compact width, and `_narrow: { height }` with `_hover: { width }` gives both (tested natively and in bun). Border color and width are separate values too (`BORDER_WIDTH`, bit 7).
+- PR7-03 (states review): a variant's `display` overrode Suspense's hide: the facade strips `display` from the variants of a hidden or suspended node and sends the table again on reveal (bun test).
+- PR7-04 (states review): detaching or removing a node kept a press inside it: `Detach` and `Remove` end it (no click on release); focus stays on a node that moves, documented, and its scopes' bits follow when it is placed again (tested).
+- PR7-05 (states review): an accessibility Focus or Blur did not restyle: `a11y_action` restyles, so `_focusWithin` follows (tested).
+- PR7-06 (states review): bare modifiers switched to keyboard modality: Shift, Cmd and the like alone, and Cmd, Ctrl or Alt chords, leave focus-visible as it was (tested).
+- PR7-07 (states review): leaving the window left the pointer at (-1, -1): a new `PointerLeave` event clears the position and ends hover, and a wheel event sets the position (tested).
+- PR7-08 (states review): hover at rest hit-tested every animating frame: it skips when no table and no listener reads hover (counted per table and in the host's listener count; tested with a reader appearing later).
+- PR7-09 (states review): input bits were recomputed on every event: they return early when the hovered node, the press, the focus, the modality and the structure revision are unchanged.
+- PR7-10 (states review): a color tween walked the subtree each frame: the inheriting spans under a `COLOR` node are cached per node, keyed by the structure and text revisions and a count of `COLOR` nodes set or cleared.
+- PR7-11 (states review): VARIANTS was unbounded: at most 256 variants on a node and 8 terms in a variant, rejected by validation (tested).
+- PR7-12 (states review): unsupported variant keys were dropped silently: every key a variant does not apply is logged once, naming the key and DF-29 (bun test); DF-23's wording now matches, and DF-29 lists the kit gaps.
+- PR7-13 (states review): a disabled Pressable was half disabled: it is not focusable, reads as disabled to assistive technology, and native masks pressed and focus-visible under `disabled` as it did hover (tested natively and in bun).
+- PR7-14 (states review): toggling `group` remounted the children: the scope Provider is always rendered (bun test).
+- PR7-15 (states review): specificity compared every rank: it is depth, then the latest rank tested, then declaration order, as the spec says. `_selected._pressed` against `_hover._pressed`, both on, tie at pressed, so the later declared wins where the full compare picked selected (tested).
+- PR7-16 (states review, nit): `_hover` on a non-scope element differs from Marbre web: recorded in DF-29 and topic 5.
+- PR7-17 (states review, nit): inherited color follows the native tree and scopes React's, so Portal content under a colored Pressable draws its own color: documented in topic 5 and tested in bun.
+- PR7-18 (states review, nit): DF-28 says what cancels an animation on a tabled node, per key (tested).
+- PR7-19 (states review): the harness's one allocation per hover was its own event vector: events drain into a kept buffer (`Ui::drain_events`), and a "hover, no scopes" row gives the reference (0 allocations; 116 µs for 1,000 dependents against 4.2 µs for none).
+- PR7-20 (states review): the breakpoint delta was not restyle alone: a row that sends the 1,000 heights directly with no tables splits it (about 200 µs of layout the heights cause anyway, 130 µs of restyle).
+- PR7-21 (states review): ARCHITECTURE §13 said restyle recomputes every scope's input bits: it says the three ancestor chains, and when.
+- PR7-22 (states review): the untested items have tests: StrictMode and Suspense with scopes, a group toggle, a Text with no color above (white), `COLOR` and scopes through a Portal, table limits, `_touch` with hover masking, and a Text moved under another `COLOR`.

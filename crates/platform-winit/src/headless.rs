@@ -62,6 +62,7 @@ fn run_counted(session: Arc<Session>, logical: Size, scale: f32, frames: &Atomic
     let view = target.create_view(&Default::default());
     let start = Instant::now();
     let mut ui = Ui::new(scale);
+    ui.set_window_size(logical);
     ui.set_time(0.0);
 
     let woken = Arc::new((Mutex::new(false), Condvar::new()));

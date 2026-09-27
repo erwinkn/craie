@@ -217,6 +217,9 @@ pub enum Event {
     ImeCommit(String),
     /// The platform reports composing is done.
     ImeDone,
+    /// The pointer left the window: hover ends, and hover at rest stops
+    /// testing its last position.
+    PointerLeave,
     /// Window focus changed.
     Focus(bool),
     /// Files dropped on the window at (x, y): their paths. The position

@@ -32,7 +32,7 @@ use craie_core::geom::Affine;
 use craie_vector::svg::{Drawing, Shape, ShapeKind};
 use craie_vector::{FillRule, LineCap, LineJoin, Stroke};
 
-use crate::states::{TermDecl, Values, VariantDecl, value_field};
+use crate::states::{TermDecl, Values, VariantDecl, layout_key, value_field};
 
 use crate::mutation::{
     Anchor, Claim, Command, ItemDesc, ItemTemplate, Mutation, NIL, NodeKind, Role, SubmitKey,
@@ -158,7 +158,7 @@ const SPAN_BYTES: usize = 28;
 
 // Style schema, in mask order. Every field is written as a fixed tag byte
 // plus payload where the encoding has a payload.
-pub mod field {
+pub(crate) mod field {
     pub const DISPLAY: u64 = 1 << 0; // u8: 0 flex, 1 none
     pub const POSITION: u64 = 1 << 1; // u8: 0 relative, 1 absolute
     pub const FLEX_DIRECTION: u64 = 1 << 2; // u8: 0 row 1 col 2 row_rev 3 col_rev
@@ -763,6 +763,7 @@ pub fn encode(txn: &Transaction<'_>) -> Vec<u8> {
 
 /// Writes a style record with only the fields in `mask`, as the JS
 /// encoder sends partial styles.
+#[cfg(test)]
 pub(crate) fn put_style_masked(out: &mut Vec<u8>, s: &Style, mask: u64) {
     out.extend_from_slice(&mask.to_le_bytes());
     put_style_fields(out, s, mask);
@@ -1378,18 +1379,18 @@ fn put_anim_value(out: &mut Vec<u8>, v: &Value) {
     }
 }
 
-/// Variant values: mask u8, then by bit FILL u32, BORDER (u32, f32),
+/// Variant values: mask u8, then by bit FILL u32, BORDER_COLOR u32,
 /// RADIUS f32, COLOR (set u8, u32), OPACITY f32, TRANSFORM 6 f32, LAYOUT
-/// (u64 field mask + fields in schema order).
+/// (u64 layout keys, then the style fields they fall in, in schema
+/// order), BORDER_WIDTH f32.
 fn put_values(out: &mut Vec<u8>, v: &Values) {
     use value_field::*;
     out.push(v.mask);
     if v.mask & FILL != 0 {
         u32le(out, v.fill);
     }
-    if v.mask & BORDER != 0 {
+    if v.mask & BORDER_COLOR != 0 {
         u32le(out, v.border.0);
-        f32le(out, v.border.1);
     }
     if v.mask & RADIUS != 0 {
         f32le(out, v.radius);
@@ -1405,7 +1406,11 @@ fn put_values(out: &mut Vec<u8>, v: &Values) {
         v.transform.0.iter().for_each(|&x| f32le(out, x));
     }
     if v.mask & LAYOUT != 0 {
-        put_style_masked(out, &v.layout.to_taffy(), v.layout_mask);
+        out.extend_from_slice(&v.layout_keys.to_le_bytes());
+        put_style_fields(out, &v.layout.to_taffy(), layout_key::fields(v.layout_keys));
+    }
+    if v.mask & BORDER_WIDTH != 0 {
+        f32le(out, v.border.1);
     }
 }
 
@@ -1476,8 +1481,8 @@ impl Reader<'_> {
         if v.mask & FILL != 0 {
             v.fill = self.u32()?;
         }
-        if v.mask & BORDER != 0 {
-            v.border = (self.u32()?, self.f32()?);
+        if v.mask & BORDER_COLOR != 0 {
+            v.border.0 = self.u32()?;
         }
         if v.mask & RADIUS != 0 {
             v.radius = self.f32()?;
@@ -1500,8 +1505,15 @@ impl Reader<'_> {
             }
         }
         if v.mask & LAYOUT != 0 {
-            v.layout_mask = self.u64()?;
-            v.layout = craie_layout::LayoutRow::from(&self.style(v.layout_mask)?);
+            v.layout_keys = self.u64()?;
+            if v.layout_keys & !layout_key::ALL != 0 {
+                return Err(WireError::BadRef("layout key"));
+            }
+            let fields = layout_key::fields(v.layout_keys);
+            v.layout = craie_layout::LayoutRow::from(&self.style(fields)?);
+        }
+        if v.mask & BORDER_WIDTH != 0 {
+            v.border.1 = self.f32()?;
         }
         Ok(v)
     }

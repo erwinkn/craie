@@ -698,9 +698,16 @@ impl Ui {
     /// declared value is what the node holds: an equal `next` changes
     /// nothing, another one retargets (with a transition) or cancels it.
     /// Without one, a declared transition starts a tween from the value
-    /// on screen.
+    /// on screen. A table's first resolution (`states.snapping`) writes
+    /// at once: nothing was on screen to move from.
     pub(crate) fn intercept(&mut self, node: NodeId, prop: Prop, next: Value) -> bool {
         let running = self.animations.find(node, prop);
+        if self.states.snapping {
+            if let Some(i) = running {
+                self.end_animation(i, end_reason::CANCELLED);
+            }
+            return true;
+        }
         if let Some(i) = running
             && self.animations.active[i].declared == next
         {

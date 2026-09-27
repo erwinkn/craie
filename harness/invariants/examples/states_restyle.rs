@@ -5,12 +5,17 @@
 //!   dependents elsewhere, each with `_row: { _hover: fill }`. One
 //!   hover change is a pointer move in or out of the row, then a frame:
 //!   dispatch (hit test, input bits, restyle) and render (paint patch).
+//!   Against the same moves over a row that only listens for enter and
+//!   leave, with no scope or table: the difference is the state work.
 //! - breakpoint: 1,000 rows 36 pt tall with `_narrow: { height: 44 }`;
 //!   the window crosses 1,023 pt back and forth. Against the same
-//!   resize with no variant tables: the difference is the restyle.
+//!   resize with no variant tables, and with no tables but a
+//!   transaction setting the 1,000 heights directly (what an app
+//!   without variants sends; JS time not included).
 //!
 //! Times are the mean per change; allocs are allocation calls per
-//! change; the frame counters say what the change touched.
+//! change; the frame counters say what the change touched. Events go
+//! to a buffer kept across changes, so allocs are the UI's own.
 //!
 //!   cargo run --release -p craie-harness --example states_restyle
 
@@ -20,11 +25,12 @@ use std::time::Instant;
 
 use craie_core::geom::Size;
 use craie_layout::LayoutRow;
-use craie_ui::events::{Event, mask};
+use craie_ui::events::{Event, UiEvent, mask};
 use craie_ui::mutation::{NIL, NodeKind, Transaction};
-use craie_ui::states::{TermDecl, Values, VariantDecl, env_bit, state_bit, value_field};
+use craie_ui::states::{
+    TermDecl, Values, VariantDecl, env_bit, layout_key, state_bit, value_field,
+};
 use craie_ui::ui::Ui;
-use craie_ui::wire::field;
 
 static ALLOCS: AtomicUsize = AtomicUsize::new(0);
 
@@ -106,10 +112,12 @@ struct Cost {
 /// Mean time, allocation calls and counters of `f` over `RUNS` calls,
 /// events drained between calls (off the clock).
 fn cost(ui: &mut Ui, mut f: impl FnMut(&mut Ui, usize)) -> Cost {
+    let mut events: Vec<UiEvent> = Vec::with_capacity(64);
     // Warm the buffers once each way.
     f(ui, 0);
     f(ui, 1);
-    ui.take_events();
+    ui.drain_events(&mut events);
+    events.clear();
     let before = ui.counters();
     let mut ns = 0u128;
     let mut count = 0;
@@ -119,7 +127,8 @@ fn cost(ui: &mut Ui, mut f: impl FnMut(&mut Ui, usize)) -> Cost {
         f(ui, i);
         ns += t.elapsed().as_nanos();
         count += allocs() - a;
-        ui.take_events();
+        ui.drain_events(&mut events);
+        events.clear();
     }
     let spent = ui.counters().since(&before);
     let per = |v: u64| v as f64 / RUNS as f64;
@@ -133,22 +142,25 @@ fn cost(ui: &mut Ui, mut f: impl FnMut(&mut Ui, usize)) -> Cost {
 
 fn print(label: &str, c: &Cost) {
     println!(
-        "{label:<34} {:>9.2} µs {:>7.1} allocs {:>7.1} paints patched {:>4.1} layouts",
+        "{label:<42} {:>9.2} µs {:>7.1} allocs {:>7.1} paints patched {:>4.1} layouts",
         c.us, c.allocs, c.patched, c.layout_passes
     );
 }
 
 /// The row (id 1, a scope) at the top left, then `n` 6 pt cells
-/// wrapped after it, each filled while the row is hovered.
-fn hover_tree(n: u32) -> Ui {
+/// wrapped after it, each filled while the row is hovered. Without
+/// `scopes`, the row only listens and the cells have no table.
+fn hover_tree(n: u32, scopes: bool) -> Ui {
     let mut ui = Ui::new(2.0);
     let mut t = Transaction::new(1);
     root(&mut t, true);
     t.create(1, NodeKind::View)
         .layout(1, &sized(200.0, 40.0))
         .interaction(1, mask::POINTER_ENTER_LEAVE, false)
-        .states(1, 0)
         .place(0, 1, NIL);
+    if scopes {
+        t.states(1, 0);
+    }
     let hovered = [VariantDecl {
         terms: vec![TermDecl {
             scope: 1,
@@ -166,12 +178,21 @@ fn hover_tree(n: u32) -> Ui {
         t.create(id, NodeKind::View)
             .layout(id, &cell)
             .fill(id, 0x1B1D_22FF)
-            .variants(id, &hovered)
             .place(0, id, NIL);
+        if scopes {
+            t.variants(id, &hovered);
+        }
     }
     ui.apply_txn(&t).unwrap();
     ui.render(WIDE);
     ui
+}
+
+fn row_style(height: f32) -> taffy::Style {
+    style(|s| {
+        s.size.height = taffy::Dimension::length(height);
+        s.flex_shrink = 0.0;
+    })
 }
 
 /// 1,000 rows 36 pt tall in a column, each 44 pt when narrow (with
@@ -180,18 +201,14 @@ fn breakpoint_tree(variants: bool) -> Ui {
     let mut ui = Ui::new(2.0);
     let mut t = Transaction::new(1);
     root(&mut t, false);
-    let row = style(|s| {
-        s.size.height = taffy::Dimension::length(36.0);
-        s.flex_shrink = 0.0;
-    });
-    let mut tall = row.clone();
-    tall.size.height = taffy::Dimension::length(44.0);
+    let row = row_style(36.0);
+    let tall = row_style(44.0);
     let narrow = [VariantDecl {
         terms: Vec::new(),
         env: env_bit::NARROW,
         values: Values {
             mask: value_field::LAYOUT,
-            layout_mask: field::SIZE,
+            layout_keys: layout_key::HEIGHT,
             layout: LayoutRow::from(&tall),
             ..Values::default()
         },
@@ -214,14 +231,19 @@ fn main() {
         "State styles, {}x{} logical @2x; mean per change over {RUNS}",
         WIDE.width, WIDE.height
     );
+    let hover = |ui: &mut Ui, i: usize| {
+        let x = if i % 2 == 0 { 100.0 } else { 1300.0 };
+        let y = if i % 2 == 0 { 20.0 } else { 880.0 };
+        ui.dispatch(&Event::PointerMove { x, y });
+        ui.render(WIDE);
+    };
+    let mut ui = hover_tree(1_000, false);
+    let c = cost(&mut ui, hover);
+    print("hover, no scopes (1,000 cells)", &c);
+    assert_eq!(c.patched, 0.0, "nothing reads hover");
     for n in [1, 100, 1_000] {
-        let mut ui = hover_tree(n);
-        let c = cost(&mut ui, |ui, i| {
-            let x = if i % 2 == 0 { 100.0 } else { 1300.0 };
-            let y = if i % 2 == 0 { 20.0 } else { 880.0 };
-            ui.dispatch(&Event::PointerMove { x, y });
-            ui.render(WIDE);
-        });
+        let mut ui = hover_tree(n, true);
+        let c = cost(&mut ui, hover);
         print(&format!("hover, {n} dependents"), &c);
         assert!(c.patched >= n as f64, "every dependent repaints");
         assert_eq!(c.layout_passes, 0.0, "a fill never relayouts");
@@ -238,4 +260,25 @@ fn main() {
         };
         print(label, &c);
     }
+    // The heights sent directly: one transaction per crossing.
+    let mut ui = breakpoint_tree(false);
+    let heights = |seq: u64, h: f32| {
+        let mut t = Transaction::new(seq);
+        let s = row_style(h);
+        for id in 1..=1000 {
+            t.layout(id, &s);
+        }
+        t
+    };
+    let (tall, short) = (heights(2, 44.0), heights(3, 36.0));
+    let c = cost(&mut ui, |ui, i| {
+        let (size, t) = if i % 2 == 0 {
+            (NARROW, &tall)
+        } else {
+            (WIDE, &short)
+        };
+        ui.apply_txn(t).unwrap();
+        ui.render(size);
+    });
+    print("breakpoint, no tables, 1,000 heights sent", &c);
 }

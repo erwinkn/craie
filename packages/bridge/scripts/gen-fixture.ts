@@ -90,7 +90,7 @@ enc.variants(5, [                                  // on the row, scoped by the 
   {
     terms: [{ scope: 0, mask: 1n }], env: ENV_BIT.narrow,
     values: {
-      border: { color: 0x0000_00ff, width: 1 }, radius: 3, color: null, opacity: 0.5,
+      borderColor: 0x0000_00ff, borderWidth: 1, radius: 3, color: null, opacity: 0.5,
       transform: [1, 0, 0, 1, 0, 2], layout: { width: "50%", height: 44 },
     },
   },

@@ -329,7 +329,10 @@ impl App for HostApp {
         let (gpu, surface) = Gpu::for_window(window.surface_target());
         let surface = WindowSurface::new(&gpu, surface, w, h);
         let renderer = Renderer::new(&gpu, surface.config.format);
-        let mut ui = Ui::new(window.scale_factor() as f32);
+        let scale = window.scale_factor() as f32;
+        let mut ui = Ui::new(scale);
+        // Breakpoints hold from the first transaction.
+        ui.set_window_size(Size::new(w as f32 / scale, h as f32 / scale));
         // TODO(macOS): `set_reduced_motion` from
         // NSWorkspace.accessibilityDisplayShouldReduceMotion (and its
         // change notification); `set_touch` stays false on desktop.

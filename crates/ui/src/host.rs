@@ -287,6 +287,9 @@ pub struct Host {
     /// Font family names spans refer to (interned, grow-only).
     pub families: Vec<String>,
     pub interaction: Vec<Interaction>,
+    /// Nodes listening for pointer enter and leave: without them (and
+    /// hover variants), hover at rest need not hit-test.
+    pub hover_listeners: usize,
     pub labels: HashMap<u32, Box<str>>,
     /// Declared transitions per node (`animation.rs`), id-keyed: few
     /// nodes have any.
@@ -363,6 +366,7 @@ impl Host {
             paragraphs: Vec::new(),
             families: Vec::new(),
             interaction: Vec::new(),
+            hover_listeners: 0,
             labels: HashMap::new(),
             transitions: HashMap::new(),
             surfaces: HashMap::new(),
@@ -549,6 +553,7 @@ impl Host {
         if kind == NodeKind::Text {
             p.spans.push(TextSpan::default());
         }
+        self.set_listeners(i, 0);
         self.interaction[i] = Interaction::default();
         self.labels.remove(&id.0);
         self.transitions.remove(&id.0);
@@ -664,6 +669,7 @@ impl Host {
         let p = &mut self.paragraphs[i];
         p.text = String::new();
         p.spans = Vec::new();
+        self.set_listeners(i, 0);
         self.labels.remove(&id.0);
         self.transitions.remove(&id.0);
         self.surfaces.remove(&id.0);
@@ -782,6 +788,14 @@ impl Host {
 
     pub fn label(&self, id: NodeId) -> Option<&str> {
         self.labels.get(&id.0).map(|s| &**s)
+    }
+
+    /// Sets slot `i`'s listener mask, keeping `hover_listeners`.
+    pub fn set_listeners(&mut self, i: usize, listeners: u32) {
+        let hovers = |l: u32| (l & crate::events::mask::POINTER_ENTER_LEAVE != 0) as usize;
+        let l = &mut self.interaction[i].listeners;
+        self.hover_listeners = self.hover_listeners + hovers(listeners) - hovers(*l);
+        *l = listeners;
     }
 
     pub fn interaction(&self, id: NodeId) -> Interaction {
