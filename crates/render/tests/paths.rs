@@ -106,9 +106,12 @@ fn px(img: &[[u8; 4]], x: u32, y: u32) -> [u8; 4] {
     img[(y * W + x) as usize]
 }
 
-fn gpu() -> Option<(Gpu, Renderer)> {
-    let gpu = Gpu::try_headless()?;
-    let r = Renderer::new(&gpu, FORMAT);
+/// One device for the whole binary: the Vulkan validation layer crashes
+/// when test threads create and destroy devices concurrently.
+fn gpu() -> Option<(&'static Gpu, Renderer)> {
+    static GPU: std::sync::OnceLock<Option<Gpu>> = std::sync::OnceLock::new();
+    let gpu = GPU.get_or_init(Gpu::try_headless).as_ref()?;
+    let r = Renderer::new(gpu, FORMAT);
     Some((gpu, r))
 }
 

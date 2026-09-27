@@ -60,6 +60,7 @@ Times are UTC.
 | [#6](https://github.com/erwinkn/craie/pull/6) | Sibling z and layers (work item 4, first half): `zIndex` among siblings, layer containers that never sort below their owner | Merged |
 | [#7](https://github.com/erwinkn/craie/pull/7) | State styles (work item 5): hover, press, focus, app states and breakpoints restyle natively; inherited color | Merged |
 | [#8](https://github.com/erwinkn/craie/pull/8) | Images (work item 8, part 2): decoded off-thread at the drawn size, drawn from the glyph atlas | Merged |
+| [#9](https://github.com/erwinkn/craie/pull/9) | GPU tests share one device per binary: fixes the intermittent `paths` crash | Merged |
 
 ## Numbers
 
@@ -211,9 +212,10 @@ Every core's top frame is in the Khronos Vulkan validation layer
 made and dropped its own device, and while one thread was inside the
 layer's `vkCreateDevice` or `vkDestroyDevice`, another's call on its
 own device read freed layer state. So it's neither Craie's rendering
-code nor wgpu nor llvmpipe. The fix is in the tests: each GPU test
-binary shares one device, and validation stays on. That's the PR after
-#8. On the Mac, wgpu uses Metal, which has no such layer.
+code nor wgpu nor llvmpipe. The fix is in the tests (PR #9): each GPU
+test binary (`paths`, `gpu_uploads`, `images`) shares one device, and
+validation stays on. On the Mac, wgpu uses Metal, which has no such
+layer.
 
 ## Next steps
 

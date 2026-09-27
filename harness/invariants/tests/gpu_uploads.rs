@@ -13,9 +13,16 @@ const VIEW: Size = Size {
     height: 240.0,
 };
 
+/// One device for the whole binary: the Vulkan validation layer crashes
+/// when test threads create and destroy devices concurrently.
+fn gpu() -> Option<&'static Gpu> {
+    static GPU: std::sync::OnceLock<Option<Gpu>> = std::sync::OnceLock::new();
+    GPU.get_or_init(Gpu::try_headless).as_ref()
+}
+
 #[test]
 fn gpu_uploads_follow_changes() {
-    let Some(gpu) = Gpu::try_headless() else {
+    let Some(gpu) = gpu() else {
         eprintln!("no GPU adapter: skipped");
         return;
     };
@@ -162,7 +169,7 @@ fn pixel(gpu: &Gpu, ui: &mut Ui, w: u32, h: u32, at: (u32, u32)) -> [u8; 4] {
 /// still reach the GPU (a zero row collapses every chunk).
 #[test]
 fn identity_world_renders_at_1x() {
-    let Some(gpu) = Gpu::try_headless() else {
+    let Some(gpu) = gpu() else {
         eprintln!("no GPU adapter: skipped");
         return;
     };
@@ -195,7 +202,7 @@ fn identity_world_renders_at_1x() {
 /// (both round half to even).
 #[test]
 fn half_pixel_edges_match_resolver() {
-    let Some(gpu) = Gpu::try_headless() else {
+    let Some(gpu) = gpu() else {
         eprintln!("no GPU adapter: skipped");
         return;
     };
@@ -263,7 +270,7 @@ fn half_pixel_edges_match_resolver() {
 /// (a smaller bitmap scaled up), in the place the resolver says.
 #[test]
 fn oversized_glyph_draws_full_size() {
-    let Some(gpu) = Gpu::try_headless() else {
+    let Some(gpu) = gpu() else {
         eprintln!("no GPU adapter: skipped");
         return;
     };
@@ -321,7 +328,7 @@ fn oversized_glyph_draws_full_size() {
 /// and the edge is crisp. At 1x and 2x.
 #[test]
 fn settled_scroll_content_is_crisp() {
-    let Some(gpu) = Gpu::try_headless() else {
+    let Some(gpu) = gpu() else {
         eprintln!("no GPU adapter: skipped");
         return;
     };
