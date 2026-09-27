@@ -121,12 +121,27 @@ fn steady_frames_do_not_allocate() {
     }
 }
 
-/// wgpu's own allocations in `Renderer::encode_frame` on this machine
-/// (Metal, wgpu 27): per frame, and per render pass after the first.
-/// Craie code in that phase holds no containers. A change here is a
+/// wgpu's own allocations in `Renderer::encode_frame` (wgpu 30), besides
+/// the command lists (`recorded` below): per frame with one pass that
+/// draws, and per opacity layer (its own pass, the composite, and the
+/// parent's pass resumed after it). They differ by backend:
+///
+/// | backend | frame | first layer | each further (1 to 5 layers) |
+/// |---|---|---|---|
+/// | Metal (M5 Max) | 53 | 67 | 62 to 70 |
+/// | Vulkan (llvmpipe, exe1) | 49 | 50 | 47 to 54 |
+///
+/// Layers vary as wgpu's resource trackers grow; the budget takes the
+/// most. Craie code in that phase holds no containers. A change here is a
 /// visible cost change: re-measure and update with the reason.
-const WGPU_FRAME: usize = 56;
-const WGPU_PASS: usize = 23;
+#[cfg(target_vendor = "apple")]
+const WGPU_FRAME: usize = 53;
+#[cfg(target_vendor = "apple")]
+const WGPU_LAYER: usize = 70;
+#[cfg(not(target_vendor = "apple"))]
+const WGPU_FRAME: usize = 49;
+#[cfg(not(target_vendor = "apple"))]
+const WGPU_LAYER: usize = 54;
 /// wgpu's staging allocations for one small buffer write in
 /// `Renderer::upload`, and the extra tracking cost at the submission that
 /// follows it. Craie's share of prepare (`collect`) is measured apart.
@@ -142,6 +157,9 @@ struct Frame {
     plan: usize,
     encode: usize,
     passes: u32,
+    layers: u32,
+    /// wgpu-core's allocations for the frame's command lists.
+    recorded: usize,
 }
 
 /// A real device, an offscreen target, and a renderer: runs whole frames
@@ -212,6 +230,12 @@ impl GpuFrames {
                 timeout: None,
             })
             .unwrap();
+        let (passes, draws) = pass_commands(&ui.scene().draw_list().cmds);
+        assert_eq!(
+            (passes.len() as u32, draws),
+            (r.stats.passes, r.stats.draw_calls),
+            "the passes Renderer::encode records"
+        );
         Frame {
             render,
             collect,
@@ -219,19 +243,75 @@ impl GpuFrames {
             plan,
             encode,
             passes: r.stats.passes,
+            layers: r.stats.layers,
+            recorded: passes.iter().map(|&c| command_list_allocs(c)).sum(),
         }
     }
 }
 
-fn budget(passes: u32) -> usize {
-    WGPU_FRAME + WGPU_PASS * (passes as usize - 1)
+/// The commands each render pass of `Renderer::encode` records, and the
+/// draws: a pass binds its pipeline and two bind groups before its first
+/// draw and switches pipelines between rects and glyphs and paths; a
+/// layer draws in passes of its own, then composites (pipeline, bind
+/// group, draw), and its parent resumes in a new pass.
+fn pass_commands(cmds: &[craie_scene::DrawCmd]) -> (Vec<u32>, u32) {
+    use craie_scene::DrawCmd;
+    fn walk(cmds: &[DrawCmd], i: &mut usize, passes: &mut Vec<u32>, draws: &mut u32) {
+        loop {
+            let p = passes.len();
+            passes.push(0);
+            let mut bound = 0;
+            loop {
+                let Some(&c) = cmds.get(*i) else { return };
+                *i += 1;
+                let want = match c {
+                    DrawCmd::EndLayer => return,
+                    DrawCmd::BeginLayer { .. } => {
+                        walk(cmds, i, passes, draws);
+                        passes.push(3);
+                        *draws += 1;
+                        break;
+                    }
+                    DrawCmd::Rects { .. } | DrawCmd::Glyphs { .. } => 1,
+                    DrawCmd::Paths { .. } => 2,
+                };
+                if bound != want {
+                    passes[p] += if bound == 0 { 3 } else { 1 };
+                    bound = want;
+                }
+                passes[p] += 1;
+                *draws += 1;
+            }
+        }
+    }
+    let (mut passes, mut draws) = (Vec::new(), 0);
+    walk(cmds, &mut 0, &mut passes, &mut draws);
+    (passes, draws)
+}
+
+/// wgpu-core records each pass's commands into a fresh `Vec` (capacity
+/// 4, then doubling): one allocation per capacity it reaches. Measured on
+/// Metal, one pass of 2 to 62 draws (5 to 65 commands) costs exactly
+/// `WGPU_FRAME` plus this; on Vulkan, so do the tests' frames (8, 16 and
+/// 17 draws, and 1 to 5 layers). The frame's encode grows with the log of
+/// each pass's draws, never linearly.
+fn command_list_allocs(commands: u32) -> usize {
+    match commands {
+        0 => 0,
+        c => c.div_ceil(4).next_power_of_two().ilog2() as usize + 1,
+    }
+}
+
+fn budget(f: &Frame) -> usize {
+    WGPU_FRAME + WGPU_LAYER * f.layers as usize + f.recorded
 }
 
 /// The whole frame on a real device: UI render, renderer prepare
 /// (collect + upload), and draw (plan + encode). Separate budgets per
 /// phase: Craie phases (render, collect, plan) allocate nothing once
 /// warm, changed or not; wgpu phases (upload, encode) cost a fixed
-/// amount per write and per pass, the same every frame.
+/// amount per write and per layer, plus the log of each pass's commands,
+/// the same every frame.
 #[test]
 fn whole_frame_budgets() {
     let Some(mut g) = GpuFrames::new() else {
@@ -260,7 +340,7 @@ fn whole_frame_budgets() {
             "opacity {opacity}: {first:?}"
         );
         assert!(
-            first.encode <= budget(first.passes),
+            first.encode <= budget(&first),
             "opacity {opacity}: {first:?}"
         );
         for _ in 0..8 {
@@ -281,7 +361,7 @@ fn whole_frame_budgets() {
         }
         assert_eq!((f.render, f.collect, f.plan), (0, 0, 0), "{f:?}");
         assert!(f.upload <= WGPU_WRITE, "{f:?}");
-        assert!(f.encode <= budget(f.passes) + WGPU_WRITE_SUBMIT, "{f:?}");
+        assert!(f.encode <= budget(&f) + WGPU_WRITE_SUBMIT, "{f:?}");
         assert_eq!(
             (idle.render, idle.collect, idle.upload, idle.plan),
             (0, 0, 0, 0),
@@ -408,7 +488,7 @@ fn list_frames_do_not_allocate() {
         );
         assert!(f.upload <= WGPU_WRITE, "scroll to {y}: {f:?}");
         assert!(
-            f.encode <= budget(f.passes) + WGPU_WRITE_SUBMIT,
+            f.encode <= budget(&f) + WGPU_WRITE_SUBMIT,
             "scroll to {y}: {f:?}"
         );
         let idle = g.frame(&mut ui, |_| {});
@@ -417,7 +497,7 @@ fn list_frames_do_not_allocate() {
             (0, 0, 0, 0),
             "idle after scroll to {y}: {idle:?}"
         );
-        assert!(idle.encode <= budget(idle.passes), "{idle:?}");
+        assert!(idle.encode <= budget(&idle), "{idle:?}");
     }
     assert!(
         !ui.take_events()
@@ -431,8 +511,5 @@ fn list_frames_do_not_allocate() {
     let f = g.frame(&mut ui, |_| {});
     assert_eq!((f.render, f.collect, f.plan), (0, 0, 0), "settle: {f:?}");
     assert!(f.upload <= WGPU_WRITE, "settle: {f:?}");
-    assert!(
-        f.encode <= budget(f.passes) + WGPU_WRITE_SUBMIT,
-        "settle: {f:?}"
-    );
+    assert!(f.encode <= budget(&f) + WGPU_WRITE_SUBMIT, "settle: {f:?}");
 }

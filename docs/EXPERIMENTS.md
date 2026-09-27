@@ -13,6 +13,70 @@ on exe1: a shared Linux VM, 8 CPUs, no GPU (wgpu on llvmpipe, software
 rasterization), load average 13 to 15 from other agents. Times are
 indicative and move about 40 percent run to run; the Mac numbers decide.
 
+Mac reruns, labeled "Mac" below, are from the same afternoon (branch
+`mac-verify`): a MacBook Pro (Mac17,7: Apple M5 Max, 18 cores, 128 GB;
+macOS 26.6.2) on AC power, no thermal or performance warning in
+`pmset -g therm`, not in low power mode. Release builds throughout. The
+Mac wasn't idle: Erwin's own apps (Blender, a browser) kept its load
+average at 3 to 17 (given per section). Runs mostly repeat within 10
+percent; a few rows move up to 25.
+
+### Why the first Mac numbers were high
+
+Two measurement bugs, both in E19's probe; nothing in Craie itself.
+The CPU-only examples were never high: every row ran faster on the Mac
+than on loaded exe1, mostly about twice as fast (1.2 to 10 times).
+
+- Native and JS stamps read different clocks. The probe read
+  `CLOCK_UPTIME_RAW` on macOS, which stops while the Mac sleeps; Node's
+  `process.hrtime` (Node 26.3, libuv 1.52.1) reads mach continuous
+  time, which doesn't. This Mac had slept 16.35 hours since boot, so
+  every phase that joins the two sides was off by that much: headless
+  idle js p50 read 58,876,521.77 ms, and apply read -58,876,521.62 ms.
+  The probe reads `CLOCK_MONOTONIC_RAW` now (the same clock, in ns: a
+  stamp taken in a child process falls between the two `process.hrtime`
+  stamps around it), and `report.py` exits with an error when the JS
+  stamps fall outside native dispatch → apply, rather than printing
+  such rows.
+- The probe waited on timers that woke late. In the shell these runs
+  came from (a background agent's), a plain 30 to 70 ms sleep woke 37 to
+  141 ms late at the median and up to 150 ms late (macOS timer
+  coalescing). Nor did the usual remedies help: in 60 sleeps of 30 to
+  70 ms each, the median wake was 37 ms late plain, 55 ms with a
+  latency-critical `NSProcessInfo` activity, 141 ms at user-interactive
+  QoS and 87 ms with `mach_wait_until`, each up to 150 ms (throwaway
+  Swift and Python loops, not kept in the repo; the spread between
+  plain runs, 37 to 82 ms, is as wide as between remedies). Headless,
+  the loop slept until 20 ms before a click
+  was due; windowed, a thread slept until each click was due, then
+  woke the loop. Both woke late, and E19 counted that as the click
+  waiting for native: headless idle round trip p50 / p95 was 23.85 /
+  124.67 ms and windowed idle 34.85 / 74.85 ms, almost all of it in
+  "wait", with idle native frames at 0.2 to 0.4 ms of CPU. With the probe
+  on, on macOS only, the headless loop now spins to every deadline, and
+  the windowed waker spins to each click: 1.01 / 1.19 ms headless, 0.29
+  / 0.41 ms windowed. Linux timers weren't late, so there both still
+  sleep as before. Whether a shell Erwin opens coalesces this much
+  wasn't measured.
+
+Ruled out, with evidence:
+
+- Debug builds: `bench/e19.sh` builds the addon with `--release` and
+  bundles React's production build; the examples ran from
+  `target/release`.
+- Vsync: windowed, `present` returned within 0.16 to 0.45 ms of the
+  commit at p50 (p99 under 1 ms), at 20 to 80 frames a second, so no
+  frame waited on the display. That end point is `present` returning,
+  though: the display shows the frame at its next refresh, which E19
+  doesn't measure.
+- A background window: sampled every few seconds, `lsappinfo front`
+  named the E19 window's process (node) during the loads (the terminal
+  between them), and all 4,000 clicks were answered.
+- Thermal state and power: see above.
+- Units: every E19 figure is ns / 1e6. The clock error was one
+  constant offset (16.35 h), not a factor such as mach ticks read as
+  ns (a factor of 125 / 3 on Apple Silicon).
+
 ### E19: event round trip under load
 
 `sh bench/e19.sh` (windowed; keep the window in front), or
@@ -21,7 +85,10 @@ indicative and move about 40 percent run to run; the Mac numbers decide.
 40x40 marker 1,000 times per load, 30 to 70 ms apart on a schedule
 fixed in advance, not after each answer, so a stall is sampled as often
 as it lasts. Windowed, a thread wakes the event loop at each due time,
-as platform input would; headless, the loop spins to its deadlines. The
+as platform input would; headless, the loop waits for its deadlines. On
+macOS both spin, since timed waits woke late there (see "Why the first
+Mac numbers were high"); on Linux they sleep, the headless loop until
+20 ms before a deadline and then spinning. The
 app (`bench/e19/app.tsx`) answers the n-th click by filling the marker
 with `n << 8 | 0xff`; native sees the answer in the applied paint, with
 no protocol change. Native stamps each click when it was due,
@@ -63,7 +130,46 @@ under Xvfb (300 clicks, still llvmpipe), round trip to `present`:
 idle 7.8 / 16.3 / 21.5, stream 39.0 / 63.4 / 77.0; js p50 / p99 0.46 /
 4.7 and 0.26 / 4.2. Runs move by 20 to 40 percent on this host; an
 earlier set had idle at 15.6 / 34.0 / 44.2 and stream at 70.9 / 105.6 /
-127.5.
+127.5. The PR #15 review reran it headless with the probe spinning to
+every deadline, as it does on the Mac (5c33852; load average 14 to 27):
+idle 12.85 / 27.10 / 38.47, stream 50.15 / 81.65 / 105.78, gc 11.53 /
+25.38 / 51.71, stream+gc 61.99 / 90.07 / 110.51, deliver p50 0.10 to
+0.38, every click answered. That is within this host's spread, so the
+two machines' tables compare; Linux keeps its timed waits.
+
+Mac (M5 Max, macOS 26.6.2, release, AC power), after the two probe
+fixes. Headless, the same 1800x1400 at 120 Hz, load average 3.0 to 3.6,
+rerun after the PR #15 review (the spin polls an atomic flag, not a
+mutex):
+
+| load      | round trip         | wait        | js          | deliver     | react       | apply       | paint       |
+|-----------|--------------------|-------------|-------------|-------------|-------------|-------------|-------------|
+| idle      | 1.01 / 1.19 / 1.24 | 0.00 / 0.01 | 0.03 / 0.14 | 0.01 / 0.07 | 0.01 / 0.08 | 0.01 / 0.04 | 0.94 / 1.18 |
+| stream    | 1.38 / 8.84 / 9.35 | 0.00 / 1.26 | 0.02 / 0.08 | 0.01 / 0.06 | 0.01 / 0.03 | 0.01 / 0.03 | 1.35 / 8.11 |
+| gc        | 0.93 / 1.16 / 1.46 | 0.00 / 0.01 | 0.03 / 0.33 | 0.02 / 0.29 | 0.02 / 0.07 | 0.01 / 0.03 | 0.87 / 1.15 |
+| stream+gc | 1.39 / 8.73 / 9.46 | 0.00 / 1.27 | 0.04 / 0.28 | 0.02 / 0.22 | 0.01 / 0.10 | 0.01 / 1.20 | 1.28 / 8.08 |
+
+Windowed, the window in front, on the Mac's built-in display, load
+average 9 to 12, measured at c8ad34b (the waker never took the mutex,
+so the review fix doesn't change it); paint ends when `present`
+returned:
+
+| load      | round trip         | wait        | js          | deliver     | react       | apply       | paint       |
+|-----------|--------------------|-------------|-------------|-------------|-------------|-------------|-------------|
+| idle      | 0.29 / 0.41 / 0.51 | 0.01 / 0.02 | 0.08 / 0.17 | 0.04 / 0.08 | 0.04 / 0.09 | 0.04 / 0.07 | 0.16 / 0.25 |
+| stream    | 0.48 / 0.80 / 1.31 | 0.01 / 0.53 | 0.04 / 0.15 | 0.02 / 0.09 | 0.02 / 0.06 | 0.02 / 0.08 | 0.41 / 0.71 |
+| gc        | 0.29 / 0.46 / 0.67 | 0.01 / 0.03 | 0.07 / 0.34 | 0.03 / 0.28 | 0.04 / 0.10 | 0.03 / 0.08 | 0.16 / 0.31 |
+| stream+gc | 0.56 / 1.11 / 1.71 | 0.01 / 0.64 | 0.06 / 0.51 | 0.03 / 0.44 | 0.03 / 0.08 | 0.03 / 0.88 | 0.45 / 0.84 |
+
+Every click was answered in both modes. Major collections paused JS for
+up to 50 ms headless and 53 ms windowed, but only 0 to 10 of 1,000
+clicks were in JS during a pause of 2 ms or more (146 to 188 on exe1),
+so they show in the max (23 ms headless gc, 43 ms windowed) and not the
+p99. Native frames took 0.1 to 0.3 ms of CPU (median of per-second
+means; worst 32 ms), at 20 frames a second idle and 78 to 80 under
+stream. Headless under stream, the p95 of about 9 ms is the loop's own
+pacing: it draws at most one frame per 8.33 ms, and while the stream
+keeps frames coming, a click's answer waits for the next slot.
 
 What it says:
 
@@ -82,6 +188,13 @@ What it says:
   the answer takes another 25 ms to be drawn. Frame CPU (prepare and
   encode) is 1.4 ms, so on a GPU these phases should shrink to about one
   frame each. That is the prediction the Mac run checks.
+- On the Mac they shrank below that. Windowed, a click is answered and
+  presented in 0.3 to 0.6 ms at p50 and under 2 ms at p99, under every
+  load; wait and apply are 0.00 to 0.04 ms at p50 in both modes, since
+  native is rarely busy. What's left of the tail is garbage collection (the max)
+  and, headless, the 120 Hz frame pacing. The display then adds up to
+  one refresh (8.3 ms at 120 Hz) before the answer is visible, which
+  E19 doesn't see.
 
 Priority. The reconciler scheduled every native event's updates at
 default priority, one scheduler task (a `setImmediate` in Node) after
@@ -135,6 +248,21 @@ it differs.
 | sparkline, dashed "6 3" | 88 µs (85) | 116 µs (115) | 719 µs (720) |
 | 4,096 shapes sharing one 1 KiB path | | 7,152 µs | 45,335 µs |
 
+Mac (M5 Max, macOS 26.6.2, release, AC power, load average 10 to 17), medians of three runs of the same example:
+
+| case | parse | apply | first frame |
+|---|---|---|---|
+| 200 plain views (baseline) | | 79 µs | 53 µs |
+| 200 icons, new | 313 µs | 478 µs | 597 µs |
+| 200 more nodes, same icons (cache hits) | | 140 µs | 171 µs |
+| the same 200 drawings resent | | 36 µs | 0 µs |
+| sparkline, 2,000 points, solid | 53 µs | 77 µs | 378 µs |
+| sparkline, dashed "6 3" | 54 µs | 77 µs | 341 µs |
+| 4,096 shapes sharing one 1 KiB path | | 5,248 µs | 22,688 µs |
+
+The Mac is 1.36 to 4.3 times faster, most in the frames; the conclusions
+below hold on both.
+
 - A new icon costs about 10 µs over a plain view (parse, validate,
   tessellate at 48 device px, emit); its frame share is mostly
   tessellation.
@@ -186,6 +314,19 @@ bytes, and the PNG rows the decoder converts are new.
 | PNG gray, 7.8 MB | 0.001 ms | 37.3 ms | 39.1 ms | 43.4 ms |
 | PNG RGB 16-bit, 46.7 MB | 0.001 ms | 177.1 ms | 218.7 ms | 222.2 ms |
 | texture bytes | | | 25,600 (1,875x less) | 480,000 (100x less) |
+
+Mac (M5 Max, macOS 26.6.2, release, AC power, load average 10 to 17), medians of three runs (each a median of 7):
+
+| source | probe | decode only | 80 x 80 cover | 400 x 300 contain |
+|---|---|---|---|---|
+| JPEG q85, 1.9 MB | 0.031 ms | 24.2 ms | 31.0 ms | 32.2 ms |
+| PNG RGB, 23.4 MB | 0.001 ms | 49.3 ms | 55.9 ms | 57.2 ms |
+| PNG RGBA, 26.2 MB | 0.001 ms | 65.0 ms | 73.8 ms | 74.9 ms |
+| PNG gray, 7.8 MB | 0.001 ms | 21.1 ms | 23.7 ms | 25.2 ms |
+| PNG RGB 16-bit, 46.7 MB | 0.001 ms | 99.6 ms | 111.6 ms | 112.8 ms |
+
+1.65 to 2.55 times as fast as exe1, and the shape is the same: the full
+decode is 75 to 90 percent of each.
 
 - 80 x 80 is a 40 pt avatar at 2x (a 3,000 x 3,000 center crop);
   400 x 300 a 200 pt card image. The texture bytes are what the decode
@@ -293,6 +434,27 @@ rest moved with the load: speedups of 9x to 328x and 11x to 240x, and
 a refresh after one box grows at 1.4 to 9 percent of its layout pass
 (one outlier at 15: deep 100k, 523 of 3,551 µs, in the first rerun).
 
+Mac (M5 Max, macOS 26.6.2, release, AC power, load average 10 to 17),
+medians of three runs, same columns:
+
+| tree      | hit test, walk | hit test, index | pointer move | full refresh | refresh after one box grows (its layout pass) | after one transform |
+|-----------|----------------|-----------------|--------------|--------------|-----------------------------------------------|---------------------|
+| deep 1k   | 10.7           | 0.09 (119x)     | 0.10         | 19           | 0.75 (18)                                     | 0.07                |
+| deep 10k  | 85             | 0.57 (150x)     | 0.64         | 157          | 2.7 (98)                                      | 0.29                |
+| deep 100k | 642            | 4.1 (156x)      | 4.4          | 1,971        | 30 (942)                                      | 2.8                 |
+| wide 1k   | 6.3            | 0.11 (57x)      | 0.12         | 6.5          | 4.2 (204)                                     | 0.97                |
+| wide 10k  | 55             | 2.0 (27x)       | 2.1          | 59           | 30 (1,071)                                    | 4.6                 |
+| wide 100k | 514            | 5.5 (94x)       | 5.5          | 1,312        | 118 (1,691)                                   | 4.7                 |
+| list 1k   | 2.8            | 0.32 (9x)       | 0.35         | 6.8          | 3.0 (60)                                      | 0.39                |
+| list 10k  | 32             | 3.2 (10x)       | 3.3          | 64           | 29 (621)                                      | 3.2                 |
+| list 100k | 328            | 32 (10x)        | 33           | 997          | 436 (9,946)                                   | 33                  |
+
+The walk is 1.2 to 2.1 times as fast as on exe1 and the index 1.3 to
+1.6 times, so speedups are a little lower (9x to 156x); a pointer move
+at 100k nodes costs 4 to 33 µs. A key with no focus now takes 0.03 to
+0.06 µs (2 allocations) at every size: claims (work item 1) landed
+since, with the window-level list below. Tab at deep 100k takes 0.42 ms.
+
 What it says:
 
 - The index wins by 12x to 236x, and a pointer move at 100k nodes costs
@@ -383,7 +545,26 @@ allocations per test):
 A sorted parent is borrowed as-is after the frame's refresh, so hit
 testing stays allocation-free. The index costs up to 1.5 times more with
 z on a tenth of all cells, an extreme case: it visits those children
-out of memory order. Rerun on the Mac with the command above.
+out of memory order.
+
+Mac (M5 Max, macOS 26.6.2, release, AC power, load average 10 to 17), ranges over three runs:
+
+| tree | children with z | re-sort | frame after z | frame after a transform |
+|------|-----------------|---------|---------------|-------------------------|
+| 5k   | none before     | 6.6 to 7.5 µs  | 0.12 to 0.13 ms | 0.040 to 0.044 ms |
+| 5k   | 1 in 10         | 8.3 to 9.5 µs  | 0.12 to 0.14 ms | 0.046 to 0.047 ms |
+| 100k | none before     | 7.3 to 7.9 µs  | 2.17 to 2.20 ms | 0.79 to 0.81 ms   |
+| 100k | 1 in 10         | 9.9 to 10.4 µs | 2.32 to 2.35 ms | 0.85 to 0.86 ms   |
+
+| z | walk | index |
+|---|------|-------|
+| none | 505 to 519, 0 allocs | 5.43 to 5.46, 0 allocs |
+| 1 in 10 cells ±1 | 523, 0 allocs | 5.67 to 5.68, 0 allocs |
+
+The frame after a z change is still the draw-order rebuild: 2.7 to 3
+times the frame after a transform (1.5 to 2.5 times on exe1). On a quiet core the
+index's cost for z on a tenth of the cells is 4 percent, not exe1's
+up to 1.5 times: that was mostly load.
 
 ### State styles: native restyle cost (work item 5)
 
@@ -428,6 +609,23 @@ per change:
   the restyle. The first table (load 27 to 30) put the whole
   difference on the restyle.
 
+Mac (M5 Max, macOS 26.6.2, release, AC power, load average 10 to 17), medians of three runs; allocations, paints and layouts
+as above:
+
+| case                                        | µs    |
+|---------------------------------------------|-------|
+| hover, no scopes (1,000 cells)              | 3.5   |
+| hover, 1 dependent                          | 0.19  |
+| hover, 100 dependents                       | 7.8   |
+| hover, 1,000 dependents                     | 74    |
+| breakpoint, no tables (resize only)         | 135   |
+| breakpoint, no tables, 1,000 heights sent   | 220   |
+| breakpoint, 1,000 `_narrow` rows            | 282   |
+
+Hover costs about 0.07 µs per dependent. A breakpoint crossing costs
+147 µs over the resize alone: 85 µs of layout the new heights cause
+anyway and about 62 µs, 0.06 µs a row, of restyle.
+
 #### Inherited color: `currentColor` icons (DF-24)
 
 Two more hover cases in the same example: the root colored `#9aa0aa`
@@ -460,6 +658,19 @@ above (116 µs was measured at load 10):
   size.
 - Measured before R12-04 moved each drawing's tints beside its
   meshes, and not rerun: the icon row is an upper bound.
+
+Mac (M5 Max, macOS 26.6.2, release, AC power, load average 10 to 17), after R12-04. The load was steady, so three runs
+suffice; median and best:
+
+| case (1,000 of each)                  | median µs | best µs | allocs | paints patched | layouts |
+|---------------------------------------|-----------|---------|--------|----------------|---------|
+| hover, fill dependents                | 73.7      | 63.9    | 0      | 1,000          | 0       |
+| hover color, `currentColor` icons     | 35.2      | 34.2    | 0      | 1,000          | 0       |
+| hover color, inheriting labels        | 20.5      | 20.3    | 0      | 1,000          | 0       |
+
+With R12-04, an icon recolors for about half of what a fill hover
+costs per dependent (two thirds on exe1, before it), and a label for
+under a third.
 
 ## Step 1 — crate split, CRW2, retained scene (2026-09-23)
 

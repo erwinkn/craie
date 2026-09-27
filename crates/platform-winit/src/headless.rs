@@ -8,7 +8,7 @@
 //! waits for the GPU. There is no input: the app drives itself, or the
 //! E19 probe clicks (`probe.rs`).
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
@@ -24,6 +24,11 @@ use crate::probe::Probe;
 const FRAME: Duration = Duration::from_nanos(8_333_333);
 /// Waits shorter than this spin (see the wait below).
 const SPIN: Duration = Duration::from_millis(20);
+/// With the E19 probe on, every wait spins, on macOS: there a process
+/// that a background agent started had its timed waits wake up to 150 ms
+/// late (coalesced timers), which E19 measured as clicks waiting for
+/// native. Linux timers were not late, so its waits keep `SPIN`.
+const PROBE_SPINS: bool = cfg!(target_vendor = "apple");
 const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Bgra8UnormSrgb;
 
 /// Runs `session` headless at `logical` size and display `scale` until
@@ -65,11 +70,15 @@ fn run_counted(session: Arc<Session>, logical: Size, scale: f32, frames: &Atomic
     ui.set_window_size(logical);
     ui.set_time(0.0);
 
-    let woken = Arc::new((Mutex::new(false), Condvar::new()));
+    // The flag is atomic so a spin can poll it without the lock, which
+    // is only for the condvar: a spinner holding it could keep a waker
+    // (the JS thread) waiting.
+    let woken = Arc::new((AtomicBool::new(false), Mutex::new(()), Condvar::new()));
     let signal = woken.clone();
     let wake = move || {
-        *signal.0.lock().unwrap() = true;
-        signal.1.notify_one();
+        signal.0.store(true, Ordering::Release);
+        let _lock = signal.1.lock().unwrap();
+        signal.2.notify_one();
     };
     let mut images = crate::images::Decoder::new(wake.clone());
     session.install_wake(Arc::new(wake));
@@ -150,33 +159,43 @@ fn run_counted(session: Arc<Session>, logical: Size, scale: f32, frames: &Atomic
         .into_iter()
         .flatten()
         .min();
-        let (lock, cv) = &*woken;
-        let mut flag = lock.lock().unwrap();
-        while !*flag {
+        let (flag, lock, cv) = &*woken;
+        while !flag.load(Ordering::Acquire) {
             match until {
                 // Near deadlines spin: this process's timed waits wake
                 // up to 30 ms late (coalesced timers, no visible window),
                 // which would pace frames by the timer, not the work.
-                Some(at) if at.saturating_duration_since(Instant::now()) < SPIN => {
-                    drop(flag);
+                Some(at)
+                    if (PROBE_SPINS && probe.is_some())
+                        || at.saturating_duration_since(Instant::now()) < SPIN =>
+                {
                     let spun = thread_cpu();
-                    while Instant::now() < at && !*lock.lock().unwrap() {
+                    while Instant::now() < at && !flag.load(Ordering::Acquire) {
                         std::thread::yield_now();
                     }
                     spin.spun(thread_cpu().saturating_sub(spun));
-                    flag = lock.lock().unwrap();
                     break;
                 }
+                // Wakers set the flag before they take the lock, so it is
+                // checked under the lock: a wake cannot slip in between.
                 Some(at) => {
                     let wait = at
                         .saturating_duration_since(Instant::now())
                         .saturating_sub(SPIN);
-                    flag = cv.wait_timeout(flag, wait).unwrap().0;
+                    let held = lock.lock().unwrap();
+                    if !flag.load(Ordering::Acquire) {
+                        drop(cv.wait_timeout(held, wait).unwrap());
+                    }
                 }
-                None => flag = cv.wait(flag).unwrap(),
+                None => {
+                    let held = lock.lock().unwrap();
+                    if !flag.load(Ordering::Acquire) {
+                        drop(cv.wait(held).unwrap());
+                    }
+                }
             }
         }
-        *flag = false;
+        flag.store(false, Ordering::Release);
     }
     session
         .closed_reason()
