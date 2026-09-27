@@ -72,6 +72,7 @@ Times are UTC.
 | [#15](https://github.com/erwinkn/craie/pull/15) | Afternoon: the Mac run: allocation budgets per backend, E19 probe clock and timers fixed, Mac numbers | Merged |
 | [#16](https://github.com/erwinkn/craie/pull/16) | Afternoon: this run log's afternoon follow-up | Merged |
 | [#17](https://github.com/erwinkn/craie/pull/17) | Evening: presses and activation (work item 3, part 2): innermost press, one native activate, keep focus on press; protocol 7 | Merged |
+| [#18](https://github.com/erwinkn/craie/pull/18) | Evening: focus traps, `modal` and `inert` (work item 3, part 1); layers owned by the trap they open from; protocol 8 | Merged |
 
 ## Numbers
 
@@ -469,7 +470,11 @@ groups follow, since they activate through #17's event. exe1's load was
 | 17:14 | PR #17 review: no blockers, 1 major (a link of two spans didn't activate when pressed on one and released on the other), 6 minors, 5 nits |
 | 17:19 | PR #18 (focus traps) opened and sent to review |
 | 17:30 | PR #17 review fixed (PR17-01..12), verified at its head, which is `main` plus the PR (CI, 424 Rust tests, 101 bun tests, smoke, macOS type-check) |
-| 17:35 | PR #17 merged; #18 rebases onto it and takes protocol 8 |
+| 17:34 | PR #17 merged; #18 rebases onto it and takes protocol 8 |
+| 17:37 | Transform parts (work item 6, part 1) starts |
+| 17:39 | PR #18 review: no blockers, 2 majors (a `focus()` in the dialog's opening update became the restore target, so closing lost focus; a modal hidden by Suspense kept the app inert), 5 minors, 5 nits |
+| 18:00 | PR #18 rebased on #17 and review fixed (PR18-01..09), verified at its head, which is `main` plus the PR (CI, 447 Rust tests, 105 bun tests, smoke, macOS type-check; hit tests still allocation-free) |
+| 18:05 | PR #18 merged; focus groups (item 3, part 3) start |
 
 ### Decisions
 
@@ -500,6 +505,33 @@ groups follow, since they activate through #17's event. exe1's load was
   update mid-press cancels the press (DF-46).
 - Deferred: `onLongPress` and `onMiddlePress` (DF-42); a keep-focus
   press hides the focus ring, where Chrome keeps it (DF-44).
+- **Focus traps are native, and settle once per update.** In
+  `<Layer z={70}><FocusTrap modal><View accessibilityRole="dialog">…</View></FocusTrap></Layer>`,
+  opening focuses the `autoFocus` node (else the first focusable), Tab
+  and Shift+Tab cycle inside, and closing returns focus to the node
+  that had it before the update that opened the trap, if that node
+  (id and generation) is still there. At the end of each update, focus
+  moves at most once, to the last that applies: a closing trap's
+  restore target, a `focus()` call, a new trap's auto-focus, an
+  `autoFocus` node mounting into an active trap, then the rule for a
+  removed focus (below). So closing a menu and its dialog together
+  sends one blur and one focus.
+- **`modal` makes the rest of the window inert** for the pointer, Tab
+  and screen readers: the page and a toast under the dialog stop
+  answering. The hit test starts only under the modal (no per-node
+  ancestor checks; still no allocation). The most recently opened
+  modal is on top, but never above a modal inside it. A modal hidden
+  by Suspense is inactive until shown again. `inert` does the same for
+  one subtree, and cancels a press in it.
+- **A layer opened inside a trap is owned by it** (DF-19 closed): the
+  dialog's menu stays live under the modal, and Tab reaches its items
+  right after the button that opened it (DF-17's Tab half; screen
+  readers still read layers last).
+- **A removed focus goes to the trap's auto-focus target**, else its
+  first focusable; outside traps, nowhere, now with a blur event (O1
+  closed). Shift+Tab with nothing focused goes to the last focusable.
+- Deferred: a `FocusTrap` is a layout box (DF-47); `autoFocus` outside
+  a trap does nothing on mount (DF-48).
 
 ## The `paths` crash
 
@@ -560,9 +592,7 @@ In Marbre:
   assistive technology.
 
 Work items not started:
-- The rest of item 3: focus traps, modals and inert content (#18, in
-  review), which also cover Tab order across layers (DF-17) and owners
-  per element (DF-19); then focus groups.
+- The rest of item 3: focus groups (in progress).
 - Item 6: transitions and animations inside variants (DF-22).
 - The second half of item 4: anchor and geometry expressions.
 - Topic 11: text ranges against a revision. This covers paste answers
