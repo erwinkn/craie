@@ -253,6 +253,9 @@ export interface HostNode {
   initial: HostNode[]
   /** List nodes only. */
   list?: ListKeys
+  /** Layer containers only: the layer it was opened from (null: none),
+   * and the children React placed in it. Open while it has any. */
+  layer?: { owner: HostNode | null; kids: Set<HostNode> }
   /** Text nodes: nested text nodes, in order. They have no native node
    * (virtual); their text and style become spans of the root's
    * paragraph. */
@@ -451,6 +454,15 @@ function layoutOf(props: Record<string, any>, suspended: boolean): StyleProps | 
   return { ...base, display: "none" }
 }
 
+/** A style's `zIndex`: an i32, 0 when unset. */
+function zOf(style: StyleProps | undefined): number {
+  const z = style?.zIndex ?? 0
+  if (!Number.isInteger(z) || z < -0x8000_0000 || z > 0x7fff_ffff) {
+    throw Error(`zIndex must be a 32-bit integer, got ${z}`)
+  }
+  return z
+}
+
 function sameMatrix(a: Affine, b: Affine): boolean {
   for (let i = 0; i < 6; i++) if (a[i] !== b[i]) return false
   return true
@@ -523,6 +535,8 @@ export class CraieHost {
   private flushWaiters = new Map<number, () => void>()
   /** Live nodes by native id — the event-dispatch target table. */
   private nodes = new Map<number, HostNode>()
+  /** Open layer containers, in open order: the root level's tail. */
+  private layers: HostNode[] = []
   /** Claim versions this commit replaced, and replaced versions by the
    * transaction that replaced them: their handlers go once native acks
    * it (it acks after delivering every event raised before). */
@@ -925,7 +939,44 @@ export class CraieHost {
     n.initial = []
   }
 
+  /** A layer container: a view filling the window under the root, above
+   * the layer it was opened from (`owner`). Opened on its first child. */
+  layer(owner: HostNode | null, z: number): HostNode {
+    const n = this.node("view", { style: { width: "100%", height: "100%", zIndex: z } })
+    n.layer = { owner, kids: new Set() }
+    return n
+  }
+
+  /** Places `child` in a layer container, opening the layer (and its
+   * owner, first) at the top of the root level if needed. */
+  placeInLayer(layer: HostNode, child: HostNode, before: HostNode | null) {
+    this.openLayer(layer)
+    layer.layer!.kids.add(child)
+    this.place(layer, child, before)
+  }
+
+  /** Removes `child` from a layer container; the last one out closes
+   * the layer (it opens again, on top, with its next child). */
+  removeFromLayer(layer: HostNode, child: HostNode) {
+    this.detach(child)
+    const kids = layer.layer!.kids
+    kids.delete(child)
+    if (kids.size === 0) this.release(layer)
+  }
+
+  private openLayer(n: HostNode) {
+    if (n.mounted || !n.layer) return
+    const owner = n.layer.owner
+    if (owner) this.openLayer(owner)
+    this.materialize(n, null, null)
+    this.layers.push(n)
+    if (this.ready()) this.encoder.layer(n.id, owner?.mounted ? owner.id : NIL)
+  }
+
   place(parent: HostNode | null, child: HostNode, before: HostNode | null) {
+    // The app's root nodes stay below the layers, which React may have
+    // opened first (a portal's children commit before its ancestors).
+    if (!parent && !before) before = this.layers[0] ?? null
     if (parent && parent.type === "text" && child.type === "text") {
       this.placeVirtual(parent, child, before)
       return
@@ -990,6 +1041,7 @@ export class CraieHost {
     }
     if (!n.mounted) return
     this.nodes.delete(n.id)
+    if (n.layer) this.layers.splice(this.layers.indexOf(n), 1)
     n.claims = undefined
     // Its native end events will not reach it (the generation moves).
     for (const p of n.pendingAnims?.splice(0) ?? []) p.resolve({ finished: false, reason: "removed" })
@@ -1056,14 +1108,20 @@ export class CraieHost {
     const newLayout = layoutOf(props, n.suspended)
     if (styleKey(oldLayout) !== styleKey(newLayout)) enc.layout(id, newLayout)
 
-    // Spatial: transform and opacity never touch layout.
+    // Spatial: transform, opacity and z never touch layout.
     const oldT = transformMatrix(oldProps.style?.transform)
     const newT = transformMatrix(props.style?.transform)
     const oldO = oldProps.style?.opacity ?? 1
     const newO = props.style?.opacity ?? 1
+    const oldZ = zOf(oldProps.style), newZ = zOf(props.style)
     const tChanged = !sameMatrix(oldT, newT)
-    if (tChanged || oldO !== newO) {
-      enc.spatial(id, tChanged ? newT : undefined, oldO !== newO ? newO : undefined)
+    if (tChanged || oldO !== newO || oldZ !== newZ) {
+      enc.spatial(
+        id,
+        tChanged ? newT : undefined,
+        oldO !== newO ? newO : undefined,
+        oldZ !== newZ ? newZ : undefined,
+      )
     }
 
     if (n.kind === 1) {

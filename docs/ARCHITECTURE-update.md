@@ -485,6 +485,54 @@ order), §16 (reconciler portals).
   forms, and how the web kit maps them to CSS Anchor Positioning or to
   Floating UI where browsers lack it.
 
+**Built (work item 4, first half).** Sibling z and layers as targeted,
+with these choices:
+
+- z is an i32 in the spatial row, sent in the spatial op (mask bit 2).
+  The facade reads it from `style.zIndex`, as React Native does (and
+  as Marbre's native resolver writes the kit's `z`). A z change bumps
+  `structure_rev`, which rebuilds the draw order: no layout, and no
+  reach refresh (a reach is a union, whatever the order).
+- The sorted order is kept only where it differs from tree order
+  (`order.rs`). A parent whose children all have z = 0 and no layer
+  holds nothing and never sorts. A tree edit under a sorted parent, a
+  child arriving with a z or an owner, and a z change queue the
+  parent; the queue is re-sorted before each frame's paint and each
+  dispatch (a stable sort: one z among 5,000 zeros is about a linear
+  pass), and a reader in between sorts on the spot.
+- The native part is generic: a layer op (0x22) makes any node a
+  layer container with an owner (a node id, or none). A layer's own
+  box lets hits through (`box-none`), and it never sorts below the
+  sibling that holds its owner, at any level. Its key is its z and its
+  tree position, each raised to at least that sibling's, then one step
+  above it:
+
+  ```text
+  root:  app z 0, dialog z 70, menu z 50 (owned in the dialog), toast z 80
+  paint: app, dialog, menu, toast   (unowned, the menu would go under the dialog)
+  ```
+
+  Owners are looked up again after any structure change, so an owner
+  that moves takes its layers along; a cycle of owners is cut where it
+  closes.
+- The facade's `Layer` is a portal:
+
+  ```tsx
+  <Layer z={70}>
+    <Dialog>
+      <Layer z={50}><Menu /></Layer>
+    </Dialog>
+  </Layer>
+  ```
+
+  Its container is a full-window view added at the end of the root
+  level when its first child commits (open order), after its owner's.
+  The owner is the enclosing `Layer`'s container, found through React
+  context; the app's root nodes are placed before the first layer,
+  since React commits a portal's children before its ancestors.
+- Focus traps, `modal` and `inert` stay with work item 3, which will
+  set finer owners (a trap inside the layer) through the same op.
+
 ## 7. Motion
 
 Changes: §12, §3 (spatial store).

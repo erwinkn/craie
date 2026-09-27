@@ -234,6 +234,7 @@ impl Ui {
     /// is logical.
     pub(crate) fn sync_scene(&mut self, viewport: Size, layout_ran: bool) {
         self.scene.begin_frame();
+        self.host.refresh_orders();
         // A frame past a settle time snaps the rested spaces itself.
         self.settle_moving();
         self.scene.scale = self.scale;
@@ -344,7 +345,7 @@ impl Ui {
         if topo {
             out.records.push(self.sync.root_rec);
         }
-        let roots: Vec<NodeId> = self.host.children(ROOT).to_vec();
+        let roots: Vec<NodeId> = self.host.paint_order(ROOT).into_owned();
         let ctx = Ctx {
             space: self.sync.root_rec,
             offset: [0.0; 2],
@@ -423,9 +424,17 @@ impl Ui {
         let Some(child_ctx) = self.visit_node(id, ctx, topo, out) else {
             return;
         };
-        for i in 0..self.host.child_count(id) {
-            let child = self.host.child_at(id, i);
-            self.visit(child, child_ctx, topo, out);
+        // Children draw in paint order (`order.rs`); most parents keep
+        // tree order and copy nothing.
+        if self.host.has_paint_order(id) {
+            for child in self.host.paint_order(id).into_owned() {
+                self.visit(child, child_ctx, topo, out);
+            }
+        } else {
+            for i in 0..self.host.child_count(id) {
+                let child = self.host.child_at(id, i);
+                self.visit(child, child_ctx, topo, out);
+            }
         }
         if topo && self.sync.spaces[id.index()].layer != NONE {
             out.order.push(OrderItem::EndLayer);

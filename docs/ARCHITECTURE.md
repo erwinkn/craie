@@ -187,7 +187,9 @@ character). Decoding rejects unknown kinds and flags, modifiers past
 the four, and keys that name nothing. The input config's flag byte
 carries multiline (bit 0) and the submit key (bits 1 and 2). Commands
 add `InsertText` (a paste claim's answer) and `WriteClipboard` (copy
-and cut; NIL may send it). Ops are u8-tagged,
+and cut; NIL may send it). The spatial op's mask carries z (bit 2, an
+i32; work item 4), and the layer op (0x22: id, then the owner or NIL)
+makes a node a layer container. Ops are u8-tagged,
 grouped by family in the high nibble. `wire::decode` yields a
 `Transaction` of `Mutation`s; the Rust builder produces the same type;
 `Ui::execute` validates the whole transaction, then applies it with no
@@ -205,7 +207,7 @@ atomically, produces dirty work, and advances revisions. No callbacks
 run during application.
 
 Op families: structure (create, place, remove), layout style (per-node
-layout inputs), spatial (transform, opacity), paint (fill, border,
+layout inputs), spatial (transform, opacity, z), paint (fill, border,
 radius, colors), text (paragraph spans), semantics (role, label),
 interaction (listener mask, focusable), claims, list (item count, estimates,
 item descriptions), animation (transitions, animate command), payload
@@ -220,8 +222,9 @@ scrollTo, insertText, writeClipboard).
 **Decisions.**
 - One breaking redesign during the split. Golden fixtures regenerate
   once.
-- Transform and opacity travel in their own spatial op and never touch
-  layout inputs. The facade splits the style object at commit time.
+- Transform, opacity and z travel in their own spatial op and never
+  touch layout inputs. The facade splits the style object at commit
+  time (`zIndex` goes with transform and opacity).
 - Styles are stored per node natively. Interning, if kept, is transport
   compression only and dies with the transaction.
 - The `hidden` op is removed. `display: none` is the one way to hide.
@@ -239,10 +242,13 @@ scrollTo, insertText, writeClipboard).
 
 **Current.** As targeted. `NodeHeader` is 16 bytes: parent, child
 span, kind, flags, generation. Dense per-node stores: `layout`
-(`taffy::Style`, 240 bytes), `spatial` (transform, opacity, scroll
+(`taffy::Style`, 240 bytes), `spatial` (transform, opacity, z, scroll
 offset), `paint`, `paragraphs` (UTF-8 + span list), `interaction`
 (listeners, focusable, role). Labels and surface payloads are id-keyed
-maps. The nine revisions live on the host; dirty queues (layout,
+maps, and so are paint orders and layer owners (`order.rs`, work item
+4): a parent whose children have a z or a layer keeps them sorted in
+`orders` (header flag `SORTED`; `ORDER` while queued for re-sorting),
+and every other parent paints in tree order at no cost. The nine revisions live on the host; dirty queues (layout,
 content, paint, spatial, semantic) are `DirtyQueue`s.
 
 **Target.** The same arena shape with per-usage stores:
@@ -250,7 +256,7 @@ content, paint, spatial, semantic) are `DirtyQueue`s.
 ```
 nodes[]            header: parent, kind, generation, flags, child span
 layout_inputs[]    dense per-node layout row (no shared records)
-spatial[]          local transform, opacity, clip ref
+spatial[]          local transform, opacity, z, clip ref
 paint[]            fill, border, radius
 text_nodes[]       paragraph: UTF-8 + span list
 interaction[]      listener mask, focusable, role
@@ -695,7 +701,9 @@ content, and transformed subtrees; all other nodes draw in their
 nearest record's space at an offset. The draw order, layer table,
 record evaluation order, and clip records are rebuilt by one walk when
 structure or clip topology changes; layout moves revisit only moved
-subtrees. Chunks build on demand within half a viewport of the screen.
+subtrees. The walk visits each parent's children in paint order: tree
+order stably sorted by z, as React Native's `zIndex`, with no stacking
+contexts (work item 4). A z change counts as a structure change. Chunks build on demand within half a viewport of the screen.
 `prepare` culls, merges contiguous segments, and wraps opacity layers.
 
 **Target.** A persistent retained drawing representation.
@@ -734,7 +742,11 @@ Scene
 - Chunk, transform, clip, and paint records land during the split,
   because owned paragraph output must target them.
 - Draw order is a derived cache rebuilt when `structure_rev` changes,
-  not incrementally patched state. The measured walk is cheap.
+  not incrementally patched state. The measured walk is cheap. A z
+  change bumps `structure_rev` too: it reorders without moving
+  anything, so it rebuilds the draw order and costs no layout. Under
+  it, each parent's sorted child order is a second cache, re-sorted
+  only for the parents that changed (work item 4).
 - Transform records exist only for the window root, scroll content,
   and transformed subtrees; every other chunk is an offset in its
   nearest record's space (2026-09-23). A scroll patches one record and
@@ -971,12 +983,14 @@ zero layouts and zero shapes (asserted, `EXPERIMENTS.md` Step 4).
 
 **Current.** Platform events normalize into `Event`s. `Ui::dispatch`
 hit tests through border boxes, ancestor clips, and scroll offsets,
+children in reverse paint order (z included; a layer container's own
+box lets hits through),
 skipping any subtree whose reach (a box around everything it can hit,
 kept lazily and refreshed after each frame's layout; `reach.rs`, E15)
 misses the point, then walks the
 propagation path with listener-relative coordinates. Pointer
 capture holds a drag on the pressed node. Tab traverses focusable nodes
-in tree order. Clipboard via arboard. IME with cursor-area tracking.
+in tree order, whatever their z. Clipboard via arboard. IME with cursor-area tracking.
 A pointer event on a text node carries the span under the pointer (key
 bits 16 and up, so at most 65,535 spans per paragraph), found from the
 placements, and the paragraph's revision (paragraph ops applied, a
@@ -1036,6 +1050,9 @@ movement without a React round trip.
 - No separate spatial index (R-tree, rebuilt BVH): the node tree
   carries a bounding box per subtree, which makes the hit test 12x to
   236x faster (E15). The full walk stays as its oracle.
+- Hit order is the reverse of paint order, z included; Tab, selection
+  and accessibility keep tree order (work item 4). A subtree's box is
+  a union, so a z change leaves it as it is.
 
 ## 14. Accessibility
 
@@ -1139,6 +1156,10 @@ function's queue refuses waits in the session, in order, until the
 next pump (JS calls `resume` after each frame it takes, which always
 pumps: it waits for a pump that is storing a refused frame, then
 retries it); a closed receiver closes the session.
+`Layer` (work item 4) is a React portal into a layer container: a
+full-window view at the end of the root level, opened when its first
+child commits, owned by the enclosing `Layer`'s container. The app's
+root nodes are placed before the first open layer.
 
 **Target.** The same transport with CRW2 payloads. The bridge exposes
 `submit` and `subscribe` only, so an embedded JS engine could replace

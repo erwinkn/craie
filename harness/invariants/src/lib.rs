@@ -56,12 +56,16 @@ pub fn snapshot(ui: &Ui) -> Transaction<'static> {
             t.layout(id.0, &style.to_taffy());
         }
         let s = host.spatial[id.index()];
-        if s.transform != Affine::IDENTITY || s.opacity != 1.0 {
+        if s.transform != Affine::IDENTITY || s.opacity != 1.0 || s.z != 0 {
             t.push(Mutation::Spatial {
                 id: id.0,
                 transform: (s.transform != Affine::IDENTITY).then_some(s.transform),
                 opacity: (s.opacity != 1.0).then_some(s.opacity),
+                z: (s.z != 0).then_some(s.z),
             });
+        }
+        if let Some(&owner) = host.owners.get(&id.0) {
+            t.layer(id.0, owner);
         }
         if kind.has_box() {
             let p = host.paint[id.index()];
@@ -863,9 +867,13 @@ impl Gen {
                     };
                     t.transform(id, m);
                 }
-                9 => {
+                9 if self.rng.chance(0.5) => {
                     let o = self.pick(&[1.0, 1.0, 0.5, 0.25, 0.0]);
                     t.opacity(id, o);
+                }
+                9 => {
+                    let z = self.pick(&[0, 0, 1, -1, 2]);
+                    t.z(id, z);
                 }
                 10 => {
                     let r = self.pick(&[Role::None, Role::Button, Role::Group, Role::Heading]);
