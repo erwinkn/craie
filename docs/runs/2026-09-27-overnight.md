@@ -64,6 +64,9 @@ Times are UTC.
 | [#7](https://github.com/erwinkn/craie/pull/7) | State styles (work item 5): hover, press, focus, app states and breakpoints restyle natively; inherited color | Merged |
 | [#8](https://github.com/erwinkn/craie/pull/8) | Images (work item 8, part 2): decoded off-thread at the drawn size, drawn from the glyph atlas | Merged |
 | [#9](https://github.com/erwinkn/craie/pull/9) | GPU tests share one device per binary: fixes the intermittent `paths` crash | Merged |
+| [#10](https://github.com/erwinkn/craie/pull/10) | Morning: clippy in CI (`-D warnings`), every existing finding fixed or allowed with a reason | Merged |
+| [#11](https://github.com/erwinkn/craie/pull/11) | Morning: a `Portal` or `Layer` starts a new scope chain; `TextInput` is a scope; load deflakes | Merged |
+| [#12](https://github.com/erwinkn/craie/pull/12) | Morning: `currentColor` icons and inputs follow the inherited `COLOR` (DF-14, DF-24); protocol 5 | Merged |
 
 ## Numbers
 
@@ -186,6 +189,8 @@ loaded). Each PR has the full table and says what it means:
 
 ## Open questions for Erwin
 
+All three are answered; see the morning follow-up below.
+
 - `_hover` on an element that is no scope (a Text, an Icon) means the
   nearest scope's hover in Craie; Marbre web means the element's own
   (`questions.tsx`, `tool-run.tsx`). Craie's rule is kept (DF-29). Align
@@ -195,6 +200,102 @@ loaded). Each PR has the full table and says what it means:
 - The helper that characterised the `paths` crash installed `gdb` on
   exe1 with `sudo apt-get`. That's a change to a shared host; it
   reports installing nothing else.
+
+## Morning follow-up
+
+Erwin read the run and asked, through the planning thread, for three
+things: verify on the Mac, add clippy to CI, and settle the scope
+questions. Erwin also lifted the collision rule: the protocol version
+and anything held back to keep parallel branches apart may change when
+no other branch is in flight.
+
+exe1's load was 35 to 70 most of the morning (Marbre's browser and
+unit test suites, run by other threads), briefly 230. Times are UTC.
+
+| Time | What |
+| --- | --- |
+| 06:29 | Mac thread starts on Erwin's MacBook, in its own worktree off `main` |
+| ~06:30 | Clippy and inherited-color threads start on exe1 |
+| 07:04 | The Mac thread loses its host (the MacBook went offline) after finding the cause of both Mac test failures; its resume is queued |
+| 09:54 | PR #10 (clippy) and PR #11 (scopes) opened and sent to review |
+| 10:14 | PR #12 (inherited color) opened and sent to review |
+| 12:22 | PR #10 review fixed (`LEDGER.md` PR10-01..05) and merged |
+| 13:33 | PR #11 review fixed (PR11-01..07), main merged in, reverified on the merged tree (CI with clippy, 398 workspace tests, 88 bun tests, smoke, macOS type-check) and merged |
+| 13:39 | PR #12 review fixed (PR12-01..06), main merged in twice, reverified on the merged tree (CI with 404 Rust and 91 bun tests, smoke) and merged |
+
+### The Mac
+
+Two tests failed on the MacBook (Apple M5 Max), both allocation
+budgets in `harness/invariants/tests/allocations.rs`: a list frame's
+encode made 57 allocations against a budget of 56, and a frame with
+four opacity passes 127 against 125. The Metal budgets were measured
+with 8 draws per pass and have no slack. wgpu-core keeps each pass's
+commands in a `Vec` that doubles, and the tests that fail draw 16 or
+17 per pass: one more doubling, one more allocation. Linux passes
+because its Vulkan base count is lower. The fix and the benchmark
+reruns wait for the MacBook to come back online; the thread resumes
+by itself. The high benchmark times Erwin saw are not explained yet.
+
+### Decisions
+
+- **Protocol 5, once, for a real change.** The op tags are already
+  grouped by domain (0x2x spatial, 0x7x payloads, 0xBx states), so
+  nothing is renumbered. #12 bumps the version because drawing shapes
+  gained a byte (45 bytes, with a `current` byte marking fill and
+  stroke that follow `COLOR`) and `INPUT_CONFIG` lost its color. The
+  load-time handshake now answers with the wire's own version, so a
+  stale `craie-node.node` fails at load, not at its first frame.
+- **Held back for collisions: one item, now done.** Only DF-24 (vector
+  `currentColor` and input color from the inherited `COLOR`, which
+  touched the vector and state-style tracks at once). #12 closes it
+  and DF-14. Recoloring patches paint slots as text does: no new
+  shader, no tessellation. `z` in variants (DF-29) stays deferred for
+  product reasons.
+- **`_hover` on an element that is no scope** means the nearest
+  scope's hover, as on Marbre web and native. The overnight question
+  rested on a wrong reading of Marbre web, which does the same: in
+  `<Pressable><Text _hover={{ color: "red" }} /></Pressable>` the text
+  turns red with the pointer on the Pressable's padding.
+- **A `Portal` or `Layer` starts a new scope chain** (#11). Native
+  hover follows the native tree, where a layer's content is not inside
+  its opener, so the old crossing turned the menu item in
+  `<Pressable expanded><Layer><Text _hover={{ color: "red" }}>Opus</Text></Layer></Pressable>`
+  red with the pointer on the trigger. Now each item needs its own
+  scope, as on web. Marbre's spec still says the opposite (`ui-kit.md`,
+  its D28 draft); the planning thread flips it.
+- **`TextInput` is its own scope** (#11), without `disabled` until a
+  read-only input exists natively. An unstyled input now takes its
+  container's color (#12), as Marbre web's `.m-input` does with
+  `color: inherit`.
+- **Clippy runs in `scripts/ci.sh`** with `-D warnings`, after the
+  build (#10). 89 findings: 53 fixed, 34 under two workspace allows
+  with reasons (`!(x > 0.0)` rejects NaN on purpose; taffy styles are
+  built field by field), 2 allowed where a check is always true today
+  but stays for when the mask widens. None was a bug. The toolchain is
+  pinned, so new lints arrive only with a deliberate bump.
+- **One cargo target directory per worktree.** Cargo gives a
+  workspace's crates the same hashes in every checkout, so two
+  worktrees sharing a target directory overwrite each other's
+  libraries mid-run: on exe1 a doctest failed with "can't find crate",
+  and a reviewer's `craie-ui` built against another branch's
+  `craie-vector`. `scripts/build-addon.sh` also copied the addon from
+  `target/` whatever `CARGO_TARGET_DIR` said, so a smoke test could
+  load another branch's addon; it copies from `CARGO_TARGET_DIR` now.
+- **Two tests deflaked, not loosened** (#11): bun tests that waited
+  one tick for a React commit wait until the op shows (at most 100
+  ticks), and a headless test's first-frame bound went from 5 to 30 s
+  (it checks liveness; the frame takes 1.6 s alone).
+
+### Numbers
+
+Inherited color, on exe1 (release, CPU only, medians and best of 14
+runs at load 36 to 55; full table in `docs/EXPERIMENTS.md`), 1,000
+dependents each: a fill hover 380 µs (best 134), `currentColor` icons
+250 (89), inheriting labels 146 (47). All three allocate nothing, lay
+out nothing and build no chunks. The overnight fill-hover row (116 µs)
+ran at load 10; within this run, icons cost about two thirds of a
+fill hover. Measured before a review fix that removed a scan over each
+drawing's items.
 
 ## The `paths` crash
 
@@ -259,5 +360,4 @@ Deferrals to revisit when a profile asks for them:
 - No color management: Display-P3 photos look desaturated (DF-35).
 - Large images share atlas pages that are never reclaimed (DF-36).
 - JPEG DCT scaling, and more than one decoder thread (DF-33).
-- An input's color, and vector `currentColor` reading the inherited
-  `COLOR` (DF-14, DF-24).
+- Imported SVGs bake `currentColor` at import (DF-39).
