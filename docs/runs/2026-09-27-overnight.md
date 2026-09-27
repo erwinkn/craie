@@ -70,6 +70,8 @@ Times are UTC.
 | [#13](https://github.com/erwinkn/craie/pull/13) | Morning: this run log's follow-up section | Merged |
 | [#14](https://github.com/erwinkn/craie/pull/14) | Afternoon: checked, expanded and selected reach assistive technology; switch, radio and radio group roles; protocol 6 | Merged |
 | [#15](https://github.com/erwinkn/craie/pull/15) | Afternoon: the Mac run: allocation budgets per backend, E19 probe clock and timers fixed, Mac numbers | Merged |
+| [#16](https://github.com/erwinkn/craie/pull/16) | Afternoon: this run log's afternoon follow-up | Merged |
+| [#17](https://github.com/erwinkn/craie/pull/17) | Evening: presses and activation (work item 3, part 2): innermost press, one native activate, keep focus on press; protocol 7 | Merged |
 
 ## Numbers
 
@@ -450,6 +452,55 @@ exe1, mostly about twice, and their conclusions held. The PR #15
 review reran E19 on exe1 with the Mac's spinning probe: within
 exe1's usual spread, so the two tables compare.
 
+## Evening: work items 3 and 6
+
+The planning thread asked for the build-now items still open: work item
+3 (focus traps, presses, focus groups), then work item 6 (motion). Item
+3 runs as two parallel PRs, focus traps (#18) and presses (#17), with
+the wire space split between them up front (flag bits and op tags; both
+bump the protocol, and the second to merge takes the next number). Focus
+groups follow, since they activate through #17's event. exe1's load was
+11 to 26. Times are UTC.
+
+| Time | What |
+| --- | --- |
+| 16:27 | Two threads start on item 3: focus traps, `modal` and `inert`; presses and activation |
+| 17:06 | PR #17 (presses) opened and sent to review |
+| 17:14 | PR #17 review: no blockers, 1 major (a link of two spans didn't activate when pressed on one and released on the other), 6 minors, 5 nits |
+| 17:19 | PR #18 (focus traps) opened and sent to review |
+| 17:30 | PR #17 review fixed (PR17-01..12), verified at its head, which is `main` plus the PR (CI, 424 Rust tests, 101 bun tests, smoke, macOS type-check) |
+| 17:35 | PR #17 merged; #18 rebases onto it and takes protocol 8 |
+
+### Decisions
+
+- **Presses go to the innermost pressable, and `onPress` has one
+  source.** In
+  `<Pressable onPress={openThread}>… <Pressable onPress={archive}>Archive</Pressable></Pressable>`,
+  clicking Archive archives and doesn't open the thread; the row's raw
+  `onPointerUp` still fires. A click, Enter (on key down, with
+  repeats), Space (on key up) and a screen reader's click all send one
+  native `ACTIVATE` to the pressable, and `onPress` comes only from it,
+  so the keyboard activates a button for the first time. A key claim
+  on the same key wins. The screen reader's click no longer fakes a
+  pointer press at the node's center, so an overlay drawn on top can't
+  take it, and it doesn't turn the focus ring off.
+- **A press is kept when the pointer leaves, and counts when it's
+  released on the pressed node or inside it** (React Aria's rule). The
+  web fires `click` on the common ancestor instead, so pressing Archive
+  and releasing on the row opens the row there and nothing here
+  (DF-45). A disabled pressable swallows its presses, and the row
+  around it doesn't fire either.
+- **`preventFocusOnPress`** keeps focus, caret and composition where
+  they are, so a mention suggestion can be pressed while the composer
+  keeps its caret.
+- **`<Text onPress>` is a link.** Its role defaults to `link`, and a
+  nested one is a pressable span: pressing "See" and releasing on
+  "logs" in `<Text onPress={go}>See <Text weight={700}>logs</Text></Text>`
+  activates it. Spans are pointer-only for now (DF-43), and a paragraph
+  update mid-press cancels the press (DF-46).
+- Deferred: `onLongPress` and `onMiddlePress` (DF-42); a keep-focus
+  press hides the focus ring, where Chrome keeps it (DF-44).
+
 ## The `paths` crash
 
 `craie-render --test paths` crashed (SIGSEGV) in PR #5's first CI run,
@@ -509,9 +560,9 @@ In Marbre:
   assistive technology.
 
 Work items not started:
-- Item 3: focus traps, modals and inert content. This also covers Tab
-  and accessibility order across layers (DF-17), and owners per
-  element (DF-19).
+- The rest of item 3: focus traps, modals and inert content (#18, in
+  review), which also cover Tab order across layers (DF-17) and owners
+  per element (DF-19); then focus groups.
 - Item 6: transitions and animations inside variants (DF-22).
 - The second half of item 4: anchor and geometry expressions.
 - Topic 11: text ranges against a revision. This covers paste answers

@@ -132,6 +132,20 @@ impl Role {
 /// neither. `checked` needs no bit: the check roles always report it,
 /// other roles never do. `a11y.rs` reports `SELECTED` on selectable
 /// roles only.
+/// A node's press flags (`Interaction::press`, `press.rs`).
+pub mod press {
+    /// Presses stop here: press events and `ACTIVATE` go to the
+    /// innermost pressable on the path, and to no other.
+    pub const PRESSABLE: u8 = 1 << 0;
+    /// A disabled pressable: it swallows its presses (nothing fires,
+    /// here or further out).
+    pub const DISABLED: u8 = 1 << 1;
+    /// A press on it or inside it neither moves nor clears focus (the
+    /// kit's `preventFocusOnPress`), nor the text selection.
+    pub const KEEP_FOCUS: u8 = 1 << 2;
+    pub const ALL: u8 = PRESSABLE | DISABLED | KEEP_FOCUS;
+}
+
 pub mod reported {
     pub const EXPANDED: u8 = 1 << 0;
     pub const SELECTED: u8 = 1 << 1;
@@ -156,6 +170,14 @@ pub struct TextSpan {
     /// Draw in the nearest inherited color (`COLOR` on the text node or
     /// an ancestor), `color` when there is none.
     pub inherit_color: bool,
+    /// A press on this span presses its text node (`press.rs`): a
+    /// nested Text with `onPress`. A node-level pressable needs none.
+    pub pressable: bool,
+    /// This pressable span belongs to the same pressable Text as the
+    /// span before it: `<Text onPress>See <Text bold>logs</Text></Text>`
+    /// is two spans, one link. A press pressed on one and released on
+    /// the other activates.
+    pub press_joins: bool,
     /// Added to each cluster's advance, logical points.
     pub letter_spacing: f32,
     /// Absolute line height, logical points; 0: the font's. Span zero's
@@ -176,6 +198,8 @@ impl Default for TextSpan {
             italic: false,
             decoration: 0,
             inherit_color: false,
+            pressable: false,
+            press_joins: false,
             letter_spacing: 0.0,
             line_height: 0.0,
             family: NIL,
@@ -383,6 +407,8 @@ pub enum Mutation<'a> {
         focusable: bool,
         /// Its text descendants form one selection domain.
         selectable: bool,
+        /// Press flags (`press`).
+        press: u8,
     },
     /// Replaces the node's claims (`claims.rs`; empty clears). `id` NIL
     /// is the window list.
@@ -713,6 +739,8 @@ impl<'a> Transaction<'a> {
                 let style = s.weight as u32
                     | (s.italic as u32) << 16
                     | (s.inherit_color as u32) << 17
+                    | (s.pressable as u32) << 18
+                    | (s.press_joins as u32) << 19
                     | (s.decoration as u32) << 24;
                 [
                     s.start,
@@ -828,6 +856,24 @@ impl<'a> Transaction<'a> {
         self.interaction_flags(id, listeners, focusable, false)
     }
 
+    /// Interaction of a pressable (`press::PRESSABLE` and the other
+    /// `press` flags in `press`).
+    pub fn interaction_press(
+        &mut self,
+        id: u32,
+        listeners: u32,
+        focusable: bool,
+        press: u8,
+    ) -> &mut Self {
+        self.push(Mutation::Interaction {
+            id,
+            listeners,
+            focusable,
+            selectable: false,
+            press,
+        })
+    }
+
     /// Interaction with every flag: `selectable` makes the node's text
     /// descendants one selection domain.
     pub fn interaction_flags(
@@ -842,6 +888,7 @@ impl<'a> Transaction<'a> {
             listeners,
             focusable,
             selectable,
+            press: 0,
         })
     }
 

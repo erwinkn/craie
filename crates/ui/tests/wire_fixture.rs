@@ -7,7 +7,7 @@ use craie_ui::claims::{Claim, chord_flag, claim_kind};
 use craie_ui::events::{Key, Mods};
 use craie_ui::host::NodeId;
 use craie_ui::input::SubmitKey;
-use craie_ui::mutation::{Mutation, NodeKind, Role, reported};
+use craie_ui::mutation::{Mutation, NodeKind, Role, press, reported};
 use craie_ui::states::layout_key;
 use craie_ui::surface;
 use craie_ui::ui::Ui;
@@ -25,9 +25,9 @@ fn js_fixture_decodes_and_executes() {
     let txn = wire::decode(&buf).expect("fixture must decode");
     assert_eq!(txn.seq, 99);
     // Identical styles intern to one table row; the span table holds
-    // the paragraph's two spans.
+    // the paragraph's three spans.
     assert_eq!(txn.styles.len(), 1);
-    assert_eq!(txn.spans.len(), 2);
+    assert_eq!(txn.spans.len(), 3);
     // Span fields: span zero's line height; span one's family (through
     // the string table), both decorations, letter spacing, weight, italic.
     let (s0, s1) = (txn.spans[0], txn.spans[1]);
@@ -65,13 +65,18 @@ fn js_fixture_decodes_and_executes() {
     // Input: listeners, focusable, explicit role, config.
     assert_eq!(host.kind(NodeId(2)), Some(NodeKind::Input));
     let i = host.interaction(NodeId(2));
-    assert_eq!(i.listeners, 0x1ff);
+    assert_eq!(i.listeners, 0x7ff);
     assert!(i.focusable);
     assert_eq!(i.role, Role::MultilineTextInput);
     assert_eq!(i.reported, 0);
     // The root: a switch reporting expanded and selected while clear.
     let r = host.interaction(NodeId(0));
     assert_eq!((r.role, r.reported), (Role::Switch, reported::ALL));
+    // Pressable, keeping focus, not focusable.
+    assert_eq!(
+        (r.press, r.focusable),
+        (press::PRESSABLE | press::KEEP_FOCUS, false)
+    );
     assert_eq!(host.interaction(NodeId(7)).role, Role::RadioGroup);
     // `setText` leaves the caret at the start, so the insert lands first.
     assert_eq!(ui.inputs.text(2), "!seed");
@@ -113,7 +118,7 @@ fn js_fixture_decodes_and_executes() {
     assert_eq!(style.aspect_ratio, Some(1.25));
     assert_eq!(style.overflow.x, taffy::Overflow::Hidden);
 
-    // Text: created, styled with two spans, moved, removed.
+    // Text: created, styled with three spans, moved, removed.
     assert!(host.node(NodeId(1)).is_none());
     let para = txn
         .mutations
@@ -128,6 +133,10 @@ fn js_fixture_decodes_and_executes() {
     assert_eq!(spans[1].start as usize, "héllo ".len());
     assert!(spans[1].italic);
     assert_eq!(spans[1].weight, 700);
+    assert!(spans[1].pressable && !spans[0].pressable);
+    assert!(!spans[1].press_joins);
+    assert_eq!(spans[2].start as usize, "héllo — مرحبا ".len());
+    assert!(spans[2].pressable && spans[2].press_joins);
 
     // Surface: kind, params, payload bytes.
     let sd = &host.surfaces[&3];

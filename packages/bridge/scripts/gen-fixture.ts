@@ -2,7 +2,7 @@
 // Rust decoder must accept. Regenerate after wire format changes:
 //   bun packages/bridge/scripts/gen-fixture.ts
 import {
-  CHORD_FLAG, CLAIM_KIND, CURRENT, ENV_BIT, Encoder, FIT, NIL, REPORTED, ROLE, STATE_BIT, SUBMIT_KEY, SURFACE,
+  CHORD_FLAG, CLAIM_KIND, CURRENT, ENV_BIT, EVENT_MASK, Encoder, FIT, NIL, PRESS_FLAG, REPORTED, ROLE, STATE_BIT, SUBMIT_KEY, SURFACE,
   parseChord, transformMatrix,
 } from "../src/wire.js"
 
@@ -11,12 +11,15 @@ enc.create(0, 0)                                    // view
 enc.create(1, 1)                                    // text
 const text = "héllo — مرحبا 日本語"
 const bold = new TextEncoder().encode("héllo ").length // byte offset of span 1
+const joined = new TextEncoder().encode("héllo — مرحبا ").length // span 2
 enc.paragraph(1, text, [
   { start: 0, fontSize: 18.5, color: 0x6dc7_ff80, lineHeight: 24, inheritColor: true },
   {
     start: bold, fontSize: 18.5, color: 0xffff_ffff, weight: 700, italic: true,
-    fontFamily: "monospace", decoration: 3, letterSpacing: 0.5,
+    fontFamily: "monospace", decoration: 3, letterSpacing: 0.5, pressable: true,
   },
+  // The same link, on: a press on span 1 released here activates.
+  { start: joined, fontSize: 18.5, color: 0xffff_ffff, pressable: true, pressJoins: true },
 ])
 enc.layout(0, {
   display: "flex",
@@ -40,7 +43,7 @@ enc.spatial(0, transformMatrix([{ translateX: 3 }, { scale: 2 }]), 0.75, -2)
 enc.paint(0, 0x1122_33ff, 6.5, { color: 0xff00_00ff, width: 2 })
 enc.create(2, 2)                                    // input
 enc.inputConfig(2, 15, "type here", true, SUBMIT_KEY["mod+enter"])
-enc.interaction(2, 0x1ff, true)                     // all listeners, focusable
+enc.interaction(2, 0x7ff, true)                     // all listeners, focusable
 enc.role(2, ROLE.multilineTextInput)
 enc.create(3, 3)                                    // surface
 enc.surface(3, SURFACE.bars, [0x6dc7_c8ff, 0x6dc7_ffff, 0, 0])
@@ -86,6 +89,8 @@ enc.animate(0, "backgroundColor", [0xff00_00ff], { duration: 300, easing: [0.1, 
 enc.animate(0, "gap", [4, 6], { spring: {}, delay: 20 })
 enc.states(0, (1n << BigInt(STATE_BIT.selected)) | 1n) // state styles
 enc.role(0, ROLE.switch, REPORTED.expanded | REPORTED.selected)
+enc.interaction(0, EVENT_MASK.press | EVENT_MASK.activate, false, false,
+  PRESS_FLAG.pressable | PRESS_FLAG.keepFocus)       // a pressable keeping focus
 enc.variants(5, [                                  // on the row, scoped by the root
   { terms: [{ scope: 0, mask: 1n << BigInt(STATE_BIT.selected) }], env: 0, values: { fill: 0x2d32_40ff, color: 0xffff_ffff } },
   {

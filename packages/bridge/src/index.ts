@@ -121,6 +121,37 @@ export interface PointerEvt {
   alt?: boolean
   meta?: boolean
 }
+/** An activation (`onPress`): a primary click released over the node,
+ * Enter or Space on it while focused, or an assistive-technology click.
+ * A click carries its release point and the modifiers held when the
+ * press began (`button` 1); a key or assistive click carries the node's
+ * center (`button` 0). */
+export interface PressEvt extends PointerEvt {
+  source: "pointer" | "keyboard" | "accessibility"
+}
+/** A press ending (`onPressOut`): released, anywhere, or `cancelled`
+ * (window focus lost, the node disabled or removed mid-press). */
+export interface PressOutEvt extends PointerEvt {
+  cancelled: boolean
+}
+/** Press listeners: the innermost pressable under the pointer owns a
+ * press, so a Pressable inside a Pressable presses alone. */
+export interface PressProps {
+  /** Activated: once per click (pressed and released over the node or
+   * inside it, wherever the pointer went meanwhile: React Aria's rule,
+   * where the web clicks the common ancestor), per Enter key down
+   * (repeats too) or Space key up while focused, modifiers or not (they
+   * come with the event: Cmd+Enter), or per assistive click. A key
+   * claim on the chord wins over it. */
+  onPress?: (e: PressEvt) => void
+  /** A press began on the node: the primary button only (the kit's web
+   * `onPointerDown` hears any), and not keys. On a Text it needs
+   * `onPress` too: only that makes a Text pressable. */
+  onPressIn?: (e: PointerEvt) => void
+  /** The press ended; `onPress` follows when it was a click. Primary
+   * button only; on a Text, with `onPress` only, as `onPressIn`. */
+  onPressOut?: (e: PressOutEvt) => void
+}
 export interface KeyEvt {
   target: HostNode
   x: number
@@ -220,7 +251,11 @@ export interface StateProps {
   /** Checked, on the check roles; on others a styling state only. */
   checked?: boolean
   highlighted?: boolean
-  /** Also masks hover and press, and stops `onPress`. */
+  /** Also masks hover and press; a disabled Pressable swallows its
+   * presses (neither it nor a Pressable around it activates). An
+   * enabled Pressable inside a disabled one still activates, as in
+   * React Native (on the web a disabled button's content gets no
+   * clicks). */
   disabled?: boolean
   /** Custom states (`defineStates`) by name. */
   states?: Record<string, boolean>
@@ -248,24 +283,27 @@ export interface ViewProps extends ListenerProps, StateProps, Variants {
   accessibilityLabel?: string
   /** Accessibility role; a plain View has none, a Pressable is a
    * `button`. The check roles (`checkbox`, `switch`, `radio`) report
-   * `checked` and take a click, like `button` and `link`; a
-   * `radiogroup` holds radios. */
+   * `checked`; a `radiogroup` holds radios. Assistive technology is
+   * offered a click on enabled Pressables only, whatever their role. */
   accessibilityRole?: AccessibilityRole
   /** Sends `display: none`. */
   hidden?: boolean
   children?: ReactNode
 }
-export interface PressableProps extends ViewProps {
-  /** Primary pointer released over the node. */
-  onPress?: (e: PointerEvt) => void
+export interface PressableProps extends ViewProps, PressProps {
+  /** Pressing keeps focus where it is (a composer's mention button),
+   * and the Pressable leaves the Tab order unless `focusable`. */
+  preventFocusOnPress?: boolean
 }
 /** Text props. A Text nested in a Text has no native node: its text and
  * style become spans of the outermost Text's paragraph, and its pointer
- * listeners (`onPress` too) receive the events over its own span. */
-export interface TextProps extends ListenerProps, Variants {
+ * and press listeners receive the events over its own span. A Text with
+ * `onPress` is pressable (a link, and an outermost one reads as one to
+ * assistive technology unless given a role), but not focusable, like a
+ * web span; a nested one activates when pressed and released on its
+ * spans. */
+export interface TextProps extends ListenerProps, PressProps, Variants {
   style?: StyleProps
-  /** Primary pointer released over this text (or this nested span). */
-  onPress?: (e: PointerEvt) => void
   /** This Text alone is a selection domain (on the outermost Text). */
   selectable?: boolean
   fontSize?: number
@@ -418,37 +456,28 @@ export function View(props: ViewProps) {
 }
 
 /** A View that is a button for assistive technology and fires `onPress`
- * on primary pointer release. Always a scope. */
-export function Pressable({ onPress, ...props }: PressableProps) {
+ * on activation (`PressProps`). Focusable unless disabled or
+ * `preventFocusOnPress`. Always a scope. */
+export function Pressable(props: PressableProps) {
   return useHost("view", {
     accessibilityRole: "button",
     ...props,
-    focusable: !props.disabled && (props.focusable ?? true),
-    onPointerUp: (e: PointerEvt) => {
-      props.onPointerUp?.(e)
-      if ((e.button ?? 1) === 1 && !props.disabled) onPress?.(e)
-    },
+    __pressable: true,
+    focusable: !props.disabled && (props.focusable ?? !props.preventFocusOnPress),
   }, true)
 }
-export function Text({ onPress, ...rest }: TextProps) {
-  const props: TextProps = onPress
-    ? {
-        ...rest,
-        onPointerUp: (e: PointerEvt) => {
-          rest.onPointerUp?.(e)
-          if ((e.button ?? 1) === 1) onPress(e)
-        },
-      }
-    : rest
+export function Text(props: TextProps) {
   // Flatten primitive children ("a" {b} "c") into a single `text` prop so
   // mixed string/expression JSX still forms one paragraph. Nested
   // non-primitive children (styled spans) keep their instances.
   const children = props.children
   const flat = props.text === undefined && children !== undefined ? flattenText(children) : undefined
+  // A pressable Text is a link (only an outermost Text's role is read).
+  const accessibilityRole = typeof props.onPress === "function" ? "link" : "text"
   if (flat !== undefined) {
-    return useHost("text", { accessibilityRole: "text", ...props, text: flat, children: undefined })
+    return useHost("text", { accessibilityRole, ...props, text: flat, children: undefined })
   }
-  return useHost("text", { accessibilityRole: "text", ...props })
+  return useHost("text", { accessibilityRole, ...props })
 }
 
 /** A native drawing surface fed by payload bytes. */

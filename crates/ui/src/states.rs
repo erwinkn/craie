@@ -592,7 +592,7 @@ impl Ui {
         }
         let key = InputKey {
             hover: self.hover,
-            pressed: self.pressed.filter(|_| self.pressed_primary),
+            pressed: self.pressed_node(),
             focus: self.focus,
             keyboard: self.states.keyboard,
             structure: self.host.revs.structure,
@@ -617,8 +617,7 @@ impl Ui {
             }
         };
         add(self, self.hover, 0, state_bit::HOVER);
-        let pressed = self.pressed.filter(|_| self.pressed_primary);
-        add(self, pressed, 0, state_bit::PRESSED);
+        add(self, self.pressed_node(), 0, state_bit::PRESSED);
         let visible = self
             .focus
             .is_some_and(|f| self.states.keyboard || self.host.kind(f) == Some(NodeKind::Input));
@@ -643,6 +642,14 @@ impl Ui {
         }
         st.next_held = held;
         st.held = next;
+    }
+
+    /// What the `pressed` bit follows: the node under a held primary
+    /// button, else the pressable a held Space presses.
+    fn pressed_node(&self) -> Option<NodeId> {
+        self.pressed
+            .filter(|_| self.pressed_primary)
+            .or(self.key_press)
     }
 
     /// Sets scope `id`'s app bits (`STATES`); it becomes a scope.
