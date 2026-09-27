@@ -195,6 +195,60 @@ Reviewer minors and nitpicks not fixed yet.
 - Resolves in: keying the cache on the world scale in steps (powers of
   two), or E07 (coverage preparation).
 
+### DF-9: `setText` leaves the caret at the start
+
+- Source: claims and keys (work item 1) implementation (own finding).
+- Where: crates/ui/src/input.rs (`Inputs::set_text`).
+- Claim: after JS sets an input's value, the caret sits at offset 0,
+  so the next keystroke types before the text. A DOM input moves the
+  caret to the end when its value is set.
+- Why deferred: pre-existing, and controlled values become rebased
+  writes (topic 11), which define where the caret goes.
+- Resolves in: topic 11's rebased writes, or a one-line change to put
+  the caret at the end if a consumer hits it first.
+
+### DF-10: no claims on a nested Text
+
+- Source: claims and keys (work item 1) implementation (own finding).
+- Where: packages/bridge/src/host.ts (`emitProps`, nested Text).
+- Claim: `onContextMenu`, `onDrop` and `keymap` on a Text nested in
+  another Text do nothing: a nested Text is spans of its root and has
+  no native node to hold a claim set.
+- Why deferred: needs claims per span, which interactive spans
+  (topic 11) define; a nested Text cannot take focus, so only the
+  pointer claims are affected.
+- Resolves in: interactive spans (topic 11).
+
+### DF-11: a paste answer has no range
+
+- Source: claims and keys (work item 1) implementation (own finding).
+- Where: crates/ui/src/ui.rs (`Command::InsertText`).
+- Claim: `InsertText` replaces the focused input's selection when the
+  answer arrives. If the user moves the caret between the claim and
+  the answer (one round trip, 0.2 to 5 ms at p99 outside major
+  collections, E19), the text lands at the new caret.
+- Why deferred: topic 1's target expresses the range against the
+  buffer revision the claim saw; revisions and rebasing come with
+  rebased writes (topic 11).
+- Resolves in: topic 11's rebased writes.
+
+### DF-12: file drops have no position
+
+- Source: PR #4 review (claims and keys).
+- Where: crates/platform-winit/src/winit.rs (`HoveredFile`,
+  `DroppedFile`).
+- Claim: winit 0.30's drop events carry no position, and no cursor
+  moves arrive while another app's drag is over the window. The
+  driver marks the pointer unknown when a drag enters, and the drop
+  goes to the focus path instead of the node under it. Paths that are
+  not UTF-8 arrive lossily converted, and Wayland gets no drop events
+  at all in winit 0.30.
+- Why deferred: the position needs the platform (on macOS,
+  `NSEvent.mouseLocation` when the drop lands) or winit 0.31's
+  `DragDropped`, which carries it.
+- Resolves in: the winit 0.31 upgrade, or a macOS-only position read
+  if a drop target needs it first.
+
 ## Closed
 
 - DF-8 (2026-09-24, same day): `native_reflow_publishes_after_the_frame`
@@ -314,3 +368,32 @@ Reviewer minors and nitpicks not fixed yet.
     12.9 and 11.9 µs: the 92 was noise, now marked in the table.
   - PR3-10: removing or detaching the hovered node or an ancestor hands
     the hover to the subtree's parent, so ancestors get no second enter.
+- PR4-01..13 (claims review), fixed in the PR #4 review:
+  - PR4-01: the bridge tests expected Ctrl for `mod` and failed on
+    macOS; they follow the platform now, and chord parsing is tested
+    for both.
+  - PR4-02: drops went to the last cursor position before the drag,
+    which can be anywhere; see DF-12. Paths are joined by NUL, not a
+    newline, which a path can hold.
+  - PR4-03: `parseChord("constructor")` read `Object.prototype`
+    (`Object.hasOwn` now).
+  - PR4-04: the window list puts the latest mounted `useHotkeys` first,
+    so an overlay's Escape beats the page's; a deviation from Marbre,
+    where both fire, recorded in topic 1.
+  - PR4-05: `enter` submits on exactly Enter, as in Marbre (Shift+Enter
+    submitted a single-line input); `SubmitKey` includes `none`; an
+    unknown `submitKey` logs once and falls back to `enter` instead of
+    throwing in the commit.
+  - PR4-06: `shift+1` never matching on a US layout is parity with
+    Marbre's `matchesChord`, now documented in `parseChord` and topic 2.
+  - PR4-07: an unknown chord logs once per chord, not on every render.
+  - PR4-08: on macOS, Ctrl+click is a secondary press (context menus);
+    the release matches its press.
+  - PR4-09..13 (nits): the handler refresh is commented; the ack readers
+    that skip event order say so; with no ack transport a replaced
+    version's handlers go at once instead of piling up; the unused
+    `Mods::command` is gone; `KeyEvt.code` is the web's `event.code`.
+  - Tests added: CLAIMS and INPUT_CONFIG decode of malformed bytes
+    (a NUL character key is now invalid), the platform's key
+    translation (`us_char`, F13 to F24), the drop fallback, the window
+    list's old versions pruned on ack, and submit key `none`.

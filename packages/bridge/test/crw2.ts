@@ -8,6 +8,8 @@ export interface Op {
   /** String operand (text, label, placeholder, set-text command). */
   s?: string
   bytes?: Uint8Array
+  /** CLAIMS: the claim set (`f` holds the version). */
+  claims?: { kind: number; flags: number; mods: number; key: number }[]
 }
 
 export interface Frame {
@@ -29,7 +31,7 @@ export function readFrame(buf: Uint8Array): Frame {
   const u32 = () => { const v = dv.getUint32(at, true); at += 4; return v }
   const f32 = () => { const v = dv.getFloat32(at, true); at += 4; return v }
   if (u32() !== 0x3257_5243) throw Error("bad magic")
-  if (u16() !== 3) throw Error("bad version")
+  if (u16() !== 4) throw Error("bad version")
   u16()
   const seq = dv.getBigUint64(at, true); at += 8
   const nStrings = u32(), nStyles = u32(), nSpans = u32()
@@ -81,11 +83,22 @@ export function readFrame(buf: Uint8Array): Frame {
       case 0x50: op.f.push(u8()); break // role
       case 0x51: op.s = strings[u32()]; break // label
       case 0x60: op.f.push(u32(), u8()); break // interaction
+      case 0x61: { // claims: version, count x (kind, flags, mods, 0, key)
+        op.f.push(u32())
+        const n = u16()
+        op.claims = []
+        for (let i = 0; i < n; i++) {
+          const kind = u8(), flags = u8(), mods = u8()
+          u8()
+          op.claims.push({ kind, flags, mods, key: u32() })
+        }
+        break
+      }
       case 0x70: op.f.push(u32(), u32(), u32(), u32(), u32()); break // surface
       case 0x71: { const n = u32(); op.bytes = buf.slice(at, at + n); at += n; break }
       case 0x80: { // command
         const c = u8(); op.f.push(c)
-        if (c === 2) op.s = strings[u32()]
+        if (c === 2 || c === 4 || c === 5) op.s = strings[u32()]
         else if (c === 3) op.f.push(f32(), f32())
         break
       }

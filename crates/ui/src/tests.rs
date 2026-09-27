@@ -453,6 +453,7 @@ fn focus_click_and_tab() {
         text: None,
         char: None,
         mods,
+        ..KeyInput::default()
     }));
     assert_eq!(ui.focused(), Some(NodeId(0)));
     let events = ui.take_events();
@@ -476,6 +477,7 @@ fn focus_click_and_tab() {
             shift: true,
             ..Mods::default()
         },
+        ..KeyInput::default()
     }));
     assert_eq!(ui.focused(), Some(NodeId(1)));
 }
@@ -515,12 +517,14 @@ fn input_typing_changes_buffer() {
         text: Some("h".into()),
         char: Some("h".into()),
         mods: Mods::default(),
+        ..KeyInput::default()
     }));
     ui.dispatch(&Event::KeyDown(KeyInput {
         key: Key::Unknown,
         text: Some("i".into()),
         char: Some("i".into()),
         mods: Mods::default(),
+        ..KeyInput::default()
     }));
     assert_eq!(ui.inputs.text(0), "hi");
 
@@ -538,6 +542,7 @@ fn input_typing_changes_buffer() {
         text: None,
         char: None,
         mods: Mods::default(),
+        ..KeyInput::default()
     }));
     assert!(
         ui.take_events()
@@ -2097,6 +2102,7 @@ fn focused_input(text: &str, width: f32, multiline: bool) -> Ui {
             text: Some(s.clone()),
             char: Some(s),
             mods: Mods::default(),
+            ..KeyInput::default()
         }));
     }
     ui.render(Size::new(800.0, 600.0));
@@ -2109,14 +2115,13 @@ fn key(ui: &mut Ui, key: Key, ch: Option<&str>, mods: Mods) {
         text: None,
         char: ch.map(str::to_string),
         mods,
+        ..KeyInput::default()
     }));
 }
 
+/// The command modifier (`mod`): Cmd on macOS, Ctrl elsewhere.
 fn meta() -> Mods {
-    Mods {
-        meta: true,
-        ..Mods::default()
-    }
+    Mods::from_bits(Mods::COMMAND)
 }
 
 /// A composition that replaces a selection is one undo step with its
@@ -2180,11 +2185,7 @@ fn composition_undo_restores_the_replaced_text() {
         &mut ui,
         Key::Unknown,
         Some("z"),
-        Mods {
-            meta: true,
-            shift: true,
-            ..Mods::default()
-        },
+        Mods::from_bits(Mods::COMMAND | Mods::SHIFT),
     );
     assert_eq!(
         ui.inputs.text(0),
@@ -2251,6 +2252,7 @@ fn undo_restores_caret_affinity() {
         text: Some("x".into()),
         char: Some("x".into()),
         mods: Mods::default(),
+        ..KeyInput::default()
     }));
     key(&mut ui, Key::Unknown, Some("z"), meta());
     ui.render(Size::new(800.0, 600.0));
@@ -2640,16 +2642,14 @@ fn selection_spans_paragraphs_in_tree_order() {
     assert!(rects(&ui, 1) > 0 && rects(&ui, 3) > 0);
     assert_eq!(rects(&ui, 5), 0);
 
-    let meta = Mods {
-        meta: true,
-        ..Mods::default()
-    };
+    let meta = Mods::from_bits(Mods::COMMAND);
     for ch in ["a", "c"] {
         ui.dispatch(&Event::KeyDown(KeyInput {
             key: Key::Unknown,
             text: None,
             char: Some(ch.into()),
             mods: meta,
+            ..KeyInput::default()
         }));
     }
     assert_eq!(

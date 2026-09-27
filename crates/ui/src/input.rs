@@ -25,6 +25,31 @@ struct Snapshot {
     focus: Cursor,
 }
 
+/// Which chord submits an input (`submitKey`). A multiline input's
+/// Enter that does not submit, and its Shift+Enter always, insert a
+/// newline.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum SubmitKey {
+    /// Enter.
+    #[default]
+    Enter = 0,
+    /// Mod+Enter (Cmd on Apple platforms, Ctrl elsewhere).
+    ModEnter = 1,
+    /// Nothing submits.
+    None = 2,
+}
+
+impl SubmitKey {
+    pub fn from_u8(v: u8) -> Option<SubmitKey> {
+        Some(match v {
+            0 => SubmitKey::Enter,
+            1 => SubmitKey::ModEnter,
+            2 => SubmitKey::None,
+            _ => return None,
+        })
+    }
+}
+
 pub struct InputState {
     pub editor: Editor,
     pub placeholder: String,
@@ -34,6 +59,7 @@ pub struct InputState {
     /// Selection fill, 0xRRGGBBAA.
     pub selection_color: u32,
     pub multiline: bool,
+    pub submit: SubmitKey,
     /// Undo/redo snapshot stacks.
     undo: Vec<Snapshot>,
     redo: Vec<Snapshot>,
@@ -59,6 +85,7 @@ impl InputState {
             color,
             selection_color: 0x3584_E47A, // rgba(53,132,228,0.48)
             multiline,
+            submit: SubmitKey::Enter,
             undo: Vec::new(),
             redo: Vec::new(),
             coalescing_insert: false,
@@ -166,6 +193,9 @@ pub enum KeyAction {
     Cut,
     Copy,
     Paste,
+    /// Replace the selection with this text, as a paste does (a paste
+    /// claim's answer; empty deletes the selection).
+    Replace(String),
     Undo,
     Redo,
     /// Place the caret at a click point (content-box relative, logical).
@@ -183,6 +213,11 @@ impl Inputs {
 
     pub fn get_mut(&mut self, id: u32) -> Option<&mut InputState> {
         self.map.get_mut(&id)
+    }
+
+    /// The input's selected text, if its selection is not empty.
+    pub fn selected_text(&self, id: u32) -> Option<String> {
+        self.map.get(&id)?.editor.selected_text().map(str::to_owned)
     }
 
     /// Creates or reconfigures an input node.
@@ -317,7 +352,8 @@ impl Inputs {
             | KeyAction::BackspaceWord
             | KeyAction::DeleteWord
             | KeyAction::Cut
-            | KeyAction::Paste => Some(false),
+            | KeyAction::Paste
+            | KeyAction::Replace(_) => Some(false),
             _ => None,
         };
         let before = edit.map(|_| state.snapshot());
@@ -328,6 +364,7 @@ impl Inputs {
             KeyAction::Insert(_)
                 | KeyAction::Newline
                 | KeyAction::Paste
+                | KeyAction::Replace(_)
                 | KeyAction::Cut
                 | KeyAction::Copy
                 | KeyAction::Submit
@@ -403,6 +440,18 @@ impl Inputs {
                 {
                     let s = if state.multiline {
                         s
+                    } else {
+                        s.replace(['\n', '\r'], " ")
+                    };
+                    state.editor.insert_or_replace_selection(text, &s);
+                }
+            }
+            KeyAction::Replace(s) => {
+                if s.is_empty() {
+                    state.editor.delete_selection(text);
+                } else {
+                    let s = if state.multiline {
+                        s.clone()
                     } else {
                         s.replace(['\n', '\r'], " ")
                     };

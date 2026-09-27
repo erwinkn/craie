@@ -306,6 +306,7 @@ fn key(key: Key, ch: Option<&str>) -> Event {
         text: ch.map(str::to_owned),
         char: ch.map(str::to_owned),
         mods: Mods::default(),
+        ..KeyInput::default()
     })
 }
 

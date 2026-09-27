@@ -14,7 +14,7 @@
 // across transactions.
 
 const MAGIC = 0x3257_5243 // "CRW2" little-endian
-const VERSION = 3
+const VERSION = 4
 export const NIL = 0xffff_ffff // no node / append / default style
 
 const enum Op {
@@ -37,6 +37,7 @@ const enum Op {
   Label = 0x51,
   // interaction
   Interaction = 0x60,
+  Claims = 0x61,
   // payload
   Surface = 0x70,
   Payload = 0x71,
@@ -122,6 +123,8 @@ const enum Cmd {
   Blur = 1,
   SetText = 2,
   ScrollTo = 3,
+  InsertText = 4,
+  WriteClipboard = 5,
 }
 
 /** Accessibility roles — mirror mutation.rs `Role`. */
@@ -170,7 +173,77 @@ export const EVENT_KIND = {
    * CPU ms per frame, a = the largest, b = mean layout and scene ms,
    * key = live nodes, revision = running tweens. */
   frameStats: 16,
+  /** A claim matched (claims.rs): node = the claimer (NIL: the window
+   * list), key = claim kind | claim index << 8, revision = the claim
+   * set's version, text = the payload (clipboard or selected text,
+   * dropped paths joined by "\\0"). */
+  claim: 17,
 } as const
+
+/** Claim kinds and chord flags — mirror claims.rs. */
+export const CLAIM_KIND = { key: 1, paste: 2, copy: 3, cut: 4, drop: 5, contextMenu: 6 } as const
+export const CHORD_FLAG = { named: 1, noRepeat: 2, inInput: 4 } as const
+/** Modifier bits (key records, pointer records, chords) — mirror
+ * events.rs `Mods`. */
+export const MODS = { shift: 1, ctrl: 2, alt: 4, meta: 8 } as const
+
+/** Named keys by the web's `event.key`, lower case, plus `space` —
+ * mirror events.rs `Key::code`. A key record's named key sits in key
+ * bits 8 to 15. */
+export const KEY_CODE: Readonly<Record<string, number>> = (() => {
+  const named: Record<string, number> = {
+    backspace: 1, tab: 2, enter: 3, escape: 4,
+    arrowleft: 5, arrowup: 6, arrowright: 7, arrowdown: 8,
+    home: 9, end: 10, pageup: 11, pagedown: 12, delete: 13,
+    " ": 14, space: 14, insert: 15, contextmenu: 16,
+  }
+  for (let f = 1; f <= 24; f++) named[`f${f}`] = 31 + f
+  return named
+})()
+
+/** When an input's Enter submits — mirror input.rs `SubmitKey`. */
+export const SUBMIT_KEY = { enter: 0, "mod+enter": 1, none: 2 } as const
+export type SubmitKey = keyof typeof SUBMIT_KEY
+
+/** One claim on the wire (claims.rs `Claim`). */
+export interface Claim {
+  kind: number
+  flags: number
+  mods: number
+  /** A named key's code (`CHORD_FLAG.named`), else a character's code
+   * point. */
+  key: number
+}
+
+/** A chord such as `mod+shift+o`, `escape`, `shift+?` or `alt+arrowup`
+ * as a key claim, or `null` when it names no key. Modifiers must match
+ * exactly; `mod` is Cmd on Apple platforms and Ctrl elsewhere (`apple`).
+ * The key is a named key (`KEY_CODE`) or one character as the web's
+ * `event.key` gives it, lower-cased: Shift+/ is `shift+?`, and
+ * `shift+1` never matches on a US layout, where Shift+1 gives "!" (as
+ * in Marbre's `matchesChord`). Native matches letters and digits held
+ * with Alt, and letters of non-Latin layouts, by physical key
+ * (claims.rs). */
+export function parseChord(chord: string, apple: boolean): Claim | null {
+  const lower = chord.toLowerCase()
+  // `+` and `mod++` are the plus key.
+  const plus = lower === "+" || lower.endsWith("++")
+  const cut = plus ? lower.length - 1 : lower.lastIndexOf("+") + 1
+  const key = lower.slice(cut)
+  let mods = 0
+  if (cut > 0) {
+    for (const m of lower.slice(0, cut - 1).split("+")) {
+      if (m === "mod") mods |= apple ? MODS.meta : MODS.ctrl
+      else if (Object.hasOwn(MODS, m)) mods |= MODS[m as keyof typeof MODS]
+      else return null
+    }
+  }
+  const named = Object.hasOwn(KEY_CODE, key) ? KEY_CODE[key] : undefined
+  if (named !== undefined) return { kind: CLAIM_KIND.key, flags: CHORD_FLAG.named, mods, key: named }
+  const cp = key.codePointAt(0)
+  if (cp === undefined || String.fromCodePoint(cp) !== key) return null
+  return { kind: CLAIM_KIND.key, flags: 0, mods, key: cp }
+}
 
 /** Why a tween ended — mirror animation.rs `end_reason`. */
 export const END_REASON = ["finished", "cancelled", "retargeted", "removed"] as const
@@ -706,14 +779,22 @@ export class Encoder {
     this.ops.u32(start)
     this.ops.u32(spans.length)
   }
-  inputConfig(id: number, fontSize: number, color: number, placeholder: string, multiline: boolean) {
+  /** `submit`: a `SUBMIT_KEY` value. */
+  inputConfig(
+    id: number,
+    fontSize: number,
+    color: number,
+    placeholder: string,
+    multiline: boolean,
+    submit: number,
+  ) {
     const s = this.strRef(placeholder)
     this.ops.u8(Op.InputConfig)
     this.ops.u32(id)
     this.ops.f32(fontSize)
     this.ops.u32(color >>> 0)
     this.ops.u32(s)
-    this.ops.u8(multiline ? 1 : 0)
+    this.ops.u8((multiline ? 1 : 0) | submit << 1)
   }
   role(id: number, role: number) {
     this.ops.u8(Op.Role)
@@ -734,6 +815,22 @@ export class Encoder {
     this.ops.u32(id)
     this.ops.u32(listeners >>> 0)
     this.ops.u8((focusable ? 1 : 0) | (selectable ? 2 : 0))
+  }
+  /** A node's claim set (id NIL: the window list), replacing the one
+   * before; an empty set removes it. */
+  claims(id: number, version: number, claims: readonly Claim[]) {
+    const b = this.ops
+    b.u8(Op.Claims)
+    b.u32(id)
+    b.u32(version >>> 0)
+    b.u16(claims.length)
+    for (const c of claims) {
+      b.u8(c.kind)
+      b.u8(c.flags)
+      b.u8(c.mods)
+      b.u8(0)
+      b.u32(c.key)
+    }
   }
   surface(id: number, kind: number, params: readonly number[]) {
     this.ops.u8(Op.Surface)
@@ -775,6 +872,23 @@ export class Encoder {
     this.ops.u8(Cmd.ScrollTo)
     this.ops.f32(x)
     this.ops.f32(y)
+  }
+  /** Replaces the selection of the focused input, when it is `id` or
+   * inside it, with `text` (a paste claim's answer). */
+  cmdInsertText(id: number, text: string) {
+    const s = this.strRef(text)
+    this.ops.u8(Op.Command)
+    this.ops.u32(id)
+    this.ops.u8(Cmd.InsertText)
+    this.ops.u32(s)
+  }
+  /** Writes plain text to the clipboard; `id` may be NIL. */
+  cmdWriteClipboard(id: number, text: string) {
+    const s = this.strRef(text)
+    this.ops.u8(Op.Command)
+    this.ops.u32(id)
+    this.ops.u8(Cmd.WriteClipboard)
+    this.ops.u32(s)
   }
 
   listConfig(id: number, overscan: number, fallback: number, templates: readonly ListTemplate[]) {

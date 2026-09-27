@@ -3,12 +3,13 @@
 
 use std::time::Instant;
 
+use crate::claims::{KeyMatch, claim_kind};
 use crate::events::{self, Event, Key, KeyInput, Mods, UiEvent, mask, out_kind};
 use craie_core::geom::{Affine, Point};
 
 use crate::geom::Rect;
 use crate::host::{NodeFlags, NodeId, ROOT};
-use crate::input::KeyAction;
+use crate::input::{KeyAction, SubmitKey};
 use crate::mutation::NodeKind;
 use crate::ui::Ui;
 
@@ -292,8 +293,12 @@ impl Ui {
             Event::KeyDown(k) => self.key_down(k),
             Event::KeyUp(k) => {
                 if let Some(f) = self.focus {
+                    let composing = self
+                        .inputs
+                        .get(f.0)
+                        .is_some_and(|s| s.editor.is_composing());
                     let mut e = self.event(out_kind::KEY_UP, f);
-                    e.key = k.key.code();
+                    e.key = events::key_bits(k, composing);
                     e.text = k.char.clone().unwrap_or_default();
                     self.emit_path(f, e);
                 }
@@ -317,6 +322,13 @@ impl Ui {
                     self.input_changed(f);
                     self.emit_change(f);
                 }
+            }
+            // Claimed on the path under the drop, or on the focus path
+            // when the position is unknown (off the window: see
+            // `Event::Drop`). Paths can hold newlines but not NUL.
+            Event::Drop { x, y, paths } => {
+                let hit = self.hit_test(*x, *y).or(self.focus);
+                self.pointer_claim(hit, claim_kind::DROP, *x, *y, paths.join("\0"));
             }
             Event::Focus(gained) => {
                 if !gained {
@@ -432,6 +444,9 @@ impl Ui {
         if let Some(hit) = hit {
             self.emit_pointer(hit, out_kind::POINTER_DOWN, x, y, button, mods);
         }
+        if button == crate::events::Button::Secondary {
+            self.pointer_claim(hit, claim_kind::CONTEXT_MENU, x, y, String::new());
+        }
     }
 
     fn emit_pointer(
@@ -449,11 +464,7 @@ impl Ui {
             crate::events::Button::Middle => 3,
             crate::events::Button::Other(b) => b as u32,
         };
-        let key = (mods.shift as u32)
-            | ((mods.ctrl as u32) << 1)
-            | ((mods.alt as u32) << 2)
-            | ((mods.meta as u32) << 3)
-            | (button_code << 8);
+        let key = mods.bits() as u32 | button_code << 8;
         // `a`/`b` carry coordinates relative to each receiving node's
         // border box — the offsets behaviors (sliders, drags) need.
         let bit = events::mask_for(kind);
@@ -484,7 +495,30 @@ impl Ui {
     }
 
     fn key_down(&mut self, k: &KeyInput) {
-        // Tab traversal beats everything.
+        let focused_input = self
+            .focus
+            .filter(|&f| self.host.kind(f) == Some(NodeKind::Input));
+        let composing = focused_input.is_some_and(|f| {
+            self.inputs
+                .get(f.0)
+                .is_some_and(|s| s.editor.is_composing())
+        });
+
+        // Claims beat every default. None match while an IME composes.
+        if !composing {
+            if let Some((node, found, version)) = self.key_claim(k, focused_input.is_some()) {
+                if let KeyMatch::Claim(i) = found {
+                    let e = self.claim_event(node, claim_kind::KEY, i, version);
+                    self.pending_events.push(e);
+                }
+                return;
+            }
+            if self.clipboard_claim(k, focused_input) || self.context_menu_key(k) {
+                return;
+            }
+        }
+
+        // Tab traversal.
         if k.key == Key::Tab && !k.mods.ctrl && !k.mods.meta {
             let focusables = self.focusables();
             if !focusables.is_empty() {
@@ -505,78 +539,155 @@ impl Ui {
             }
         }
 
-        let focused_input = self
-            .focus
-            .filter(|&f| self.host.kind(f) == Some(NodeKind::Input));
-
         // Text selection keys, outside inputs: copy, select all, clear.
         if focused_input.is_none() && self.text_selection.is_some() {
-            let command = k.mods.meta || k.mods.ctrl;
-            match (command, k.char.as_deref(), k.key) {
-                (true, Some("c"), _) => {
-                    let text = self.selected_text();
-                    if !text.is_empty() {
-                        self.inputs.clipboard.set(&text);
-                    }
+            if k.is(Mods::COMMAND, 'c') {
+                let text = self.selected_text();
+                if !text.is_empty() {
+                    self.inputs.clipboard.set(&text);
                 }
-                (true, Some("a"), _) => self.select_domain(),
-                (false, _, Key::Escape) => self.set_text_selection(None),
-                _ => {}
+            } else if k.is(Mods::COMMAND, 'a') {
+                self.select_domain();
+            } else if k.key == Key::Escape && k.mods == Mods::default() {
+                self.set_text_selection(None);
             }
         }
 
-        if let Some(id) = focused_input {
-            if k.key == Key::Escape {
-                self.set_focus(None);
-            }
-            let multiline = self.inputs.get(id.0).map(|s| s.multiline).unwrap_or(false);
-            if let Some(action) = key_action(k, multiline) {
-                match action {
-                    KeyAction::Submit => {
-                        let mut e = self.event(out_kind::SUBMIT, id);
-                        e.text = self.inputs.text(id.0);
-                        self.pending_events.push(e);
-                    }
-                    _ => {
-                        self.inputs.act(&mut self.text, id.0, &action);
-                        self.input_changed(id);
-                        self.emit_change(id);
-                    }
+        if let Some(id) = focused_input
+            && let Some(state) = self.inputs.get(id.0)
+            && let Some(action) = key_action(k, state.multiline, state.submit)
+        {
+            match action {
+                KeyAction::Submit => {
+                    let mut e = self.event(out_kind::SUBMIT, id);
+                    e.text = self.inputs.text(id.0);
+                    self.pending_events.push(e);
+                }
+                _ => {
+                    self.inputs.act(&mut self.text, id.0, &action);
+                    self.input_changed(id);
+                    self.emit_change(id);
                 }
             }
         }
 
-        // Keys go to the focused node's path (or every KEY listener when
-        // nothing is focused — global shortcuts).
-        let mut e = UiEvent::new(out_kind::KEY_DOWN, 0);
-        e.key = k.key.code();
-        e.text = k.char.clone().unwrap_or_default();
-        match self.focus {
-            Some(f) => self.emit_path(f, e),
-            None => {
-                // Global delivery: every node with a key listener.
-                let mut stack = std::mem::take(&mut self.walk);
-                stack.clear();
-                stack.extend(self.host.children(ROOT).iter().rev());
-                while let Some(id) = stack.pop() {
-                    if self.host.node(id).is_none() {
-                        continue;
-                    }
-                    if self.host.interaction(id).listeners & mask::KEY != 0 {
-                        e.node = id.0;
-                        e.generation = self.host.node(id).map_or(0, |n| n.generation);
-                        self.pending_events.push(e.clone());
-                    }
-                    stack.extend(self.host.children(id).iter().rev());
-                }
-                self.walk = stack;
-            }
+        // Unclaimed keys go to the focused node's path; with nothing
+        // focused, to no one (window shortcuts are claims).
+        if let Some(f) = self.focus {
+            let mut e = self.event(out_kind::KEY_DOWN, f);
+            e.key = events::key_bits(k, composing);
+            e.text = k.char.clone().unwrap_or_default();
+            self.emit_path(f, e);
+        }
+    }
+
+    /// The key claim a press finds: the first match on the focused node
+    /// and its ancestors, then on the window list (only claims allowed
+    /// in inputs while one has focus). The claimer is NIL for the window.
+    fn key_claim(&self, k: &KeyInput, in_input: bool) -> Option<(NodeId, KeyMatch, u32)> {
+        if self.host.claims.is_empty() {
+            return None;
+        }
+        let on_path = self.focus.and_then(|f| {
+            self.ancestors(f).find_map(|n| {
+                let set = self.host.claims.get(&n.0)?;
+                Some((n, set.key(k, false)?, set.version))
+            })
+        });
+        on_path.or_else(|| {
+            let set = self.host.claims.get(&NodeId::NIL.0)?;
+            Some((NodeId::NIL, set.key(k, in_input)?, set.version))
+        })
+    }
+
+    /// The first claim of `kind` on `from` and its ancestors: the
+    /// claimer, the claim's index, and its set's version.
+    fn path_claim(&self, from: Option<NodeId>, kind: u8) -> Option<(NodeId, usize, u32)> {
+        if self.host.claims.is_empty() {
+            return None;
+        }
+        self.ancestors(from?).find_map(|n| {
+            let set = self.host.claims.get(&n.0)?;
+            Some((n, set.find(kind)?, set.version))
+        })
+    }
+
+    /// A `CLAIM` event: claim `index` (of `kind`) of `node`'s set, as of
+    /// `version`.
+    fn claim_event(&self, node: NodeId, kind: u8, index: usize, version: u32) -> UiEvent {
+        let mut e = self.event(out_kind::CLAIM, node);
+        e.key = kind as u32 | (index as u32) << 8;
+        e.revision = version;
+        e
+    }
+
+    /// Mod+C, X or V, claimed on the focus path (with nothing focused,
+    /// the text selection's domain and its ancestors): a claim event
+    /// with the clipboard's text (paste) or the selected text (copy,
+    /// cut) instead of the default. The answer comes back as
+    /// `InsertText` and `WriteClipboard` commands.
+    fn clipboard_claim(&mut self, k: &KeyInput, input: Option<NodeId>) -> bool {
+        let kind = if k.is(Mods::COMMAND, 'c') {
+            claim_kind::COPY
+        } else if k.is(Mods::COMMAND, 'x') {
+            claim_kind::CUT
+        } else if k.is(Mods::COMMAND, 'v') {
+            claim_kind::PASTE
+        } else {
+            return false;
+        };
+        let from = self.focus.or_else(|| self.text_selection.map(|s| s.domain));
+        let Some((node, i, version)) = self.path_claim(from, kind) else {
+            return false;
+        };
+        let mut e = self.claim_event(node, kind, i, version);
+        e.text = match (kind, input) {
+            (claim_kind::PASTE, _) => self.inputs.clipboard.get().unwrap_or_default(),
+            (_, Some(id)) => self.inputs.selected_text(id.0).unwrap_or_default(),
+            (_, None) => self.selected_text(),
+        };
+        self.pending_events.push(e);
+        true
+    }
+
+    /// The ContextMenu key or Shift+F10, claimed on the focus path: a
+    /// claim event at the focused node's center.
+    fn context_menu_key(&mut self, k: &KeyInput) -> bool {
+        let menu = (k.key == Key::ContextMenu && k.mods == Mods::default())
+            || (k.key == Key::F(10) && k.mods.bits() == Mods::SHIFT);
+        if !menu {
+            return false;
+        }
+        let Some((node, i, version)) = self.path_claim(self.focus, claim_kind::CONTEXT_MENU) else {
+            return false;
+        };
+        let focus = self.focus.unwrap_or(node);
+        let size = self.layouts.data(focus).rect.size;
+        let c = self
+            .node_to_window(focus)
+            .apply(Point::new(size.width / 2.0, size.height / 2.0));
+        let mut e = self.claim_event(node, claim_kind::CONTEXT_MENU, i, version);
+        e.x = c.x;
+        e.y = c.y;
+        self.pending_events.push(e);
+        true
+    }
+
+    /// A pointer's claims: a secondary press claimed as a context menu,
+    /// or files dropped, on the path under the pointer.
+    fn pointer_claim(&mut self, hit: Option<NodeId>, kind: u8, x: f32, y: f32, text: String) {
+        if let Some((node, i, version)) = self.path_claim(hit, kind) {
+            let mut e = self.claim_event(node, kind, i, version);
+            e.x = x;
+            e.y = y;
+            e.text = text;
+            self.pending_events.push(e);
         }
     }
 
     /// An input's buffer, caret, selection, or composition changed:
     /// relayout it and redraw its chunk.
-    fn input_changed(&mut self, id: NodeId) {
+    pub(crate) fn input_changed(&mut self, id: NodeId) {
         self.host.mark_layout(id);
         self.host.dirty.content.push(id.0);
         self.force_paint = true;
@@ -621,11 +732,29 @@ impl Ui {
     }
 }
 
-/// Maps a normalized key event to an editing action. `meta` (Cmd/Super)
-/// takes priority, then `alt` (word granularity), then `shift`
-/// (selection). Returns `None` when the key means nothing to an input.
-fn key_action(k: &KeyInput, multiline: bool) -> Option<KeyAction> {
+/// Maps a normalized key event to an editing action. Command chords
+/// (`mod+c`, exact modifiers, `KeyInput::is`) come first, then `alt`
+/// (word granularity), then `shift` (selection). Returns `None` when the
+/// key means nothing to an input.
+fn key_action(k: &KeyInput, multiline: bool, submit: SubmitKey) -> Option<KeyAction> {
     let m = &k.mods;
+    // Enter per the submit key, with exact modifiers (Marbre's rule).
+    // Shift+Enter is a newline in a multiline input.
+    if k.key == Key::Enter {
+        let (plain, shift) = (m.bits() == 0, m.bits() == Mods::SHIFT);
+        let submits = match submit {
+            SubmitKey::Enter => plain,
+            SubmitKey::ModEnter => m.bits() == Mods::COMMAND,
+            SubmitKey::None => false,
+        };
+        return if submits {
+            Some(KeyAction::Submit)
+        } else if multiline && (plain || shift) {
+            Some(KeyAction::Newline)
+        } else {
+            None
+        };
+    }
     // Printable text inserts unless a command chord is held.
     if !m.meta
         && !m.ctrl
@@ -635,22 +764,22 @@ fn key_action(k: &KeyInput, multiline: bool) -> Option<KeyAction> {
         return Some(KeyAction::Insert(t.clone()));
     }
     if m.meta || m.ctrl {
-        let c = k.char.as_deref().unwrap_or("");
-        return Some(match (c, k.key) {
-            ("a", _) => KeyAction::SelectAll,
-            ("c", _) => KeyAction::Copy,
-            ("x", _) => KeyAction::Cut,
-            ("v", _) => KeyAction::Paste,
-            ("z", _) if m.shift => KeyAction::Redo,
-            ("z", _) | ("y", _) => KeyAction::Undo,
-            (_, Key::Left) if m.shift => KeyAction::SelectTextStart,
-            (_, Key::Left) => KeyAction::MoveTextStart,
-            (_, Key::Right) if m.shift => KeyAction::SelectTextEnd,
-            (_, Key::Right) => KeyAction::MoveTextEnd,
-            (_, Key::Up) if m.shift => KeyAction::SelectTextStart,
-            (_, Key::Up) => KeyAction::MoveTextStart,
-            (_, Key::Down) if m.shift => KeyAction::SelectTextEnd,
-            (_, Key::Down) => KeyAction::MoveTextEnd,
+        let command = |c| k.is(Mods::COMMAND, c);
+        return Some(match k.key {
+            _ if command('a') => KeyAction::SelectAll,
+            _ if command('c') => KeyAction::Copy,
+            _ if command('x') => KeyAction::Cut,
+            _ if command('v') => KeyAction::Paste,
+            _ if command('z') => KeyAction::Undo,
+            _ if command('y') || k.is(Mods::COMMAND | Mods::SHIFT, 'z') => KeyAction::Redo,
+            Key::Left if m.shift => KeyAction::SelectTextStart,
+            Key::Left => KeyAction::MoveTextStart,
+            Key::Right if m.shift => KeyAction::SelectTextEnd,
+            Key::Right => KeyAction::MoveTextEnd,
+            Key::Up if m.shift => KeyAction::SelectTextStart,
+            Key::Up => KeyAction::MoveTextStart,
+            Key::Down if m.shift => KeyAction::SelectTextEnd,
+            Key::Down => KeyAction::MoveTextEnd,
             _ => return None,
         });
     }
@@ -660,15 +789,7 @@ fn key_action(k: &KeyInput, multiline: bool) -> Option<KeyAction> {
         Key::Backspace => KeyAction::Backspace,
         Key::Delete if m.alt => KeyAction::DeleteWord,
         Key::Delete => KeyAction::Delete,
-        Key::Enter => {
-            if multiline {
-                KeyAction::Newline
-            } else {
-                KeyAction::Submit
-            }
-        }
-        Key::Escape => return None, // handled by the caller as blur intent
-        Key::Tab => return None,    // traversal handled above
+        Key::Tab => return None, // traversal handled above
         Key::Left if sel && m.alt => KeyAction::SelectWordLeft,
         Key::Left if sel => KeyAction::SelectLeft,
         Key::Left if m.alt => KeyAction::MoveWordLeft,
@@ -685,6 +806,6 @@ fn key_action(k: &KeyInput, multiline: bool) -> Option<KeyAction> {
         Key::Home => KeyAction::MoveLineStart,
         Key::End if sel => KeyAction::SelectLineEnd,
         Key::End => KeyAction::MoveLineEnd,
-        Key::PageUp | Key::PageDown | Key::Unknown => return None,
+        _ => return None,
     })
 }

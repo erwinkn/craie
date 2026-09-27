@@ -1,7 +1,9 @@
 // Generates test/fixture.bin: one CRW2 transaction covering every op the
 // Rust decoder must accept. Regenerate after wire format changes:
 //   bun packages/bridge/scripts/gen-fixture.ts
-import { Encoder, NIL, ROLE, SURFACE, transformMatrix } from "../src/wire.js"
+import {
+  CHORD_FLAG, CLAIM_KIND, Encoder, NIL, ROLE, SUBMIT_KEY, SURFACE, parseChord, transformMatrix,
+} from "../src/wire.js"
 
 const enc = new Encoder()
 enc.create(0, 0)                                    // view
@@ -36,7 +38,7 @@ enc.layout(0, {
 enc.spatial(0, transformMatrix([{ translateX: 3 }, { scale: 2 }]), 0.75)
 enc.paint(0, 0x1122_33ff, 6.5, { color: 0xff00_00ff, width: 2 })
 enc.create(2, 2)                                    // input
-enc.inputConfig(2, 15, 0xffff_ffff, "type here", true)
+enc.inputConfig(2, 15, 0xffff_ffff, "type here", true, SUBMIT_KEY["mod+enter"])
 enc.interaction(2, 0x1ff, true)                     // all listeners, focusable
 enc.role(2, ROLE.multilineTextInput)
 enc.create(3, 3)                                    // surface
@@ -53,7 +55,15 @@ enc.place(0, 2, NIL)
 enc.cmdSetText(2, "seed")
 enc.cmdScrollTo(0, 4, 8)
 enc.cmdFocus(2)
+enc.cmdInsertText(2, "!")                           // replaces the selection
 enc.cmdBlur(2)
+enc.cmdWriteClipboard(NIL, "copied")
+enc.claims(2, 7, [                                  // claim sets
+  parseChord("mod+shift+k", false)!,
+  { ...parseChord("escape", false)!, flags: CHORD_FLAG.named | CHORD_FLAG.noRepeat },
+  { kind: CLAIM_KIND.paste, flags: 0, mods: 0, key: 0 },
+])
+enc.claims(NIL, 3, [{ ...parseChord("shift+?", false)!, flags: CHORD_FLAG.inInput }])
 enc.detach(1)
 enc.place(0, 1, NIL)
 enc.remove(1)

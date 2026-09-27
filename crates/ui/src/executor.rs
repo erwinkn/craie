@@ -13,6 +13,7 @@ use craie_core::geom::Affine;
 use craie_layout::LayoutRow;
 
 use crate::animation::{Prop, Value};
+use crate::claims::{Claim, claim_kind};
 use crate::host::{Host, MAX_NODES, NodeId};
 use crate::list::{IdIndex, MAX_ITEMS};
 use crate::mutation::{Command, ItemDesc, Mutation, NIL, NodeKind, TextSpan, Transaction};
@@ -50,6 +51,9 @@ fn finite(v: f32) -> bool {
 /// Checks `spans` as a paragraph style list over `text`.
 /// Spans per paragraph: pointer events carry `span + 1` in 16 key bits.
 pub const MAX_SPANS: usize = 0xFFFF;
+
+/// Claims per node: the wire's `u16` count.
+pub const MAX_CLAIMS: usize = 0xFFFF;
 
 fn valid_spans(text: &str, spans: &[TextSpan], families: usize) -> Result<(), WireError> {
     let Some(first) = spans.first() else {
@@ -358,6 +362,20 @@ pub fn validate(host: &Host, txn: &Transaction<'_>) -> Result<(), WireError> {
             | Mutation::Interaction { id, .. } => {
                 need_live(&o, *id, "semantics on an absent node")?;
             }
+            Mutation::Claims { id, claims, .. } => {
+                // The window list (NIL) holds key claims only.
+                if *id != NIL {
+                    need_live(&o, *id, "claims on an absent node")?;
+                } else if claims.iter().any(|c| c.kind != claim_kind::KEY) {
+                    return Err(invalid("a window claim that is not a key"));
+                }
+                if claims.len() > MAX_CLAIMS {
+                    return Err(invalid("too many claims on one node"));
+                }
+                if !claims.iter().all(Claim::valid) {
+                    return Err(invalid("malformed claim"));
+                }
+            }
             Mutation::Surface { id, .. } => {
                 if o.kind(*id) != Some(NodeKind::Surface) {
                     return Err(invalid("surface data on a non-surface node"));
@@ -374,7 +392,10 @@ pub fn validate(host: &Host, txn: &Transaction<'_>) -> Result<(), WireError> {
                 _ => return Err(invalid("payload on a node without one")),
             },
             Mutation::Command { id, cmd } => {
-                need_live(&o, *id, "command on an absent node")?;
+                // The clipboard is the window's: NIL may write it.
+                if !(*id == NIL && matches!(cmd, Command::WriteClipboard(_))) {
+                    need_live(&o, *id, "command on an absent node")?;
+                }
                 match cmd {
                     Command::SetText(_) if o.kind(*id) != Some(NodeKind::Input) => {
                         return Err(invalid("set text on a non-input node"));
@@ -697,10 +718,14 @@ impl Ui {
                 color,
                 placeholder,
                 multiline,
+                submit,
             } => {
                 let metrics =
                     self.inputs
                         .configure(*id, *font_size, *color, placeholder, *multiline);
+                if let Some(state) = self.inputs.get_mut(*id) {
+                    state.submit = *submit;
+                }
                 if metrics {
                     self.host.mark_layout(NodeId(*id));
                     self.host.revs.text_metrics.bump();
@@ -751,6 +776,20 @@ impl Ui {
                     i.selectable = *selectable;
                     self.host.revs.semantic.bump();
                     self.host.dirty.semantic.push(*id);
+                }
+            }
+            Mutation::Claims {
+                id,
+                version,
+                claims,
+            } => {
+                if claims.is_empty() {
+                    self.host.claims.remove(id);
+                } else {
+                    let set = self.host.claims.entry(*id).or_default();
+                    set.version = *version;
+                    set.claims.clear();
+                    set.claims.extend_from_slice(claims);
                 }
             }
             Mutation::Surface { id, kind, params } => {

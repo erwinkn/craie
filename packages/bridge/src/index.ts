@@ -6,7 +6,9 @@
 import React, {
   createContext,
   createElement,
+  useContext,
   useEffect,
+  useLayoutEffect,
   useState,
   type ReactNode,
   type Ref,
@@ -21,8 +23,13 @@ import {
 import {
   CraieHost,
   onFrameStats as onFrameStatsInternal,
+  type ClipboardEvt,
+  type ContextMenuEvt,
+  type DropEvt,
   type FrameStats as FrameStatsReport,
+  type Hotkey,
   type HostNode,
+  type KeyClaim,
   type SurfaceParam,
   type Transport,
 } from "./host.js"
@@ -38,6 +45,7 @@ import {
   type ListTemplate,
   type ScrollAnchor,
   type StyleProps,
+  type SubmitKey,
 } from "./wire.js"
 
 export { attachApp, decodeEvents, loadBindings, runApp, NativeTransport } from "./native.js"
@@ -51,18 +59,31 @@ export {
   NIL,
   ROLE,
   SURFACE,
+  parseChord,
   transformMatrix,
   type AccessibilityRole,
   type ItemDesc,
   type ListTemplate,
   type ScrollAnchor,
   type StyleProps,
+  type SubmitKey,
   type Timing,
   type Transform,
   type TransformStep,
   type Transitions,
 } from "./wire.js"
-export type { FrameStats, HostNode, SurfaceParam, Transport, UiEvent } from "./host.js"
+export type {
+  ClipboardEvt,
+  ContextMenuEvt,
+  DropEvt,
+  FrameStats,
+  Hotkey,
+  HostNode,
+  KeyClaim,
+  SurfaceParam,
+  Transport,
+  UiEvent,
+} from "./host.js"
 export { onFrameStats } from "./host.js"
 
 /** Pointer position + target passed to pointer/wheel listeners. `x`/`y`
@@ -86,10 +107,23 @@ export interface KeyEvt {
   target: HostNode
   x: number
   y: number
-  /** Named-key code; 0 when the press produced text instead. */
+  /** Named-key code (wire.ts `KEY_CODE`); 0 for a character key. */
   key: number
-  /** Printable character for unknown keys. */
+  /** The character the key gives on the current layout, Shift and Alt
+   * applied, Ctrl and Cmd not (the web's `event.key`): "O" for Shift+O. */
   char: string
+  shift: boolean
+  ctrl: boolean
+  alt: boolean
+  meta: boolean
+  /** The platform's auto-repeat of a held key. */
+  repeat: boolean
+  /** An IME composes: the key belongs to it. */
+  composing: boolean
+  /** The physical key as the web's `event.code`: "KeyC" for the C
+   * position on any layout, "Digit1", "Slash", "Enter", "F5"; "" for
+   * keys Craie doesn't name. */
+  code: string
 }
 export interface ScrollEvt {
   target: HostNode
@@ -112,6 +146,23 @@ export interface ListenerProps {
   onFocus?: (e: { target: HostNode }) => void
   onBlur?: (e: { target: HostNode }) => void
   onScroll?: (e: ScrollEvt) => void
+  /** Keys this node claims while it or a descendant has focus: native
+   * skips its own handling and runs the first matching claim. */
+  keymap?: KeyClaim[]
+  /** Claims paste (focus inside this node): native does not insert, and
+   * the returned text replaces the input's selection. */
+  onPaste?: (e: ClipboardEvt) => string | void
+  /** Claims copy of the focused input's or the selection's text: the
+   * returned text goes to the clipboard. */
+  onCopy?: (e: ClipboardEvt) => string | void
+  /** Claims cut: the returned text goes to the clipboard, and the
+   * input's selection is deleted; nothing happens without a return. */
+  onCut?: (e: ClipboardEvt) => string | void
+  /** Claims file drops under the pointer. */
+  onDrop?: (e: DropEvt) => void
+  /** Claims context-menu requests: a secondary press here, or the
+   * ContextMenu key or Shift+F10 with focus inside. */
+  onContextMenu?: (e: ContextMenuEvt) => void
 }
 
 export interface ViewProps extends ListenerProps {
@@ -210,8 +261,35 @@ export interface TextInputProps extends ListenerProps {
    * Native reports edits through `onChangeText`. */
   value?: string
   onChangeText?: (text: string) => void
+  /** Enter submits (per `submitKey`) only when set; without it, Enter
+   * in a multiline input is a newline. */
   onSubmit?: (text: string) => void
+  /** Which Enter submits: `enter` (default; Shift+Enter too when single
+   * line) or `mod+enter`. Other Enters in a multiline input insert a
+   * newline. */
+  submitKey?: SubmitKey
   hidden?: boolean
+}
+
+const HostContext = createContext<CraieHost | null>(null)
+
+/** Window-level shortcuts, matched after every claim on the focus path
+ * and, unless `allowInInput`, not while a text input has focus. The
+ * window list is every mounted hook's bindings in mount order; the first
+ * match wins. */
+export function useHotkeys(bindings: readonly Hotkey[]) {
+  const host = useContext(HostContext)
+  const [owner] = useState(() => ({}))
+  useLayoutEffect(() => {
+    host?.setHotkeys(owner, bindings)
+  })
+  useLayoutEffect(() => () => host?.setHotkeys(owner, null), [host, owner])
+}
+
+/** Writes plain text to the system clipboard. */
+export function useClipboard(): { write(text: string): void } {
+  const host = useContext(HostContext)
+  return { write: (text: string) => host?.writeClipboard(text) }
 }
 
 /** The latest native frame statistics (`null` until the first report).
@@ -532,7 +610,10 @@ export class Root {
     )
   }
   render(node: ReactNode) {
-    reconciler.updateContainer(node, this.container, null, null)
+    reconciler.updateContainer(
+      createElement(HostContext.Provider, { value: this.host }, node),
+      this.container, null, null,
+    )
   }
   renderSync(node: ReactNode) {
     reconciler.flushSyncFromReconciler(() => this.render(node))
@@ -551,7 +632,7 @@ function eventPriority(kind: number): number {
     case EVENT_KIND.pointerDown: case EVENT_KIND.pointerUp:
     case EVENT_KIND.keyDown: case EVENT_KIND.keyUp:
     case EVENT_KIND.focus: case EVENT_KIND.blur:
-    case EVENT_KIND.change: case EVENT_KIND.submit:
+    case EVENT_KIND.change: case EVENT_KIND.submit: case EVENT_KIND.claim:
       return DiscreteEventPriority
     case EVENT_KIND.pointerMove: case EVENT_KIND.pointerEnter: case EVENT_KIND.pointerLeave:
     case EVENT_KIND.wheel: case EVENT_KIND.scroll:

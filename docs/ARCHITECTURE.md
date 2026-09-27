@@ -179,7 +179,15 @@ step 3c: start, size, color, weight, flags for italic, underline, and
 line-through, a family string reference or NIL, letter spacing, and
 line height; span zero is the base, and a paragraph has no family of
 its own). The interaction op's flag byte carries focusable and
-selectable; unknown bits fail decoding. Ops are u8-tagged,
+selectable; unknown bits fail decoding. The claims op (0x61, protocol
+4) replaces a node's claim set, or the window list's (NIL, key claims
+only): a version u32, a count u16, then per claim a kind, flags,
+modifiers, a pad byte, and a key u32 (a named key's code or a
+character). Decoding rejects unknown kinds and flags, modifiers past
+the four, and keys that name nothing. The input config's flag byte
+carries multiline (bit 0) and the submit key (bits 1 and 2). Commands
+add `InsertText` (a paste claim's answer) and `WriteClipboard` (copy
+and cut; NIL may send it). Ops are u8-tagged,
 grouped by family in the high nibble. `wire::decode` yields a
 `Transaction` of `Mutation`s; the Rust builder produces the same type;
 `Ui::execute` validates the whole transaction, then applies it with no
@@ -199,10 +207,10 @@ run during application.
 Op families: structure (create, place, remove), layout style (per-node
 layout inputs), spatial (transform, opacity), paint (fill, border,
 radius, colors), text (paragraph spans), semantics (role, label),
-interaction (listener mask, focusable), list (item count, estimates,
+interaction (listener mask, focusable), claims, list (item count, estimates,
 item descriptions), animation (transitions, animate command), payload
 (typed-array bytes for surfaces), command (focus, blur, setText,
-scrollTo).
+scrollTo, insertText, writeClipboard).
 
 **Experiments.**
 - Per-transaction style intern table versus inline styles on every
@@ -221,7 +229,8 @@ scrollTo).
   components and surface records fed by payload ops.
 - The ack-gated id free list is removed. JS recycles ids immediately.
   Outbound events carry the node generation and JS drops stale ones.
-  The ack remains only to resolve `flush()`.
+  The ack remains only to resolve `flush()` and, since protocol 4, to
+  retire the handlers of replaced claim sets.
 - Span lists intern per transaction like styles (2026-09-23): most
   paragraphs share one style, and without interning CRW2 cost 9% more
   bytes than CRW1 on the 5k-row mount (see `EXPERIMENTS.md`).
@@ -990,6 +999,29 @@ before paint (list rows change natively), the highlighted ranges are
 recomputed from the tree; each selected paragraph draws its highlight
 from its placements in its own chunk, and only the chunks whose range
 changed rebuild. The rebuild oracle carries the selection.
+Keys and claims (`claims.rs`, protocol 4): a key record packs the
+modifiers, repeat, composing, the named key, and the physical key's
+US-layout character into `key`, and carries the logical character
+(Shift and Alt applied, as the web's `event.key`) as text. A claim set
+on a node, or the window list (`useHotkeys`), takes a gesture before
+any default. A key looks at the focused node, its ancestors, then the
+window list, which matches only claims that allow inputs while a text
+input has focus; nothing matches while an IME composes, and a claim
+with `repeat: false` swallows its auto-repeat. A chord is exact
+modifiers plus a named key or the lower-cased character; with Alt and
+a letter or digit, or a non-Latin letter, the physical key. Native
+editing commands use the same rule with exact `mod`. Paste, copy, and
+cut are claimed on the focus path (the selection's domain when nothing
+has focus), drops and secondary presses on the path under the pointer
+(a drop at an unknown position on the focus path; on macOS Ctrl+click
+is a secondary press), and the ContextMenu key and Shift+F10 on the focus path at the focused
+node's center. A match sends one `CLAIM` event (claimer, kind and
+index, the set's version, and the clipboard text, the selected text,
+the dropped paths, or the position) and no default; JS answers with
+`InsertText` or `WriteClipboard`. An unclaimed key goes to the focus
+path, and to no one when nothing has focus. Escape has no action in an
+input; Enter follows the input's submit key (`enter`, `mod+enter`, or
+`none`, with exact modifiers).
 
 **Target.** The same model over the new stores. Pointer ids and types
 rather than mouse-only concepts. Hit testing stays bounds plus clip
@@ -1094,10 +1126,14 @@ event loop, the window, the device, or the render target.
 `worker_thread` and submits CRW2 bytes through `NativeClient.submit`.
 One threadsafe function delivers `ack | events` frames. JS recycles
 ids at once and mirrors each slot's generation; events carry the
-generation and JS drops stale ones; the ack only resolves `flush()`.
-Payload ops copy typed-array bytes once. Protocol version 3 (36-byte
-event records). Delivery is lossless where a promise waits: frames
-carrying animation ends never drop from the session's bounded queue
+generation and JS drops stale ones; the ack resolves `flush()`.
+Payload ops copy typed-array bytes once. Protocol version 4 (36-byte
+event records; claims). The session hands JS its output in native
+order: acks sit between event frames where they happened, so the ack
+of a transaction never overtakes an event raised before it applied,
+and the facade retires a claim set's old handlers on that ack.
+Delivery is lossless where a promise or a user gesture waits: frames
+carrying animation ends or claims never drop from the session's bounded queue
 (the oldest droppable frame goes instead), and a frame the threadsafe
 function's queue refuses waits in the session, in order, until the
 next pump (JS calls `resume` after each frame it takes, which always

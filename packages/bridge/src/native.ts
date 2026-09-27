@@ -71,7 +71,7 @@ export function loadBindings(path?: string): Bindings {
     process.env.CRAIE_NODE ??
     fileURLToPath(new URL("../../../craie-node.node", import.meta.url))
   const bindings = require(resolved) as Bindings
-  if (bindings.craieRuntimeVersion() !== 3) throw Error("Craie native bridge protocol mismatch")
+  if (bindings.craieRuntimeVersion() !== 4) throw Error("Craie native bridge protocol mismatch")
   return bindings
 }
 

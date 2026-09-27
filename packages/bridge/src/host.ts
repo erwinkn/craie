@@ -6,12 +6,18 @@
 // generation, so an event for a previous occupant of an id is dropped.
 
 import {
+  CHORD_FLAG,
+  CLAIM_KIND,
   DECORATION,
   Encoder,
   EVENT_KIND,
   EVENT_MASK,
   NIL,
   ROLE,
+  SUBMIT_KEY,
+  parseChord,
+  type Claim,
+  type SubmitKey,
   layoutPart,
   styleKey,
   transformMatrix,
@@ -51,10 +57,175 @@ export interface UiEvent {
   a: number
   /** Aux float: dy (wheel), scroll y. */
   b: number
-  /** Key code (key events); mirror events.rs `Key::code`. */
+  /** Packed per kind: key records as events.rs `key_bits`, pointer
+   * records mods | button << 8 | span << 16, claims kind | index << 8. */
   key: number
   /** Text payload (change/submit). */
   text: string
+}
+
+/** A key a node claims (`keymap`): native skips its own handling of the
+ * chord (text entry, Tab, Enter, Escape) and JS runs `run`. The first
+ * matching claim on the focused node, then its ancestors, wins. */
+export interface KeyClaim {
+  /** A chord such as `mod+shift+o`, `escape`, `shift+?` (wire.ts
+   * `parseChord`); `mod` is Cmd on Apple platforms and Ctrl elsewhere. */
+  keys: string
+  run: () => void
+  /** The claim applies only while true (default); a false claim lets
+   * the key through. */
+  when?: boolean
+  /** Whether the key's auto-repeat runs it again (default); with
+   * `false` repeats are swallowed. */
+  repeat?: boolean
+}
+
+/** A window-level shortcut (`useHotkeys`): matched after every claim on
+ * the focus path. */
+export interface Hotkey extends KeyClaim {
+  /** Also while a text input has focus. */
+  allowInInput?: boolean
+}
+
+/** The event of a clipboard claim (`onPaste`, `onCopy`, `onCut`): the
+ * clipboard's plain text on paste, the selected text on copy and cut. */
+export interface ClipboardEvt {
+  target: HostNode
+  text: string
+}
+/** Files dropped on a node that claims drops (`onDrop`). */
+export interface DropEvt {
+  target: HostNode
+  x: number
+  y: number
+  paths: string[]
+}
+/** A context-menu request (`onContextMenu`): a secondary press at the
+ * pointer, or the ContextMenu key or Shift+F10 at the focused node's
+ * center. */
+export interface ContextMenuEvt {
+  target: HostNode
+  x: number
+  y: number
+}
+
+/** A claim set as sent (claims.rs): its signature and version, and the
+ * handlers of each version native may still name — the current one, and
+ * older ones until native acks the transaction that replaced them. */
+interface ClaimState {
+  sig: string
+  version: number
+  handlers: Map<number, readonly Function[]>
+}
+
+/** Claims and their handlers, in claim order. */
+interface Declared {
+  claims: Claim[]
+  handlers: Function[]
+}
+
+const APPLE = typeof process !== "undefined" && process.platform === "darwin"
+
+const warned = new Set<string>()
+/** Logs a bad prop once: a typo should not take the app down, nor
+ * flood the console on every render. */
+function warnOnce(msg: string) {
+  if (warned.has(msg)) return
+  warned.add(msg)
+  console.error(`craie: ${msg}`)
+}
+
+/** Props that claim an event kind, in claim order after the keymap. */
+const CLAIM_PROPS = [
+  ["onPaste", CLAIM_KIND.paste],
+  ["onCopy", CLAIM_KIND.copy],
+  ["onCut", CLAIM_KIND.cut],
+  ["onDrop", CLAIM_KIND.drop],
+  ["onContextMenu", CLAIM_KIND.contextMenu],
+] as const
+
+function keyClaims(list: readonly Hotkey[] | undefined, out: Declared, window: boolean) {
+  for (const k of list ?? []) {
+    if (k.when === false) continue
+    const c = parseChord(k.keys, APPLE)
+    if (!c) {
+      warnOnce(`unknown key chord "${k.keys}"`)
+      continue
+    }
+    if (k.repeat === false) c.flags |= CHORD_FLAG.noRepeat
+    if (window && k.allowInInput) c.flags |= CHORD_FLAG.inInput
+    out.claims.push(c)
+    out.handlers.push(k.run)
+  }
+}
+
+/** A node's declared claims: its keymap, then its claim props. */
+function declaredClaims(props: Record<string, any>): Declared {
+  const out: Declared = { claims: [], handlers: [] }
+  keyClaims(props.keymap, out, false)
+  for (const [name, kind] of CLAIM_PROPS) {
+    if (typeof props[name] !== "function") continue
+    out.claims.push({ kind, flags: 0, mods: 0, key: 0 })
+    out.handlers.push(props[name])
+  }
+  return out
+}
+
+function claimSig(claims: readonly Claim[]): string {
+  return claims.map(c => `${c.kind}.${c.flags}.${c.mods}.${c.key}`).join()
+}
+
+function claimsDeclared(props: Record<string, any>): boolean {
+  return props.keymap !== undefined || CLAIM_PROPS.some(([name]) => props[name] !== undefined)
+}
+
+function submitKeyOf(props: Record<string, any>): number {
+  if (!props.onSubmit) return SUBMIT_KEY.none
+  const key = props.submitKey ?? "enter"
+  if (Object.hasOwn(SUBMIT_KEY, key)) return SUBMIT_KEY[key as SubmitKey]
+  warnOnce(`unknown submitKey "${key}", using "enter"`)
+  return SUBMIT_KEY.enter
+}
+
+/** Web `event.code` names of the named keys, by code (`KEY_CODE`). */
+const NAMED_CODE = [
+  "", "Backspace", "Tab", "Enter", "Escape", "ArrowLeft", "ArrowUp", "ArrowRight", "ArrowDown",
+  "Home", "End", "PageUp", "PageDown", "Delete", "Space", "Insert", "ContextMenu",
+]
+/** Web `event.code` names of the punctuation keys, by US character. */
+const PUNCT_CODE: Record<string, string> = {
+  "-": "Minus", "=": "Equal", "[": "BracketLeft", "]": "BracketRight", "\\": "Backslash",
+  ";": "Semicolon", "'": "Quote", "`": "Backquote", ",": "Comma", ".": "Period", "/": "Slash",
+}
+
+/** The web's `event.code` of a key record: the physical key's US
+ * character (`physical`), else the named key (`named`), else "". */
+function webCode(named: number, physical: number): string {
+  if (physical) {
+    const c = String.fromCharCode(physical)
+    if (c >= "a" && c <= "z") return `Key${c.toUpperCase()}`
+    if (c >= "0" && c <= "9") return `Digit${c}`
+    return PUNCT_CODE[c] ?? ""
+  }
+  if (named >= 32 && named <= 55) return `F${named - 31}`
+  return NAMED_CODE[named] ?? ""
+}
+
+/** A key record (events.rs `key_bits`) as a listener's event. */
+function keyEvt(e: { target: HostNode; x: number; y: number }, ev: UiEvent) {
+  const named = (ev.key >>> 8) & 0xff
+  return {
+    ...e,
+    key: named,
+    char: ev.text,
+    shift: !!(ev.key & 1),
+    ctrl: !!(ev.key & 2),
+    alt: !!(ev.key & 4),
+    meta: !!(ev.key & 8),
+    repeat: !!(ev.key & 16),
+    composing: !!(ev.key & 32),
+    code: webCode(named, (ev.key >>> 16) & 0xff),
+  }
 }
 
 /** Item identity bookkeeping of a list node: React keys interned to
@@ -97,6 +268,8 @@ export interface HostNode {
    * `Paragraph::revision`): a span event from another revision was
    * hit-tested against an older span table. */
   paragraphRev?: number
+  /** The claim set sent for this node (`keymap`, `onPaste`...). */
+  claims?: ClaimState
   /** `animate` calls not ended yet, oldest first (native keeps one tween
    * per property, so ends arrive in call order per property). */
   pendingAnims?: { prop: number; resolve: (end: AnimationEnd) => void }[]
@@ -350,6 +523,17 @@ export class CraieHost {
   private flushWaiters = new Map<number, () => void>()
   /** Live nodes by native id — the event-dispatch target table. */
   private nodes = new Map<number, HostNode>()
+  /** Claim versions this commit replaced, and replaced versions by the
+   * transaction that replaced them: their handlers go once native acks
+   * it (it acks after delivering every event raised before). */
+  private replaced: { state: ClaimState; version: number }[] = []
+  private retired: { seq: number; state: ClaimState; version: number }[] = []
+  /** The window list (`useHotkeys`): each hook's bindings, in mount
+   * order, and the claim set they make (latest mounted first). */
+  private hotkeys = new Map<object, readonly Hotkey[]>()
+  private windowClaims: ClaimState = { sig: "", version: 0, handlers: new Map() }
+  /** The window list may have changed: the seal sends it (once). */
+  private windowDirty = false
 
   /** `inEvent` runs each event's dispatch; the root sets React's
    * update priority for its kind around it. */
@@ -365,6 +549,12 @@ export class CraieHost {
   private ack(seq: number) {
     this.flushWaiters.get(seq)?.()
     this.flushWaiters.delete(seq)
+    let done = 0
+    while (done < this.retired.length && this.retired[done]!.seq <= seq) {
+      const r = this.retired[done++]!
+      r.state.handlers.delete(r.version)
+    }
+    if (done) this.retired.splice(0, done)
   }
 
   private alloc(): number {
@@ -389,8 +579,65 @@ export class CraieHost {
 
   private seal() {
     this.flushTexts()
+    if (this.windowDirty) {
+      this.windowDirty = false
+      this.sendClaims(NIL, this.windowClaims, this.windowDeclared())
+    }
     const seq = ++this.seq
+    // Without acks there is no telling when native is done with a
+    // version: its handlers go now rather than never.
+    for (const r of this.replaced) {
+      if (this.transport.onAck) this.retired.push({ seq, ...r })
+      else r.state.handlers.delete(r.version)
+    }
+    this.replaced = []
     this.transport.send(this.encoder.finish(seq))
+  }
+
+  /** Sends a claim set when its declaration changed (a new version),
+   * and keeps the current version's handlers fresh either way: a press
+   * raised before this commit runs this commit's closures, as a DOM
+   * listener would once React re-rendered. Call while a transaction is
+   * open. */
+  private sendClaims(id: number, state: ClaimState, d: Declared) {
+    const sig = claimSig(d.claims)
+    if (sig === state.sig) {
+      if (state.version) state.handlers.set(state.version, d.handlers)
+      return
+    }
+    if (state.version) this.replaced.push({ state, version: state.version })
+    state.sig = sig
+    state.version = (state.version + 1) >>> 0
+    state.handlers.set(state.version, d.handlers)
+    this.encoder.claims(id, state.version, d.claims)
+  }
+
+  /** `useHotkeys`: sets one hook's bindings (`null` drops them). The
+   * window list is every hook's bindings, the latest mounted hook's
+   * first, so an overlay's shortcuts beat the page's; the seal sends it
+   * when its chords changed. */
+  setHotkeys(owner: object, bindings: readonly Hotkey[] | null) {
+    if (bindings) this.hotkeys.set(owner, bindings)
+    else this.hotkeys.delete(owner)
+    const d = this.windowDeclared()
+    const w = this.windowClaims
+    if (claimSig(d.claims) === w.sig) {
+      if (w.version) w.handlers.set(w.version, d.handlers)
+    } else if (!this.windowDirty) {
+      this.windowDirty = true
+      this.ready()
+    }
+  }
+
+  private windowDeclared(): Declared {
+    const d: Declared = { claims: [], handlers: [] }
+    for (const list of [...this.hotkeys.values()].reverse()) keyClaims(list, d, true)
+    return d
+  }
+
+  /** Writes plain text to the system clipboard. */
+  writeClipboard(text: string) {
+    if (this.ready()) this.encoder.cmdWriteClipboard(NIL, text)
   }
 
   /** Text roots whose paragraph (own props or virtual descendants)
@@ -530,6 +777,10 @@ export class CraieHost {
   /** Routes a native event record to the target node's listener props.
    * Events for a previous occupant of the id are dropped. */
   private dispatchEvent(ev: UiEvent) {
+    if (ev.kind === EVENT_KIND.claim) {
+      this.dispatchClaim(ev)
+      return
+    }
     if (ev.kind === EVENT_KIND.frameStats) {
       const stats = {
         fps: ev.x,
@@ -569,8 +820,8 @@ export class CraieHost {
       case EVENT_KIND.pointerEnter: p.onPointerEnter?.(e); break
       case EVENT_KIND.pointerLeave: p.onPointerLeave?.(e); break
       case EVENT_KIND.wheel: p.onWheel?.({ ...e, dx: ev.a, dy: ev.b }); break
-      case EVENT_KIND.keyDown: p.onKeyDown?.({ ...e, key: ev.key, char: ev.text }); break
-      case EVENT_KIND.keyUp: p.onKeyUp?.({ ...e, key: ev.key, char: ev.text }); break
+      case EVENT_KIND.keyDown: p.onKeyDown?.(keyEvt(e, ev)); break
+      case EVENT_KIND.keyUp: p.onKeyUp?.(keyEvt(e, ev)); break
       case EVENT_KIND.focus: p.onFocus?.(e); break
       case EVENT_KIND.blur: p.onBlur?.(e); break
       case EVENT_KIND.change: p.onChangeText?.(ev.text); break
@@ -595,6 +846,45 @@ export class CraieHost {
         p.onRange?.({ first: ev.a, end: ev.b, keepKey, current })
         break
       }
+    }
+  }
+
+  /** A claim matched: runs the handler of the version native matched,
+   * and sends its answer (text to insert, text for the clipboard). */
+  private dispatchClaim(ev: UiEvent) {
+    const n = ev.node === NIL ? undefined : this.nodes.get(ev.node)
+    if (ev.node !== NIL && (!n || n.gen !== ev.generation)) return
+    const state = ev.node === NIL ? this.windowClaims : n?.claims
+    const run = state?.handlers.get(ev.revision)?.[ev.key >>> 8]
+    if (!run) return
+    const kind = ev.key & 0xff
+    if (kind === CLAIM_KIND.key) {
+      run()
+      return
+    }
+    if (!n) return
+    const e = { target: n, x: ev.x, y: ev.y }
+    switch (kind) {
+      case CLAIM_KIND.paste: {
+        const out = run({ target: n, text: ev.text })
+        if (typeof out === "string") this.cmd(n, (enc, id) => enc.cmdInsertText(id, out))
+        break
+      }
+      case CLAIM_KIND.copy: {
+        const out = run({ target: n, text: ev.text })
+        if (typeof out === "string") this.writeClipboard(out)
+        break
+      }
+      case CLAIM_KIND.cut: {
+        const out = run({ target: n, text: ev.text })
+        if (typeof out === "string") {
+          this.writeClipboard(out)
+          this.cmd(n, (enc, id) => enc.cmdInsertText(id, ""))
+        }
+        break
+      }
+      case CLAIM_KIND.drop: run({ ...e, paths: ev.text ? ev.text.split("\0") : [] }); break
+      case CLAIM_KIND.contextMenu: run(e); break
     }
   }
 
@@ -624,6 +914,7 @@ export class CraieHost {
     n.sentInteraction = undefined
     n.spanOwners = undefined
     n.paragraphRev = 0
+    n.claims = undefined
     this.nodes.set(n.id, n)
     if (!this.ready()) return
     const enc = this.encoder
@@ -699,6 +990,7 @@ export class CraieHost {
     }
     if (!n.mounted) return
     this.nodes.delete(n.id)
+    n.claims = undefined
     // Its native end events will not reach it (the generation moves).
     for (const p of n.pendingAnims?.splice(0) ?? []) p.resolve({ finished: false, reason: "removed" })
     if (this.ready()) this.encoder.remove(n.id)
@@ -905,14 +1197,18 @@ export class CraieHost {
       const color32 = color(props.color, 0xffff_ffff)
       const ph = props.placeholder ?? ""
       const multiline = !!props.multiline
+      // Enter submits only with `onSubmit`, as in the kit; without it a
+      // multiline input takes Enter as a newline.
+      const submit = submitKeyOf(props)
       if (
         !mounted ||
         oldProps.fontSize !== props.fontSize ||
         color(oldProps.color, 0xffff_ffff) !== color32 ||
         (oldProps.placeholder ?? "") !== ph ||
-        !!oldProps.multiline !== multiline
+        !!oldProps.multiline !== multiline ||
+        submitKeyOf(oldProps) !== submit
       ) {
-        enc.inputConfig(id, fs, color32, ph, multiline)
+        enc.inputConfig(id, fs, color32, ph, multiline, submit)
       }
       if (!mounted && typeof props.value === "string" && props.value !== "") {
         enc.cmdSetText(id, props.value)
@@ -927,6 +1223,12 @@ export class CraieHost {
         !!oldProps.selectable !== !!props.selectable)
     ) {
       enc.interaction(id, newMask, !!props.focusable, !!props.selectable)
+    }
+
+    // Claims: a new version when the declaration changes; the handlers
+    // follow every commit.
+    if (n.claims || claimsDeclared(props)) {
+      this.sendClaims(id, (n.claims ??= { sig: "", version: 0, handlers: new Map() }), declaredClaims(props))
     }
 
     const oldRole = mounted ? roleOf(oldProps) : ROLE.none

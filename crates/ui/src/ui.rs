@@ -21,7 +21,7 @@ use craie_core::geom::{Affine, Point};
 
 use crate::geom::{Rect, Size};
 use crate::host::{Host, NodeId, Revs};
-use crate::input::Inputs;
+use crate::input::{Inputs, KeyAction};
 use crate::layout::{self, Layouts, MeasuredText};
 use crate::mutation::{Command, NodeKind, Transaction};
 use crate::scene::Scene;
@@ -85,8 +85,6 @@ pub struct Ui {
     pub(crate) pending_scrolls: Vec<(NodeId, f32, f32)>,
     /// Each node's hit-test reach, by id (`reach.rs`).
     pub(crate) reach: Vec<crate::reach::Bounds>,
-    /// Scratch stack for tree walks during dispatch.
-    pub(crate) walk: Vec<NodeId>,
     /// Display scale factor (physical / logical).
     pub scale: f32,
     /// Background clear color, 0xRRGGBBAA.
@@ -139,7 +137,6 @@ impl Ui {
             sync,
             pending_scrolls: Vec::new(),
             reach: Vec::new(),
-            walk: Vec::new(),
             scale,
             clear: 0x1415_18FF,
             seq: 0,
@@ -230,6 +227,20 @@ impl Ui {
                 self.pending_scrolls.push((id, *x, *y));
                 self.force_paint = true;
             }
+            Command::InsertText(text) => {
+                // The focused input, if it is this node or inside it: the
+                // user's paste, answered by JS, so it notifies.
+                if let Some(f) = self.focus
+                    && self.host.kind(f) == Some(NodeKind::Input)
+                    && self.ancestors(f).any(|n| n == id)
+                {
+                    self.inputs
+                        .act(&mut self.text, f.0, &KeyAction::Replace(text.to_string()));
+                    self.input_changed(f);
+                    self.emit_change(f);
+                }
+            }
+            Command::WriteClipboard(text) => self.inputs.clipboard.set(text),
         }
     }
 

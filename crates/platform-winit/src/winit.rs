@@ -13,7 +13,7 @@ use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
 use winit::event::{ElementState, Ime, MouseButton, MouseScrollDelta, StartCause, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
-use winit::keyboard::{Key as WKey, NamedKey};
+use winit::keyboard::{Key as WKey, KeyCode, NamedKey, PhysicalKey};
 use winit::window::{WindowAttributes, WindowId};
 
 use craie_core::Size;
@@ -44,6 +44,8 @@ pub fn run<A: App>(title: &str, logical_size: Size, app: A) {
             )),
         mods: Mods::default(),
         pointer: (0.0, 0.0),
+        dropped: Vec::new(),
+        ctrl_click: false,
     };
     event_loop.run_app(&mut driver).expect("event loop error");
 }
@@ -56,32 +58,29 @@ struct Driver<A: App> {
     mods: Mods,
     /// Last pointer position (logical); wheel events carry no position.
     pointer: (f32, f32),
+    /// Files dropped since the last wait: winit sends one event per
+    /// file, the app gets one drop.
+    dropped: Vec<String>,
+    /// The held primary press began with Ctrl on macOS: it is a
+    /// secondary press, and so is its release.
+    ctrl_click: bool,
 }
 
 impl<A: App> Driver<A> {
     fn key_input(&self, event: &winit::event::KeyEvent) -> KeyInput {
         let key = match &event.logical_key {
-            WKey::Named(named) => match named {
-                NamedKey::Backspace => Key::Backspace,
-                NamedKey::Tab => Key::Tab,
-                NamedKey::Enter => Key::Enter,
-                NamedKey::Escape => Key::Escape,
-                NamedKey::ArrowLeft => Key::Left,
-                NamedKey::ArrowUp => Key::Up,
-                NamedKey::ArrowRight => Key::Right,
-                NamedKey::ArrowDown => Key::Down,
-                NamedKey::Home => Key::Home,
-                NamedKey::End => Key::End,
-                NamedKey::PageUp => Key::PageUp,
-                NamedKey::PageDown => Key::PageDown,
-                NamedKey::Delete => Key::Delete,
-                _ => Key::Unknown,
-            },
+            WKey::Named(named) => named_key(named),
             _ => Key::Unknown,
         };
+        // Shift and Alt apply, Ctrl does not (the web's `event.key`,
+        // which chords are written against); `code` backs it up.
         let char = match &event.logical_key {
             WKey::Character(c) => Some(c.to_string()),
             _ => None,
+        };
+        let code = match event.physical_key {
+            PhysicalKey::Code(code) => us_char(code),
+            PhysicalKey::Unidentified(_) => None,
         };
         // `text` is the printable string for this press. Command chords
         // (meta/ctrl) are shortcuts, not text — the platform filters them
@@ -99,9 +98,128 @@ impl<A: App> Driver<A> {
             key,
             text,
             char,
+            code,
             mods: self.mods,
+            repeat: event.repeat,
         }
     }
+}
+
+fn named_key(named: &NamedKey) -> Key {
+    match named {
+        NamedKey::Backspace => Key::Backspace,
+        NamedKey::Tab => Key::Tab,
+        NamedKey::Enter => Key::Enter,
+        NamedKey::Escape => Key::Escape,
+        NamedKey::ArrowLeft => Key::Left,
+        NamedKey::ArrowUp => Key::Up,
+        NamedKey::ArrowRight => Key::Right,
+        NamedKey::ArrowDown => Key::Down,
+        NamedKey::Home => Key::Home,
+        NamedKey::End => Key::End,
+        NamedKey::PageUp => Key::PageUp,
+        NamedKey::PageDown => Key::PageDown,
+        NamedKey::Delete => Key::Delete,
+        NamedKey::Space => Key::Space,
+        NamedKey::Insert => Key::Insert,
+        NamedKey::ContextMenu => Key::ContextMenu,
+        _ => F_KEYS
+            .iter()
+            .position(|f| f == named)
+            .map_or(Key::Unknown, |i| Key::F(i as u8 + 1)),
+    }
+}
+
+const F_KEYS: [NamedKey; 24] = [
+    NamedKey::F1,
+    NamedKey::F2,
+    NamedKey::F3,
+    NamedKey::F4,
+    NamedKey::F5,
+    NamedKey::F6,
+    NamedKey::F7,
+    NamedKey::F8,
+    NamedKey::F9,
+    NamedKey::F10,
+    NamedKey::F11,
+    NamedKey::F12,
+    NamedKey::F13,
+    NamedKey::F14,
+    NamedKey::F15,
+    NamedKey::F16,
+    NamedKey::F17,
+    NamedKey::F18,
+    NamedKey::F19,
+    NamedKey::F20,
+    NamedKey::F21,
+    NamedKey::F22,
+    NamedKey::F23,
+    NamedKey::F24,
+];
+
+/// A physical key as the character it types on a US layout: letters,
+/// digits and punctuation (`KeyInput::code`).
+fn us_char(code: KeyCode) -> Option<char> {
+    const LETTERS: [KeyCode; 26] = [
+        KeyCode::KeyA,
+        KeyCode::KeyB,
+        KeyCode::KeyC,
+        KeyCode::KeyD,
+        KeyCode::KeyE,
+        KeyCode::KeyF,
+        KeyCode::KeyG,
+        KeyCode::KeyH,
+        KeyCode::KeyI,
+        KeyCode::KeyJ,
+        KeyCode::KeyK,
+        KeyCode::KeyL,
+        KeyCode::KeyM,
+        KeyCode::KeyN,
+        KeyCode::KeyO,
+        KeyCode::KeyP,
+        KeyCode::KeyQ,
+        KeyCode::KeyR,
+        KeyCode::KeyS,
+        KeyCode::KeyT,
+        KeyCode::KeyU,
+        KeyCode::KeyV,
+        KeyCode::KeyW,
+        KeyCode::KeyX,
+        KeyCode::KeyY,
+        KeyCode::KeyZ,
+    ];
+    const DIGITS: [KeyCode; 10] = [
+        KeyCode::Digit0,
+        KeyCode::Digit1,
+        KeyCode::Digit2,
+        KeyCode::Digit3,
+        KeyCode::Digit4,
+        KeyCode::Digit5,
+        KeyCode::Digit6,
+        KeyCode::Digit7,
+        KeyCode::Digit8,
+        KeyCode::Digit9,
+    ];
+    if let Some(i) = LETTERS.iter().position(|&k| k == code) {
+        return Some((b'a' + i as u8) as char);
+    }
+    if let Some(i) = DIGITS.iter().position(|&k| k == code) {
+        return Some((b'0' + i as u8) as char);
+    }
+    Some(match code {
+        KeyCode::Minus => '-',
+        KeyCode::Equal => '=',
+        KeyCode::BracketLeft => '[',
+        KeyCode::BracketRight => ']',
+        KeyCode::Backslash => '\\',
+        KeyCode::Semicolon => ';',
+        KeyCode::Quote => '\'',
+        KeyCode::Backquote => '`',
+        KeyCode::Comma => ',',
+        KeyCode::Period => '.',
+        KeyCode::Slash => '/',
+        _ => return None,
+    })
 }
 
 impl<A: App> ApplicationHandler for Driver<A> {
@@ -142,8 +260,16 @@ impl<A: App> ApplicationHandler for Driver<A> {
         }
     }
 
-    /// Sleeps until the app's next timer, if it has one.
+    /// Delivers the files dropped this turn as one drop, then sleeps
+    /// until the app's next timer, if it has one.
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        if !self.dropped.is_empty()
+            && let Some(window) = &self.window
+        {
+            let (x, y) = self.pointer;
+            let paths = std::mem::take(&mut self.dropped);
+            self.app.event(window, &Event::Drop { x, y, paths });
+        }
         event_loop.set_control_flow(match self.app.next_timer() {
             Some(at) => ControlFlow::WaitUntil(at),
             None => ControlFlow::Wait,
@@ -201,7 +327,7 @@ impl<A: App> ApplicationHandler for Driver<A> {
                 // Buttons carry no position in winit 0.30; the last
                 // cursor position is where the press happened.
                 let (x, y) = self.pointer;
-                let button = match button {
+                let mut button = match button {
                     MouseButton::Left => Button::Primary,
                     MouseButton::Right => Button::Secondary,
                     MouseButton::Middle => Button::Middle,
@@ -209,6 +335,18 @@ impl<A: App> ApplicationHandler for Driver<A> {
                     MouseButton::Forward => Button::Other(5),
                     MouseButton::Other(b) => Button::Other(b),
                 };
+                // macOS: Ctrl+click is a secondary click (context menus).
+                if cfg!(target_os = "macos") && button == Button::Primary {
+                    if state == ElementState::Pressed {
+                        self.ctrl_click = self.mods.ctrl;
+                    }
+                    if self.ctrl_click {
+                        button = Button::Secondary;
+                    }
+                    if state == ElementState::Released {
+                        self.ctrl_click = false;
+                    }
+                }
                 let ev = match state {
                     ElementState::Pressed => Event::PointerDown {
                         x,
@@ -256,6 +394,14 @@ impl<A: App> ApplicationHandler for Driver<A> {
                 };
                 self.app.event(window, &ev);
             }
+            // Drops carry no position in winit 0.30, and no cursor moves
+            // arrive while a drag from another app is over the window:
+            // the position is unknown until the pointer moves again, and
+            // the drop goes to the focus path (`LEDGER.md` DF-12).
+            WindowEvent::HoveredFile(_) => self.pointer = (-1.0, -1.0),
+            WindowEvent::DroppedFile(path) => {
+                self.dropped.push(path.to_string_lossy().into_owned());
+            }
             WindowEvent::Ime(ime) => match ime {
                 Ime::Enabled => {}
                 Ime::Preedit(text, cursor) => {
@@ -265,6 +411,40 @@ impl<A: App> ApplicationHandler for Driver<A> {
                 Ime::Disabled => self.app.event(window, &Event::ImeDone),
             },
             _ => {}
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn named_keys() {
+        assert_eq!(named_key(&NamedKey::F1), Key::F(1));
+        assert_eq!(named_key(&NamedKey::F13), Key::F(13));
+        assert_eq!(named_key(&NamedKey::F24), Key::F(24));
+        assert_eq!(named_key(&NamedKey::F25), Key::Unknown);
+        assert_eq!(named_key(&NamedKey::ContextMenu), Key::ContextMenu);
+        assert_eq!(named_key(&NamedKey::Shift), Key::Unknown);
+    }
+
+    #[test]
+    fn us_chars() {
+        let cases = [
+            (KeyCode::KeyA, Some('a')),
+            (KeyCode::KeyZ, Some('z')),
+            (KeyCode::Digit0, Some('0')),
+            (KeyCode::Digit9, Some('9')),
+            (KeyCode::Slash, Some('/')),
+            (KeyCode::Backquote, Some('`')),
+            (KeyCode::Quote, Some('\'')),
+            (KeyCode::Space, None),
+            (KeyCode::Numpad1, None),
+            (KeyCode::IntlBackslash, None),
+        ];
+        for (code, char) in cases {
+            assert_eq!(us_char(code), char, "{code:?}");
         }
     }
 }
