@@ -66,10 +66,12 @@ fn run_counted(session: Arc<Session>, logical: Size, scale: f32, frames: &Atomic
 
     let woken = Arc::new((Mutex::new(false), Condvar::new()));
     let signal = woken.clone();
-    session.install_wake(Arc::new(move || {
+    let wake = move || {
         *signal.0.lock().unwrap() = true;
         signal.1.notify_one();
-    }));
+    };
+    let images = crate::images::Decoder::new(wake.clone());
+    session.install_wake(Arc::new(wake));
 
     let mut stats = FrameStats::new();
     let mut spin = SpinLog::new();
@@ -91,6 +93,7 @@ fn run_counted(session: Arc<Session>, logical: Size, scale: f32, frames: &Atomic
             }
         }
         stats.worked(t.elapsed().as_secs_f64() * 1e3);
+        images.pump(&mut ui);
         if ui
             .next_settle()
             .is_some_and(|at| at <= start.elapsed().as_secs_f64())
@@ -114,6 +117,7 @@ fn run_counted(session: Arc<Session>, logical: Size, scale: f32, frames: &Atomic
             let t = Instant::now();
             prepare_frame(&mut ui, &mut renderer, &gpu, (w, h), scale);
             let prepare_ms = t.elapsed().as_secs_f64() * 1e3;
+            images.pump(&mut ui);
             flush_events(&mut ui, &session);
             let t = Instant::now();
             renderer.draw(&gpu, &view, w, h, ui.scene_mut());
@@ -236,10 +240,14 @@ fn thread_cpu() -> Duration {
 fn flush_events(ui: &mut Ui, session: &Session) {
     let out = ui.take_events();
     if !out.is_empty() {
-        // Animation ends resolve JS promises: those frames never drop.
-        let reliable = out
-            .iter()
-            .any(|e| e.kind == events::out_kind::ANIMATION_END);
+        // Animation ends resolve JS promises, and an image loads or
+        // fails once: those frames never drop.
+        let reliable = out.iter().any(|e| {
+            matches!(
+                e.kind,
+                events::out_kind::ANIMATION_END | events::out_kind::IMAGE
+            )
+        });
         session.post_events(events::encode_events(&out), reliable);
     }
 }

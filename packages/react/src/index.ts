@@ -23,6 +23,7 @@ export {
   Surface,
   Bars,
   Vector,
+  Image,
   Path,
   Circle,
   Ellipse,
@@ -42,6 +43,7 @@ export {
   ROLE,
   SURFACE,
   ANCHOR,
+  FIT,
 } from "@craie/bridge"
 export type {
   ListProps,
@@ -56,6 +58,10 @@ export type {
   SurfaceProps,
   BarsProps,
   VectorProps,
+  ImageProps,
+  ImageFit,
+  ImageLoadEvt,
+  ImageErrorEvt,
   ShapeProps,
   PathProps,
   CircleProps,

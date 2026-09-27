@@ -1,7 +1,7 @@
 import { test, expect } from "bun:test"
 import { Activity, createElement, useState } from "react"
 import {
-  createRoot, View, Text, TextInput, ScrollView, Pressable, Bars, List, ROLE, Vector,
+  createRoot, View, Text, TextInput, ScrollView, Pressable, Bars, List, ROLE, Vector, Image,
   Circle, G, Line, Path, Polygon, Rect,
 } from "../src/index.js"
 import { CraieHost } from "../src/host.js"
@@ -890,4 +890,63 @@ test("vector shapes reject what they cannot draw", () => {
     ["text"],
   ]
   for (const children of bad) expect(() => flattenShapes(children)).toThrow()
+})
+
+// Work item 8: an image sends its bytes once per change as a payload,
+// its fit only when it is not the default, and native's image events
+// reach onLoad and onError.
+test("images send bytes once, fit on change, and report load and failure", async () => {
+  const t = new FakeTransport()
+  const root = createRoot(t)
+  const bytes = new Uint8Array([1, 2, 3])
+  const seen: unknown[] = []
+  function App({ fit }: { fit?: "cover" | "contain" | "fill" }) {
+    return createElement(Image, {
+      src: bytes, fit, alt: "avatar",
+      onLoad: e => seen.push(["load", e.width, e.height]),
+      onError: e => seen.push(["error", e.message]),
+    })
+  }
+  root.renderSync(createElement(App, {}))
+  await tick()
+  const ops = t.ops(0)
+  const create = ops.find(o => o.tag === 0x01)!
+  expect(create.f[0]).toBe(7)
+  expect([...ops.find(o => o.tag === 0x71)!.bytes!]).toEqual([1, 2, 3])
+  expect(ops.some(o => o.tag === 0x73)).toBe(false) // cover is native's default
+  expect(ops.find(o => o.tag === 0x50)!.f[0]).toBe(ROLE.image)
+  expect(ops.find(o => o.tag === 0x51)!.s).toBe("avatar")
+  t.frames.length = 0
+  root.renderSync(createElement(App, { fit: "contain" }))
+  await tick()
+  expect(t.ops().map(o => [o.tag, o.f[0]])).toEqual([[0x73, 1]])
+
+  const ev = (key: number, text = "", generation = 0): UiEvent => ({
+    kind: 18, node: create.id, generation, revision: 0, x: 40, y: 20, a: 0, b: 0, key, text,
+  })
+  t.eventCb!(ev(0))
+  t.eventCb!(ev(1, "unsupported format"))
+  t.eventCb!(ev(0, "", 1)) // a previous occupant's: dropped
+  expect(seen).toEqual([["load", 40, 20], ["error", "unsupported format"]])
+})
+
+test("image URLs are fetched once per change; failures reach onError", async () => {
+  const t = new FakeTransport()
+  const root = createRoot(t)
+  const errors: string[] = []
+  const settle = async () => { for (let i = 0; i < 20; i++) await tick() }
+  function App({ src }: { src: string }) {
+    return createElement(Image, { src, onError: e => errors.push(e.message) })
+  }
+  root.renderSync(createElement(App, { src: "data:application/octet-stream;base64,AQID" }))
+  await settle()
+  const payloads = t.frames.flatMap(f => readFrame(f).ops).filter(o => o.tag === 0x71)
+  expect(payloads.map(o => [...o.bytes!])).toEqual([[1, 2, 3]])
+  t.frames.length = 0
+  root.renderSync(createElement(App, { src: "/nonexistent/craie-image.png" }))
+  await settle()
+  // The old bytes stay; nothing is sent.
+  expect(t.frames.flatMap(f => readFrame(f).ops).some(o => o.tag === 0x71)).toBe(false)
+  expect(errors.length).toBe(1)
+  expect(errors[0]).toContain("ENOENT")
 })

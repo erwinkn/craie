@@ -6,9 +6,11 @@
 import React, {
   createContext,
   createElement,
+  useCallback,
   useContext,
   useEffect,
   useLayoutEffect,
+  useRef,
   useState,
   type ReactNode,
   type Ref,
@@ -29,6 +31,8 @@ import {
   type FrameStats as FrameStatsReport,
   type Hotkey,
   type HostNode,
+  type ImageErrorEvt,
+  type ImageLoadEvt,
   type KeyClaim,
   type SurfaceParam,
   type Transport,
@@ -42,6 +46,7 @@ import {
   type AnimationEnd,
   type Easing,
   type EndReason,
+  type ImageFit,
   type ItemDesc,
   type ListTemplate,
   type ScrollAnchor,
@@ -57,12 +62,14 @@ export {
   EASING,
   END_REASON,
   Encoder,
+  FIT,
   NIL,
   ROLE,
   SURFACE,
   parseChord,
   transformMatrix,
   type AccessibilityRole,
+  type ImageFit,
   type ItemDesc,
   type ListTemplate,
   type ScrollAnchor,
@@ -77,6 +84,8 @@ export type {
   ClipboardEvt,
   ContextMenuEvt,
   DropEvt,
+  ImageErrorEvt,
+  ImageLoadEvt,
   FrameStats,
   Hotkey,
   HostNode,
@@ -398,6 +407,82 @@ export function Vector({ children, viewBox, ...props }: VectorProps) {
     strokeDasharray, strokeDashoffset, opacity, transform,
   })
   return createElement("vector", { accessibilityRole: "image", ...rest, viewBox, shapes })
+}
+
+export interface ImageProps extends ListenerProps {
+  style?: StyleProps
+  backgroundColor?: string | number
+  borderRadius?: number
+  borderColor?: string | number
+  borderWidth?: number
+  /** The encoded image (PNG, JPEG, WebP, GIF's first frame): a URL
+   * (http, https, data, file) or a path, fetched once per change, or the
+   * bytes (identity compare). */
+  src: string | Uint8Array
+  /** How the image fills the content box (default cover). */
+  fit?: ImageFit
+  /** The accessible name. */
+  alt?: string
+  /** Decoded: the natural size in pixels. */
+  onLoad?: (e: ImageLoadEvt) => void
+  /** The fetch or the decode failed. */
+  onError?: (e: ImageErrorEvt) => void
+  accessibilityRole?: AccessibilityRole
+  hidden?: boolean
+}
+
+/** An image. Native decodes it off the UI thread at the size it is
+ * shown (a 4,000 px photo in a 40 pt box decodes to 80 px at 2x). Its
+ * natural size, a pixel per point, is its intrinsic size. While a new
+ * `src` loads, the old image stays.
+ *
+ *   <Image src="https://example.com/a.jpg" fit="cover" alt="Avatar"
+ *     style={{ width: 40, height: 40 }} />
+ *
+ * It does not clip to its own radius (LEDGER DF-31): round it in a
+ * parent with `borderRadius` and `overflow: "hidden"`. */
+export function Image({ src, fit, alt, ref, ...props }: ImageProps) {
+  const [fetched, setFetched] = useState<Uint8Array>()
+  const node = useRef<HostNode | null>(null)
+  const onError = useRef(props.onError)
+  onError.current = props.onError
+  const setRef = useCallback((n: HostNode | null) => {
+    node.current = n
+    if (typeof ref === "function") ref(n)
+    else if (ref) (ref as { current: HostNode | null }).current = n
+  }, [ref])
+  useEffect(() => {
+    if (typeof src !== "string") return
+    let live = true
+    loadImage(src).then(
+      (bytes) => live && setFetched(bytes),
+      (e: unknown) => {
+        const target = node.current
+        if (live && target) onError.current?.({ target, message: String((e as Error)?.message ?? e) })
+      },
+    )
+    return () => { live = false }
+  }, [src])
+  return createElement("image", {
+    accessibilityRole: "image",
+    accessibilityLabel: alt,
+    ...props,
+    ref: setRef,
+    bytes: typeof src === "string" ? fetched : src,
+    fit,
+  })
+}
+
+/** The bytes of an image URL: http(s), data, and blob URLs by `fetch`;
+ * file URLs and paths from disk. */
+async function loadImage(src: string): Promise<Uint8Array> {
+  if (/^(https?|data|blob):/i.test(src)) {
+    const res = await fetch(src)
+    if (!res.ok) throw Error(`${res.status} ${res.statusText} (${src})`)
+    return new Uint8Array(await res.arrayBuffer())
+  }
+  const { readFile } = await import("node:fs/promises")
+  return new Uint8Array(await readFile(src.startsWith("file:") ? new URL(src) : src))
 }
 
 /** Bar chart surface (`SURFACE.bars`). */

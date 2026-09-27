@@ -718,6 +718,44 @@ choices:
   included); an icon already drawn elsewhere costs about 3 µs more than
   a plain view; a 2,000-point sparkline parses in 85 µs.
 
+**Built (work item 8, images).** As targeted, with these choices:
+
+```tsx
+<Image src="https://example.com/photo.jpg" fit="cover" alt="Avatar"
+  style={{ width: 40, height: 40 }}
+  onLoad={e => console.log(e.width, e.height)}   // natural pixels
+  onError={e => console.warn(e.message)} />
+```
+
+- An Image node is kind 7. Its encoded bytes are a `PAYLOAD` (0x71);
+  `IMAGE_CONFIG` (0x73) sets the fit (default cover). Native accepts any
+  bytes: a bad image fails later as an event, not a rejected
+  transaction. Out-event 18 reports load (key 0, the natural size) and
+  failure (key 1, the reason); both are reliable.
+- The core owns each payload's `ImageId` and plans the decode: the
+  source rect (cover crops the centered part with the box's aspect) and
+  the pixel size (the drawn size at the display scale, never above the
+  source, at most a page). A probe first reads the header for the
+  natural size, which is the intrinsic size (a pixel per point, like a
+  Vector's view box). A box that grows asks for a new decode; one that
+  shrinks keeps its bitmap down to half the size (DF-34).
+- The platform decodes on one worker thread (`image` crate: PNG, JPEG,
+  WebP, GIF's first frame; EXIF orientation applied) and averages the
+  crop down. The core keeps the pixels and puts them in the color atlas
+  as a raster; the quad is a color glyph, so images need no new
+  instance type or shader. An evicted image re-inserts from the core's
+  copy.
+- The facade fetches URLs (http, https, data, blob, file, paths) once
+  per `src`, or takes a `Uint8Array`, and keeps the old image until the
+  new one arrives. Kit gaps (numeric `src`, SVG data URLs, placeholder
+  and fallback, own-radius clipping) are DF-31 and DF-32; images are not
+  shared across nodes (DF-30).
+- Cost (exe1, loaded; `cargo run --release -p craie-platform-winit
+  --example images`): a 4,000 x 3,000 JPEG (1.9 MB) probes in 0.1 ms and
+  decodes to an 80 x 80 cover in 63 ms (50 ms of it the full decode),
+  for 25.6 KB of texture instead of 48 MB; the same photo as PNG takes
+  97 ms. One worker serializes decodes (DF-33).
+
 ## 11. Inline content and editing
 
 Changes: §4 (the decision "Block means block-level boxes only. Inline

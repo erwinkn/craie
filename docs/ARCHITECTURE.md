@@ -681,8 +681,10 @@ container:
 
 ## 8. Scene
 
-**Current.** As targeted, except images and group opacity by
-multiply-through (only isolated layers exist). One chunk per node (id =
+**Current.** As targeted, except `ImageInstance` and group opacity by
+multiply-through (only isolated layers exist). An image draws as a
+color glyph: one `GlyphInstance` quad of its node's raster, sized to
+the fitted rect (work item 8). One chunk per node (id =
 node id) in `RectInstance` (40 B) and `GlyphInstance` (20 B) pools, a
 paint pool, and path mesh pools (`PathVertex`, 16 B: chunk-local
 position, paint, chunk; and triangle indices), with up to four
@@ -846,6 +848,13 @@ row has a bitmap size and a quad size; they differ only for a glyph
 rasterized smaller to fit a page (`downscaled`). `insert` still
 refuses and counts a raster that fits no page (`oversized`), as a
 guard.
+Image nodes own color rasters (work item 8): a raster per decoded
+bitmap, at the decode size, its quad set to the drawn size each chunk
+build (`set_quad`), so a bitmap draws scaled until a better one lands.
+The core keeps each bitmap's pixels and re-inserts an evicted one when
+a visible chunk misses it, as text re-rasterizes glyphs. `release`
+frees a raster's area and recycles its id when the node's image
+changes or goes; glyph rasters are never released.
 
 **Target.** Stable `RasterId` with separate residency (atlas, rect,
 generation). Drawing records reference the id, never baked atlas
@@ -1120,7 +1129,13 @@ frame path, renderer (into an offscreen target), and statistics,
 paced at 120 Hz by spinning, because a process with no visible window
 gets coalesced timers on macOS (4 ms waits woke up to 30 ms late). It
 is for measuring where no display is on. It sends the events a commit
-raises at once, not with the next frame. `craie_ui::platform` holds the contract: `WindowId`
+raises at once, not with the next frame. Both loops own an image
+decoder (`images.rs`): one worker thread that answers the core's
+requests (`Ui::take_image_requests`: probe a header, decode a source
+rect at a pixel size) with the `image` crate (PNG, JPEG, WebP, GIF's
+first frame; EXIF orientation applied) and wakes the loop; results go
+back through `Ui::image_result` after commits, and new requests go out
+after each prepared frame. `craie_ui::platform` holds the contract: `WindowId`
 and `PlatformWindow` (surface size, scale, frame request, text input);
 the clipboard seam is `craie_ui::clipboard::Clipboard`. One window.
 
@@ -1138,9 +1153,14 @@ event loop, the window, the device, or the render target.
   beta only gave us the payload-less wake and a vendored fork.
 - Single window in the next milestone, with the window id in the
   contract so events and roots are keyed.
-- Images decode in the platform adapter with the `image` crate behind a
-  feature flag. The core receives prepared pixels and owns `ImageId`,
-  dimensions, format, and residency.
+- Images decode in the platform adapter with the `image` crate. The
+  core receives prepared pixels and owns `ImageId`, dimensions, format,
+  and residency. Built without a feature flag of our own (work item 8,
+  2026-09-27): the `image` crate's format features (PNG, JPEG, WebP,
+  GIF) are the switch, and every desktop host wants images. The core
+  decides the decode size (the drawn size in device pixels, never
+  upscaled), so a 4,000 px photo in a 40 pt box at 2x decodes to 80 px
+  (25.6 KB of texture, not 48 MB).
 
 ## 16. Bridge and JS runtime
 

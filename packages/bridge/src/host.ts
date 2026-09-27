@@ -12,6 +12,7 @@ import {
   Encoder,
   EVENT_KIND,
   EVENT_MASK,
+  FIT,
   NIL,
   ROLE,
   SUBMIT_KEY,
@@ -25,6 +26,7 @@ import {
   type Affine,
   type AnimProp,
   type AnimationEnd,
+  type ImageFit,
   ANIM_PROP,
   END_REASON,
   type Timing,
@@ -36,9 +38,12 @@ import {
   type TextSpanIn,
 } from "./wire.js"
 
-// 0 view, 1 text, 2 input, 3 surface, 4 list — mirror NodeKind
-export type Kind = 0 | 1 | 2 | 3 | 4 | 5
-export const KIND: Record<string, Kind> = { view: 0, text: 1, input: 2, surface: 3, list: 4, vector: 5 }
+// 0 view, 1 text, 2 input, 3 surface, 4 list, 5 vector, 7 image — mirror
+// NodeKind (6 is reserved)
+export type Kind = 0 | 1 | 2 | 3 | 4 | 5 | 7
+export const KIND: Record<string, Kind> = {
+  view: 0, text: 1, input: 2, surface: 3, list: 4, vector: 5, image: 7,
+}
 
 /** One decoded UI -> JS event record (see events.rs `UiEvent`). */
 export interface UiEvent {
@@ -99,6 +104,17 @@ export interface DropEvt {
   x: number
   y: number
   paths: string[]
+}
+/** An image decoded (`onLoad`): its natural size in pixels. */
+export interface ImageLoadEvt {
+  target: HostNode
+  width: number
+  height: number
+}
+/** An image failed to load or decode (`onError`). */
+export interface ImageErrorEvt {
+  target: HostNode
+  message: string
 }
 /** A context-menu request (`onContextMenu`): a secondary press at the
  * pointer, or the ContextMenu key or Shift+F10 at the focused node's
@@ -835,6 +851,10 @@ export class CraieHost {
         if (i >= 0) list.splice(i, 1)[0]!.resolve({ finished: reason === "finished", reason })
         break
       }
+      case EVENT_KIND.image:
+        if (ev.key === 0) p.onLoad?.({ target: n, width: ev.x, height: ev.y })
+        else p.onError?.({ target: n, message: ev.text })
+        break
       case EVENT_KIND.listRange: {
         // The kept (focused) item by identity: its index may be stale by
         // the time this arrives. Indices apply only to the item order
@@ -1118,6 +1138,18 @@ export class CraieHost {
         mounted && props.viewBox === oldProps.viewBox && oldProps.shapes !== undefined &&
         JSON.stringify(props.shapes) === JSON.stringify(oldProps.shapes)
       if (!same) enc.drawing(id, props.viewBox, props.shapes)
+    }
+
+    if (n.kind === 7) {
+      // Image: the encoded bytes, copied once per change (identity
+      // compare; `Image` keeps the old ones until new ones arrive), and
+      // the fit (native's default is cover).
+      if (props.bytes !== undefined && props.bytes !== oldProps.bytes) {
+        enc.payload(id, props.bytes)
+      }
+      const fit = FIT[props.fit as ImageFit] ?? FIT.cover
+      const oldFit = mounted ? FIT[oldProps.fit as ImageFit] ?? FIT.cover : FIT.cover
+      if (fit !== oldFit) enc.imageConfig(id, fit)
     }
 
     if (n.kind === 4) {

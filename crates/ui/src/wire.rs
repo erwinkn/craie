@@ -29,6 +29,7 @@ use taffy::{
 
 use craie_core::geom::Affine;
 
+use crate::image::Fit;
 use craie_vector::svg::{Drawing, Shape, ShapeKind};
 use craie_vector::{FillRule, LineCap, LineJoin, Stroke};
 
@@ -72,6 +73,9 @@ pub mod op {
     /// string u32, dash array string u32, fill u32, stroke u32, stroke
     /// width f32, miter limit f32, dash offset f32, opacity f32).
     pub const DRAWING: u8 = 0x72;
+    /// An image node's configuration: id u32 | fit u8 (0 cover, 1
+    /// contain, 2 fill). Its bytes come as a PAYLOAD.
+    pub const IMAGE_CONFIG: u8 = 0x73;
     // command
     pub const COMMAND: u8 = 0x80;
     // lists
@@ -562,6 +566,11 @@ pub fn encode(txn: &Transaction<'_>) -> Vec<u8> {
                         f32le(&mut ops, v);
                     }
                 }
+            }
+            Mutation::ImageConfig { id, fit } => {
+                ops.push(op::IMAGE_CONFIG);
+                u32le(&mut ops, *id);
+                ops.push(*fit as u8);
             }
             Mutation::Command { id, cmd } => {
                 ops.push(op::COMMAND);
@@ -1096,6 +1105,10 @@ pub fn decode(buf: &[u8]) -> Result<Transaction<'_>, WireError> {
                     drawing: Drawing { view_box, shapes },
                 }
             }
+            op::IMAGE_CONFIG => Mutation::ImageConfig {
+                id: r.u32()?,
+                fit: Fit::from_u8(r.u8()?).ok_or(WireError::BadRef("image fit"))?,
+            },
             op::COMMAND => {
                 let id = r.u32()?;
                 let cmd = match r.u8()? {

@@ -20,6 +20,7 @@ mod dispatch;
 pub mod events;
 mod executor;
 pub mod host;
+pub mod image;
 pub mod input;
 pub mod layout;
 pub mod list;

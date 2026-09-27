@@ -39,8 +39,9 @@ fn js_fixture_decodes_and_executes() {
     assert_eq!(ui.apply(&buf).unwrap(), 99);
     let host = &ui.host;
 
-    // remove(1): view + input + surface + list + row + two vectors remain.
-    assert_eq!(host.len(), 7);
+    // remove(1): view + input + surface + list + row + two vectors + an
+    // image remain.
+    assert_eq!(host.len(), 8);
     assert_eq!(host.kind(NodeId(0)), Some(NodeKind::View));
     let paint = host.paint[0];
     assert_eq!(paint.fill, 0x1122_33ff);
@@ -126,7 +127,14 @@ fn js_fixture_decodes_and_executes() {
     assert_eq!(host.label(NodeId(3)), None);
     assert_eq!(
         host.children(NodeId(0)),
-        [NodeId(3), NodeId(2), NodeId(4), NodeId(6), NodeId(8)]
+        [
+            NodeId(3),
+            NodeId(2),
+            NodeId(4),
+            NodeId(6),
+            NodeId(8),
+            NodeId(9)
+        ]
     );
 
     // List: templates, items after two splices, a row, an anchor.
@@ -223,6 +231,17 @@ fn js_fixture_decodes_and_executes() {
         "{:?}",
         tri.transform
     );
+
+    // An image node: its bytes and fit, and a probe queued for the
+    // decoder.
+    assert_eq!(host.kind(NodeId(9)), Some(NodeKind::Image));
+    let image = &host.images[&9];
+    assert_eq!(&image.bytes[..], &[0x89, 0x50, 0x4e, 0x47, 1, 2, 3]);
+    assert_eq!(image.fit, craie_ui::image::Fit::Contain);
+    assert!(matches!(
+        ui.take_image_requests()[..],
+        [craie_ui::image::ImageRequest::Probe { .. }]
+    ));
 
     // WriteClipboard, addressed to no node.
     assert_eq!(ui.inputs.clipboard.get().as_deref(), Some("copied"));

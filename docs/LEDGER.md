@@ -307,6 +307,83 @@ Reviewer minors and nitpicks not fixed yet.
   the corner needs a join-aware dasher, the group an isolated layer.
 - Resolves in: a lyon-side dasher or E07; group layers (DF-6).
 
+### DF-30: images are decoded per node, and fetched per mount
+
+- Source: images (work item 8) implementation (own finding).
+- Where: crates/ui/src/image.rs (`Images`), packages/bridge/src/index.ts
+  (`Image`, `loadImage`).
+- Claim: each node owns its bytes, decode, and raster. A list of 100
+  rows showing the same avatar URL fetches it 100 times, holds 100
+  copies of the bytes, and decodes 100 bitmaps (vectors intern by
+  content; images do not).
+- Why deferred: sharing needs a key (content hash, or URL from JS) and
+  a decode per (source, crop, size) with reference counts; the first
+  consumers show distinct photos.
+- Resolves in: an image cache keyed by source in the facade (fetch)
+  and the core (bytes and bitmaps), when a consumer repeats images.
+
+### DF-31: an image does not clip to its own border radius
+
+- Source: images (work item 8) implementation (own finding).
+- Where: crates/ui/src/scene_sync.rs (clip records), crates/ui/src/image.rs
+  (`build_image`).
+- Claim: `borderRadius` on an `Image` rounds its background and border
+  but not the picture: a node's clip applies to its children, not its
+  own content. A round avatar clips in a parent:
+  `<View style={{ width: 40, height: 40, overflow: "hidden" }}
+  borderRadius={20}><Image src={url} style={{ width: "100%", height:
+  "100%" }} /></View>` (tested: `a_rounded_parent_clips_an_image`).
+- Why deferred: clipping a chunk by its own node's shape needs a clip
+  record per rounded image, or a rounded-rect mask in the glyph path.
+- Resolves in: content clipping for the node's own chunk (also wanted by
+  surfaces), or a corner mask on image quads.
+
+### DF-32: kit `Image` gaps
+
+- Source: images (work item 8), kit API comparison (Marbre
+  `ImageProps`).
+- Where: packages/bridge/src/index.ts (`Image`).
+- Claim: `src`, `fit`, `alt`, `onError` match the kit. Missing: a numeric
+  `src` (a bundled asset id); SVG data URLs, which the kit's native
+  version renders with `SvgXml` (here the decoder rejects them and
+  `onError` fires; SVG goes through `Vector`); `placeholder` and
+  `fallback` (compose them in JS: render the fallback after `onError`);
+  animated GIFs (the first frame only); `radius` (DF-31).
+- Why deferred: each needs a decision outside images: an asset
+  registry, runtime SVG documents (build-time only, §9), JS composition.
+- Resolves in: the kit port, per gap.
+
+### DF-33: one decoder thread, full decode before the downscale
+
+- Source: images (work item 8), measurement.
+- Where: crates/platform-winit/src/images.rs.
+- Claim: the decoder decodes the whole image, then averages the crop
+  down. A 12-megapixel JPEG costs about 63 ms on one core (exe1, loaded;
+  50 ms of it the decode) and a transient 36 MB buffer, whatever size it
+  shows at. One worker serializes a screen of photos: twenty take over a
+  second before the last appears.
+- Why deferred: the four-format `image` crate has no reduced-size JPEG
+  decode (DCT scaling, 1/2 to 1/8); a pool needs a budget for the
+  transient buffers.
+- Resolves in: scaled JPEG decode (zune-jpeg's or a decoder that has it),
+  a small pool sized by the transient-memory budget.
+
+### DF-34: resizes draw the old bitmap, and big images cap at a page
+
+- Source: images (work item 8) implementation (own finding).
+- Where: crates/ui/src/image.rs (`plan`, `Bitmap::stale`).
+- Claim: three approximations. While a box grows, the old bitmap draws
+  scaled up until the larger decode lands (a frame or more of blur); a
+  box that shrinks keeps its bitmap until it is under half the size. The
+  decode size caps at an atlas page less its gutter (2,046 px a side),
+  so a full-screen image on a 5K display draws scaled up. The downscale
+  averages sRGB values, not linear light, so fine high-contrast detail
+  comes out slightly dark.
+- Why deferred: no consumer shows full-screen images yet; linear
+  averaging doubles the downscale cost.
+- Resolves in: an image texture outside the atlas for large images;
+  linear-light filtering if photos look wrong next to a browser.
+
 ## Closed
 
 - DF-8 (2026-09-24, same day): `native_reflow_publishes_after_the_frame`

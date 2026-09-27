@@ -2,7 +2,7 @@
 // Rust decoder must accept. Regenerate after wire format changes:
 //   bun packages/bridge/scripts/gen-fixture.ts
 import {
-  CHORD_FLAG, CLAIM_KIND, Encoder, NIL, ROLE, SUBMIT_KEY, SURFACE, parseChord, transformMatrix,
+  CHORD_FLAG, CLAIM_KIND, Encoder, FIT, NIL, ROLE, SUBMIT_KEY, SURFACE, parseChord, transformMatrix,
 } from "../src/wire.js"
 
 const enc = new Encoder()
@@ -119,6 +119,12 @@ enc.drawing(8, "0 0 24 24", [
   { ...shape, kind: 2, geometry: "4,4 20,4 12,20", transform: "rotate(90 12 12)", dashes: "", fill: 0xff00_00ff, fillRule: 1, stroke: 0, opacity: 0.5 },
 ])
 enc.place(0, 8, NIL)
+// An image node: encoded bytes (native decodes them later, off the UI
+// thread: any bytes are accepted here) and its fit.
+enc.create(9, 7)                                    // image
+enc.payload(9, new Uint8Array([0x89, 0x50, 0x4e, 0x47, 1, 2, 3]))
+enc.imageConfig(9, FIT.contain)
+enc.place(0, 9, NIL)
 
 await Bun.write(new URL("../test/fixture.bin", import.meta.url).pathname, enc.finish(99n))
 console.log("wrote fixture.bin")

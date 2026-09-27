@@ -1,7 +1,8 @@
 //! Raster atlas: stable `RasterId`s with separate residency.
 //!
-//! A raster (glyph bitmap today, icons later) gets a `RasterId` once and
-//! keeps it. Residency — which page, which rect — is a separate table
+//! A raster (a glyph bitmap, or an image's decoded pixels) gets a
+//! `RasterId` once and keeps it until its owner releases it (images do;
+//! glyphs never). Residency — which page, which rect — is a separate table
 //! the GPU reads, so drawing records never bake atlas coordinates and a
 //! relocation touches no chunk.
 //!
@@ -107,6 +108,8 @@ pub struct RasterAtlas {
     alpha: Vec<Page>,
     color: Vec<Page>,
     entries: Vec<Residency>,
+    /// Released ids, reused by the next `new_scaled_id`.
+    free: Vec<u32>,
     gpu: Vec<RasterGpu>,
     gpu_dirty: DirtyRanges,
     epoch: u32,
@@ -133,6 +136,7 @@ impl RasterAtlas {
             alpha: Vec::new(),
             color: Vec::new(),
             entries: Vec::new(),
+            free: Vec::new(),
             gpu: Vec::new(),
             gpu_dirty: DirtyRanges::default(),
             epoch: 1,
@@ -174,23 +178,64 @@ impl RasterAtlas {
         quad_h: u16,
         color: bool,
     ) -> RasterId {
-        let id = self.entries.len() as u32;
-        self.entries.push(Residency {
+        let entry = Residency {
             w,
             h,
             quad_w,
             quad_h,
             color,
             ..Residency::default()
-        });
-        self.gpu.push(RasterGpu {
+        };
+        let row = RasterGpu {
             xy: 0,
             wh: w as u32 | (h as u32) << 16,
             page: (color as u32) << 16,
             quad: quad_w as u32 | (quad_h as u32) << 16,
-        });
+        };
+        let id = match self.free.pop() {
+            Some(id) => {
+                self.entries[id as usize] = entry;
+                self.gpu[id as usize] = row;
+                id
+            }
+            None => {
+                self.entries.push(entry);
+                self.gpu.push(row);
+                self.entries.len() as u32 - 1
+            }
+        };
         self.gpu_dirty.add(id as usize..id as usize + 1);
         RasterId(id)
+    }
+
+    /// Frees `id` and its atlas area; a later `new_scaled_id` reuses the
+    /// id. The owner must stop drawing it first: a chunk that still
+    /// names it draws whatever takes the id next.
+    pub fn release(&mut self, id: RasterId) {
+        let e = &mut self.entries[id.0 as usize];
+        if let Some(alloc) = e.alloc.take() {
+            let pages = if e.color {
+                &mut self.color
+            } else {
+                &mut self.alpha
+            };
+            pages[e.page as usize].alloc.deallocate(alloc);
+        }
+        *e = Residency::default();
+        self.free.push(id.0);
+    }
+
+    /// Changes the drawn size of `id` (device px), keeping its bitmap:
+    /// an image whose box changed a little draws its pixels scaled.
+    pub fn set_quad(&mut self, id: RasterId, quad_w: u16, quad_h: u16) {
+        let e = &mut self.entries[id.0 as usize];
+        if (e.quad_w, e.quad_h) == (quad_w, quad_h) {
+            return;
+        }
+        e.quad_w = quad_w;
+        e.quad_h = quad_h;
+        self.gpu[id.0 as usize].quad = quad_w as u32 | (quad_h as u32) << 16;
+        self.gpu_dirty.add(id.0 as usize..id.0 as usize + 1);
     }
 
     pub fn entry(&self, id: RasterId) -> &Residency {
@@ -518,6 +563,27 @@ mod tests {
         atlas.insert(id, &vec![1u8; 2047]);
         assert!(!atlas.entry(id).resident);
         assert_eq!(atlas.stats.oversized, 1);
+    }
+
+    /// A released raster frees its area and its id: the next raster
+    /// takes both, and the old bitmap's pixels are gone from its rect.
+    #[test]
+    fn release_reuses_the_id_and_the_area() {
+        let mut atlas = RasterAtlas::with_budget(64, 0, 1);
+        let a = atlas.new_id(62, 62, true);
+        atlas.insert(a, &[9u8; 62 * 62 * 4]);
+        atlas.release(a);
+        assert!(!atlas.entry(a).resident);
+        let b = atlas.new_scaled_id(60, 60, 30, 30, true);
+        assert_eq!(b, a);
+        atlas.insert(b, &[5u8; 60 * 60 * 4]);
+        assert!(atlas.entry(b).resident);
+        assert_eq!(atlas.color_pages(), 1);
+        assert_eq!(atlas.stats.evictions, 0);
+        assert_eq!(atlas.gpu_rows()[b.0 as usize].quad, 30 | 30 << 16);
+        atlas.set_quad(b, 40, 20);
+        assert_eq!(atlas.entry(b).quad_w, 40);
+        assert_eq!(atlas.gpu_rows()[b.0 as usize].quad, 40 | 20 << 16);
     }
 
     /// Eviction keeps the id and its size; re-insert restores residency

@@ -19,6 +19,8 @@ accesskit_winit.workspace = true
 arboard.workspace = true
 # System font discovery and fallback (the platform side of FontSource).
 fontique.workspace = true
+# Image decoding and downscaling, on a worker thread (`images.rs`).
+image.workspace = true
 
 
 [dev-dependencies]
@@ -58,6 +60,10 @@ path = "../../examples/fontcost/main.rs"
 [[example]]
 name = "vector"
 path = "../../examples/vector/main.rs"
+
+[[example]]
+name = "images"
+path = "../../examples/images/main.rs"
 
 [target.'cfg(unix)'.dependencies]
 # The headless loop's thread CPU clock.

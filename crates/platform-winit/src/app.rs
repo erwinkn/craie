@@ -18,6 +18,7 @@ use craie_ui::surface::SurfacePainter;
 use craie_ui::ui::Ui;
 
 use crate::clipboard::SystemClipboard;
+use crate::images::Decoder;
 use crate::probe::Probe;
 use crate::{App, Wake, Window};
 
@@ -45,6 +46,7 @@ struct Inner {
     renderer: Renderer,
     ui: Ui,
     stats: FrameStats,
+    images: Decoder,
 }
 
 /// Frame costs over a window of about half a second, for
@@ -271,6 +273,8 @@ impl Inner {
         if drain {
             apply_commits(&mut self.ui, session, &mut self.stats);
         }
+        // Decoded images land (sizes, pixels) and new payloads go out.
+        self.images.pump(&mut self.ui);
         if self.ui.needs_paint() || self.ui.animating() {
             window.request_redraw();
         }
@@ -295,10 +299,16 @@ impl Inner {
     fn flush_out(ui: &mut Ui, session: &Session) {
         let events = ui.take_events();
         if !events.is_empty() {
-            // Animation ends resolve JS promises, and claims are user
-            // actions only JS carries out: those frames never drop.
+            // Animation ends resolve JS promises, claims are user actions
+            // only JS carries out, and an image loads or fails once:
+            // those frames never drop.
             let reliable = events.iter().any(|e| {
-                e.kind == events::out_kind::ANIMATION_END || e.kind == events::out_kind::CLAIM
+                matches!(
+                    e.kind,
+                    events::out_kind::ANIMATION_END
+                        | events::out_kind::CLAIM
+                        | events::out_kind::IMAGE
+                )
             });
             session.post_events(events::encode_events(&events), reliable);
         }
@@ -340,12 +350,14 @@ impl App for HostApp {
         if let Some(p) = &mut self.probe {
             p.wake_with(wake.clone());
         }
+        let poke = wake.clone();
         let mut inner = Inner {
             gpu,
             surface,
             renderer,
             ui,
             stats: FrameStats::new(),
+            images: Decoder::new(move || poke.wake()),
         };
         inner.sync(window, &self.session, true);
         Inner::publish_frame_state(&mut inner.ui, window, &self.a11y);
@@ -478,6 +490,8 @@ impl App for HostApp {
         // Recorded now: a failed acquisition below must not lose it; the
         // next presented frame shows this work.
         inner.stats.prepared(t.elapsed().as_secs_f64() * 1e3);
+        // The frame planned image decodes at their drawn sizes.
+        inner.images.pump(&mut inner.ui);
         // Layout is current now: bounds and the caret area are too; the
         // frame's events (list ranges, anchoring scrolls) go out, and the
         // geometry-dependent state is published (not through the stale

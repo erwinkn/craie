@@ -298,12 +298,26 @@ impl TreeView<'_> {
                 height: size.height,
             };
         }
-        if node.kind == NodeKind::Vector {
-            // The view box is the intrinsic content size (aspect kept). A
-            // sized axis (known, or set in the style) is its content box:
+        if matches!(node.kind, NodeKind::Vector | NodeKind::Image) {
+            // The view box (an image: its natural size, a pixel per
+            // point) is the intrinsic content size (aspect kept). A sized
+            // axis (known, or set in the style) is its content box:
             // Taffy's `known` is the border box, `available` the content
             // box of a sized axis.
-            let Some(a) = self.host.vectors.get(&id.0).and_then(|v| v.asset.as_ref()) else {
+            let view_box = if node.kind == NodeKind::Vector {
+                self.host
+                    .vectors
+                    .get(&id.0)
+                    .and_then(|v| v.asset.as_ref())
+                    .map(|a| a.view_box)
+            } else {
+                self.host
+                    .images
+                    .get(&id.0)
+                    .and_then(|i| i.natural)
+                    .map(|[w, h]| [0.0, 0.0, w as f32, h as f32])
+            };
+            let Some(view_box) = view_box else {
                 return TSize::ZERO;
             };
             let style = self.style_of(id);
@@ -334,7 +348,7 @@ impl TreeView<'_> {
                 })
             };
             let [width, height] = crate::vector::constrained(
-                a.view_box,
+                view_box,
                 [
                     content(known.width, !size.width.is_auto(), available.width),
                     content(known.height, !size.height.is_auto(), available.height),

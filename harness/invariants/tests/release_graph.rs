@@ -15,11 +15,12 @@ const RELEASE: &[&str] = &["craie-node", "craie-platform-winit"];
 /// tiny-skia there).
 const TARGETS: &[&str] = &["aarch64-apple-darwin", "x86_64-apple-darwin"];
 
-/// Crates that must never appear in a release graph.
+/// Crates that must never appear in a release graph. (`png` left the
+/// list with images, work item 8: the platform decodes PNG with the
+/// `image` crate.)
 const REFERENCE_ONLY: &[&str] = &[
     "craie-harness",
     "parley",
-    "png",
     "resvg",
     "usvg",
     "tiny-skia",
