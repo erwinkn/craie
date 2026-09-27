@@ -480,7 +480,7 @@ groups follow, since they activate through #17's event. exe1's load was
 | 19:57 | PR #19 (transform parts) opened and sent to review |
 | 20:11 | PR #19 review: no blockers or majors; 3 minors (a variant's `translateY` could overwrite the base `translateX` with no test failing; a 180° or 360° rotation left float noise, so the subtree never snapped to pixels again; a percentage in an RN transform list sent NaN), 3 nits |
 | 20:19 | PR #19 review fixed (PR19-01..06), verified at its head, which is `main` plus the PR (CI, 456 Rust tests, 112 bun tests, smoke, macOS type-check) |
-| 20:24 | PR #19 merged; keyframe animations and motion in variants (item 6, part 2) start |
+| 20:21 | PR #19 merged; keyframe animations and motion in variants (item 6, part 2) start |
 
 ### Decisions
 
