@@ -525,6 +525,8 @@ mod tests {
             .payload(1, png.as_slice())
             .place(NIL, 1, NIL);
         ui.apply_txn(&t).unwrap();
+        // The session's first ENVIRONMENT report.
+        ui.take_events();
         assert!(!decoder.pump(&mut ui));
         rx.recv().unwrap();
         assert!(decoder.pump(&mut ui));
@@ -784,7 +786,12 @@ mod tests {
             decoder.pump(ui);
             ui.render(craie_core::Size::new(10.0, 10.0));
             decoder.pump(ui);
-            out.extend(ui.take_events().into_iter().map(|e| (e.node, e.key)));
+            out.extend(
+                ui.take_events()
+                    .into_iter()
+                    .filter(|e| e.kind == craie_ui::events::out_kind::IMAGE)
+                    .map(|e| (e.node, e.key)),
+            );
         }
         out.sort();
         out
