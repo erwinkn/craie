@@ -485,6 +485,63 @@ order), §16 (reconciler portals).
   forms, and how the web kit maps them to CSS Anchor Positioning or to
   Floating UI where browsers lack it.
 
+**Built (work item 4, first half).** Sibling z and layers as targeted,
+with these choices:
+
+- z is an i32 in the spatial row, sent in the spatial op (mask bit 2).
+  The facade reads it from `style.zIndex`, as React Native does (and
+  as Marbre's native resolver writes the kit's `z`). A z change bumps
+  `structure_rev`, which rebuilds the draw order: no layout, and no
+  reach refresh (a reach is a union, whatever the order).
+- The sorted order is kept only where it differs from tree order
+  (`order.rs`). A parent whose children all have z = 0 and no layer
+  holds nothing and never sorts. A tree edit under a sorted parent, a
+  child arriving with a z or an owner, and a z change queue the
+  parent; the queue is re-sorted before each frame's paint and each
+  dispatch (a stable sort: one z among 5,000 zeros is about a linear
+  pass), and a reader in between sorts on the spot.
+- The native part is generic: a layer op (0x22) makes any node a
+  layer container with an owner (a node id, or none). A layer's own
+  box lets hits through (`box-none`), and it never sorts below the
+  sibling that holds its owner, at any level. Its key is its z and its
+  tree position, each raised to at least that sibling's, then one step
+  above it:
+
+  ```text
+  root:  app z 0, dialog z 70, menu z 50 (owned in the dialog), toast z 80
+  paint: app, dialog, menu, toast   (unowned, the menu would go under the dialog)
+  ```
+
+  Owners are looked up again after any structure change, so an owner
+  that moves takes its layers along; a cycle of owners is cut where it
+  closes.
+- The facade's `Layer` is a portal:
+
+  ```tsx
+  <Layer z={70}>
+    <Dialog>
+      <Layer z={50}><Menu /></Layer>
+    </Dialog>
+  </Layer>
+  ```
+
+  Its container is a full-window view added at the end of the root
+  level when its first child commits (open order), after its owner's.
+  It closes once it holds neither children nor an open layer it owns
+  (a menu keeps its dialog open), and reopens on top.
+  The owner is the enclosing `Layer`'s container, found through React
+  context; the app's root nodes are placed before the first layer,
+  since React commits a portal's children before its ancestors.
+- Cost (`EXPERIMENTS.md`, sibling z; exe1, loaded): re-sorting a
+  5,000-child parent after one z change takes 13 to 74 µs. The frame
+  after it pays the draw-order walk any structure change pays: 6 to 9
+  ms at 100k nodes, against 2.5 to 3.7 ms after a transform
+  (`LEDGER.md`, DF-18). Hit tests stay allocation-free: 7 to 12 µs at
+  100k nodes, with or without z.
+- Focus traps, `modal` and `inert` stay with work item 3, which will
+  set finer owners (a trap inside the layer) through the same op
+  (DF-19). Tab and accessibility reach layers after the app (DF-17).
+
 ## 7. Motion
 
 Changes: §12, §3 (spatial store).
@@ -692,31 +749,54 @@ choices:
   view box and up to 4,096 shapes of 44 bytes (kind, fill rule, join,
   cap, three string refs, fill and stroke colors, width, miter limit,
   dash offset, opacity). The strings stay SVG syntax and native parses
-  them (`craie_vector::svg`, about 600 lines, no dependency); a string
-  that does not parse rejects the transaction, like a bad asset.
+  them (`craie_vector::svg`, about 600 lines, no dependency). A drawing
+  whose strings or numbers do not parse draws nothing (zero intrinsic
+  size) and the session goes on, as SVG draws nothing for an empty view
+  box; structural errors (bad refs, too many shapes, too many bytes)
+  reject the transaction.
+- Work is bounded per drawing, not per string: at most 4,096 shapes
+  whose string references add up to at most 4 MiB (a string shared by
+  every shape counts for each), checked before anything else; each
+  distinct string parses once; path commands (per shape drawing them),
+  transform functions and points share one budget of 2^20, and dashes
+  one of 65,536 per drawing.
 - A drawing builds the same `Asset` a `CRV1` payload decodes to, so
   layout, fitting, clipping and tessellation are shared. Sources are
-  interned by content (payload bytes, or a drawing's canonical key) and
-  meshes are shared across nodes per asset, content box and scale: the
-  cache is per drawing, not per shape.
-- Dashes restart on each subpath, as SVG does; a pattern that would cut
-  more than 65,536 dashes draws solid rather than stall.
+  interned by content (payload bytes, which must start `CRV1`, or a
+  drawing's canonical key, which starts `CRVS`, built once per
+  transaction and shared) and meshes are shared across nodes per asset,
+  content box and scale: the cache is per drawing, not per shape.
+  Tessellation skips shapes outside the view box or at opacity 0, and
+  flattens no finer than a shape's size over 2^16.
+- Dashes restart on each subpath, as SVG does; zero-length dashes draw
+  as dots with round or square caps; a closed subpath joins its last
+  dash to its first. Past the drawing's dash budget, a pattern draws
+  solid rather than stall.
 - The dash offset is a plain value, not animatable: `ANIMATE` (0xA1)
   animates node properties, and an offset belongs to a shape, so a
   spinner ring rotates the node instead (`LEDGER.md` DF-13).
-- Paints are plain colors; `currentColor` waits for topic 5 and throws
-  in the facade (DF-14). Gradients stay build-time.
+- Paints are plain colors. `currentColor` resolves in the facade to a
+  `color` prop on the `Vector` or a `G`, as `<svg color>` does, and
+  throws without one; inheriting a color from ancestors waits for
+  topic 5 (DF-14). `fillOpacity` and `strokeOpacity` scale the alpha.
+  Gradients stay build-time.
 - The facade flattens children into shapes: `Path`, `Circle`,
   `Ellipse`, `Rect`, `Line`, `Polyline`, `Polygon` and `G` (attributes
-  inherited, transforms nested, opacity multiplied), with the Vector's
-  own paint props as defaults, as on an `<svg>` element. The kit's
-  `viewBox` and shape props map one to one; shapes must be direct
-  elements, not components that return them (DF-15).
+  inherited, transforms nested, a `G`'s opacity multiplied into its
+  shapes: DF-16), with the Vector's own paint props as defaults, as on
+  an `<svg>` element. The Vector's `opacity` is the node's: one layer,
+  animatable. Numbers are coerced as SVG reads attributes; a shape with
+  one that is not finite is dropped, with a warning. The kit's shapes
+  differ in three ways: token colors must be resolved first, its
+  `Path` and `Circle` wrappers use hooks and so throw (shapes must be
+  direct elements, DF-15), and inherited color needs `color` (DF-14).
 - Cost (exe1, loaded; `cargo run --release -p craie-harness --example
-  vectors`): 200 distinct 24 px icons parse in 0.35 ms and mount in
-  about 2 ms more than 200 plain views (10 µs per icon, tessellation
-  included); an icon already drawn elsewhere costs about 3 µs more than
-  a plain view; a 2,000-point sparkline parses in 85 µs.
+  vectors`, the Rust direct API: no wire, no JS): 200 distinct 24 px
+  icons parse in about 0.4 ms and mount in about 2 ms more than 200
+  plain views (10 µs per icon, tessellation included); an icon already
+  drawn elsewhere costs about 3 µs more than a plain view; a
+  2,000-point sparkline parses in 90 µs. In JS, an unchanged icon
+  costs about 5 µs a render (flatten, stringify, compare).
 
 **Built (work item 8, images).** As targeted, with these choices:
 

@@ -114,33 +114,58 @@ window closed (an un-unref'd timeout in a `Promise.race`).
 
 ### Runtime vector shapes (work item 8)
 
-`cargo run --release -p craie-harness --example vectors`. Headless
-(`Ui::render`, no GPU), display scale 2, medians of 21 fresh `Ui`s, on
-exe1 at load average 24 (loaded; indicative only). Icons: eight Lucide
-icons (circle-check, house, search, settings, bell, user, calendar,
-chevron-right) at 25 stroke widths each, so 200 distinct drawings, 24
-pt square.
+`cargo run --release -p craie-harness --example vectors`. This is the
+Rust direct API: transactions built in Rust and applied with
+`apply_txn`, with no wire encode or decode and no JS (the JS side is
+below). Headless (`Ui::render`, no GPU), display scale 2, medians of 21
+fresh `Ui`s, on exe1 (Linux, llvmpipe) at load average 17 to 29
+(loaded; indicative only). Icons: eight Lucide icons (circle-check,
+house, search, settings, bell, user, calendar, chevron-right) at 25
+stroke widths each, so 200 distinct drawings, 24 pt square. Numbers
+after the PR #5 review fixes; the PR's first run in parentheses where
+it differs.
 
 | case | parse | apply | first frame |
 |---|---|---|---|
-| 200 plain views (baseline) | | 109 µs | 94 µs |
-| 200 icons, new | 354 µs (1.8 µs each) | 729 µs | 1,407 µs |
-| 200 more nodes, same icons (cache hits) | | 199 µs | 667 µs |
-| the same 200 drawings resent | | 42 µs | 1 µs |
-| sparkline, 2,000 points, solid | 84 µs | 106 µs | 755 µs |
-| sparkline, dashed "6 3" | 85 µs | 115 µs | 720 µs |
+| 200 plain views (baseline) | | 115 µs (109) | 92 µs (94) |
+| 200 icons, new | 451 µs (354) | 872 µs (729) | 1,588 µs (1,407) |
+| 200 more nodes, same icons (cache hits) | | 218 µs (199) | 737 µs (667) |
+| the same 200 drawings resent | | 51 µs (42) | 1 µs |
+| sparkline, 2,000 points, solid | 90 µs (84) | 115 µs (106) | 784 µs (755) |
+| sparkline, dashed "6 3" | 88 µs (85) | 116 µs (115) | 719 µs (720) |
+| 4,096 shapes sharing one 1 KiB path | | 7,152 µs | 45,335 µs |
 
 - A new icon costs about 10 µs over a plain view (parse, validate,
   tessellate at 48 device px, emit); its frame share is mostly
   tessellation.
 - A cache hit (the source interned, the meshes shared) costs about 3 µs
   over a plain view: the key, a hash lookup, and copying the mesh into
-  the node's chunk. Resending an unchanged drawing is a byte compare
-  (0.2 µs per node) and the frame does nothing.
+  the node's chunk. On the Rust side, resending an unchanged drawing
+  builds its key and compares it with the node's (0.25 µs per icon),
+  and the frame does nothing.
 - The sparkline's frame is its stroke tessellation (about 0.35 µs per
   point with round joins); dashing it is within the noise.
 - Apply parses each new source once: validation keeps what it built for
   apply, and equal drawings in one transaction build once.
+- The review fixes against the PR's first commit, run back to back
+  three times (`f4ae6b6` built apart): first frames within noise of
+  each other (1,393 to 1,525 µs before, 1,466 to 1,506 after); apply
+  about 130 µs higher for 200 icons (757 to 805 before, 864 to 889
+  after), which is the per-drawing check, the memo tables and the
+  shared key. Parse alone was within the load's noise (358 to 626 µs
+  before, 445 to 1,119 after).
+- The worst case the per-drawing bounds allow: 4,096 filled shapes all
+  referencing one 1 KiB path, 4 MiB of references. Apply (the check,
+  a 4 MiB key, one parse) takes 7 ms; the first frame tessellates
+  4,096 paths of 113 segments, 45 ms. Before the fixes each shape
+  parsed its own copy, and each of 4,096 strings could hold a million
+  path commands.
+
+JS side of a resend (bun 1.4.2, exe1, loaded; `flattenShapes`, then
+`JSON.stringify` of `[viewBox, shapes]` and a compare with the string
+the host node last sent, which is all an unchanged drawing costs in
+JS): a Lucide-sized icon (circle, path, rounded rect) 5.0 µs a render;
+a 1,000-point polyline 157 µs (the points joined, then stringified).
 
 ### Images (work item 8)
 
@@ -316,6 +341,49 @@ Two older bugs, fixed in the PR #3 review:
   panics when rounding puts its low bound above its high one: a radius
   of half the box, at an origin a border offsets. Borders in the
   randomized test found it.
+
+### Sibling z: sorting and hit testing (work item 4)
+
+`cargo run --release -p craie-harness --example zorder`. E15's wide
+tree (groups of 5,000 cells 6 pt square), headless on exe1 with a load
+average of 22 to 38; ranges are three runs.
+
+One z change in a parent of 5,000 children, mean of 50 changes: the
+re-sort alone, then the next frame without it (`render` after the
+re-sort: the draw-order rebuild and the scene), against the frame after
+a transform change of the same cell.
+
+| tree | children with z | re-sort | frame after z | frame after a transform |
+|------|-----------------|---------|---------------|-------------------------|
+| 5k   | none before     | 13 to 14 µs | 0.31 to 0.44 ms | 0.17 to 0.29 ms |
+| 5k   | 1 in 10         | 17 to 30 µs | 0.35 to 0.45 ms | 0.18 to 0.23 ms |
+| 100k | none before     | 28 to 74 µs | 6.2 to 7.1 ms   | 2.5 to 3.7 ms   |
+| 100k | 1 in 10         | 35 to 43 µs | 6.0 to 8.8 ms   | 2.8 to 2.9 ms   |
+
+- The sort is not the cost: Rust's stable sort is adaptive, so one z
+  among 5,000 zeros is about a linear pass.
+- The frame is: a z change bumps `structure_rev`, like an insert, and
+  the draw order rebuilds with one walk of the whole tree (`LEDGER.md`,
+  DF-18). No layout runs and no chunk rebuilds (`z_change_costs_no_layout`
+  checks both).
+- Rerun twice after the PR #6 review (the scene walk lends a sorted
+  order instead of copying it), load average 20 to 26: within noise.
+  Two cells ran slower than their range, both with no z before: the
+  5k re-sort at 13 to 18 µs, and the 100k frame after z at 7.9 to
+  9.0 ms. The others fell inside or just below their ranges.
+
+Hit tests at 100k nodes along E15's 1,000-point path (µs per test,
+allocations per test):
+
+| z | walk | index |
+|---|------|-------|
+| none | 1,273 to 2,678, 0 allocs | 7.3 to 7.9, 0 allocs |
+| 1 in 10 cells ±1 | 1,570 to 2,377, 0 allocs | 8.1 to 11.5, 0 allocs |
+
+A sorted parent is borrowed as-is after the frame's refresh, so hit
+testing stays allocation-free. The index costs up to 1.5 times more with
+z on a tenth of all cells, an extreme case: it visits those children
+out of memory order. Rerun on the Mac with the command above.
 
 ## Step 1 — crate split, CRW2, retained scene (2026-09-23)
 

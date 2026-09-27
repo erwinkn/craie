@@ -365,24 +365,44 @@ export function Surface(props: SurfaceProps) {
   return createElement("surface", props)
 }
 
-export interface VectorProps extends ListenerProps, ShapeProps {
+interface VectorBase extends ListenerProps {
   style?: StyleProps
   backgroundColor?: string | number
   borderRadius?: number
   borderColor?: string | number
   borderWidth?: number
-  /** A prepared asset: the bytes `craie-svg in.svg out.crv` writes (SVG
-   * documents import at build time). */
-  asset?: Uint8Array
-  /** Runtime shapes instead of an asset: "minX minY width height", with
-   * `Path`, `Circle`, ... children. The paint props (`fill`, `stroke`,
-   * ...) are defaults the shapes inherit. */
-  viewBox?: string
-  children?: ReactNode
   accessibilityLabel?: string
   accessibilityRole?: AccessibilityRole
   hidden?: boolean
 }
+
+/** A prepared asset: the bytes `craie-svg in.svg out.crv` writes (SVG
+ * documents import at build time). Its paint is baked in. */
+export interface VectorAssetProps extends VectorBase {
+  asset: Uint8Array
+  viewBox?: undefined
+  children?: undefined
+}
+
+/** Runtime shapes: `Path`, `Circle`, ... children in a view box. The
+ * paint props (`fill`, `stroke`, ...) are defaults the shapes inherit;
+ * `opacity` is the node's (as `style.opacity`: the drawing fades as one
+ * layer, and animates). */
+export interface VectorShapeProps extends VectorBase, ShapeProps {
+  asset?: undefined
+  /** "minX minY width height". Empty or zero-size draws nothing. */
+  viewBox: string
+  children?: ReactNode
+}
+
+/** A Vector with neither draws nothing. */
+export interface VectorEmptyProps extends VectorBase {
+  asset?: undefined
+  viewBox?: undefined
+  children?: undefined
+}
+
+export type VectorProps = VectorAssetProps | VectorShapeProps | VectorEmptyProps
 
 /** A vector drawing (icons, illustrations, charts). Its view box is the
  * node's intrinsic size; the drawing fits its content box, centered,
@@ -394,18 +414,24 @@ export interface VectorProps extends ListenerProps, ShapeProps {
  *     <Path d="m9 12 2 2 4-4" />
  *   </Vector>
  */
-export function Vector({ children, viewBox, ...props }: VectorProps) {
-  if (viewBox === undefined) {
-    return createElement("vector", { accessibilityRole: "image", ...props })
+export function Vector(props: VectorProps) {
+  if (props.viewBox === undefined) {
+    const { children: _, ...rest } = props
+    return createElement("vector", { accessibilityRole: "image", ...rest })
   }
   const {
-    fill, fillRule, stroke, strokeWidth, strokeLinecap, strokeLinejoin, strokeMiterlimit,
-    strokeDasharray, strokeDashoffset, opacity, transform, ...rest
-  } = props
+    children, viewBox, asset: _, fill, fillOpacity, fillRule, stroke, strokeOpacity,
+    strokeWidth, strokeLinecap, strokeLinejoin, strokeMiterlimit, strokeDasharray,
+    strokeDashoffset, color, opacity, transform, ...rest
+  } = props as VectorShapeProps
   const shapes = flattenShapes(children, {
-    fill, fillRule, stroke, strokeWidth, strokeLinecap, strokeLinejoin, strokeMiterlimit,
-    strokeDasharray, strokeDashoffset, opacity, transform,
-  })
+    fill, fillOpacity, fillRule, stroke, strokeOpacity, strokeWidth, strokeLinecap,
+    strokeLinejoin, strokeMiterlimit, strokeDasharray, strokeDashoffset, color, transform,
+  }, viewBox)
+  if (opacity !== undefined) {
+    const o = Math.min(Math.max(Number(opacity), 0), 1)
+    rest.style = { ...rest.style, opacity: (rest.style?.opacity ?? 1) * (Number.isNaN(o) ? 1 : o) }
+  }
   return createElement("vector", { accessibilityRole: "image", ...rest, viewBox, shapes })
 }
 
@@ -531,6 +557,43 @@ export function ScrollView(props: ScrollViewProps) {
   })
 }
 
+/** The layer a subtree renders in (null: the app itself). */
+const LayerOwner = createContext<HostNode | null>(null)
+
+export interface LayerProps {
+  /** Order among layers (kit tokens: dropdown 50, modal 70, toast 80...). */
+  z?: number
+  children?: ReactNode
+}
+
+/** Renders `children` in a layer: a container filling the window at the
+ * root level, above the app. Layers order by `z`, then by the order they
+ * opened, and never below the layer they were opened from:
+ *
+ *   <Layer z={70}><Dialog>   // opened from the app
+ *     <Layer z={50}><Menu /></Layer>   // paints above the dialog
+ *   </Dialog></Layer>
+ *
+ * The container is transparent to hit testing: a press where its
+ * children are not reaches whatever is below. */
+export function Layer({ z = 0, children }: LayerProps) {
+  const host = useContext(HostContext)
+  const owner = useContext(LayerOwner)
+  if (!host) throw Error("Layer outside a Craie root")
+  const [container] = useState(() => host.layer(owner, z))
+  useLayoutEffect(() => {
+    const old = container.props
+    if (old.style.zIndex === z) return
+    const props = { style: { ...old.style, zIndex: z } }
+    if (container.mounted) host.update(container, old, props)
+    else container.props = props
+  }, [z])
+  return reconciler.createPortal(
+    createElement(LayerOwner.Provider, { value: container }, children),
+    container, null, null,
+  )
+}
+
 export interface ListProps<T> {
   /** The items. Treated as immutable: a changed item is a new object. */
   items: readonly T[]
@@ -636,6 +699,10 @@ const context = Object.freeze({})
 const noop = () => {}
 const no = () => false
 
+/** A container is the root, or a layer container (`Layer`'s portal). */
+type Container = CraieHost | HostNode
+const hostOf = (c: Container) => (c instanceof CraieHost ? c : c.root)
+
 const config = {
   rendererVersion: "0.1.0",
   rendererPackageName: "@craie/bridge",
@@ -646,12 +713,12 @@ const config = {
   supportsMicrotasks: true,
   scheduleMicrotask: queueMicrotask,
 
-  createInstance: (type: string, props: Record<string, any>, root: CraieHost) =>
-    root.node(type, props),
+  createInstance: (type: string, props: Record<string, any>, c: Container) =>
+    hostOf(c).node(type, props),
   // String children are absorbed into the `text` prop via
   // shouldSetTextContent; createTextInstance covers mixed content.
-  createTextInstance: (text: string, root: CraieHost) =>
-    root.node("text", { text, accessibilityRole: "text" }),
+  createTextInstance: (text: string, c: Container) =>
+    hostOf(c).node("text", { text, accessibilityRole: "text" }),
 
   appendInitialChild: (parent: HostNode, child: HostNode) => {
     // Parent has no id yet; replayed by materialize.
@@ -659,16 +726,17 @@ const config = {
   },
   appendChild: (parent: HostNode, child: HostNode) =>
     parent.root.place(parent, child, null),
-  appendChildToContainer: (root: CraieHost, child: HostNode) =>
-    root.place(null, child, null),
+  appendChildToContainer: (c: Container, child: HostNode) =>
+    c instanceof CraieHost ? c.place(null, child, null) : c.root.placeInLayer(c, child, null),
   insertBefore: (parent: HostNode, child: HostNode, before: HostNode) =>
     parent.root.place(parent, child, before),
-  insertInContainerBefore: (root: CraieHost, child: HostNode, before: HostNode) =>
-    root.place(null, child, before),
+  insertInContainerBefore: (c: Container, child: HostNode, before: HostNode) =>
+    c instanceof CraieHost ? c.place(null, child, before) : c.root.placeInLayer(c, child, before),
   // Removal unlinks the subtree root here; every deleted node in the
   // subtree then frees its own slot through detachDeletedInstance.
   removeChild: (parent: HostNode, child: HostNode) => parent.root.detach(child),
-  removeChildFromContainer: (root: CraieHost, child: HostNode) => root.detach(child),
+  removeChildFromContainer: (c: Container, child: HostNode) =>
+    c instanceof CraieHost ? c.detach(child) : c.root.removeFromLayer(c, child),
 
   commitUpdate: (n: HostNode, _type: string, oldProps: any, props: any) =>
     n.root.update(n, oldProps, props),

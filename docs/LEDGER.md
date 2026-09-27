@@ -267,14 +267,16 @@ Reviewer minors and nitpicks not fixed yet.
 - Resolves in: shape-level animation targets, or dashes in the shader
   (E07).
 
-### DF-14: no `currentColor` in drawings
+### DF-14: no inherited color in drawings
 
 - Source: runtime vector shapes (work item 8) implementation (own
-  finding).
+  finding); narrowed in the PR #5 review (PR5-06).
 - Where: packages/bridge/src/shapes.ts (`paint`).
-- Claim: a shape's fill and stroke are resolved colors; `currentColor`
-  throws in the facade, so a Lucide icon needs its color passed as
-  `stroke`.
+- Claim: `currentColor` resolves to the `color` prop of the `Vector` or
+  a `G` above the shape, as `<svg color>` does; it does not inherit a
+  color from the node's ancestors (there is none to inherit), and
+  without a `color` prop it throws. The kit's token colors (`'ink-3'`)
+  must be resolved to colors before they reach a shape.
 - Why deferred: the color a node inherits comes with state styles and
   paint sources (topic 5).
 - Resolves in: topic 5.
@@ -287,25 +289,73 @@ Reviewer minors and nitpicks not fixed yet.
 - Claim: `Vector` reads its children as elements (`Path`, `G`, arrays,
   fragments); a component that returns shapes (`<MyArrow />`) throws.
   The kit's icon registry passes `[tag, attrs]` data, which maps to
-  direct elements.
+  direct elements; the kit's own `Path` and `Circle` are components
+  using hooks, and throw.
 - Why deferred: rendering shapes through the reconciler would give each
   a host node; flattening at render keeps one op per drawing.
 - Resolves in: host shape nodes if a consumer composes shapes from
   components.
 
-### DF-16: dash corners and group opacity in drawings
+### DF-16: group opacity and fill-under-stroke overlap in drawings
 
 - Source: runtime vector shapes (work item 8) implementation (own
+  finding); corrected in the PR #5 review (PR5-03, PR5-04).
+- Where: packages/bridge/src/shapes.ts, crates/vector/src/svg.rs.
+- Claim: two differences from a browser remain. A `G`'s opacity
+  multiplies into each shape inside, so overlapping shapes in a faded
+  group show their overlap (the importer's DF-6 case). A shape's own
+  `opacity` multiplies into its fill and its stroke separately, so a
+  faded shape with both shows its fill under the inner half of its
+  stroke. `Vector`'s `opacity` is the node's (one layer) and has
+  neither problem; dash corners at a closed subpath's start are joined.
+- Why deferred: both need an isolated layer per group or shape.
+- Resolves in: group layers (DF-6).
+
+### DF-17: Tab and accessibility reach layers after the app
+
+- Source: sibling z and layers (work item 4) implementation (own
   finding).
-- Where: crates/vector/src/lib.rs (`dashed`), packages/bridge/src/shapes.ts.
-- Claim: two small differences from a browser. A dash that runs across
-  a closed subpath's start is two open pieces with caps, not one joined
-  corner. A `G`'s opacity multiplies into each shape, so overlapping
-  shapes in a translucent group show their overlap (the importer's
-  DF-6 case).
-- Why deferred: neither shows on icons or charts at their usual sizes;
-  the corner needs a join-aware dasher, the group an isolated layer.
-- Resolves in: a lyon-side dasher or E07; group layers (DF-6).
+- Where: crates/ui/src/dispatch.rs (`focusables`), crates/ui/src/a11y.rs.
+- Claim: a layer container is a root-level node after the app's roots,
+  and Tab and the accessibility tree keep tree order. So Tab reaches a
+  menu opened from a toolbar button only after every focusable node of
+  the app, and a screen reader reads layers last, in open order.
+- Why deferred: where focus goes into and out of a layer is work item
+  3's (focus traps, `modal`, owners' scopes); reading a layer next to
+  its owner is the accessibility pass's (topic 13).
+- Resolves in: work item 3, then topic 13.
+
+### DF-18: a z change walks the whole tree for the draw order
+
+- Source: sibling z (work item 4) measurement (`zorder` example).
+- Where: crates/ui/src/scene_sync.rs (`walk_tree`).
+- Claim: a z change bumps `structure_rev`, like an insert, and the next
+  frame rebuilds the draw order with one walk of the whole tree. At
+  100k nodes that frame took 6.0 to 8.8 ms against 2.5 to 3.7 ms after
+  a transform change (exe1, loaded); the re-sort itself took 28 to 74
+  µs. At 5k nodes: 0.31 to 0.45 ms against 0.17 to 0.29 ms.
+- Why deferred: it is the cost every structure change already pays,
+  and the draw order is a derived cache by decision (§8). Patching one
+  parent's range needs the draw list ranged per parent.
+- Resolves in: an incremental draw-order patch for structure changes,
+  if reordering or inserting in large trees shows up in a frame
+  profile (it would serve inserts and moves too).
+
+### DF-19: layers owned coarsely
+
+- Source: sibling z and layers (work item 4) implementation (own
+  finding).
+- Where: packages/bridge/src/index.ts (`Layer`).
+- Claim: a `Layer`'s owner is the enclosing `Layer`'s container, and a
+  top-level `Layer` has none. So an unowned layer with a negative z
+  sorts under the app (the kit's layer tokens are all positive), and
+  owners know nothing finer than a layer (a trap inside it). The other
+  way round, a top-level `Layer` defaults to z 0: an app root with a
+  positive `zIndex` covers every unowned layer.
+- Why deferred: the native op takes any node as owner; finding a finer
+  one (the trap, or the host node that opened the layer) is work item
+  3's, with focus traps.
+- Resolves in: work item 3.
 
 ### DF-30: images are decoded per node, and fetched per mount
 
@@ -602,6 +652,30 @@ Reviewer minors and nitpicks not fixed yet.
     (a NUL character key is now invalid), the platform's key
     translation (`us_char`, F13 to F24), the drop fallback, the window
     list's old versions pruned on ack, and submit key `none`.
+- PR5-01 (vectors review): a bad value in a drawing closed the session: a drawing whose strings or numbers do not parse now applies and draws nothing (`asset: None`, zero intrinsic size), as SVG draws nothing for an empty view box. Structural errors still reject (bad refs, a drawing on another kind, too many shapes, a malformed op, the byte cap). The facade coerces with `Number()` and drops a shape with a number that is not finite (warned once), clamps `opacity`, gives a negative `strokeWidth` or a miter limit under 1 its default, draws no shape for a size of zero or less, and takes `strokeDasharray` as a number, an array or a string (a negative length draws solid).
+- PR5-02 (vectors review): the bounds were per string: they are per drawing now. `check` caps the shapes' string references at 4 MiB (`MAX_BYTES`) before the key is built; `build` parses each distinct string once, charges path commands per shape, transform functions and points to one `MAX_VERBS` budget, and shares one dash budget. The key is built once per transaction and shared as `Arc<[u8]>` by the executor, the source table and every node drawing it.
+- PR5-03 (vectors review): zero-length dashes at a subpath's start and end are drawn (dots at 0, 4, 8 and 12 for "0 4" on a 12-unit line, as Chrome), and a closed subpath that starts and ends inside a dash emits its last piece first, so the corner gets a join.
+- PR5-04 (vectors review): `Vector`'s `opacity` is the node's (`style.opacity`: one layer, animatable); only `G` and shape opacity multiply into shapes. DF-16 is corrected: what remains is `G` opacity and fill under stroke.
+- PR5-05 (vectors review): tessellation is bounded by what shows: items whose bounds miss the viewport are skipped, the tolerance is at least the item's size over 2^16 (a circle of radius 4e6 through a 24-unit icon flattens to under 2,000 vertices instead of over 5,000, and the count no longer grows with the radius), and a shape at opacity 0 is not tessellated. A node at opacity 0 still is: its opacity is a layer patch, so a fade-in does not tessellate on its first visible frame.
+- PR5-06 (vectors review): `fillOpacity` and `strokeOpacity` scale the color's alpha; `currentColor` paints with a `color` prop on `Vector` or `G` and throws without one. DF-14 is narrowed to "no inherited color".
+- PR5-07 (vectors review): `flattenShapes` throws past 4,096 shapes, or 4 MiB of strings, saying why, instead of a wrapped count or a closed session.
+- PR5-08 (vectors review): the docs say what the bounds are, list the kit's remaining differences (token colors, hook-using wrappers; DF-14, DF-15), and label the benchmark as the Rust direct API. The host node keeps the drawing it last sent, so a resend stringifies once, not twice; the JS side of a resend is measured (EXPERIMENTS.md).
+- PR5-09 (vectors review): the test gaps are filled: dots, offsets past a period, a closed subpath starting inside a dash; packed arc flags, skews, negative view boxes, T and S after other commands; sweeps shrinking both tables after churn, scale changes, a source removed and reused in one transaction, id recycling while shared; unknown kind, rule, join and cap bytes and a bad string ref; Ellipse and Polyline, asset and shapes switching, a view-box-only resend, an inherited dash array, and the numeric-string and NaN cases.
+- PR5-10 (vectors review, nit): a payload must start with the `CRV1` magic, checked before the source table (drawing keys start `CRVS`), so a payload cannot take a drawing's asset. The rebuild oracle relied on that hole (it replayed a drawing's key as a payload); it replays the drawing now (`Drawing::from_key`), and its random sequences create drawings as well as assets.
+- PR5-11 (vectors review, nit): a Vector going from shapes or an asset to neither sends an empty drawing, which draws nothing.
+- PR5-12 (vectors review, nit): opacity 0 does not tessellate (PR5-05).
+- PR5-13 (vectors review, nit): `VectorProps` is a union: an asset Vector's type has no shape props, and `asset` is dropped when `viewBox` is given.
+- PR6-01 (zorder review): an owner layer closed with its last child while a layer it owned stayed open, which then lost its owner for good: a container stays open while it has children or open layers it owns, closing cascades to an idle owner, and `Layer`'s cleanup effect is gone (tested with the review's repro, which fails on the old code, and the cascade).
+- PR6-02 (zorder review): the harness snapshot sent `LAYER` before the owner's create when the owner's id was higher: layer ops go in a pass after every create, and `Gen` sets layers with random owners (any node, none, later removed).
+- PR6-03 (zorder review): a style of only spatial keys sent a layout op (`{}` against no style): `layoutPart` returns undefined when no defined key is left (tested undefined, `{zIndex: 1}`, undefined).
+- PR6-04 (zorder review): the randomized order test compared the index against a walk reading the same order: a new oracle over random z, layers, owners, moves, detaches and reused ids checks the stable sort by z, each layer above its owner's sibling, the drawn order and hits, before and after the refresh (dropping the owner raise or the stale-reader re-sort fails it); new tests cover a reused sorted parent's id, z and `LAYER` set while detached, an app root remounted under an open layer, an insert before a sibling in a layer, and Suspense hiding and revealing a layer's children.
+- PR6-05 (zorder review): the scene walk copied each sorted parent's order per visit: it lends the order out of `Host::orders` for the walk (`mem::take`) and puts it back.
+- PR6-06 (zorder review): a non-integer `zIndex` threw in the commit: it is rounded and clamped to an i32, NaN is 0, with a warning logged once.
+- PR6-07 (zorder review): closing a layer missing from the open list would have dropped the last one: the splice is guarded.
+- PR6-08 (zorder review): `LAYER` was accepted on any kind: it is a structural error on anything but a View (tested); `order.rs` and `Mutation::Layer` document the owners that silently count as none.
+- PR6-09 (zorder review): between a transaction and a refresh, a direct `hit_test` sorts stale parents on the spot: documented on `hit_test` (it takes `&self`, so it cannot refresh lazily).
+- PR6-10 (zorder review): EXPERIMENTS says the frame column excludes the re-sort; DF-19 adds that an app root with a positive `zIndex` covers unowned layers; DF-20 is closed.
+- DF-20 (an owner-only layer closed when Suspense hid it): fixed in the PR #6 review (PR6-01); a Suspense hide removes no layer's children, so nothing closes.
 - PR8-01 (images review): the decoder did not bound memory (a 249 KB PNG took 1.25 GB): the probe and the decode reject over 64 megapixels (`MAX_PIXELS`) before any buffer, the codecs check 32,768 px a side, and `decode` reserves the decoded buffer, plus the RGBA copy for a format that needs one, against 512 MiB (`MAX_ALLOC`) before `from_decoder`. The rotation copy is gone: the decoder crops and shrinks in the stored orientation and turns the small result. A probe over the budget fails the image, so no huge intrinsic size is set. The false "512 MiB" comment is replaced. Tests: a 4 x 4 PNG claiming 20,000 x 20,000 fails in both, and the reserve fails one byte short for RGBA and gray.
 - PR8-02 (images review): a new `src` blanked the image and collapsed its layout until the decode landed: the old bitmap and natural size stay until the new image's first pixels or failure. An unsized image with a new aspect decodes twice as a result (DF-38).
 - PR8-03 (images review): a failed fetch left the previous `src`'s image on screen: the facade sends empty bytes, which clear it, and fires `onError`.

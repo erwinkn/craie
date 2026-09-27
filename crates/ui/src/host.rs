@@ -8,7 +8,7 @@
 //! ```text
 //! nodes[]        header: parent, child span, kind, flags, generation
 //! layout[]       the node's own layout inputs (no shared records)
-//! spatial[]      local transform, opacity, scroll offset
+//! spatial[]      local transform, opacity, scroll offset, z
 //! paint[]        fill, border, radius
 //! paragraphs[]   UTF-8 text + style span list (text nodes)
 //! interaction[]  listener mask, focusable, role
@@ -17,7 +17,7 @@
 //!
 //! Children are a `Span` into one capacity-classed pool, so a leaf pays
 //! nothing for children. Truly sparse facts (labels, surface payloads,
-//! list states) live in id-keyed maps.
+//! list states, paint orders, layer owners) live in id-keyed maps.
 //!
 //! Every mutation advances the revisions it can invalidate and queues the
 //! dirty work it creates. Queues schedule work; revisions prove validity.
@@ -90,6 +90,14 @@ impl NodeFlags {
     pub const TEXT: NodeFlags = NodeFlags(1 << 2);
     /// The hit-test reach is stale (`reach.rs`); so is every ancestor's.
     pub const REACH: NodeFlags = NodeFlags(1 << 3);
+    /// Its children paint in a sorted order, held in `Host::orders`
+    /// (`order.rs`); without it they paint in tree order.
+    pub const SORTED: NodeFlags = NodeFlags(1 << 4);
+    /// Its paint order is queued for re-sorting.
+    pub const ORDER: NodeFlags = NodeFlags(1 << 5);
+    /// A layer container: never a hit target itself (`box-none`), and
+    /// never sorts below the sibling that holds its owner.
+    pub const LAYER: NodeFlags = NodeFlags(1 << 6);
 
     pub fn contains(self, other: NodeFlags) -> bool {
         self.0 & other.0 != 0
@@ -145,6 +153,8 @@ pub struct Spatial {
     pub opacity: f32,
     /// Content offset of a scroll container (logical points).
     pub scroll: [f32; 2],
+    /// Order among its siblings (`order.rs`): higher paints later.
+    pub z: i32,
 }
 
 impl Default for Spatial {
@@ -153,6 +163,7 @@ impl Default for Spatial {
             transform: Affine::IDENTITY,
             opacity: 1.0,
             scroll: [0.0; 2],
+            z: 0,
         }
     }
 }
@@ -220,11 +231,13 @@ pub struct SurfaceData {
 }
 
 /// A vector node's asset: its source (payload bytes as sent, or a
-/// drawing's key) and their decoding.
+/// drawing's key), shared with the source table and other nodes, and
+/// their decoding.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct VectorData {
-    pub bytes: Vec<u8>,
-    /// `None` until a payload arrives.
+    pub bytes: std::sync::Arc<[u8]>,
+    /// `None` until a source arrives, and for a drawing that does not
+    /// parse (it draws nothing).
     pub asset: Option<std::sync::Arc<craie_vector::asset::Asset>>,
 }
 
@@ -296,7 +309,7 @@ pub struct Host {
     pub images: HashMap<u32, ImageData>,
     /// Decoded vector sources by source bytes: nodes with the same
     /// source share one asset (and so its tessellation).
-    vector_sources: HashMap<Box<[u8]>, std::sync::Weak<craie_vector::asset::Asset>>,
+    vector_sources: HashMap<std::sync::Arc<[u8]>, std::sync::Weak<craie_vector::asset::Asset>>,
     /// `vector_sources` entries after the last sweep of dead ones.
     vector_sources_swept: usize,
     /// Claim sets (`claims.rs`), id-keyed; NIL keys the window list.
@@ -305,6 +318,18 @@ pub struct Host {
     pub list_index: Vec<u32>,
     /// List states and scroll anchors (§7).
     pub lists: crate::list::Lists,
+    /// Paint orders of the parents flagged `SORTED`, NIL keying the root
+    /// level (`order.rs`).
+    pub(crate) orders: HashMap<u32, Vec<NodeId>>,
+    /// Layer containers' owners (NIL: none), id-keyed.
+    pub owners: HashMap<u32, u32>,
+    /// `SORTED` and `ORDER` for the root level, which has no header.
+    pub(crate) root_flags: NodeFlags,
+    /// Parents whose paint order is queued (flagged `ORDER`).
+    pub(crate) order_queue: Vec<u32>,
+    /// `revs.structure` at the last `refresh_orders`: owners resolve
+    /// through the tree, so any structure change re-sorts their parents.
+    pub(crate) order_rev: Rev,
     pub revs: Revs,
     pub dirty: DirtyQueues,
     /// Bytes copied from transactions into host stores: paragraph text
@@ -359,6 +384,11 @@ impl Host {
             claims: HashMap::new(),
             list_index: Vec::new(),
             lists: crate::list::Lists::default(),
+            orders: HashMap::new(),
+            owners: HashMap::new(),
+            root_flags: NodeFlags::NONE,
+            order_queue: Vec::new(),
+            order_rev: Rev::ZERO,
             revs: Revs::default(),
             dirty: DirtyQueues::default(),
             copied_bytes: 0,
@@ -381,25 +411,49 @@ impl Host {
             .is_some_and(|w| w.strong_count() > 0)
     }
 
-    /// The shared decoding of a vector source, built on a miss (`None`:
-    /// it does not build). Dead entries are swept when the table has
-    /// doubled since the last sweep.
+    /// The table's copy of a source, if it holds one (nodes of the same
+    /// source share one copy).
+    pub fn vector_source_key(&self, source: &[u8]) -> Option<std::sync::Arc<[u8]>> {
+        self.vector_sources
+            .get_key_value(source)
+            .map(|(k, _)| k.clone())
+    }
+
+    /// Vector source table entries, live or not yet swept (tests).
+    pub fn vector_sources_len(&self) -> usize {
+        self.vector_sources.len()
+    }
+
+    /// The shared copy and decoding of a vector source: the table's, or
+    /// `share()` and `build()` on a miss (`None`: it does not build, and
+    /// is not kept). Dead entries are swept when the table has doubled
+    /// since the last sweep.
     pub fn vector_source(
         &mut self,
         source: &[u8],
+        share: impl FnOnce() -> std::sync::Arc<[u8]>,
         build: impl FnOnce() -> Option<craie_vector::asset::Asset>,
-    ) -> Option<std::sync::Arc<craie_vector::asset::Asset>> {
-        if let Some(a) = self.vector_sources.get(source).and_then(|w| w.upgrade()) {
-            return Some(a);
+    ) -> (
+        std::sync::Arc<[u8]>,
+        Option<std::sync::Arc<craie_vector::asset::Asset>>,
+    ) {
+        if let Some((k, w)) = self.vector_sources.get_key_value(source)
+            && let Some(a) = w.upgrade()
+        {
+            return (k.clone(), Some(a));
         }
-        let a = std::sync::Arc::new(build()?);
+        let key = share();
+        let Some(a) = build().map(std::sync::Arc::new) else {
+            return (key, None);
+        };
+        self.vector_sources.remove(source);
         self.vector_sources
-            .insert(source.into(), std::sync::Arc::downgrade(&a));
+            .insert(key.clone(), std::sync::Arc::downgrade(&a));
         if self.vector_sources.len() > 2 * self.vector_sources_swept + 64 {
             self.vector_sources.retain(|_, w| w.strong_count() > 0);
             self.vector_sources_swept = self.vector_sources.len();
         }
-        Some(a)
+        (key, Some(a))
     }
 
     pub fn kind(&self, id: NodeId) -> Option<NodeKind> {
@@ -513,6 +567,8 @@ impl Host {
         self.vectors.remove(&id.0);
         self.images.remove(&id.0);
         self.claims.remove(&id.0);
+        self.orders.remove(&id.0);
+        self.owners.remove(&id.0);
         self.list_index[i] = NIL;
         self.lists.forget(id.0);
         if kind == NodeKind::Surface {
@@ -555,6 +611,14 @@ impl Host {
         }
         self.nodes[child.index()].parent = parent.0;
         self.revs.structure.bump();
+        // A child with a z or an owner sorts; so does any child of a
+        // parent that already does.
+        if self.spatial[child.index()].z != 0
+            || self.nodes[child.index()].flags.contains(NodeFlags::LAYER)
+            || self.order_flags(parent).contains(NodeFlags::SORTED)
+        {
+            self.queue_order(parent);
+        }
         self.mark_layout(child);
         self.dirty.semantic.push(child.0);
         if parent.is_node() {
@@ -584,6 +648,9 @@ impl Host {
         }
         self.nodes[id.index()].parent = NodeId::DETACHED.0;
         self.revs.structure.bump();
+        if self.order_flags(parent).contains(NodeFlags::SORTED) {
+            self.queue_order(parent);
+        }
         if parent.is_node() {
             // The parent's layout depended on this child.
             self.mark_layout(parent);
@@ -617,6 +684,15 @@ impl Host {
         self.vectors.remove(&id.0);
         self.images.remove(&id.0);
         self.claims.remove(&id.0);
+        self.orders.remove(&id.0);
+        self.owners.remove(&id.0);
+        // Its layers lose their owner: a reuse of the id must not adopt
+        // them.
+        for owner in self.owners.values_mut() {
+            if *owner == id.0 {
+                *owner = NIL;
+            }
+        }
         self.list_index[i] = NIL;
         self.lists.forget(id.0);
         let generation = self.nodes[i].generation.wrapping_add(1);

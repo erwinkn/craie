@@ -33,6 +33,15 @@ Times are UTC.
 | 03:10 | PR #4 review fixed (13 findings, no blockers; `LEDGER.md` PR4-01..13, DF-12 for drop positions) |
 | 03:15 | PR #4 reverified (CI, 300 workspace tests, smoke, macOS type-check) and merged as `a4e71a8`; tracks told to rebase onto it |
 | 03:30 | Runtime vector shapes (item 8, part 1) pushed by its track; PR #5 opened and sent to review; images (part 2) continue stacked on it |
+| 03:37 | Sibling z and layers (item 4, first half) pushed by its track; PR #6 opened and sent to review |
+| 03:44 | PR #5 review: no blockers, 2 majors (a bad value in a drawing closed the session; work bounds per string, not per drawing), 7 minors; a new thread fixes them |
+| 03:50 | PR #6 review: no blockers, 1 major (an owner layer closed when its own content left, leaving its nested menu unowned under it), 9 minors and nits; its track fixes them |
+| 03:52 | State styles (item 5) pushed by its track; PR #7 opened and sent to review |
+| 04:02 | Images (item 8, part 2) pushed by its track; PR #8 opened, stacked on #5, and sent to review |
+| 04:15 | PR #6 review fixed (`LEDGER.md` PR6-01..10), reverified (CI, 311 workspace tests, smoke, macOS type-check) and merged |
+| 04:18 | PR #7 review: no blockers, 2 majors (transitions ran on mount and on the first frame; layout values in a variant took their partner fields from the base, not from other variants), 13 minors; its track fixes them after merging main |
+| 04:22 | PR #8 review: 1 blocker (decoding was not memory-bounded: a 249 KB PNG with a 16,000×16,000 header took 1.25 GB), 7 majors; its track fixes them |
+| 04:35 | PR #5 review fixed (`LEDGER.md` PR5-01..13), main merged in, reverified (CI, 337 workspace tests, smoke, macOS type-check) and merged; PR #8 retargeted to main first |
 
 ## PRs
 
@@ -42,7 +51,10 @@ Times are UTC.
 | [#2](https://github.com/erwinkn/craie/pull/2) | E19: event round trip under load; React priorities for native events | Merged |
 | [#3](https://github.com/erwinkn/craie/pull/3) | E15: hit-test reach index; propagation paths no longer allocate | Merged |
 | [#4](https://github.com/erwinkn/craie/pull/4) | Claims and keys (work item 1): key records, keymaps, paste and drop claims; protocol 4 | Merged |
-| [#5](https://github.com/erwinkn/craie/pull/5) | Runtime vector shapes (work item 8, part 1): SVG path strings parsed natively, dashes, a shared mesh cache | In review |
+| [#5](https://github.com/erwinkn/craie/pull/5) | Runtime vector shapes (work item 8, part 1): SVG path strings parsed natively, dashes, a shared mesh cache | Merged |
+| [#6](https://github.com/erwinkn/craie/pull/6) | Sibling z and layers (work item 4, first half): `zIndex` among siblings, layer containers that never sort below their owner | Merged |
+| [#7](https://github.com/erwinkn/craie/pull/7) | State styles (work item 5): hover, press, focus, app states and breakpoints restyle natively; inherited color | In review |
+| [#8](https://github.com/erwinkn/craie/pull/8) | Images (work item 8, part 2): decoded off-thread at the drawn size, drawn from the glyph atlas | In review |
 
 ## Numbers
 
@@ -124,6 +136,26 @@ percent of the layout pass that stales it, and 16 bytes per node. Rerun on the M
   of its own, not usvg; the dash offset is not animatable yet (a
   spinner rotates its node; `LEDGER.md` DF-13), and `currentColor`
   waits for state styles (DF-14).
+- Sibling z: `zIndex` rides the spatial op, so a z change never
+  relayouts. A layer's sort key is (z, tree position, depth), each
+  raised to its owner's, so "never below its owner" is a plain stable
+  sort. A z change rebuilds the whole draw order (6 to 9 ms at 100k
+  nodes against 2.5 to 3.7 ms after a transform; `LEDGER.md` DF-18);
+  an incremental patch waits for a profile that asks for it.
+- State styles: resolved natively, since the JS tail under GC (E19:
+  35 to 50 ms p99) is too slow for hover. Specificity is the number of
+  states a variant tests, then the highest-ranked state, then
+  declaration order; a restyle sends only the fields that changed, so
+  a transition tweens exactly those. Hover over 1,000 dependents
+  restyles in 235 µs with no layout.
+- Images: decoded by the `image` crate (png, jpeg, webp, gif) in
+  `craie-platform-winit` only, on one worker thread, at the size drawn
+  (an 80×80 avatar holds 25.6 KB, not the 48 MB of its 4000×3000
+  source), and drawn as color quads from the glyph atlas: no new
+  shader.
+- A PR stacked on another is retargeted to `main` before its base
+  merges: `--delete-branch` closes stacked PRs instead of retargeting
+  them.
 - macOS: exe1 cannot build or sign for the Mac, but
   `cargo check --workspace --target aarch64-apple-darwin` type-checks
   every `cfg(target_os = "macos")` path (no linking, no codesign). Each
@@ -132,7 +164,9 @@ percent of the layout pass that stales it, and 16 bytes per node. Rerun on the M
 ## Open questions for Erwin
 
 - `craie-render --test paths` failed once in the first full test run
-  of PR #2 and passed in five reruns. Likely a timing flake under
-  llvmpipe load; worth watching on the Mac.
+  of PR #2 and passed in five reruns. It crashed again (SIGSEGV) in
+  PR #5's first CI run and passed alone three times and in the CI rerun.
+  A segfault points at llvmpipe or the driver rather than timing;
+  worth watching on the Mac.
 
 ## Next steps

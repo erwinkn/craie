@@ -56,11 +56,12 @@ pub fn snapshot(ui: &Ui) -> Transaction<'static> {
             t.layout(id.0, &style.to_taffy());
         }
         let s = host.spatial[id.index()];
-        if s.transform != Affine::IDENTITY || s.opacity != 1.0 {
+        if s.transform != Affine::IDENTITY || s.opacity != 1.0 || s.z != 0 {
             t.push(Mutation::Spatial {
                 id: id.0,
                 transform: (s.transform != Affine::IDENTITY).then_some(s.transform),
                 opacity: (s.opacity != 1.0).then_some(s.opacity),
+                z: (s.z != 0).then_some(s.z),
             });
         }
         if kind.has_box() {
@@ -91,10 +92,14 @@ pub fn snapshot(ui: &Ui) -> Transaction<'static> {
         if let Some(label) = host.label(id) {
             t.label(id.0, label.to_string());
         }
+        // A vector's source: payload bytes, or a drawing's key.
         if let Some(v) = host.vectors.get(&id.0)
             && !v.bytes.is_empty()
         {
-            t.payload(id.0, v.bytes.clone());
+            match craie_vector::svg::Drawing::from_key(&v.bytes) {
+                Some(d) => t.drawing(id.0, d.into_owned()),
+                None => t.payload(id.0, v.bytes.to_vec()),
+            };
         }
         if let Some(sd) = host.surfaces.get(&id.0) {
             t.surface(id.0, sd.kind, sd.params);
@@ -125,6 +130,12 @@ pub fn snapshot(ui: &Ui) -> Transaction<'static> {
         for &c in host.children(id) {
             t.append(id.0, c.0);
         }
+    }
+    // After every create: an owner may have a higher id than its layer.
+    let mut layers: Vec<_> = host.owners.iter().map(|(&l, &o)| (l, o)).collect();
+    layers.sort_unstable();
+    for (layer, owner) in layers {
+        t.layer(layer, owner);
     }
     t
 }
@@ -436,6 +447,32 @@ const WORDS: &[&str] = &[
     "of",
 ];
 
+/// A runtime drawing: a dashed ring over a filled square.
+fn vector_drawing() -> craie_vector::svg::Drawing<'static> {
+    use craie_vector::svg::{Drawing, Shape};
+    Drawing {
+        view_box: "0 0 24 24".into(),
+        shapes: vec![
+            Shape {
+                geometry: "M4 4h16v16H4z".into(),
+                fill: 0x3366_99FF,
+                ..Shape::default()
+            },
+            Shape {
+                geometry: "M22 12A10 10 0 0 1 2 12A10 10 0 0 1 22 12Z".into(),
+                fill: 0,
+                stroke: 0xFFFF_FFFF,
+                line: craie_vector::Stroke {
+                    width: 2.0,
+                    ..craie_vector::Stroke::default()
+                },
+                dashes: "4 2".into(),
+                ..Shape::default()
+            },
+        ],
+    }
+}
+
 /// One of three small vector assets: a filled square with a hole
 /// (even-odd), a stroked circle, and a gradient triangle.
 fn vector_asset(which: u32) -> Vec<u8> {
@@ -718,8 +755,11 @@ impl Gen {
                 t.paragraph(id, text, &spans);
             }
             NodeKind::Vector => {
-                let asset = vector_asset(self.rng.below(3));
-                t.payload(id, asset);
+                // Three assets, or a runtime drawing (dashed ring).
+                match self.rng.below(4) {
+                    3 => t.drawing(id, vector_drawing()),
+                    which => t.payload(id, vector_asset(which)),
+                };
                 if self.rng.chance(0.5) {
                     let mut s = taffy::Style::default();
                     s.size.width = length(16.0 + self.rng.below(64) as f32);
@@ -864,10 +904,28 @@ impl Gen {
                     };
                     t.transform(id, m);
                 }
-                9 => {
-                    let o = self.pick(&[1.0, 1.0, 0.5, 0.25, 0.0]);
-                    t.opacity(id, o);
-                }
+                9 => match self.rng.below(3) {
+                    0 => {
+                        let o = self.pick(&[1.0, 1.0, 0.5, 0.25, 0.0]);
+                        t.opacity(id, o);
+                    }
+                    1 => {
+                        let z = self.pick(&[0, 0, 1, -1, 2]);
+                        t.z(id, z);
+                    }
+                    // A layer owned by any other node, sibling or not, or
+                    // by none; owners removed later leave it unowned.
+                    _ if kind == NodeKind::View => {
+                        let owner = self.pick(&nodes);
+                        let owner = if owner == id || self.rng.chance(0.25) {
+                            NIL
+                        } else {
+                            owner
+                        };
+                        t.layer(id, owner);
+                    }
+                    _ => {}
+                },
                 10 => {
                     let r = self.pick(&[Role::None, Role::Button, Role::Group, Role::Heading]);
                     t.role(id, r);

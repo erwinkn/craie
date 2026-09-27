@@ -324,6 +324,9 @@ mod tests {
         if rng.chance(0.2) {
             t.paint(id, None, Some(rng.unit() * 40.0), None);
         }
+        if rng.chance(0.3) {
+            t.z(id, rng.below(5) as i32 - 2);
+        }
         t.append(parent, id);
         live.push(id);
     }
@@ -336,7 +339,8 @@ mod tests {
     /// The pruned hit test answers as the full walk, with the index
     /// fresh and between a change and its refresh, as trees are built,
     /// restyled (borders and padding alone, too), transformed,
-    /// scrolled, moved and pruned, with removed ids reused at once.
+    /// reordered by z and layers, scrolled, moved and pruned, with
+    /// removed ids reused at once.
     #[test]
     fn index_agrees_with_walk() {
         for seed in 1..=12u64 {
@@ -360,7 +364,7 @@ mod tests {
                     }
                     let mut t = Transaction::new(round + 1);
                     let id = live[rng.below(live.len() as u32) as usize];
-                    match rng.below(6) {
+                    match rng.below(8) {
                         0 => {
                             t.layout(id, &style(&mut rng));
                         }
@@ -392,6 +396,15 @@ mod tests {
                             live.retain(|&n| n != id);
                             free.push(id);
                             spawn(&mut t, &mut rng, &mut live, &mut free, &mut next);
+                        }
+                        5 => {
+                            t.z(id, rng.below(5) as i32 - 2);
+                        }
+                        6 => {
+                            // A layer (its own box lets hits through),
+                            // owned by another node, or by none.
+                            let owner = live[rng.below(live.len() as u32) as usize];
+                            t.layer(id, if owner == id { NIL } else { owner });
                         }
                         _ => {
                             t.append(NIL, id);
