@@ -9,8 +9,8 @@
 //! layout inputs), spatial (transform, opacity), paint (fill, border,
 //! radius), text (paragraph spans, input configuration), semantics
 //! (role, label), interaction (listener mask, focusable), payload
-//! (surface kind and bytes), command (focus, blur, set text, scroll),
-//! list (templates, item splices, row indices, scroll anchoring).
+//! (surface kind and bytes, vector drawings), command (focus, blur, set
+//! text, scroll), list (templates, item splices, row indices, scroll anchoring).
 //!
 //! Layout styles and text spans travel in per-transaction tables:
 //! mutations refer to them by index, and the tables die with the
@@ -45,8 +45,9 @@ pub enum NodeKind {
     /// A virtualized list inside a scroll container: it owns its item
     /// count and extents and lays out only its rendered rows.
     List = 4,
-    /// A vector drawing from a prepared asset (`craie_vector::asset`,
-    /// payload bytes), fitted into its content box.
+    /// A vector drawing, fitted into its content box: a prepared asset
+    /// (`craie_vector::asset`, payload bytes) or runtime shapes
+    /// (`Mutation::Drawing`).
     Vector = 5,
 }
 
@@ -359,6 +360,13 @@ pub enum Mutation<'a> {
         id: u32,
         bytes: Cow<'a, [u8]>,
     },
+    /// A vector node's drawing from runtime shapes (SVG strings,
+    /// `craie_vector::svg`). It replaces an asset payload, and a payload
+    /// replaces it.
+    Drawing {
+        id: u32,
+        drawing: craie_vector::svg::Drawing<'a>,
+    },
     // command
     Command {
         id: u32,
@@ -424,6 +432,7 @@ impl Mutation<'_> {
             | Mutation::Claims { id, .. }
             | Mutation::Surface { id, .. }
             | Mutation::Payload { id, .. }
+            | Mutation::Drawing { id, .. }
             | Mutation::Command { id, .. }
             | Mutation::ListConfig { id, .. }
             | Mutation::ListSplice { id, .. }
@@ -732,6 +741,10 @@ impl<'a> Transaction<'a> {
             id,
             bytes: bytes.into(),
         })
+    }
+
+    pub fn drawing(&mut self, id: u32, drawing: craie_vector::svg::Drawing<'a>) -> &mut Self {
+        self.push(Mutation::Drawing { id, drawing })
     }
 
     pub fn command(&mut self, id: u32, cmd: Command<'a>) -> &mut Self {

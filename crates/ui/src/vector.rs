@@ -1,9 +1,12 @@
-//! Vector nodes (ARCHITECTURE.md section 9, step 5b): a prepared asset
-//! (`craie_vector::asset`) fitted into the content box, centered with its
-//! aspect ratio kept (SVG `xMidYMid meet`). Each item tessellates in its
-//! own space at a tolerance of a quarter device pixel, then maps into the
-//! chunk; the meshes are cached per node until the fit or the display
-//! scale changes. Opacity multiplies each paint's alpha.
+//! Vector nodes (ARCHITECTURE.md section 9): an asset fitted into the
+//! content box, centered with its aspect ratio kept (SVG `xMidYMid
+//! meet`). The asset is a prepared `CRV1` payload or a runtime drawing
+//! (`craie_vector::svg`); nodes with the same source share one. Each
+//! item tessellates in its own space at a tolerance of a quarter device
+//! pixel, then maps into the chunk. Meshes are cached per asset, content
+//! box and display scale, and shared by the nodes drawing that asset in
+//! a box of that size (a list of rows with the same icon tessellates it
+//! once). Opacity multiplies each paint's alpha.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -21,8 +24,8 @@ use crate::ui::Ui;
 const TOLERANCE_PX: f32 = 0.25;
 
 /// A tessellated item in chunk-local units, and its paint.
-struct Prepared {
-    mesh: Mesh,
+pub(crate) struct Prepared {
+    pub(crate) mesh: Mesh,
     paint: Prepaint,
 }
 
@@ -31,14 +34,70 @@ enum Prepaint {
     Gradient(GradientPaint),
 }
 
-/// A node's meshes and what they were made for.
-pub(crate) struct CachedVector {
-    /// (content box, display scale) bits and the asset they came from.
-    key: ([u32; 5], usize),
-    items: Vec<Prepared>,
+/// (content box, display scale) bits and the asset's address.
+type MeshKey = ([u32; 5], usize);
+
+/// Tessellated vector meshes.
+#[derive(Default)]
+pub(crate) struct VectorCache {
+    /// Each node's meshes and the key they were made for.
+    nodes: HashMap<u32, (MeshKey, Arc<[Prepared]>)>,
+    /// Meshes by key, shared between nodes. An entry holds its asset,
+    /// so the address in its key stays that asset's.
+    shared: HashMap<MeshKey, (Arc<Asset>, Arc<[Prepared]>)>,
+    /// `shared` entries after the last sweep of unused ones.
+    swept: usize,
 }
 
-pub(crate) type VectorCache = HashMap<u32, CachedVector>;
+impl VectorCache {
+    /// A node's meshes, if built (tests).
+    #[cfg(test)]
+    pub(crate) fn items(&self, id: u32) -> Option<&Arc<[Prepared]>> {
+        self.nodes.get(&id).map(|(_, items)| items)
+    }
+
+    pub(crate) fn forget(&mut self, id: u32) {
+        self.nodes.remove(&id);
+    }
+
+    /// The meshes of `asset` for `key`: the node's own, another node's,
+    /// or new. Unused shared entries are swept when the table has doubled
+    /// since the last sweep.
+    fn get(
+        &mut self,
+        id: u32,
+        key: MeshKey,
+        asset: &Arc<Asset>,
+        build: impl FnOnce() -> Vec<Prepared>,
+    ) -> Arc<[Prepared]> {
+        if let Some((k, items)) = self.nodes.get(&id)
+            && *k == key
+        {
+            return items.clone();
+        }
+        let items = match self.shared.get(&key) {
+            Some((_, items)) => items.clone(),
+            None => {
+                let items: Arc<[Prepared]> = build().into();
+                self.shared.insert(key, (asset.clone(), items.clone()));
+                items
+            }
+        };
+        self.nodes.insert(id, (key, items.clone()));
+        if self.shared.len() > 2 * self.swept + 64 {
+            self.shared
+                .retain(|_, (_, items)| Arc::strong_count(items) > 1);
+            self.swept = self.shared.len();
+        }
+        items
+    }
+
+    /// Shared entries (tests).
+    #[cfg(test)]
+    pub(crate) fn shared_len(&self) -> usize {
+        self.shared.len()
+    }
+}
 
 /// The view box fitted into `content`: scaled uniformly to fit, centered.
 pub fn fit(view_box: [f32; 4], content: Rect) -> Affine {
@@ -193,16 +252,28 @@ fn prepare(asset: &Asset, content: Rect, scale: f32) -> Vec<Prepared> {
             ItemStyle::Fill(rule) => {
                 craie_vector::fill(&it.path.transformed(&m), rule, chunk_tolerance)
             }
+            // Dashes cut the path where it strokes, in that space's units
+            // (a pattern that would cut too many draws solid).
             ItemStyle::Stroke(s) if similar => {
                 let s = craie_vector::Stroke {
                     width: s.width * k,
                     ..s
                 };
-                craie_vector::stroke(&it.path.transformed(&m), &s, chunk_tolerance)
+                let path = it.path.transformed(&m);
+                let dashed = it
+                    .dash
+                    .as_ref()
+                    .and_then(|d| craie_vector::dashed(&path, &d.scaled(k), chunk_tolerance));
+                craie_vector::stroke(dashed.as_ref().unwrap_or(&path), &s, chunk_tolerance)
             }
             ItemStyle::Stroke(s) => {
                 let tolerance = chunk_tolerance / max_stretch(&m);
-                craie_vector::stroke(&it.path, &s, tolerance).map(|mut mesh| {
+                let dashed = it
+                    .dash
+                    .as_ref()
+                    .and_then(|d| craie_vector::dashed(&it.path, d, tolerance));
+                let path = dashed.as_ref().unwrap_or(&it.path);
+                craie_vector::stroke(path, &s, tolerance).map(|mut mesh| {
                     for v in &mut mesh.vertices {
                         let p = m.apply(craie_core::geom::Point::new(v[0], v[1]));
                         *v = [p.x, p.y];
@@ -284,12 +355,11 @@ impl Ui {
             ],
             Arc::as_ptr(&asset) as usize,
         );
-        let fresh = !matches!(self.vector_meshes.get(&id.0), Some(c) if c.key == key);
-        if fresh {
-            let items = prepare(&asset, content, self.scale);
-            self.vector_meshes.insert(id.0, CachedVector { key, items });
-        }
-        for it in &self.vector_meshes[&id.0].items {
+        let scale = self.scale;
+        let items = self
+            .vector_meshes
+            .get(id.0, key, &asset, || prepare(&asset, content, scale));
+        for it in items.iter() {
             let (slot, gradient) = match &it.paint {
                 Prepaint::Solid(c) => (w.paint(*c), false),
                 Prepaint::Gradient(g) => (w.gradient(g), true),
@@ -349,6 +419,7 @@ mod node_tests {
                 paint: 0,
                 opacity: 0.5,
                 transform: Affine::IDENTITY,
+                dash: None,
             }],
         })
     }
@@ -449,7 +520,7 @@ mod node_tests {
     #[test]
     fn vector_meshes_are_cached() {
         let mut ui = ui_with(taffy::Style::default(), &red_box());
-        let items = |ui: &Ui| ui.vector_meshes[&1].items.as_ptr();
+        let items = |ui: &Ui| ui.vector_meshes.items(1).unwrap().as_ptr();
         let before = items(&ui);
         let mut t = Transaction::new(2);
         t.fill(1, 0x0000_FFFF);
@@ -528,14 +599,16 @@ mod review_tests {
                 paint: 0,
                 opacity: 1.0,
                 transform,
+                dash: None,
             }],
         })
     }
 
     /// Triangle area of the node's meshes, chunk units.
     fn area(ui: &Ui) -> f64 {
-        ui.vector_meshes[&1]
-            .items
+        ui.vector_meshes
+            .items(1)
+            .unwrap()
             .iter()
             .map(|p| p.mesh.area())
             .sum()
@@ -600,10 +673,11 @@ mod review_tests {
                 paint: 0,
                 opacity: 1.0,
                 transform: Affine::IDENTITY,
+                dash: None,
             }],
         });
         let ui = one(asset, taffy::Style::default(), 1.0);
-        let mesh = &ui.vector_meshes[&1].items[0].mesh;
+        let mesh = &ui.vector_meshes.items(1).unwrap()[0].mesh;
         assert!(mesh.vertices.iter().all(|v| v[0] <= 40.0));
         // The kept part: 10 x 10.
         assert!((mesh.area() - 100.0).abs() < 1e-3, "{}", mesh.area());
@@ -693,15 +767,223 @@ mod review_tests {
     fn scale_changes_retessellate() {
         let asset = circle(24.0, ItemStyle::Fill(FillRule::NonZero), Affine::IDENTITY);
         let mut ui = one(asset.clone(), sized(96.0, None), 1.0);
-        let at_1x = ui.vector_meshes[&1].items[0].mesh.vertices.len();
+        let at_1x = ui.vector_meshes.items(1).unwrap()[0].mesh.vertices.len();
         ui.scale = 2.0;
         ui.render(Size::new(300.0, 300.0));
         let fresh = one(asset, sized(96.0, None), 2.0);
         let (now, want) = (
-            ui.vector_meshes[&1].items[0].mesh.vertices.len(),
-            fresh.vector_meshes[&1].items[0].mesh.vertices.len(),
+            ui.vector_meshes.items(1).unwrap()[0].mesh.vertices.len(),
+            fresh.vector_meshes.items(1).unwrap()[0].mesh.vertices.len(),
         );
         assert!(want > at_1x);
         assert_eq!(now, want);
+    }
+}
+
+#[cfg(test)]
+mod drawing_tests {
+    use super::node_tests::red_box;
+    use crate::geom::Size;
+    use crate::host::NodeId;
+    use crate::mutation::{NodeKind, Transaction};
+    use crate::ui::Ui;
+    use crate::wire;
+    use craie_vector::Stroke;
+    use craie_vector::svg::{Drawing, Shape, ShapeKind};
+
+    const NIL: u32 = u32::MAX;
+
+    /// A 24-unit ring (Lucide's circle, r 10) stroked 2 wide, optionally
+    /// dashed.
+    fn ring(dashes: &str) -> Drawing<'static> {
+        Drawing {
+            view_box: "0 0 24 24".into(),
+            shapes: vec![Shape {
+                geometry: "M22 12A10 10 0 0 1 2 12A10 10 0 0 1 22 12Z".into(),
+                fill: 0,
+                stroke: 0xFFFF_FFFF,
+                line: Stroke {
+                    width: 2.0,
+                    ..Stroke::default()
+                },
+                dashes: dashes.to_string().into(),
+                ..Shape::default()
+            }],
+        }
+    }
+
+    /// `count` vector nodes of 48 x 48 in a column, each drawing
+    /// `drawing`.
+    fn ui_with(drawing: &Drawing<'static>, count: u32) -> Ui {
+        let mut ui = Ui::new(1.0);
+        let mut t = Transaction::new(1);
+        let column = taffy::Style {
+            flex_direction: taffy::FlexDirection::Column,
+            align_items: Some(taffy::AlignItems::START),
+            ..taffy::Style::default()
+        };
+        let sized = taffy::Style {
+            size: taffy::Size {
+                width: taffy::Dimension::length(48.0),
+                height: taffy::Dimension::length(48.0),
+            },
+            ..taffy::Style::default()
+        };
+        t.create(0, NodeKind::View)
+            .layout(0, &column)
+            .place(NIL, 0, NIL);
+        for id in 1..=count {
+            t.create(id, NodeKind::Vector)
+                .layout(id, &sized)
+                .drawing(id, drawing.clone())
+                .place(0, id, NIL);
+        }
+        ui.apply_txn(&t).unwrap();
+        ui.render(Size::new(200.0, 400.0));
+        ui
+    }
+
+    fn area(ui: &Ui, id: u32) -> f64 {
+        ui.vector_meshes
+            .items(id)
+            .unwrap()
+            .iter()
+            .map(|p| p.mesh.area())
+            .sum()
+    }
+
+    /// A ring drawn at 48 px (scale 2 from its 24 view box): 4 px wide
+    /// around radius 20; half dashed ("π·5 π·5" per 20π·... units), it
+    /// covers half as much.
+    #[test]
+    fn drawings_render_and_dash() {
+        let solid = ui_with(&ring(""), 1);
+        let r = solid.layouts.data(NodeId(1)).rect;
+        assert_eq!((r.size.width, r.size.height), (48.0, 48.0));
+        let want = std::f64::consts::PI * (22.0f64.powi(2) - 18.0f64.powi(2));
+        let full = area(&solid, 1);
+        assert!((full - want).abs() / want < 0.01, "{full} vs {want}");
+        // The circumference in view-box units is 20π; eight dashes.
+        let d = std::f32::consts::PI * 20.0 / 16.0;
+        let dashed = ui_with(&ring(&format!("{d} {d}")), 1);
+        let half = area(&dashed, 1);
+        assert!((half - full / 2.0).abs() / full < 0.02, "{half} vs {full}");
+    }
+
+    /// Nodes drawing the same shapes share one parse and one
+    /// tessellation; a new drawing on one of them parses and tessellates
+    /// its own.
+    #[test]
+    fn same_drawings_share_assets_and_meshes() {
+        let mut ui = ui_with(&ring("4 2"), 3);
+        let asset = |ui: &Ui, id: u32| ui.host.vectors[&id].asset.clone().unwrap();
+        assert!(std::sync::Arc::ptr_eq(&asset(&ui, 1), &asset(&ui, 3)));
+        let items = |ui: &Ui, id: u32| ui.vector_meshes.items(id).unwrap().as_ptr();
+        assert_eq!(items(&ui, 1), items(&ui, 2));
+        assert_eq!(items(&ui, 1), items(&ui, 3));
+        assert_eq!(ui.vector_meshes.shared_len(), 1);
+        let mut t = Transaction::new(2);
+        t.drawing(2, ring(""));
+        ui.apply_txn(&t).unwrap();
+        ui.render(Size::new(200.0, 400.0));
+        assert_ne!(items(&ui, 1), items(&ui, 2));
+        assert!(!std::sync::Arc::ptr_eq(&asset(&ui, 1), &asset(&ui, 2)));
+        assert!(area(&ui, 2) > area(&ui, 1));
+    }
+
+    /// A drawing replaces an asset payload and the other way around.
+    #[test]
+    fn drawings_and_payloads_replace_each_other() {
+        let mut ui = ui_with(&ring(""), 1);
+        let mut t = Transaction::new(2);
+        t.payload(1, red_box());
+        ui.apply_txn(&t).unwrap();
+        ui.render(Size::new(200.0, 400.0));
+        assert_eq!(
+            ui.host.vectors[&1].asset.as_ref().unwrap().view_box[2],
+            24.0
+        );
+        assert_eq!(
+            ui.host.vectors[&1].asset.as_ref().unwrap().view_box[3],
+            12.0
+        );
+        let mut t = Transaction::new(3);
+        t.drawing(1, ring(""));
+        ui.apply_txn(&t).unwrap();
+        ui.render(Size::new(200.0, 400.0));
+        assert_eq!(
+            ui.host.vectors[&1].asset.as_ref().unwrap().view_box[3],
+            24.0
+        );
+    }
+
+    /// Bad strings, bad numbers, and drawings on other kinds reject the
+    /// whole transaction, on the wire as in the direct API.
+    #[test]
+    fn bad_drawings_reject() {
+        let mut ui = ui_with(&ring(""), 1);
+        let seq = ui.seq;
+        let with = |f: &dyn Fn(&mut Shape<'static>)| {
+            let mut d = ring("");
+            f(&mut d.shapes[0]);
+            d
+        };
+        let cases = [
+            with(&|s| s.geometry = "M1 2L".into()),
+            with(&|s| s.geometry = "M NaN 0".into()),
+            with(&|s| s.transform = "rotate(".into()),
+            with(&|s| s.dashes = "4 -2".into()),
+            with(&|s| s.kind = ShapeKind::Polygon),
+            with(&|s| s.line.width = f32::INFINITY),
+            with(&|s| s.opacity = 2.0),
+            with(&|s| s.line.miter_limit = 0.5),
+            Drawing {
+                view_box: "0 0 0 24".into(),
+                ..ring("")
+            },
+        ];
+        for (k, d) in cases.into_iter().enumerate() {
+            let mut t = Transaction::new(seq + 1);
+            t.drawing(1, d);
+            assert!(ui.apply(&wire::encode(&t)).is_err(), "case {k} on the wire");
+            assert!(ui.apply_txn(&t).is_err(), "case {k}");
+            assert_eq!(ui.seq, seq);
+        }
+        let mut t = Transaction::new(seq + 1);
+        t.drawing(0, ring(""));
+        assert!(ui.apply_txn(&t).is_err());
+        assert_eq!(ui.seq, seq);
+    }
+
+    /// The wire carries every field of every shape.
+    #[test]
+    fn drawings_round_trip_the_wire() {
+        let mut d = ring("1 2 3");
+        d.shapes.push(Shape {
+            kind: ShapeKind::Polyline,
+            geometry: "0,0 4,4".into(),
+            transform: "translate(1 2)".into(),
+            fill: 0x1122_3344,
+            fill_rule: craie_vector::FillRule::EvenOdd,
+            line: Stroke {
+                width: 1.5,
+                join: craie_vector::LineJoin::Round,
+                cap: craie_vector::LineCap::Square,
+                miter_limit: 8.0,
+            },
+            dash_offset: -3.0,
+            opacity: 0.25,
+            ..Shape::default()
+        });
+        let mut t = Transaction::new(7);
+        t.drawing(5, d);
+        let buf = wire::encode(&t);
+        let back = wire::decode(&buf).unwrap();
+        assert_eq!(back.mutations, t.mutations);
+        // Truncated inside the op, it fails to decode.
+        for n in 0..buf.len() {
+            let cut = wire::decode(&buf[..n]);
+            assert!(cut.map_or(true, |c| c.mutations.is_empty()), "{n}");
+        }
     }
 }

@@ -33,6 +33,7 @@ import {
   type SurfaceParam,
   type Transport,
 } from "./host.js"
+import { flattenShapes, type ShapeProps } from "./shapes.js"
 import {
   EVENT_KIND,
   SURFACE,
@@ -85,6 +86,10 @@ export type {
   UiEvent,
 } from "./host.js"
 export { onFrameStats } from "./host.js"
+export { Circle, Ellipse, G, Line, Path, Polygon, Polyline, Rect } from "./shapes.js"
+export type {
+  CircleProps, EllipseProps, GProps, LineProps, PathProps, PolyProps, RectProps, ShapeProps,
+} from "./shapes.js"
 
 /** Pointer position + target passed to pointer/wheel listeners. `x`/`y`
  * are window-absolute logical points; `rx`/`ry` are relative to the
@@ -351,25 +356,48 @@ export function Surface(props: SurfaceProps) {
   return createElement("surface", props)
 }
 
-export interface VectorProps extends ListenerProps {
+export interface VectorProps extends ListenerProps, ShapeProps {
   style?: StyleProps
   backgroundColor?: string | number
   borderRadius?: number
   borderColor?: string | number
   borderWidth?: number
-  /** A vector asset: the bytes `craie-svg in.svg out.crv` writes (SVG
-   * is imported at build time). Its view box is the node's intrinsic
-   * size; the drawing fits its content box, centered, aspect kept. */
-  asset: Uint8Array
+  /** A prepared asset: the bytes `craie-svg in.svg out.crv` writes (SVG
+   * documents import at build time). */
+  asset?: Uint8Array
+  /** Runtime shapes instead of an asset: "minX minY width height", with
+   * `Path`, `Circle`, ... children. The paint props (`fill`, `stroke`,
+   * ...) are defaults the shapes inherit. */
+  viewBox?: string
+  children?: ReactNode
   accessibilityLabel?: string
   accessibilityRole?: AccessibilityRole
   hidden?: boolean
 }
 
-/** A vector drawing (icons, illustrations) from a prepared asset. An
- * image for assistive technology unless a role is given. */
-export function Vector(props: VectorProps) {
-  return createElement("vector", { accessibilityRole: "image", ...props })
+/** A vector drawing (icons, illustrations, charts). Its view box is the
+ * node's intrinsic size; the drawing fits its content box, centered,
+ * aspect kept. An image for assistive technology unless a role is
+ * given.
+ *
+ *   <Vector viewBox="0 0 24 24" fill="none" stroke="#fff" strokeWidth={2}>
+ *     <Circle cx={12} cy={12} r={10} />
+ *     <Path d="m9 12 2 2 4-4" />
+ *   </Vector>
+ */
+export function Vector({ children, viewBox, ...props }: VectorProps) {
+  if (viewBox === undefined) {
+    return createElement("vector", { accessibilityRole: "image", ...props })
+  }
+  const {
+    fill, fillRule, stroke, strokeWidth, strokeLinecap, strokeLinejoin, strokeMiterlimit,
+    strokeDasharray, strokeDashoffset, opacity, transform, ...rest
+  } = props
+  const shapes = flattenShapes(children, {
+    fill, fillRule, stroke, strokeWidth, strokeLinecap, strokeLinejoin, strokeMiterlimit,
+    strokeDasharray, strokeDashoffset, opacity, transform,
+  })
+  return createElement("vector", { accessibilityRole: "image", ...rest, viewBox, shapes })
 }
 
 /** Bar chart surface (`SURFACE.bars`). */

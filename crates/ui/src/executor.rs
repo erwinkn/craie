@@ -226,8 +226,17 @@ impl Overlay<'_> {
     }
 }
 
+/// Vector sources new to the host that validation decoded, by source
+/// bytes (asset payloads, drawing keys): apply takes them instead of
+/// decoding again.
+#[derive(Default)]
+pub struct Validated {
+    vectors: HashMap<Box<[u8]>, craie_vector::asset::Asset>,
+}
+
 /// Validates the whole transaction. O(mutations); no host mutation.
-pub fn validate(host: &Host, txn: &Transaction<'_>) -> Result<(), WireError> {
+pub fn validate(host: &Host, txn: &Transaction<'_>) -> Result<Validated, WireError> {
+    let mut done = Validated::default();
     let mut o = Overlay {
         host,
         kinds: HashMap::new(),
@@ -385,12 +394,27 @@ pub fn validate(host: &Host, txn: &Transaction<'_>) -> Result<(), WireError> {
                 Some(NodeKind::Surface) => {}
                 // A vector's payload is its asset: it must decode.
                 Some(NodeKind::Vector) => {
-                    if craie_vector::asset::decode(bytes).is_err() {
-                        return Err(invalid("vector asset does not decode"));
+                    if !host.has_vector_source(bytes) && !done.vectors.contains_key(&bytes[..]) {
+                        let asset = craie_vector::asset::decode(bytes)
+                            .map_err(|_| invalid("vector asset does not decode"))?;
+                        done.vectors.insert(bytes[..].into(), asset);
                     }
                 }
                 _ => return Err(invalid("payload on a node without one")),
             },
+            Mutation::Drawing { id, drawing } => {
+                if o.kind(*id) != Some(NodeKind::Vector) {
+                    return Err(invalid("drawing on a non-vector node"));
+                }
+                // Every string must parse (bounded work: `svg` limits).
+                let key = drawing.key();
+                if !host.has_vector_source(&key) && !done.vectors.contains_key(&key[..]) {
+                    let asset = drawing
+                        .build()
+                        .map_err(|_| invalid("vector drawing does not parse"))?;
+                    done.vectors.insert(key.into(), asset);
+                }
+            }
             Mutation::Command { id, cmd } => {
                 // The clipboard is the window's: NIL may write it.
                 if !(*id == NIL && matches!(cmd, Command::WriteClipboard(_))) {
@@ -502,7 +526,7 @@ pub fn validate(host: &Host, txn: &Transaction<'_>) -> Result<(), WireError> {
             }
         }
     }
-    Ok(())
+    Ok(done)
 }
 
 /// An `Animate` target: the value kind of `prop`, finite, lengths (not
@@ -533,15 +557,15 @@ impl Ui {
     /// Validates and applies one transaction atomically. On error
     /// nothing changes.
     pub fn execute(&mut self, txn: &Transaction<'_>) -> Result<(), WireError> {
-        validate(&self.host, txn)?;
+        let mut done = validate(&self.host, txn)?;
         for m in &txn.mutations {
-            self.apply_mutation(txn, m);
+            self.apply_mutation(txn, m, &mut done);
         }
         self.seq = txn.seq;
         Ok(())
     }
 
-    fn apply_mutation(&mut self, txn: &Transaction<'_>, m: &Mutation<'_>) {
+    fn apply_mutation(&mut self, txn: &Transaction<'_>, m: &Mutation<'_>, done: &mut Validated) {
         match m {
             Mutation::Create { id, kind } => {
                 let node = NodeId(*id);
@@ -804,23 +828,22 @@ impl Ui {
             Mutation::Payload { id, bytes }
                 if self.host.kind(NodeId(*id)) == Some(NodeKind::Vector) =>
             {
-                let v = self.host.vectors.entry(*id).or_default();
-                if v.bytes[..] != bytes[..] {
-                    // Validated: it decodes.
-                    let asset = craie_vector::asset::decode(bytes)
-                        .ok()
-                        .map(std::sync::Arc::new);
-                    v.bytes.clear();
-                    v.bytes.extend_from_slice(bytes);
-                    v.asset = asset;
-                    self.host.copied_bytes += bytes.len() as u64;
-                    self.host.revs.resource.bump();
-                    self.host.dirty.content.push(*id);
-                    // The view box is its intrinsic size.
-                    self.host.revs.layout_input.bump();
-                    self.host.mark_layout(NodeId(*id));
-                    self.vector_meshes.remove(id);
-                }
+                // Validated: it decodes (a node dropped earlier in the
+                // batch may have released its interned copy).
+                self.set_vector(*id, bytes, || {
+                    done.vectors
+                        .remove(&bytes[..])
+                        .or_else(|| craie_vector::asset::decode(bytes).ok())
+                });
+            }
+            Mutation::Drawing { id, drawing } => {
+                // Validated: it parses.
+                let key = drawing.key();
+                self.set_vector(*id, &key, || {
+                    done.vectors
+                        .remove(&key[..])
+                        .or_else(|| drawing.build().ok())
+                });
             }
             Mutation::Payload { id, bytes } => {
                 let s = self.host.surfaces.entry(*id).or_default();
@@ -890,6 +913,37 @@ impl Ui {
         }
     }
 
+    /// Sets a vector node's source (asset bytes or a drawing's key),
+    /// shared with other nodes of the same source; `build` decodes it
+    /// when no node has it.
+    fn set_vector(
+        &mut self,
+        id: u32,
+        source: &[u8],
+        build: impl FnOnce() -> Option<craie_vector::asset::Asset>,
+    ) {
+        if self
+            .host
+            .vectors
+            .get(&id)
+            .is_some_and(|v| v.bytes[..] == source[..])
+        {
+            return;
+        }
+        let asset = self.host.vector_source(source, build);
+        let v = self.host.vectors.entry(id).or_default();
+        v.bytes.clear();
+        v.bytes.extend_from_slice(source);
+        v.asset = asset;
+        self.host.copied_bytes += source.len() as u64;
+        self.host.revs.resource.bump();
+        self.host.dirty.content.push(id);
+        // The view box is its intrinsic size.
+        self.host.revs.layout_input.bump();
+        self.host.mark_layout(NodeId(id));
+        self.vector_meshes.forget(id);
+    }
+
     /// Drops per-node state held outside the host when a slot is created
     /// or freed: a recycled id must start clean.
     fn forget_node_state(&mut self, node: NodeId) {
@@ -897,7 +951,7 @@ impl Ui {
             *t = None;
         }
         self.inputs.remove(node.0);
-        self.vector_meshes.remove(&node.0);
+        self.vector_meshes.forget(node.0);
         self.animations.forget(node);
         self.layouts.forget(node);
     }

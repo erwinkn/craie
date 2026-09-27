@@ -447,6 +447,7 @@ fn vector_asset(which: u32) -> Vec<u8> {
         paint,
         opacity: 1.0,
         transform: Affine::IDENTITY,
+        dash: None,
     };
     let asset = match which {
         0 => {

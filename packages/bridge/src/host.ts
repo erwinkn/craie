@@ -1110,6 +1110,15 @@ export class CraieHost {
       // change (identity compare).
       enc.payload(id, props.asset)
     }
+    if (n.kind === 5 && props.shapes !== undefined) {
+      // Vector: runtime shapes, flattened by `Vector` on every render;
+      // sent when their content changes. Native interns by content too,
+      // so equal drawings parse and tessellate once.
+      const same =
+        mounted && props.viewBox === oldProps.viewBox && oldProps.shapes !== undefined &&
+        JSON.stringify(props.shapes) === JSON.stringify(oldProps.shapes)
+      if (!same) enc.drawing(id, props.viewBox, props.shapes)
+    }
 
     if (n.kind === 4) {
       // List: configuration, then the item diff as one splice (common

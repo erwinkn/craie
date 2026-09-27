@@ -1,7 +1,11 @@
 import { test, expect } from "bun:test"
 import { Activity, createElement, useState } from "react"
-import { createRoot, View, Text, TextInput, ScrollView, Pressable, Bars, List, ROLE, Vector } from "../src/index.js"
+import {
+  createRoot, View, Text, TextInput, ScrollView, Pressable, Bars, List, ROLE, Vector,
+  Circle, G, Line, Path, Polygon, Rect,
+} from "../src/index.js"
 import { CraieHost } from "../src/host.js"
+import { flattenShapes } from "../src/shapes.js"
 import type { HostNode, Transport, UiEvent } from "../src/host.js"
 import { readFrame } from "./crw2.js"
 import { decodeEvents } from "../src/native.js"
@@ -830,4 +834,60 @@ test("vectors send their asset once per change", async () => {
   root.renderSync(createElement(App, { asset: b, bg: "#ffffff" }))
   await tick()
   expect([...t.ops().find(o => o.tag === 0x71)!.bytes!]).toEqual([4, 5])
+})
+
+// Work item 8: runtime shapes flatten into one DRAWING op, sent again
+// only when the drawing changes. Vector props are inherited defaults.
+test("vector shapes send one drawing per change", async () => {
+  const t = new FakeTransport()
+  const root = createRoot(t)
+  function App({ r, bg }: { r: number; bg: string }) {
+    return createElement(Vector, {
+      viewBox: "0 0 24 24", fill: "none", stroke: "#ffffff", strokeWidth: 2,
+      strokeLinecap: "round", backgroundColor: bg,
+    },
+      createElement(Circle, { cx: 12, cy: 12, r, strokeDasharray: [4, 2] }),
+      createElement(G, { transform: "translate(1 0)", opacity: 0.5, stroke: "#ff0000" },
+        createElement(Path, { d: "m9 12 2 2 4-4", transform: "scale(2)" }),
+        [createElement(Polygon, { key: "p", points: [0, 0, 4, 0, 2, 3], fill: "#00ff00", fillRule: "evenodd" })]),
+      createElement(Rect, { width: 10, height: 6, rx: 2 }),
+      createElement(Line, { x2: 5, y2: 5 }),
+    )
+  }
+  root.renderSync(createElement(App, { r: 10, bg: "#000000" }))
+  await tick()
+  const ops = t.ops(0)
+  expect(ops.find(o => o.tag === 0x01)!.f[0]).toBe(5)
+  const d = ops.find(o => o.tag === 0x72)!
+  expect(d.s).toBe("0 0 24 24")
+  const [circle, path, poly, rect, line] = d.shapes!
+  expect(circle!.strings).toEqual(["M22 12A10 10 0 1 1 2 12A10 10 0 1 1 22 12Z", "", "4 2"])
+  // kind, rule, join, cap, fill, stroke, width, miter, offset, opacity
+  expect(circle!.f).toEqual([0, 0, 0, 1, 0, 0xffffffff, 2, 4, 0, 1])
+  expect(path!.strings).toEqual(["m9 12 2 2 4-4", "translate(1 0) scale(2)", ""])
+  expect(path!.f[5]).toBe(0xff0000ff)
+  expect(path!.f[9]).toBe(0.5)
+  expect(poly!.strings[0]).toBe("0 0 4 0 2 3")
+  expect(poly!.f.slice(0, 2)).toEqual([2, 1])
+  expect(poly!.f[4]).toBe(0x00ff00ff)
+  expect(rect!.strings[0]).toBe(
+    "M2 0H8A2 2 0 0 1 10 2V4A2 2 0 0 1 8 6H2A2 2 0 0 1 0 4V2A2 2 0 0 1 2 0Z")
+  expect(line!.strings[0]).toBe("M0 0L5 5")
+  t.frames.length = 0
+  root.renderSync(createElement(App, { r: 10, bg: "#ffffff" }))
+  await tick()
+  expect(t.ops().some(o => o.tag === 0x72)).toBe(false)
+  t.frames.length = 0
+  root.renderSync(createElement(App, { r: 8, bg: "#ffffff" }))
+  await tick()
+  expect(t.ops().find(o => o.tag === 0x72)!.shapes![0]!.strings[0]).toContain("A8 8")
+})
+
+test("vector shapes reject what they cannot draw", () => {
+  const bad = [
+    [createElement(Path, { d: "M0 0", fill: "currentColor" })],
+    [createElement(View)],
+    ["text"],
+  ]
+  for (const children of bad) expect(() => flattenShapes(children)).toThrow()
 })

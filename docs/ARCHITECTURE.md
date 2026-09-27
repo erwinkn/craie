@@ -786,6 +786,26 @@ maps into the chunk, and is cached per node until the content box, the
 display scale, or the asset changes. JS: `<Vector asset={bytes} />`,
 an image for assistive technology by default.
 
+Work item 8: shapes also arrive at runtime as SVG strings. A `DRAWING`
+op (0x72) carries a view box and shapes: path data or points, a
+transform list, a dash array, and resolved paint (plain colors, fill
+rule, stroke width, joins, caps, dash offset, opacity).
+`craie_vector::svg` parses them into the same asset a `CRV1` payload
+decodes to; every string is bounded (4,096 shapes, a million path
+verbs, 64 dashes) and any error rejects the transaction. Strokes take
+dashes (`craie_vector::dashed`: the flattened path cut by length,
+restarting on each subpath). Sources, payload bytes or a drawing's
+canonical key, are interned by content, and meshes are cached per
+asset, content box and display scale, so 200 nodes showing one icon
+parse once and tessellate once. JS:
+
+```tsx
+<Vector viewBox="0 0 24 24" fill="none" stroke="#fff" strokeWidth={2}>
+  <Circle cx={12} cy={12} r={10} strokeDasharray="4 2" />
+  <Path d="m9 12 2 2 4-4" />
+</Vector>
+```
+
 **Target.** Paths, fills, strokes, joins, caps, gradients, affine
 transforms, clips, group opacity. Two preparation strategies stay
 possible behind `PathRecord`: tessellation and coverage/strip
@@ -801,9 +821,11 @@ fills, strokes, gradients, transforms, clips, images, group opacity.
 
 **Decisions.**
 - lyon tessellation ships first, behind the `PathRecord` boundary.
-- SVG imports at build time only, via usvg, into prepared path assets.
-  usvg stays out of the shipped binary. Runtime import waits for a
-  product feature.
+- SVG documents import at build time only, via usvg, into prepared path
+  assets; path data is runtime input (2026-09-27, work item 8). usvg
+  stays out of the shipped binary: the runtime parser reads path data,
+  points, transform lists, view boxes and dash arrays, not documents,
+  styles or text.
 - Assets keep paths, not meshes (2026-09-23, step 5b): tessellation runs
   at the display scale on the device, so a drawing is as smooth at 16
   px as at 512 and one asset serves every size. Group opacity folds into

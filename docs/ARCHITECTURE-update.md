@@ -685,6 +685,39 @@ and that the core owns `ImageId`, dimensions, format and residency).
   is runtime input.
 - JS fetches images and native decodes them; Rust gets no HTTP client.
 
+**Built (work item 8, runtime vector shapes).** As targeted, with these
+choices:
+
+- One op, `DRAWING` (0x72), replaces a Vector node's whole drawing: a
+  view box and up to 4,096 shapes of 44 bytes (kind, fill rule, join,
+  cap, three string refs, fill and stroke colors, width, miter limit,
+  dash offset, opacity). The strings stay SVG syntax and native parses
+  them (`craie_vector::svg`, about 600 lines, no dependency); a string
+  that does not parse rejects the transaction, like a bad asset.
+- A drawing builds the same `Asset` a `CRV1` payload decodes to, so
+  layout, fitting, clipping and tessellation are shared. Sources are
+  interned by content (payload bytes, or a drawing's canonical key) and
+  meshes are shared across nodes per asset, content box and scale: the
+  cache is per drawing, not per shape.
+- Dashes restart on each subpath, as SVG does; a pattern that would cut
+  more than 65,536 dashes draws solid rather than stall.
+- The dash offset is a plain value, not animatable: `ANIMATE` (0xA1)
+  animates node properties, and an offset belongs to a shape, so a
+  spinner ring rotates the node instead (`LEDGER.md` DF-13).
+- Paints are plain colors; `currentColor` waits for topic 5 and throws
+  in the facade (DF-14). Gradients stay build-time.
+- The facade flattens children into shapes: `Path`, `Circle`,
+  `Ellipse`, `Rect`, `Line`, `Polyline`, `Polygon` and `G` (attributes
+  inherited, transforms nested, opacity multiplied), with the Vector's
+  own paint props as defaults, as on an `<svg>` element. The kit's
+  `viewBox` and shape props map one to one; shapes must be direct
+  elements, not components that return them (DF-15).
+- Cost (exe1, loaded; `cargo run --release -p craie-harness --example
+  vectors`): 200 distinct 24 px icons parse in 0.35 ms and mount in
+  about 2 ms more than 200 plain views (10 µs per icon, tessellation
+  included); an icon already drawn elsewhere costs about 3 µs more than
+  a plain view; a 2,000-point sparkline parses in 85 µs.
+
 ## 11. Inline content and editing
 
 Changes: §4 (the decision "Block means block-level boxes only. Inline

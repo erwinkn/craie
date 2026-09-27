@@ -28,7 +28,7 @@
 
 use craie_core::geom::Affine;
 
-use crate::{FillRule, LineCap, LineJoin, Paint, Path, Stroke, Verb};
+use crate::{Dash, FillRule, LineCap, LineJoin, Paint, Path, Stroke, Verb};
 
 pub const MAGIC: u32 = 0x3156_5243; // "CRV1"
 pub const VERSION: u16 = 1;
@@ -59,6 +59,8 @@ pub struct Item {
     pub opacity: f32,
     /// Item space to view-box space.
     pub transform: Affine,
+    /// A stroke's dashes (runtime drawings only: `CRV1` has none).
+    pub dash: Option<Dash>,
 }
 
 /// A decoded asset.
@@ -318,6 +320,7 @@ pub fn decode(buf: &[u8]) -> Result<Asset, AssetError> {
             paint: it.paint,
             opacity: it.opacity,
             transform: it.transform,
+            dash: None,
         });
     }
     Ok(Asset {
@@ -474,6 +477,7 @@ mod tests {
                     paint: 1,
                     opacity: 0.5,
                     transform: Affine::translate(2.0, 3.0),
+                    dash: None,
                 },
                 Item {
                     path: Path::circle(12.0, 12.0, 5.0),
@@ -486,6 +490,7 @@ mod tests {
                     paint: 0,
                     opacity: 1.0,
                     transform: Affine::IDENTITY,
+                    dash: None,
                 },
             ],
         }
@@ -505,6 +510,7 @@ mod tests {
                 paint: 0,
                 opacity: 1.0,
                 transform: Affine::IDENTITY,
+                dash: None,
             }],
         };
         assert_eq!(decode(&encode(&small)).unwrap(), small);

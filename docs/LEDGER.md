@@ -170,7 +170,8 @@ Reviewer minors and nitpicks not fixed yet.
 - Claim: clip paths and masks (drawn unclipped), filters, blend modes,
   patterns, images and `foreignObject`, text (outline it first; found
   in the source, since usvg drops it without fonts), stroke dashes
-  (drawn solid), `miter-clip` joins (drawn as miter), `vector-effect`
+  (drawn solid: `CRV1` has no dash field, though runtime drawings dash
+  since work item 8), `miter-clip` joins (drawn as miter), `vector-effect`
   (ignored), spreads other than pad, radial focal points (drawn
   centered), gradients past 64 stops (truncated), and group opacity
   over two or more painted items (folded into each; a fill and its own
@@ -248,6 +249,63 @@ Reviewer minors and nitpicks not fixed yet.
   `DragDropped`, which carries it.
 - Resolves in: the winit 0.31 upgrade, or a macOS-only position read
   if a drop target needs it first.
+
+### DF-13: the dash offset is not animatable
+
+- Source: runtime vector shapes (work item 8) implementation (own
+  finding).
+- Where: crates/ui/src/animation.rs (`Prop`), crates/ui/src/wire.rs
+  (`DRAWING`).
+- Claim: ARCHITECTURE-update topic 10 targets an animatable dash offset
+  (spinner rings, progress rings). `ANIMATE` (0xA1) drives node
+  properties, 0 to 7, and a drawing has many shapes, each with its own
+  offset; the offset changes only by sending the drawing again, which
+  re-tessellates it.
+- Why deferred: animating a shape property needs a shape address in the
+  op (node, shape index) and a mesh rebuild per frame, or dashing in the
+  shader; neither extends 0xA1 cleanly. A rotating node covers spinners.
+- Resolves in: shape-level animation targets, or dashes in the shader
+  (E07).
+
+### DF-14: no `currentColor` in drawings
+
+- Source: runtime vector shapes (work item 8) implementation (own
+  finding).
+- Where: packages/bridge/src/shapes.ts (`paint`).
+- Claim: a shape's fill and stroke are resolved colors; `currentColor`
+  throws in the facade, so a Lucide icon needs its color passed as
+  `stroke`.
+- Why deferred: the color a node inherits comes with state styles and
+  paint sources (topic 5).
+- Resolves in: topic 5.
+
+### DF-15: shapes must be direct children of a Vector
+
+- Source: runtime vector shapes (work item 8) implementation (own
+  finding).
+- Where: packages/bridge/src/shapes.ts (`flattenShapes`).
+- Claim: `Vector` reads its children as elements (`Path`, `G`, arrays,
+  fragments); a component that returns shapes (`<MyArrow />`) throws.
+  The kit's icon registry passes `[tag, attrs]` data, which maps to
+  direct elements.
+- Why deferred: rendering shapes through the reconciler would give each
+  a host node; flattening at render keeps one op per drawing.
+- Resolves in: host shape nodes if a consumer composes shapes from
+  components.
+
+### DF-16: dash corners and group opacity in drawings
+
+- Source: runtime vector shapes (work item 8) implementation (own
+  finding).
+- Where: crates/vector/src/lib.rs (`dashed`), packages/bridge/src/shapes.ts.
+- Claim: two small differences from a browser. A dash that runs across
+  a closed subpath's start is two open pieces with caps, not one joined
+  corner. A `G`'s opacity multiplies into each shape, so overlapping
+  shapes in a translucent group show their overlap (the importer's
+  DF-6 case).
+- Why deferred: neither shows on icons or charts at their usual sizes;
+  the corner needs a join-aware dasher, the group an isolated layer.
+- Resolves in: a lyon-side dasher or E07; group layers (DF-6).
 
 ## Closed
 

@@ -112,6 +112,36 @@ instead of both reading the closed state.
 The harness found one bug: `runApp` held the process for 2 s after the
 window closed (an un-unref'd timeout in a `Promise.race`).
 
+### Runtime vector shapes (work item 8)
+
+`cargo run --release -p craie-harness --example vectors`. Headless
+(`Ui::render`, no GPU), display scale 2, medians of 21 fresh `Ui`s, on
+exe1 at load average 24 (loaded; indicative only). Icons: eight Lucide
+icons (circle-check, house, search, settings, bell, user, calendar,
+chevron-right) at 25 stroke widths each, so 200 distinct drawings, 24
+pt square.
+
+| case | parse | apply | first frame |
+|---|---|---|---|
+| 200 plain views (baseline) | | 109 µs | 94 µs |
+| 200 icons, new | 354 µs (1.8 µs each) | 729 µs | 1,407 µs |
+| 200 more nodes, same icons (cache hits) | | 199 µs | 667 µs |
+| the same 200 drawings resent | | 42 µs | 1 µs |
+| sparkline, 2,000 points, solid | 84 µs | 106 µs | 755 µs |
+| sparkline, dashed "6 3" | 85 µs | 115 µs | 720 µs |
+
+- A new icon costs about 10 µs over a plain view (parse, validate,
+  tessellate at 48 device px, emit); its frame share is mostly
+  tessellation.
+- A cache hit (the source interned, the meshes shared) costs about 3 µs
+  over a plain view: the key, a hash lookup, and copying the mesh into
+  the node's chunk. Resending an unchanged drawing is a byte compare
+  (0.2 µs per node) and the frame does nothing.
+- The sparkline's frame is its stroke tessellation (about 0.35 µs per
+  point with round joins); dashing it is within the noise.
+- Apply parses each new source once: validation keeps what it built for
+  apply, and equal drawings in one transaction build once.
+
 ### E15: interaction lookups, index versus walk
 
 `cargo run --release -p craie-harness --example e15_lookups`. Trees of

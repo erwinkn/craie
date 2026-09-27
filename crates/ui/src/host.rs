@@ -219,7 +219,8 @@ pub struct SurfaceData {
     pub payload: Vec<u8>,
 }
 
-/// A vector node's asset: its bytes (as sent) and their decoding.
+/// A vector node's asset: its source (payload bytes as sent, or a
+/// drawing's key) and their decoding.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct VectorData {
     pub bytes: Vec<u8>,
@@ -280,6 +281,11 @@ pub struct Host {
     pub surfaces: HashMap<u32, SurfaceData>,
     /// Vector nodes' assets, id-keyed.
     pub vectors: HashMap<u32, VectorData>,
+    /// Decoded vector sources by source bytes: nodes with the same
+    /// source share one asset (and so its tessellation).
+    vector_sources: HashMap<Box<[u8]>, std::sync::Weak<craie_vector::asset::Asset>>,
+    /// `vector_sources` entries after the last sweep of dead ones.
+    vector_sources_swept: usize,
     /// Claim sets (`claims.rs`), id-keyed; NIL keys the window list.
     pub claims: HashMap<u32, crate::claims::ClaimSet>,
     /// Item index of a list row (a child of a List node); NIL otherwise.
@@ -334,6 +340,8 @@ impl Host {
             transitions: HashMap::new(),
             surfaces: HashMap::new(),
             vectors: HashMap::new(),
+            vector_sources: HashMap::new(),
+            vector_sources_swept: 0,
             claims: HashMap::new(),
             list_index: Vec::new(),
             lists: crate::list::Lists::default(),
@@ -349,6 +357,35 @@ impl Host {
 
     pub fn node_mut(&mut self, id: NodeId) -> Option<&mut NodeHeader> {
         self.nodes.get_mut(id.index()).filter(|n| n.is_live())
+    }
+
+    /// Whether a vector source is decoded and in use (validation skips
+    /// parsing it again).
+    pub fn has_vector_source(&self, source: &[u8]) -> bool {
+        self.vector_sources
+            .get(source)
+            .is_some_and(|w| w.strong_count() > 0)
+    }
+
+    /// The shared decoding of a vector source, built on a miss (`None`:
+    /// it does not build). Dead entries are swept when the table has
+    /// doubled since the last sweep.
+    pub fn vector_source(
+        &mut self,
+        source: &[u8],
+        build: impl FnOnce() -> Option<craie_vector::asset::Asset>,
+    ) -> Option<std::sync::Arc<craie_vector::asset::Asset>> {
+        if let Some(a) = self.vector_sources.get(source).and_then(|w| w.upgrade()) {
+            return Some(a);
+        }
+        let a = std::sync::Arc::new(build()?);
+        self.vector_sources
+            .insert(source.into(), std::sync::Arc::downgrade(&a));
+        if self.vector_sources.len() > 2 * self.vector_sources_swept + 64 {
+            self.vector_sources.retain(|_, w| w.strong_count() > 0);
+            self.vector_sources_swept = self.vector_sources.len();
+        }
+        Some(a)
     }
 
     pub fn kind(&self, id: NodeId) -> Option<NodeKind> {
