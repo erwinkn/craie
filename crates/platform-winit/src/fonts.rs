@@ -253,7 +253,7 @@ mod tests {
     use craie_text::paragraph::{Paragraph, SpanStyle, TextSpec, TextStyle};
     use fontique::{Blob, Collection, CollectionOptions, FallbackKey, GenericFamily, Script};
 
-    use super::SystemFonts;
+    use super::{LAST_RESORT, SystemFonts};
 
     macro_rules! font {
         ($name:literal) => {
@@ -393,7 +393,13 @@ mod tests {
         };
         let a = pick(&files);
         assert_eq!(a, pick(&reversed));
-        // By name: "Noto Sans" sorts first.
-        assert_eq!(a, files[3].as_ptr() as usize);
+        // The platform's preferred last resort when present (Symbols 2 on
+        // Linux), else by name: "Noto Sans" sorts first.
+        let want = if LAST_RESORT.contains(&"Noto Sans Symbols 2") {
+            files[0]
+        } else {
+            files[3]
+        };
+        assert_eq!(a, want.as_ptr() as usize);
     }
 }
