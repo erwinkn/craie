@@ -2,8 +2,9 @@
 //! makes `HostApp` write one frame to a PNG once the app has settled
 //! (`CRAIE_CAPTURE_DELAY_MS`, default 1500), then exit.
 //!
-//! The PNG writer is minimal (stored deflate blocks, no compression) so
-//! the release graph gains no image crate.
+//! The PNG writer is minimal (stored deflate blocks, no compression). It
+//! predates the `image` crate in the release graph (`images.rs`, which
+//! decodes only) and needs nothing from it.
 
 use std::io;
 use std::path::Path;

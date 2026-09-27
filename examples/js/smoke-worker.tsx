@@ -1,8 +1,9 @@
 // Smoke test worker: attaches, renders a frame with claims (a keymap, a
-// paste claim, a window hotkey) and state styles (scopes, variants, an
-// inherited color, a portal), awaits the native ack, changes a state and
-// awaits that ack, then closes the session so the main thread's event
-// loop exits.
+// paste claim, a window hotkey), state styles (scopes, variants, an
+// inherited color, a portal) and an image (fetched, decoded natively,
+// reported loaded), awaits the native ack, changes a state and awaits
+// that ack, then closes the session so the main thread's event loop
+// exits.
 import React, { createElement } from "react"
 import { workerData, parentPort, isMainThread } from "node:worker_threads"
 import {
@@ -15,6 +16,7 @@ import {
   Pressable,
   View,
   Text,
+  Image,
 } from "@craie/bridge"
 
 if (isMainThread) throw Error("worker only")
@@ -26,6 +28,10 @@ const root = createRoot(transport)
 defineStates(["unread", "streaming"])
 
 let scrolls = 0
+// 2 x 2: red and blue columns.
+const PNG =
+  "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAEUlEQVR4nGP4z8AAQv8ZYAwAQ84H+VjtZqAAAAAASUVORK5CYII="
+let loaded = ""
 function Row({ selected, unread }: { selected: boolean; unread: boolean }) {
   return createElement(
     Pressable,
@@ -75,6 +81,16 @@ function Smoke() {
     },
     createElement(Text, { fontSize: 16, color: "#ececf0" }, "smoke"),
     createElement(Row, { selected: true, unread }),
+    createElement(Image, {
+      src: PNG,
+      fit: "contain",
+      style: { width: 40, height: 40 },
+      onLoad: (e) => {
+        loaded = `${e.width}x${e.height}`
+        console.log(`[smoke] image loaded: ${loaded}`)
+      },
+      onError: (e) => console.error(`[smoke] image failed: ${e.message}`),
+    }),
   )
 }
 root.render(createElement(Smoke))
@@ -91,5 +107,5 @@ console.log("[smoke] state change acked")
 
 setTimeout(() => {
   console.log("[smoke] closing session")
-  client.close("smoke done")
+  client.close(loaded === "2x2" ? "smoke done" : "image did not load")
 }, 3000)

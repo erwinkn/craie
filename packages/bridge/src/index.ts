@@ -6,10 +6,12 @@
 import React, {
   createContext,
   createElement,
+  useCallback,
   useContext,
   useEffect,
   useLayoutEffect,
   useMemo,
+  useRef,
   useState,
   type ReactNode,
   type Ref,
@@ -30,6 +32,8 @@ import {
   type FrameStats as FrameStatsReport,
   type Hotkey,
   type HostNode,
+  type ImageErrorEvt,
+  type ImageLoadEvt,
   type KeyClaim,
   type ScopeChain,
   type ScopeRef,
@@ -45,6 +49,7 @@ import {
   type AnimationEnd,
   type Easing,
   type EndReason,
+  type ImageFit,
   type ItemDesc,
   type ListTemplate,
   type ScrollAnchor,
@@ -60,12 +65,14 @@ export {
   EASING,
   END_REASON,
   Encoder,
+  FIT,
   NIL,
   ROLE,
   SURFACE,
   parseChord,
   transformMatrix,
   type AccessibilityRole,
+  type ImageFit,
   type ItemDesc,
   type ListTemplate,
   type ScrollAnchor,
@@ -80,6 +87,8 @@ export type {
   ClipboardEvt,
   ContextMenuEvt,
   DropEvt,
+  ImageErrorEvt,
+  ImageLoadEvt,
   FrameStats,
   Hotkey,
   HostNode,
@@ -489,6 +498,105 @@ export function Vector(props: VectorProps) {
     rest.style = { ...rest.style, opacity: (rest.style?.opacity ?? 1) * (Number.isNaN(o) ? 1 : o) }
   }
   return useHost("vector", { accessibilityRole: "image", ...rest, viewBox, shapes })
+}
+
+export interface ImageProps extends ListenerProps, Variants {
+  style?: StyleProps
+  backgroundColor?: string | number
+  borderRadius?: number
+  borderColor?: string | number
+  borderWidth?: number
+  /** The encoded image (PNG, JPEG, WebP, GIF's first frame): a URL
+   * (http, https, data, blob, file) or a path, fetched once per change,
+   * or the bytes, compared by identity (a new `Uint8Array` each render is
+   * sent each time). A relative path resolves against the process's
+   * working directory (`process.cwd()`), not the module. */
+  src: string | Uint8Array
+  /** How the image fills the content box (default cover). */
+  fit?: ImageFit
+  /** The accessible name. `alt=""` marks the image decorative: assistive
+   * technology skips it. */
+  alt?: string
+  /** Decoded: the natural size in pixels. Fires again when the same
+   * bytes are sent again. */
+  onLoad?: (e: ImageLoadEvt) => void
+  /** The fetch (30 s at most) or the decode failed. The image clears. */
+  onError?: (e: ImageErrorEvt) => void
+  accessibilityRole?: AccessibilityRole
+  hidden?: boolean
+}
+
+/** An image. Native decodes it off the UI thread at the size it is
+ * shown (a 4,000 px photo in a 40 pt box decodes to 80 px at 2x). Its
+ * natural size, a pixel per point, is its intrinsic size. While a new
+ * `src` loads, the old image stays.
+ *
+ *   <Image src="https://example.com/a.jpg" fit="cover" alt="Avatar"
+ *     style={{ width: 40, height: 40 }} />
+ *
+ * It does not clip to its own radius (LEDGER DF-31): round it in a
+ * parent with `borderRadius` and `overflow: "hidden"`. */
+export function Image({ src, fit, alt, ref, ...props }: ImageProps) {
+  const [fetched, setFetched] = useState<Uint8Array>()
+  const node = useRef<HostNode | null>(null)
+  const onError = useRef(props.onError)
+  onError.current = props.onError
+  const setRef = useCallback((n: HostNode | null) => {
+    node.current = n
+    if (typeof ref === "function") ref(n)
+    else if (ref) (ref as { current: HostNode | null }).current = n
+  }, [ref])
+  useEffect(() => {
+    // Bytes in hand: an earlier URL's must not come back when the next
+    // URL loads (the bytes stay up until it does).
+    if (typeof src !== "string") return setFetched(undefined)
+    // Unmounting or a newer `src` cancels the fetch, without an error.
+    const abort = new AbortController()
+    const timer = setTimeout(
+      () => abort.abort(Error(`timed out after ${IMAGE_TIMEOUT / 1000} s (${src})`)),
+      IMAGE_TIMEOUT,
+    )
+    let live = true
+    loadImage(src, abort.signal).then(
+      (bytes) => live && setFetched(bytes),
+      (e: unknown) => {
+        if (!live) return
+        // Empty bytes clear the image: the old `src`'s must not stay.
+        setFetched(new Uint8Array(0))
+        const err = abort.signal.aborted ? abort.signal.reason : e
+        const target = node.current
+        if (target) onError.current?.({ target, message: String((err as Error)?.message ?? err) })
+      },
+    ).finally(() => clearTimeout(timer))
+    return () => {
+      live = false
+      clearTimeout(timer)
+      abort.abort()
+    }
+  }, [src])
+  return useHost("image", {
+    accessibilityRole: alt === "" ? undefined : "image",
+    accessibilityLabel: alt || undefined,
+    ...props,
+    ref: setRef,
+    bytes: typeof src === "string" ? fetched : src,
+    fit,
+  })
+}
+
+/** How long an image URL may take to load (ms). */
+const IMAGE_TIMEOUT = 30_000
+
+/** The bytes of an image URL: http(s), data, and blob URLs by `fetch`;
+ * file URLs and paths from disk. */
+async function loadImage(src: string, signal: AbortSignal): Promise<Uint8Array> {
+  if (/^(https?|data|blob):/i.test(src)) {
+    const res = await fetch(src, { signal })
+    if (!res.ok) throw Error(`${res.status} ${res.statusText} (${src})`)
+    return new Uint8Array(await res.arrayBuffer())
+  }
+  const { readFile } = await import("node:fs/promises")
+  return new Uint8Array(await readFile(src.startsWith("file:") ? new URL(src) : src, { signal }))
 }
 
 /** Bar chart surface (`SURFACE.bars`). */

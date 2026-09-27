@@ -1,7 +1,8 @@
 //! Raster atlas: stable `RasterId`s with separate residency.
 //!
-//! A raster (glyph bitmap today, icons later) gets a `RasterId` once and
-//! keeps it. Residency — which page, which rect — is a separate table
+//! A raster (a glyph bitmap, or an image's decoded pixels) gets a
+//! `RasterId` once and keeps it until its owner releases it (images do;
+//! glyphs never). Residency — which page, which rect — is a separate table
 //! the GPU reads, so drawing records never bake atlas coordinates and a
 //! relocation touches no chunk.
 //!
@@ -107,6 +108,8 @@ pub struct RasterAtlas {
     alpha: Vec<Page>,
     color: Vec<Page>,
     entries: Vec<Residency>,
+    /// Released ids, reused by the next `new_scaled_id`.
+    free: Vec<u32>,
     gpu: Vec<RasterGpu>,
     gpu_dirty: DirtyRanges,
     epoch: u32,
@@ -133,6 +136,7 @@ impl RasterAtlas {
             alpha: Vec::new(),
             color: Vec::new(),
             entries: Vec::new(),
+            free: Vec::new(),
             gpu: Vec::new(),
             gpu_dirty: DirtyRanges::default(),
             epoch: 1,
@@ -174,23 +178,64 @@ impl RasterAtlas {
         quad_h: u16,
         color: bool,
     ) -> RasterId {
-        let id = self.entries.len() as u32;
-        self.entries.push(Residency {
+        let entry = Residency {
             w,
             h,
             quad_w,
             quad_h,
             color,
             ..Residency::default()
-        });
-        self.gpu.push(RasterGpu {
+        };
+        let row = RasterGpu {
             xy: 0,
             wh: w as u32 | (h as u32) << 16,
             page: (color as u32) << 16,
             quad: quad_w as u32 | (quad_h as u32) << 16,
-        });
+        };
+        let id = match self.free.pop() {
+            Some(id) => {
+                self.entries[id as usize] = entry;
+                self.gpu[id as usize] = row;
+                id
+            }
+            None => {
+                self.entries.push(entry);
+                self.gpu.push(row);
+                self.entries.len() as u32 - 1
+            }
+        };
         self.gpu_dirty.add(id as usize..id as usize + 1);
         RasterId(id)
+    }
+
+    /// Frees `id` and its atlas area; a later `new_scaled_id` reuses the
+    /// id. The owner must stop drawing it first: a chunk that still
+    /// names it draws whatever takes the id next.
+    pub fn release(&mut self, id: RasterId) {
+        let e = &mut self.entries[id.0 as usize];
+        if let Some(alloc) = e.alloc.take() {
+            let pages = if e.color {
+                &mut self.color
+            } else {
+                &mut self.alpha
+            };
+            pages[e.page as usize].alloc.deallocate(alloc);
+        }
+        *e = Residency::default();
+        self.free.push(id.0);
+    }
+
+    /// Changes the drawn size of `id` (device px), keeping its bitmap:
+    /// an image whose box changed a little draws its pixels scaled.
+    pub fn set_quad(&mut self, id: RasterId, quad_w: u16, quad_h: u16) {
+        let e = &mut self.entries[id.0 as usize];
+        if (e.quad_w, e.quad_h) == (quad_w, quad_h) {
+            return;
+        }
+        e.quad_w = quad_w;
+        e.quad_h = quad_h;
+        self.gpu[id.0 as usize].quad = quad_w as u32 | (quad_h as u32) << 16;
+        self.gpu_dirty.add(id.0 as usize..id.0 as usize + 1);
     }
 
     pub fn entry(&self, id: RasterId) -> &Residency {
@@ -408,20 +453,38 @@ fn blit(page: &mut Page, page_size: u32, bpp: u32, x: u16, y: u16, w: u32, h: u3
     let row = (w * bpp) as usize;
     let (x, y) = (x as usize, y as usize);
     let b = bpp as usize;
+    let g = GUTTER as usize;
+    // The gutter is written on every insert: a reused slot may hold an
+    // evicted bitmap's pixels, and quads sample up to one pixel out. A
+    // mask's gutter is empty; a color raster's repeats its edge pixels,
+    // so a bitmap filling its quad keeps its full color to the edge (a
+    // clear gutter would fade the outer half pixel).
+    let color = bpp == 4;
     for r in 0..h as usize {
         let dst = (y + r) * stride + x * b;
         page.data[dst..dst + row].copy_from_slice(&src[r * row..r * row + row]);
-        // The gutter columns, cleared: a reused slot may hold an evicted
-        // bitmap's pixels, and glyph quads sample one gutter pixel out.
-        let left = dst - GUTTER as usize * b;
-        page.data[left..dst].fill(0);
-        page.data[dst + row..dst + row + GUTTER as usize * b].fill(0);
+        let (first, last) = (dst, dst + row - b);
+        for k in 1..=g {
+            if color {
+                page.data.copy_within(first..first + b, dst - k * b);
+                page.data.copy_within(last..last + b, last + k * b);
+            } else {
+                page.data[dst - k * b..dst - k * b + b].fill(0);
+                page.data[last + k * b..last + k * b + b].fill(0);
+            }
+        }
     }
-    let g = GUTTER as usize;
     let full = (w as usize + 2 * g) * b;
-    for gy in (y - g..y).chain(y + h as usize..y + h as usize + g) {
-        let at = gy * stride + (x - g) * b;
-        page.data[at..at + full].fill(0);
+    let line = |gy: usize| gy * stride + (x - g) * b;
+    for k in 1..=g {
+        for (gy, edge) in [(y - k, y), (y + h as usize - 1 + k, y + h as usize - 1)] {
+            let at = line(gy);
+            if color {
+                page.data.copy_within(line(edge)..line(edge) + full, at);
+            } else {
+                page.data[at..at + full].fill(0);
+            }
+        }
     }
     let rect = RectPx::new(
         (x - g) as u32,
@@ -466,6 +529,38 @@ mod tests {
             assert_eq!(px(x - 1 + k, y + 8), 0, "bottom gutter");
         }
         assert_eq!(px(x, y), 128);
+    }
+
+    /// A color raster's gutter repeats its edge pixels, corners included,
+    /// over whatever the slot held.
+    #[test]
+    fn color_gutters_repeat_the_edges() {
+        let mut atlas = RasterAtlas::with_budget(64, 0, 1);
+        let big = atlas.new_id(62, 62, true);
+        atlas.insert(big, &[255u8; 62 * 62 * 4]);
+        atlas.begin_epoch();
+        // 2 x 2: red, green / blue, white.
+        let px = [
+            [255, 0, 0, 255],
+            [0, 255, 0, 255],
+            [0, 0, 255, 255],
+            [255; 4],
+        ];
+        let small = atlas.new_id(2, 2, true);
+        atlas.insert(small, px.as_flattened());
+        let e = atlas.entry(small);
+        let (x, y) = (e.x as usize, e.y as usize);
+        let (data, _) = atlas.page_bytes(true, 0);
+        let at =
+            |x: usize, y: usize| -> [u8; 4] { data[(y * 64 + x) * 4..][..4].try_into().unwrap() };
+        let rows: Vec<Vec<[u8; 4]>> = (y - 1..y + 3)
+            .map(|y| (x - 1..x + 3).map(|x| at(x, y)).collect())
+            .collect();
+        let [r, g, b, w] = px;
+        assert_eq!(
+            rows,
+            [[r, r, g, g], [r, r, g, g], [b, b, w, w], [b, b, w, w]].map(Vec::from)
+        );
     }
 
     fn fill(atlas: &mut RasterAtlas, n: usize) -> Vec<RasterId> {
@@ -518,6 +613,27 @@ mod tests {
         atlas.insert(id, &vec![1u8; 2047]);
         assert!(!atlas.entry(id).resident);
         assert_eq!(atlas.stats.oversized, 1);
+    }
+
+    /// A released raster frees its area and its id: the next raster
+    /// takes both, and the old bitmap's pixels are gone from its rect.
+    #[test]
+    fn release_reuses_the_id_and_the_area() {
+        let mut atlas = RasterAtlas::with_budget(64, 0, 1);
+        let a = atlas.new_id(62, 62, true);
+        atlas.insert(a, &[9u8; 62 * 62 * 4]);
+        atlas.release(a);
+        assert!(!atlas.entry(a).resident);
+        let b = atlas.new_scaled_id(60, 60, 30, 30, true);
+        assert_eq!(b, a);
+        atlas.insert(b, &[5u8; 60 * 60 * 4]);
+        assert!(atlas.entry(b).resident);
+        assert_eq!(atlas.color_pages(), 1);
+        assert_eq!(atlas.stats.evictions, 0);
+        assert_eq!(atlas.gpu_rows()[b.0 as usize].quad, 30 | 30 << 16);
+        atlas.set_quad(b, 40, 20);
+        assert_eq!(atlas.entry(b).quad_w, 40);
+        assert_eq!(atlas.gpu_rows()[b.0 as usize].quad, 40 | 20 << 16);
     }
 
     /// Eviction keeps the id and its size; re-insert restores residency

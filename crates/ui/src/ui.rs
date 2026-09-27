@@ -87,6 +87,8 @@ pub struct Ui {
     pub(crate) selection_revs: crate::host::Revs,
     /// Vector nodes' tessellated meshes (`vector.rs`).
     pub(crate) vector_meshes: crate::vector::VectorCache,
+    /// Image nodes' decode state and the decoder's queue (`image.rs`).
+    pub(crate) images: crate::image::Images,
     /// Running animations (`animation.rs`).
     pub(crate) animations: crate::animation::Animations,
     /// Events accumulated for the JS side since the last `take_events`.
@@ -158,6 +160,7 @@ impl Ui {
             selection_revs: Default::default(),
             animations: Default::default(),
             vector_meshes: Default::default(),
+            images: Default::default(),
             pending_events: Vec::new(),
             a11y_stale: true,
             force_paint: true,

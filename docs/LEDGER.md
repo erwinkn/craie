@@ -486,6 +486,152 @@ Reviewer minors and nitpicks not fixed yet.
   element would make every such node a scope.
 - Resolves in: when a ported component needs one; the Marbre port
   flags the `_hover` difference.
+### DF-30: images are decoded per node, and fetched per mount
+
+- Source: images (work item 8) implementation (own finding).
+- Where: crates/ui/src/image.rs (`Images`), packages/bridge/src/index.ts
+  (`Image`, `loadImage`).
+- Claim: each node owns its bytes, decode, and raster. A list of 100
+  rows showing the same avatar URL fetches it 100 times, holds 100
+  copies of the bytes, and decodes 100 bitmaps (vectors intern by
+  content; images do not). Each node's encoded bytes are also held
+  twice: in the facade's state and in the core.
+- Why deferred: sharing needs a key (content hash, or URL from JS) and
+  a decode per (source, crop, size) with reference counts; the first
+  consumers show distinct photos.
+- Resolves in: an image cache keyed by source in the facade (fetch)
+  and the core (bytes and bitmaps), when a consumer repeats images.
+
+### DF-31: an image does not clip to its own border radius
+
+- Source: images (work item 8) implementation (own finding).
+- Where: crates/ui/src/scene_sync.rs (clip records), crates/ui/src/image.rs
+  (`build_image`).
+- Claim: `borderRadius` on an `Image` rounds its background and border
+  but not the picture: a node's clip applies to its children, not its
+  own content. A round avatar clips in a parent:
+  `<View style={{ width: 40, height: 40, overflow: "hidden" }}
+  borderRadius={20}><Image src={url} style={{ width: "100%", height:
+  "100%" }} /></View>` (tested: `a_rounded_parent_clips_an_image`).
+- Why deferred: clipping a chunk by its own node's shape needs a clip
+  record per rounded image, or a rounded-rect mask in the glyph path.
+- Resolves in: content clipping for the node's own chunk (also wanted by
+  surfaces), or a corner mask on image quads.
+
+### DF-32: kit `Image` gaps
+
+- Source: images (work item 8), kit API comparison (Marbre
+  `ImageProps`).
+- Where: packages/bridge/src/index.ts (`Image`).
+- Claim: `src`, `fit`, `alt`, `onError` match the kit. Missing: a numeric
+  `src` (a bundled asset id); SVG data URLs, which the kit's native
+  version renders with `SvgXml` (here the decoder rejects them and
+  `onError` fires; SVG goes through `Vector`); `placeholder` and
+  `fallback` (compose them in JS: render the fallback after `onError`);
+  animated GIFs (the first frame only); `radius` (DF-31); ICO files,
+  which the kit's `Favicon` and `SourceChip` load from sites (the
+  `image` crate's `ico` feature is off, so they fail with `onError`).
+- Why deferred: each needs a decision outside images: an asset
+  registry, runtime SVG documents (build-time only, §9), JS composition.
+- Resolves in: the kit port, per gap.
+
+### DF-33: one decoder thread, full decode before the downscale
+
+- Source: images (work item 8), measurement.
+- Where: crates/platform-winit/src/images.rs.
+- Claim: the decoder decodes the whole image, then averages the crop
+  down. A 12-megapixel JPEG costs about 63 ms on one core (exe1, loaded;
+  50 ms of it the decode) and a transient 36 MB buffer, whatever size it
+  shows at. One worker serializes a screen of photos: twenty take over a
+  second before the last appears. Probes go first, and queued work for
+  a removed or replaced image is dropped (PR8-04), but a decode that
+  has started runs to the end.
+- Why deferred: the four-format `image` crate has no reduced-size JPEG
+  decode (DCT scaling, 1/2 to 1/8); a pool needs a budget for the
+  transient buffers.
+- Resolves in: scaled JPEG decode (zune-jpeg's or a decoder that has it),
+  a small pool sized by the transient-memory budget.
+
+### DF-34: resizes draw the old bitmap, and big images cap at a page
+
+- Source: images (work item 8) implementation (own finding); corrected
+  in the PR #8 review (PR8-06, PR8-15).
+- Where: crates/ui/src/image.rs (`plan`, `grown`, `Bitmap::stale`).
+- Claim: three approximations. While a box grows, the old bitmap draws
+  scaled up until the larger decode lands: a decode's time, 60 to 100
+  ms for a 12-megapixel photo on exe1, more behind other work. A grow
+  asks for 1.25 times the size (capped by the source and a page), so a
+  box growing steadily redecodes every 25 %; a box that shrinks keeps
+  its bitmap until it is under half the size. The decode size caps at
+  an atlas page less its gutter (2,046 px a side), so a full-screen
+  image on a 5K display draws scaled up. The downscale averages sRGB
+  values, not linear light, so fine high-contrast detail comes out
+  slightly dark.
+- Why deferred: no consumer shows full-screen images yet; linear
+  averaging doubles the downscale cost.
+- Resolves in: an image texture outside the atlas for large images
+  (DF-36); linear-light filtering if photos look wrong next to a
+  browser.
+
+### DF-35: no color management
+
+- Source: PR #8 review (images), finding 15.
+- Where: crates/platform-winit/src/images.rs (`decode`).
+- Claim: the decoder ignores embedded ICC profiles and treats every
+  image as sRGB. A Display-P3 photo (an iPhone's) shows its P3 values
+  as sRGB: reds and greens look desaturated next to a browser.
+- Why deferred: converting needs the profile read per image and a
+  transform per pixel (`moxcms` is in the graph, through `image`); on a
+  wide-gamut display, drawing P3 properly also needs a wide-gamut
+  surface, which the renderer does not have.
+- Resolves in: an ICC-to-sRGB transform in the decoder (cheap after the
+  shrink); wide-gamut output with the renderer's color work.
+
+### DF-36: image memory: large images share the glyph atlas
+
+- Source: PR #8 review (images), finding 7.
+- Where: crates/ui/src/image.rs (`Images::trim`), crates/scene/src/atlas.rs.
+- Claim: the core's copies of decoded pixels are capped (64 MB, least
+  recently drawn dropped first, decoded again on a miss; PR8-07), but
+  the atlas is not image-aware. A 2,046 px image fills a whole color
+  page; the color atlas's cap is 2 pages (32 MiB), so a few large
+  visible images pin pages past it (`over_budget_pages`), and a page is
+  never freed once made.
+- Why deferred: the fix is a texture per large image outside the atlas
+  (a new binding in the glyph path, or its own instance type) and page
+  reclaim in the atlas; both are renderer work beyond the review.
+- Resolves in: large images in their own textures, and atlas page
+  reclaim, when a consumer shows full-screen images.
+
+### DF-37: a layout transition redecodes as it goes
+
+- Source: PR #8 review (images), finding 6.
+- Where: crates/ui/src/image.rs (`build_image`).
+- Claim: an image whose box animates (its own width or height, or an
+  ancestor's) asks for a new decode at each 1.25x step as it grows, and
+  for cover, at each aspect change past 2 device px. At most one decode
+  per image is in flight, so it costs a busy worker, not a backlog.
+- Why deferred: skipping requests while a node transitions misses
+  ancestors' transitions, and a skip that ends without a final request
+  leaves a stale bitmap; the steps already bound it.
+- Resolves in: asking for the transition's end size up front (the
+  animation knows it) when a consumer animates images.
+
+### DF-38: a new `src` of another shape decodes twice when unsized
+
+- Source: PR #8 review (images) fix (own finding).
+- Where: crates/ui/src/image.rs (`image_result`).
+- Claim: the old image, and its natural size, stay until the new one's
+  pixels arrive (PR8-02). A node with no size of its own is laid out at
+  the old natural size meanwhile, so the first decode of a new `src`
+  with another aspect is planned for the old box; when it lands the
+  node relayouts to the new natural size and decodes again. A sized box
+  decodes once.
+- Why deferred: taking the new natural size at the probe resizes the
+  box around the old picture (a jump, then the pixels); the double
+  decode is the cost of no jump.
+- Resolves in: planning the decode for the new natural size when the
+  node's size depends on it, if the double decode shows.
 
 ## Closed
 
@@ -681,3 +827,28 @@ Reviewer minors and nitpicks not fixed yet.
 - PR7-20 (states review): the breakpoint delta was not restyle alone: a row that sends the 1,000 heights directly with no tables splits it (about 200 µs of layout the heights cause anyway, 130 µs of restyle).
 - PR7-21 (states review): ARCHITECTURE §13 said restyle recomputes every scope's input bits: it says the three ancestor chains, and when.
 - PR7-22 (states review): the untested items have tests: StrictMode and Suspense with scopes, a group toggle, a Text with no color above (white), `COLOR` and scopes through a Portal, table limits, `_touch` with hover masking, and a Text moved under another `COLOR`.
+- PR8-01 (images review): the decoder did not bound memory (a 249 KB PNG took 1.25 GB): the probe and the decode reject over 64 megapixels (`MAX_PIXELS`) before any buffer, the codecs check 32,768 px a side, and `decode` reserves the decoded buffer, plus the RGBA copy for a format that needs one, against 512 MiB (`MAX_ALLOC`) before `from_decoder`. The rotation copy is gone: the decoder crops and shrinks in the stored orientation and turns the small result. A probe over the budget fails the image, so no huge intrinsic size is set. The false "512 MiB" comment is replaced. Tests: a 4 x 4 PNG claiming 20,000 x 20,000 fails in both, and the reserve fails one byte short for RGBA and gray.
+- PR8-02 (images review): a new `src` blanked the image and collapsed its layout until the decode landed: the old bitmap and natural size stay until the new image's first pixels or failure. An unsized image with a new aspect decodes twice as a result (DF-38).
+- PR8-03 (images review): a failed fetch left the previous `src`'s image on screen: the facade sends empty bytes, which clear it, and fires `onError`.
+- PR8-04 (images review): the worker queue had no cancellation or priority: a shared queue replaces the channel. Probes run before decodes, a newer decode of an image replaces its queued one, and the queued work of a removed or replaced image is dropped (`Ui::take_dropped_images`). A decode already running finishes (DF-33).
+- PR8-05 (images review): images drew dark edges when magnified and dark rims where transparent, with no shader change: the decoder averages premultiplied and stores straight alpha, transparent pixels take their visible neighbours' color, and a color raster's atlas gutter repeats its edge pixels. The llvmpipe test checks edge rows and columns of each fit, and a transparent-black ring stretched 4x shows no dark pixel; both fail without the fix.
+- PR8-06 (images review): resizing thrashed full decodes: a grow asks for 1.25 times the needed size (capped by the source and a page), and a cover crop within 2 device px of the plan keeps its bitmap. Skipping requests during layout transitions is not done (DF-37); DF-34's "a frame of blur" is corrected to a decode's time.
+- PR8-07 (images review): image memory had no budget: the core's pixel copies are capped at 64 MB, least recently drawn dropped first; an evicted raster whose copy is gone decodes again. Large images out of the atlas and page reclaim are DF-36.
+- PR8-08 (images review): a panic in the worker hung every image for good: `run` is caught and its image fails ("the image decoder panicked"); a worker that dies anyway (a panic the catch cannot hold) fails its image ("the image decoder stopped") and is replaced at the next pump. There is no send to fail, so no node stays pending.
+- PR8-09 (images review): a decode failure kept the probed size, and a later failure hid a loaded image: a failure with no bitmap clears the natural size; a failure after a load keeps the bitmap and is not retried.
+- PR8-10 (images review): decode failed on an unreadable EXIF chunk where probe ignored it: both show the image unturned (`unwrap_or(NoTransforms)`). No test: PNG's EXIF read cannot fail, and the other codecs need a crafted file.
+- PR8-11 (images review): equal bytes returned early with no event: they report again (`LOADED` if loaded, else the stored failure; a load in flight reports when it lands). The `src` doc says a new `Uint8Array` each render is sent each time.
+- PR8-12 (images review): `alt=""` made an unlabeled image: it now has no role and no label, which assistive technology skips.
+- PR8-13 (images review): the drawn rect was not snapped: its origin rounds to device pixels, the size stays the fitted size.
+- PR8-14 (images review): fetch handling was thin: an unmount or a new `src` aborts the fetch (no `onError`), a load has 30 s before it fails with `onError`, and the doc says a relative path resolves against the process's working directory. Tests: a fetch failure after a change clears the image, an unmount aborts, and A, B, A with URLs sends A again.
+- PR8-15 (images review): docs and numbers: the bench builds the probe request outside the timed part (the PNG probe was the 23 MB copy) and adds RGBA, gray and 16-bit PNG rows (EXPERIMENTS.md); DF-34 is corrected, no color management is DF-35, and DF-32 lists ICO favicons.
+- PR8-16 (images review, nit): a quad over 65,535 device px drew at the wrong size: the quad and the drawn rect shrink together, keeping the aspect. `capture.rs` is left as is.
+- PR8-17 (images review, tests missing): added: EXIF, all eight orientations against the `image` crate's (size and pixels, at 1:1 and shrunk); the bomb and a truncated file after a good probe; a new `src` keeping the old image; a fetch failure after a change, an unmount during a fetch, A, B, A; eviction and re-insert, and a copy dropped past the budget decoding again; a scale change; a cover aspect change and late pixels for an older crop; edge and transparency pixels on llvmpipe; a panicking codec and a dead worker.
+- PR8-18 (re-review): a WebP's EXIF chunk size was allocated unchecked, past `Limits` (78 bytes asked for 4 GiB and aborted under a memory cap): before reading the orientation of a WebP, `webp_chunks_fit` walks its RIFF chunk headers, and one that claims more than the file holds skips the EXIF read (the image shows unturned). Test: the 1 x 1 file with a 0xFFFF_FFF0 EXIF chunk probes and decodes; without the guard the test binary aborts under `ulimit -v 3000000` ("memory allocation of 4294967280 bytes failed").
+- PR8-19 (re-review): `Image` had no state styles after PR #7: `ImageProps` takes `Variants` and it renders through `useHost`, so `_pressed` inside a `Pressable` sends a VARIANTS table. Test added.
+- PR8-20 (re-review): after a grow, an image stayed decoded 1.25 times too large, drawn minified: once the plan holds for a frame (the node looks again the next frame while its bitmap is off by more than a pixel), a bitmap of another size is decoded again at the drawn size (never upscaled, at most a page). The x1.25 step and the half-size hysteresis still apply while the box moves. Test: 80 px grown to 84 then 88 asks for 105, then 88, then nothing.
+- PR8-21 (re-review): after URL A, bytes X, then URL B, A's bytes came back while B loaded: bytes reset the fetched state, so X stays up until B arrives. Test added.
+- PR8-22 (re-review): a trimmed CPU copy could not always come back: `trim` and `ensure_resident` share one predicate (`State::restorable`: the bitmap is of the current payload, which has not failed), and only restorable copies are trimmed. An old `src` up while the new one loads, and pixels of a payload that later failed, keep theirs. Test: an old `src` evicted over the budget re-inserts from its copy.
+- PR8-23 (re-review, nit): the snap was said to be node-relative only: it composes with the chunk origin, which snaps in world space (always in the window root, at rest in scroll and transformed spaces, as text does; §8). No DF: a test at 1.25x and 1.5x checks the quad's world origin (a node at x = 11 pt, 13.75 device px, draws from 14) and fails without the snap.
+- PR8-24 (re-review, nit): `MAX_ALLOC`'s doc now says it bounds the image crate's buffers, and codecs may add about one more image. It stays 512 MiB.
+- PR8-25 (re-review, nits): `take_dropped_images` says the embedder must call it or the list grows; the color gutter repeat applies to color emoji too (their opaque edges extend half a pixel instead of fading). Left as is: `Queue::add`'s per-image replacement, which one request in flight per image makes dead code for now, and the precision a low-alpha pixel loses at 1:1 through premultiply and back (invisible after blending).

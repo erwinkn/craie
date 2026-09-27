@@ -272,6 +272,10 @@ pub mod out_kind {
     /// clipboard's plain text; copy and cut: the selected text; drop:
     /// the paths, one per line, and x/y; context menu: x/y.
     pub const CLAIM: u8 = 17;
+    /// An image node's bytes decoded or failed (`image.rs`), always
+    /// sent: key 0 = loaded, x/y = the natural size in pixels; key 1 =
+    /// failed, `text` = why.
+    pub const IMAGE: u8 = 18;
 }
 
 /// A key record's `key` field: the modifiers in bits 0 to 3 (as

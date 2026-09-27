@@ -120,6 +120,7 @@ export function readFrame(buf: Uint8Array): Frame {
         }
         break
       }
+      case 0x73: op.f.push(u8()); break // image config: fit
       case 0x80: { // command
         const c = u8(); op.f.push(c)
         if (c === 2 || c === 4 || c === 5) op.s = strings[u32()]

@@ -423,8 +423,15 @@ pub fn validate(host: &Host, txn: &Transaction<'_>) -> Result<Validated, WireErr
                     return Err(invalid("surface data on a non-surface node"));
                 }
             }
+            Mutation::ImageConfig { id, .. } => {
+                if o.kind(*id) != Some(NodeKind::Image) {
+                    return Err(invalid("image config on a non-image node"));
+                }
+            }
             Mutation::Payload { id, bytes } => match o.kind(*id) {
-                Some(NodeKind::Surface) => {}
+                // An image's bytes are checked by the decoder, off the UI
+                // thread: bad ones fail as an event, not a rejection.
+                Some(NodeKind::Surface | NodeKind::Image) => {}
                 // A vector's payload is its asset: it must decode. Its
                 // magic tags it in the source table ("CRV1"; drawing
                 // keys start "CRVS"), so it is checked before a lookup.
@@ -969,6 +976,12 @@ impl Ui {
                     },
                 );
             }
+            Mutation::Payload { id, bytes }
+                if self.host.kind(NodeId(*id)) == Some(NodeKind::Image) =>
+            {
+                self.set_image(*id, bytes);
+            }
+            Mutation::ImageConfig { id, fit } => self.set_image_fit(*id, *fit),
             Mutation::Drawing { id, drawing } => {
                 // Validated: the key is built; the asset is built, or
                 // `None` if it does not parse.
@@ -1103,6 +1116,7 @@ impl Ui {
         }
         self.inputs.remove(node.0);
         self.vector_meshes.forget(node.0);
+        self.images.forget(node.0, &mut self.scene.atlas);
         self.animations.forget(node);
         self.layouts.forget(node);
         self.forget_states(node);

@@ -43,6 +43,10 @@ Times are UTC.
 | 04:22 | PR #8 review: 1 blocker (decoding was not memory-bounded: a 249 KB PNG with a 16,000×16,000 header took 1.25 GB), 7 majors; its track fixes them |
 | 04:35 | PR #5 review fixed (`LEDGER.md` PR5-01..13), main merged in, reverified (CI, 337 workspace tests, smoke, macOS type-check) and merged; PR #8 retargeted to main first |
 | 04:47 | PR #7 review fixed (`LEDGER.md` PR7-01..22: first values snap, layout resolves per key, Suspense wins, disabled is fully disabled), main merged in twice, reverified (CI, 363 workspace tests, bun 80, smoke, macOS type-check) and merged |
+| 04:52 | PR #8 review fixed (`LEDGER.md` PR8-01..17: decoding is bounded at 64 MP and 512 MiB before any buffer exists, the old image stays until the new one is ready, no dark edges, a 64 MB pixel budget, a panicking codec fails only its image), main merged in twice, reverified (CI, 395 workspace tests, smoke, macOS type-check). The blocker was about memory, so a fresh thread re-reviews the fix commit |
+| 05:02 | PR #8 re-review: the blocker is closed; 1 new major (a 78-byte WebP whose EXIF chunk claims 4 GiB aborts the app where memory is committed up front), 4 minors |
+| 05:10 | The intermittent `paths` crash characterised (below): the Vulkan validation layer, triggered by tests creating devices in parallel |
+| 05:13 | PR #8 re-review fixed (`LEDGER.md` PR8-18..25), reverified (CI, 398 workspace tests, bun 87, smoke, macOS type-check) and merged |
 
 ## PRs
 
@@ -55,7 +59,7 @@ Times are UTC.
 | [#5](https://github.com/erwinkn/craie/pull/5) | Runtime vector shapes (work item 8, part 1): SVG path strings parsed natively, dashes, a shared mesh cache | Merged |
 | [#6](https://github.com/erwinkn/craie/pull/6) | Sibling z and layers (work item 4, first half): `zIndex` among siblings, layer containers that never sort below their owner | Merged |
 | [#7](https://github.com/erwinkn/craie/pull/7) | State styles (work item 5): hover, press, focus, app states and breakpoints restyle natively; inherited color | Merged |
-| [#8](https://github.com/erwinkn/craie/pull/8) | Images (work item 8, part 2): decoded off-thread at the drawn size, drawn from the glyph atlas | In review |
+| [#8](https://github.com/erwinkn/craie/pull/8) | Images (work item 8, part 2): decoded off-thread at the drawn size, drawn from the glyph atlas | Merged |
 
 ## Numbers
 
@@ -86,6 +90,19 @@ index (speedup):
 Walk and index from the same run. Keeping the index costs 2 to 7
 percent of the layout pass that stales it, and 16 bytes per node. Rerun on the Mac:
 `cargo run --release -p craie-harness --example e15_lookups`.
+
+The later work items, also on exe1 (CPU only for the core; medians,
+loaded). Each PR has the full table and says what it means:
+
+| What | Cost |
+| --- | --- |
+| Vectors: a new icon over a view (parse, tessellate) / from the cache | 11.4 µs / 3.2 µs |
+| Vectors, worst case allowed (4,096 shapes × 1 KiB paths) | 7.4 ms to apply, 48 ms first frame |
+| Sibling z: one z change among 5,000 siblings | 13 to 74 µs |
+| Sibling z: the frame after a z change at 100k nodes | 6 to 9 ms (2.5 to 3.7 after a transform) |
+| State styles: hover, 1 / 100 / 1,000 dependents | 0.27 / 11 / 116 µs, no allocation, no layout |
+| State styles: breakpoint over 1,000 `_narrow` rows | 637 µs, of which about 130 µs is the restyle |
+| Images: 4000×3000 JPEG to an 80×80 avatar | 75.5 ms off the main thread; 25.6 KB kept, not 48 MB |
 
 ## Decisions
 
@@ -148,12 +165,13 @@ percent of the layout pass that stales it, and 16 bytes per node. Rerun on the M
   states a variant tests, then the highest-ranked state, then
   declaration order; a restyle sends only the fields that changed, so
   a transition tweens exactly those. Hover over 1,000 dependents
-  restyles in 235 µs with no layout.
+  restyles in 116 µs, with no allocation and no layout.
 - Images: decoded by the `image` crate (png, jpeg, webp, gif) in
   `craie-platform-winit` only, on one worker thread, at the size drawn
   (an 80×80 avatar holds 25.6 KB, not the 48 MB of its 4000×3000
   source), and drawn as color quads from the glyph atlas: no new
-  shader.
+  shader. Decoding is bounded before any buffer exists (64 megapixels,
+  512 MiB), so a small hostile file can't claim gigabytes.
 - A PR stacked on another is retargeted to `main` before its base
   merges: `--delete-branch` closes stacked PRs instead of retargeting
   them.
@@ -164,10 +182,69 @@ percent of the layout pass that stales it, and 16 bytes per node. Rerun on the M
 
 ## Open questions for Erwin
 
-- `craie-render --test paths` failed once in the first full test run
-  of PR #2 and passed in five reruns. It crashed again (SIGSEGV) in
-  PR #5's first CI run and passed alone three times and in the CI rerun.
-  A segfault points at llvmpipe or the driver rather than timing;
-  worth watching on the Mac.
+- `_hover` on an element that is no scope (a Text, an Icon) means the
+  nearest scope's hover in Craie; Marbre web means the element's own
+  (`questions.tsx`, `tool-run.tsx`). Craie's rule is kept (DF-29). Align
+  Marbre, or make such an element an implicit scope?
+- Clippy has warnings in `craie-vector` and `craie-scene`, and
+  `scripts/ci.sh` doesn't run it. Add clippy to CI, and fix them?
+- The helper that characterised the `paths` crash installed `gdb` on
+  exe1 with `sudo apt-get`. That's a change to a shared host; it
+  reports installing nothing else.
+
+## The `paths` crash
+
+`craie-render --test paths` crashed (SIGSEGV) in PR #5's first CI run,
+and failed once in PR #2's (that log wasn't kept, so it may be another
+bug). A helper looped it on exe1 and read 13 core dumps:
+
+| Configuration, 200 runs each | Crashes |
+| --- | --- |
+| Tests in parallel (the default) | 5 |
+| `--test-threads=1` | 0 |
+| `WGPU_VALIDATION=0` (no validation layer) | 0 |
+| `LP_NUM_THREADS=1` (one llvmpipe thread) | 8 |
+| One device shared by the binary's tests | 0 |
+
+Every core's top frame is in the Khronos Vulkan validation layer
+(1.3.275, Ubuntu 24.04), which wgpu loads in debug builds. Each test
+made and dropped its own device, and while one thread was inside the
+layer's `vkCreateDevice` or `vkDestroyDevice`, another's call on its
+own device read freed layer state. So it's neither Craie's rendering
+code nor wgpu nor llvmpipe. The fix is in the tests: each GPU test
+binary shares one device, and validation stays on. That's the PR after
+#8. On the Mac, wgpu uses Metal, which has no such layer.
 
 ## Next steps
+
+On the Mac (exe1 can't link, sign or use a real GPU):
+- Build, sign and run the app, then the pixel tests on a real GPU:
+  `cargo test --workspace --no-fail-fast`.
+- Rerun tonight's benchmarks. Every number above is from exe1, a
+  loaded VM, with llvmpipe for anything the GPU does:
+  - `sh bench/e19.sh`
+  - `cargo run --release -p craie-harness --example e15_lookups`
+  - `cargo run --release -p craie-harness --example vectors`
+  - `cargo run --release -p craie-harness --example zorder`
+  - `cargo run --release -p craie-harness --example states_restyle`
+  - `cargo run --release -p craie-platform-winit --example images`
+- Give touch and reduced motion a platform source (DF-25; the setters
+  exist, with a TODO(macOS) in `app.rs`).
+
+Work items not started:
+- Item 3: focus traps, modals and inert content. This also covers Tab
+  and accessibility order across layers (DF-17), and owners per
+  element (DF-19).
+- Item 6: transitions and animations inside variants (DF-22).
+- The second half of item 4: anchor and geometry expressions.
+- Topic 11: text ranges against a revision. This covers paste answers
+  with a range (DF-11) and variants on nested Text (DF-26).
+
+Deferrals to revisit when a profile asks for them:
+- A z change rebuilds the whole draw order: 6 to 9 ms at 100k nodes
+  (DF-18).
+- No color management: Display-P3 photos look desaturated (DF-35).
+- Large images share atlas pages that are never reclaimed (DF-36).
+- JPEG DCT scaling, and more than one decoder thread (DF-33).
+- An input's color, and vector `currentColor` reading the inherited
+  `COLOR` (DF-14, DF-24).

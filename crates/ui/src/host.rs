@@ -241,6 +241,17 @@ pub struct VectorData {
     pub asset: Option<std::sync::Arc<craie_vector::asset::Asset>>,
 }
 
+/// An image node's source. Decode state lives in `Ui::images`.
+#[derive(Default)]
+pub struct ImageData {
+    /// The encoded bytes (the node's payload), shared with decode
+    /// requests.
+    pub bytes: std::sync::Arc<[u8]>,
+    pub fit: crate::image::Fit,
+    /// Pixels, once the decoder read the header: the intrinsic size.
+    pub natural: Option<[u32; 2]>,
+}
+
 /// Revisions. A derived value records the revisions it was built from
 /// and is valid while they are unchanged.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -297,6 +308,8 @@ pub struct Host {
     pub surfaces: HashMap<u32, SurfaceData>,
     /// Vector nodes' assets, id-keyed.
     pub vectors: HashMap<u32, VectorData>,
+    /// Image nodes' encoded bytes and fit, id-keyed (`image.rs`).
+    pub images: HashMap<u32, ImageData>,
     /// Decoded vector sources by source bytes: nodes with the same
     /// source share one asset (and so its tessellation).
     vector_sources: HashMap<std::sync::Arc<[u8]>, std::sync::Weak<craie_vector::asset::Asset>>,
@@ -371,6 +384,7 @@ impl Host {
             transitions: HashMap::new(),
             surfaces: HashMap::new(),
             vectors: HashMap::new(),
+            images: HashMap::new(),
             vector_sources: HashMap::new(),
             vector_sources_swept: 0,
             claims: HashMap::new(),
@@ -559,6 +573,7 @@ impl Host {
         self.transitions.remove(&id.0);
         self.surfaces.remove(&id.0);
         self.vectors.remove(&id.0);
+        self.images.remove(&id.0);
         self.claims.remove(&id.0);
         self.colors.remove(&id.0);
         self.orders.remove(&id.0);
@@ -570,6 +585,9 @@ impl Host {
         }
         if kind == NodeKind::Vector {
             self.vectors.insert(id.0, VectorData::default());
+        }
+        if kind == NodeKind::Image {
+            self.images.insert(id.0, ImageData::default());
         }
         self.live += 1;
         self.revs.structure.bump();
@@ -674,6 +692,7 @@ impl Host {
         self.transitions.remove(&id.0);
         self.surfaces.remove(&id.0);
         self.vectors.remove(&id.0);
+        self.images.remove(&id.0);
         self.claims.remove(&id.0);
         self.colors.remove(&id.0);
         self.orders.remove(&id.0);

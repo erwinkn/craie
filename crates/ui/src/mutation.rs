@@ -49,6 +49,10 @@ pub enum NodeKind {
     /// (`craie_vector::asset`, payload bytes) or runtime shapes
     /// (`Mutation::Drawing`).
     Vector = 5,
+    // 6 is reserved.
+    /// A raster image: encoded bytes (a payload) the platform decodes
+    /// at the size it is shown (`image.rs`), fitted per `ImageConfig`.
+    Image = 7,
 }
 
 impl NodeKind {
@@ -60,6 +64,7 @@ impl NodeKind {
             3 => NodeKind::Surface,
             4 => NodeKind::List,
             5 => NodeKind::Vector,
+            7 => NodeKind::Image,
             _ => return None,
         })
     }
@@ -382,6 +387,11 @@ pub enum Mutation<'a> {
         id: u32,
         drawing: craie_vector::svg::Drawing<'a>,
     },
+    /// An image node's fit (`image::Fit`).
+    ImageConfig {
+        id: u32,
+        fit: crate::image::Fit,
+    },
     // command
     Command {
         id: u32,
@@ -472,6 +482,7 @@ impl Mutation<'_> {
             | Mutation::Surface { id, .. }
             | Mutation::Payload { id, .. }
             | Mutation::Drawing { id, .. }
+            | Mutation::ImageConfig { id, .. }
             | Mutation::Command { id, .. }
             | Mutation::ListConfig { id, .. }
             | Mutation::ListSplice { id, .. }
@@ -831,6 +842,10 @@ impl<'a> Transaction<'a> {
 
     pub fn drawing(&mut self, id: u32, drawing: craie_vector::svg::Drawing<'a>) -> &mut Self {
         self.push(Mutation::Drawing { id, drawing })
+    }
+
+    pub fn image_config(&mut self, id: u32, fit: crate::image::Fit) -> &mut Self {
+        self.push(Mutation::ImageConfig { id, fit })
     }
 
     pub fn command(&mut self, id: u32, cmd: Command<'a>) -> &mut Self {

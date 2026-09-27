@@ -43,6 +43,7 @@ const enum Op {
   Surface = 0x70,
   Payload = 0x71,
   Drawing = 0x72,
+  ImageConfig = 0x73,
   // command
   Command = 0x80,
   // lists
@@ -212,7 +213,14 @@ export const EVENT_KIND = {
    * set's version, text = the payload (clipboard or selected text,
    * dropped paths joined by "\\0"). */
   claim: 17,
+  /** An image node decoded (key 0: x/y = the natural size in pixels) or
+   * failed (key 1: text = why). */
+  image: 18,
 } as const
+
+/** How an image fills its box — mirror image.rs `Fit`. */
+export const FIT = { cover: 0, contain: 1, fill: 2 } as const
+export type ImageFit = keyof typeof FIT
 
 /** Claim kinds and chord flags — mirror claims.rs. */
 export const CLAIM_KIND = { key: 1, paste: 2, copy: 3, cut: 4, drop: 5, contextMenu: 6 } as const
@@ -1048,6 +1056,12 @@ export class Encoder {
       b.f32(s.dashOffset)
       b.f32(s.opacity)
     }
+  }
+  /** An image node's fit (`FIT`); its bytes go as a payload. */
+  imageConfig(id: number, fit: number) {
+    this.ops.u8(Op.ImageConfig)
+    this.ops.u32(id)
+    this.ops.u8(fit)
   }
   cmdFocus(id: number) {
     this.ops.u8(Op.Command)

@@ -241,7 +241,8 @@ impl Ui {
         self.scene.clear = crate::scene::Color(self.clear);
 
         // A scale change re-rasterizes every glyph chunk, re-tessellates
-        // every vector chunk (its tolerance is in device px), and remaps
+        // every vector chunk (its tolerance is in device px), replans
+        // every image (its decode size is in device px), and remaps
         // the root record; other geometry in logical units is unaffected.
         if self.sync.scale != self.scale {
             self.sync.scale = self.scale;
@@ -252,7 +253,7 @@ impl Ui {
                 let id = NodeId(i as u32);
                 if matches!(
                     self.host.kind(id),
-                    Some(NodeKind::Text | NodeKind::Input | NodeKind::Vector)
+                    Some(NodeKind::Text | NodeKind::Input | NodeKind::Vector | NodeKind::Image)
                 ) {
                     self.host.dirty.content.push(id.0);
                 }
@@ -331,6 +332,7 @@ impl Ui {
         self.scene.prepare(px, &mut missing);
         if !missing.is_empty() {
             self.text.ensure_resident(&missing, &mut self.scene.atlas);
+            self.images.ensure_resident(&missing, &mut self.scene.atlas);
         }
         self.sync.missing = missing;
     }
@@ -730,6 +732,7 @@ impl Ui {
             NodeKind::Input => self.build_input(id, &data, &mut w),
             NodeKind::Surface => self.build_surface(id, &data, &mut w),
             NodeKind::Vector => self.build_vector(id, &data, &mut w),
+            NodeKind::Image => self.build_image(id, &data, &mut w),
             NodeKind::View | NodeKind::List => {}
         }
         self.scene.commit_chunk(id.0, &mut w);

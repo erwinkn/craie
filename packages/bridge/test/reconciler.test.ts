@@ -1,7 +1,7 @@
 import { test, expect } from "bun:test"
 import { Activity, createElement, useState } from "react"
 import {
-  createRoot, View, Text, TextInput, ScrollView, Pressable, Bars, List, ROLE, Vector,
+  createRoot, View, Text, TextInput, ScrollView, Pressable, Bars, List, ROLE, Vector, Image,
   Circle, Ellipse, G, Line, Path, Polygon, Polyline, Rect,
 } from "../src/index.js"
 import { CraieHost } from "../src/host.js"
@@ -9,6 +9,7 @@ import { flattenShapes, MAX_BYTES, MAX_SHAPES } from "../src/shapes.js"
 import type { HostNode, Transport, UiEvent } from "../src/host.js"
 import { readFrame } from "./crw2.js"
 import { decodeEvents } from "../src/native.js"
+import { STATE_BIT } from "../src/wire.js"
 
 class FakeTransport implements Transport {
   frames: Uint8Array[] = []
@@ -1010,4 +1011,164 @@ test("vector drawings resend on change and clear", async () => {
   // Asset then neither also clears.
   await step(createElement(Vector, { asset }))
   expect((await step(createElement(Vector, {}))).map(o => o.tag)).toEqual([0x72])
+})
+
+// Work item 8: an image sends its bytes once per change as a payload,
+// its fit only when it is not the default, and native's image events
+// reach onLoad and onError.
+test("images send bytes once, fit on change, and report load and failure", async () => {
+  const t = new FakeTransport()
+  const root = createRoot(t)
+  const bytes = new Uint8Array([1, 2, 3])
+  const seen: unknown[] = []
+  function App({ fit }: { fit?: "cover" | "contain" | "fill" }) {
+    return createElement(Image, {
+      src: bytes, fit, alt: "avatar",
+      onLoad: e => seen.push(["load", e.width, e.height]),
+      onError: e => seen.push(["error", e.message]),
+    })
+  }
+  root.renderSync(createElement(App, {}))
+  await tick()
+  const ops = t.ops(0)
+  const create = ops.find(o => o.tag === 0x01)!
+  expect(create.f[0]).toBe(7)
+  expect([...ops.find(o => o.tag === 0x71)!.bytes!]).toEqual([1, 2, 3])
+  expect(ops.some(o => o.tag === 0x73)).toBe(false) // cover is native's default
+  expect(ops.find(o => o.tag === 0x50)!.f[0]).toBe(ROLE.image)
+  expect(ops.find(o => o.tag === 0x51)!.s).toBe("avatar")
+  t.frames.length = 0
+  root.renderSync(createElement(App, { fit: "contain" }))
+  await tick()
+  expect(t.ops().map(o => [o.tag, o.f[0]])).toEqual([[0x73, 1]])
+
+  const ev = (key: number, text = "", generation = 0): UiEvent => ({
+    kind: 18, node: create.id, generation, revision: 0, x: 40, y: 20, a: 0, b: 0, key, text,
+  })
+  t.eventCb!(ev(0))
+  t.eventCb!(ev(1, "unsupported format"))
+  t.eventCb!(ev(0, "", 1)) // a previous occupant's: dropped
+  expect(seen).toEqual([["load", 40, 20], ["error", "unsupported format"]])
+})
+
+test("image URLs are fetched once per change; failures reach onError", async () => {
+  const t = new FakeTransport()
+  const root = createRoot(t)
+  const errors: string[] = []
+  const settle = async () => { for (let i = 0; i < 20; i++) await tick() }
+  function App({ src }: { src: string }) {
+    return createElement(Image, { src, onError: e => errors.push(e.message) })
+  }
+  root.renderSync(createElement(App, { src: "data:application/octet-stream;base64,AQID" }))
+  await settle()
+  const payloads = t.frames.flatMap(f => readFrame(f).ops).filter(o => o.tag === 0x71)
+  expect(payloads.map(o => [...o.bytes!])).toEqual([[1, 2, 3]])
+  t.frames.length = 0
+  root.renderSync(createElement(App, { src: "/nonexistent/craie-image.png" }))
+  await settle()
+  // The old image must not stand in for the new src: empty bytes clear it.
+  const sent = t.frames.flatMap(f => readFrame(f).ops).filter(o => o.tag === 0x71)
+  expect(sent.map(o => o.bytes!.length)).toEqual([0])
+  expect(errors.length).toBe(1)
+  expect(errors[0]).toContain("ENOENT")
+})
+
+test("image URLs A, B, then A again send A's bytes again", async () => {
+  const t = new FakeTransport()
+  const root = createRoot(t)
+  const settle = async () => { for (let i = 0; i < 20; i++) await tick() }
+  const a = "data:application/octet-stream;base64,AQID"
+  const b = "data:application/octet-stream;base64,BAU="
+  const App = ({ src }: { src: string }) => createElement(Image, { src })
+  for (const src of [a, b, a]) {
+    root.renderSync(createElement(App, { src }))
+    await settle()
+  }
+  const payloads = t.frames.flatMap(f => readFrame(f).ops).filter(o => o.tag === 0x71)
+  expect(payloads.map(o => [...o.bytes!])).toEqual([[1, 2, 3], [4, 5], [1, 2, 3]])
+})
+
+test("unmounting an image cancels its fetch, without onError", async () => {
+  const t = new FakeTransport()
+  const root = createRoot(t)
+  const errors: string[] = []
+  const signals: AbortSignal[] = []
+  const real = globalThis.fetch
+  globalThis.fetch = ((_: unknown, init?: RequestInit) => new Promise((_, reject) => {
+    const signal = init!.signal!
+    signals.push(signal)
+    signal.addEventListener("abort", () => reject(signal.reason))
+  })) as typeof fetch
+  try {
+    function App({ show }: { show: boolean }) {
+      return createElement(View, {}, show
+        ? createElement(Image, { src: "https://example.com/a.png", onError: e => errors.push(e.message) })
+        : null)
+    }
+    root.renderSync(createElement(App, { show: true }))
+    for (let i = 0; i < 5; i++) await tick()
+    expect(signals.length).toBe(1)
+    expect(signals[0]!.aborted).toBe(false)
+    root.renderSync(createElement(App, { show: false }))
+    for (let i = 0; i < 5; i++) await tick()
+    expect(signals[0]!.aborted).toBe(true)
+    expect(errors).toEqual([])
+  } finally {
+    globalThis.fetch = real
+  }
+})
+
+test("alt=\"\" marks an image decorative", async () => {
+  const t = new FakeTransport()
+  const root = createRoot(t)
+  root.renderSync(createElement(Image, { src: new Uint8Array([1]), alt: "" }))
+  await tick()
+  expect(t.ops(0).some(o => o.tag === 0x50 || o.tag === 0x51)).toBe(false)
+})
+
+test("an image URL after bytes shows the bytes, not an older URL's, while it loads", async () => {
+  const t = new FakeTransport()
+  const root = createRoot(t)
+  const settle = async () => { for (let i = 0; i < 20; i++) await tick() }
+  const a = "data:application/octet-stream;base64,AQID"
+  const x = new Uint8Array([9])
+  const b = "data:application/octet-stream;base64,BAU="
+  const App = ({ src }: { src: string | Uint8Array }) => createElement(Image, { src })
+  for (const src of [a, x]) {
+    root.renderSync(createElement(App, { src }))
+    await settle()
+  }
+  const real = globalThis.fetch
+  let release!: () => void
+  const held = new Promise<void>(r => { release = r })
+  globalThis.fetch = (async (url: string) => { await held; return real(url) }) as typeof fetch
+  try {
+    root.renderSync(createElement(App, { src: b }))
+    await settle()
+    // While B loads: nothing sent, so X stays up (A must not come back).
+    const sent = t.frames.flatMap(f => readFrame(f).ops).filter(o => o.tag === 0x71)
+    expect(sent.map(o => [...o.bytes!])).toEqual([[1, 2, 3], [9]])
+    release()
+    await settle()
+  } finally {
+    globalThis.fetch = real
+  }
+  const payloads = t.frames.flatMap(f => readFrame(f).ops).filter(o => o.tag === 0x71)
+  expect(payloads.map(o => [...o.bytes!])).toEqual([[1, 2, 3], [9], [4, 5]])
+})
+
+test("an image takes state styles from its scope", async () => {
+  const t = new FakeTransport()
+  createRoot(t).renderSync(
+    createElement(Pressable, { onPress: () => {} },
+      createElement(Image, { src: new Uint8Array([1]), _pressed: { style: { opacity: 0.7 } } })),
+  )
+  await tick()
+  const ops = t.ops()
+  const pressable = ops.find(o => o.tag === 0x01 && o.f[0] === 0)!.id
+  const image = ops.find(o => o.tag === 0x01 && o.f[0] === 7)!.id
+  const table = ops.find(o => o.tag === 0xb1 && o.id === image)
+  expect(table?.variants!.map(v => v.terms.map(x => [x.scope, x.mask]))).toEqual([
+    [[pressable, 1n << BigInt(STATE_BIT.pressed)]],
+  ])
 })
