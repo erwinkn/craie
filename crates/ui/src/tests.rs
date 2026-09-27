@@ -495,7 +495,7 @@ fn input_typing_changes_buffer() {
     let st1 = t.style(&s);
     t.create(0, NodeKind::Input);
     t.push(Mutation::Layout { id: 0, style: st1 });
-    t.input_config(0, 16.0, 0xFFFF_FFFF, "", false);
+    t.input_config(0, 16.0, "", false);
     t.interaction(0, mask::INPUT, true);
     t.place(NIL, 0, NIL);
     t.seq = 1;
@@ -632,7 +632,7 @@ fn a11y_tree_maps_roles_names_focus() {
     t.role(1, crate::mutation::Role::Label);
     t.place(0, 1, NIL);
     t.create(2, NodeKind::Input);
-    t.input_config(2, 14.0, 0xFFFF_FFFF, "type here", false);
+    t.input_config(2, 14.0, "type here", false);
     t.role(2, crate::mutation::Role::TextInput);
     t.place(0, 2, NIL);
     t.seq = 1;
@@ -818,7 +818,7 @@ fn wire_roundtrip_is_exact() {
                 },
             ],
         )
-        .input_config(2, 15.0, 0xFFFF_FFFF, "type", true)
+        .input_config(2, 15.0, "type", true)
         .role(2, Role::TextInput)
         .label(0, "root")
         .interaction(0, mask::POINTER_DOWN, true)
@@ -1338,7 +1338,7 @@ fn set_text_command_needs_paint() {
     let mut t = Transaction::new(1);
     t.create(0, NodeKind::Input)
         .layout(0, &sized(200.0, 30.0))
-        .input_config(0, 16.0, 0xFFFF_FFFF, "", false)
+        .input_config(0, 16.0, "", false)
         .append(NIL, 0);
     ui.apply_txn(&t).unwrap();
     ui.render(Size::new(300.0, 100.0));
@@ -2084,7 +2084,7 @@ fn focused_input(text: &str, width: f32, multiline: bool) -> Ui {
     let st1 = t.style(&s);
     t.create(0, NodeKind::Input);
     t.push(Mutation::Layout { id: 0, style: st1 });
-    t.input_config(0, 16.0, 0xFFFF_FFFF, "", multiline);
+    t.input_config(0, 16.0, "", multiline);
     t.interaction(0, mask::INPUT, true);
     t.place(NIL, 0, NIL);
     t.seq = 1;

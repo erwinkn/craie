@@ -9,7 +9,7 @@ import { flattenShapes, MAX_BYTES, MAX_SHAPES } from "../src/shapes.js"
 import type { HostNode, Transport, UiEvent } from "../src/host.js"
 import { readFrame } from "./crw2.js"
 import { decodeEvents } from "../src/native.js"
-import { STATE_BIT } from "../src/wire.js"
+import { CURRENT, STATE_BIT } from "../src/wire.js"
 
 class FakeTransport implements Transport {
   frames: Uint8Array[] = []
@@ -863,14 +863,14 @@ test("vector shapes send one drawing per change", async () => {
   expect(d.s).toBe("0 0 24 24")
   const [circle, path, poly, rect, line] = d.shapes!
   expect(circle!.strings).toEqual(["M22 12A10 10 0 1 1 2 12A10 10 0 1 1 22 12Z", "", "4 2"])
-  // kind, rule, join, cap, fill, stroke, width, miter, offset, opacity
-  expect(circle!.f).toEqual([0, 0, 0, 1, 0, 0xffffffff, 2, 4, 0, 1])
+  // kind, rule, join, cap, current, fill, stroke, width, miter, offset, opacity
+  expect(circle!.f).toEqual([0, 0, 0, 1, 0, 0, 0xffffffff, 2, 4, 0, 1])
   expect(path!.strings).toEqual(["m9 12 2 2 4-4", "translate(1 0) scale(2)", ""])
-  expect(path!.f[5]).toBe(0xff0000ff)
-  expect(path!.f[9]).toBe(0.5)
+  expect(path!.f[6]).toBe(0xff0000ff)
+  expect(path!.f[10]).toBe(0.5)
   expect(poly!.strings[0]).toBe("0 0 4 0 2 3")
   expect(poly!.f.slice(0, 2)).toEqual([2, 1])
-  expect(poly!.f[4]).toBe(0x00ff00ff)
+  expect(poly!.f[5]).toBe(0x00ff00ff)
   expect(rect!.strings[0]).toBe(
     "M2 0H8A2 2 0 0 1 10 2V4A2 2 0 0 1 8 6H2A2 2 0 0 1 0 4V2A2 2 0 0 1 2 0Z")
   expect(line!.strings[0]).toBe("M0 0L5 5")
@@ -886,8 +886,6 @@ test("vector shapes send one drawing per change", async () => {
 
 test("vector shapes reject what they cannot draw", () => {
   const bad = [
-    // PR5-06: currentColor needs a color to resolve to.
-    [createElement(Path, { d: "M0 0", fill: "currentColor" })],
     [createElement(View)],
     ["text"],
     // PR5-07: past the native limits, a clear error, not a closed session.
@@ -895,9 +893,9 @@ test("vector shapes reject what they cannot draw", () => {
     Array.from({ length: 2048 }, (_, i) => createElement(Path, { key: i, d: "M0 0".padEnd(2100) })),
   ]
   for (const children of bad) expect(() => flattenShapes(children)).toThrow(/Vector/)
-  expect(() => flattenShapes(bad[3]!)).toThrow(/more than 4096 shapes/)
-  expect(() => flattenShapes(bad[4]!)).toThrow(`at most ${MAX_BYTES}`)
-  expect(flattenShapes(bad[3]!.slice(1))).toHaveLength(MAX_SHAPES)
+  expect(() => flattenShapes(bad[2]!)).toThrow(/more than 4096 shapes/)
+  expect(() => flattenShapes(bad[3]!)).toThrow(`at most ${MAX_BYTES}`)
+  expect(flattenShapes(bad[2]!.slice(1))).toHaveLength(MAX_SHAPES)
 })
 
 // PR5-01, PR5-06: numbers are coerced and checked as SVG reads them, so a
@@ -956,11 +954,17 @@ test("vector shape values coerce as SVG reads them", () => {
     expect(f!.fill).toBe(0xffffffff)
     expect(f!.stroke).toBe(0xff000040)
     expect(at({ fillOpacity: 0.5 }).fill).toBe(0x00000080)
-    // currentColor paints with the nearest color prop.
+    // currentColor paints with the nearest G's color, resolved here.
     const [c] = flattenShapes([createElement(G, { color: "#00ff00" },
-      createElement(Path, { d: "M0 0", fill: "currentColor", stroke: "currentColor", strokeOpacity: 0.5 }))],
-    { color: "#ff0000" })
-    expect([c!.fill, c!.stroke]).toEqual([0x00ff00ff, 0x00ff0080])
+      createElement(Path, { d: "M0 0", fill: "currentColor", stroke: "currentColor", strokeOpacity: 0.5 }))])
+    expect([c!.fill, c!.stroke, c!.current]).toEqual([0x00ff00ff, 0x00ff0080, 0])
+    // DF-24: without one it is left to native, flagged, the color a
+    // white tint carrying the paint's opacity; no throw.
+    const [n] = flattenShapes([createElement(Path, {
+      d: "M0 0", fill: "#ff0000", stroke: "currentColor", strokeOpacity: 0.5 })])
+    expect([n!.fill, n!.stroke, n!.current]).toEqual([0xff0000ff, 0xffffff80, CURRENT.stroke])
+    const [b] = flattenShapes([createElement(Path, { d: "M0 0", fill: "currentColor", stroke: "currentColor" })])
+    expect([b!.fill, b!.stroke, b!.current]).toEqual([0xffffffff, 0xffffffff, CURRENT.fill | CURRENT.stroke])
   } finally {
     console.error = log
   }
@@ -979,7 +983,7 @@ test("vector opacity is the node's", async () => {
   const spatial = ops.find(o => o.tag === 0x20)!
   expect(spatial.f).toEqual([2, 0.25])
   const [a, b] = ops.find(o => o.tag === 0x72)!.shapes!
-  expect([a!.f[9], b!.f[9]]).toEqual([1, 0.5])
+  expect([a!.f[10], b!.f[10]]).toEqual([1, 0.5])
 })
 
 // PR5-08, PR5-09, PR5-11: a drawing is resent when anything in it changes (the view

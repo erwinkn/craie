@@ -71,6 +71,10 @@ pub fn default_style() -> LayoutRow {
     LayoutRow::default()
 }
 
+/// What inherits where no node sets a color: white, the fallback the
+/// facade gives a span (`Host::current_color`).
+pub const DEFAULT_COLOR: u32 = 0xFFFF_FFFF;
+
 /// Node ids index dense stores, so they are bounded: 2^24 slots. The
 /// bridge allocates ids densely from zero and recycles them.
 pub const MAX_NODES: u32 = 1 << 24;
@@ -416,6 +420,14 @@ impl Host {
         self.vector_sources
             .get(source)
             .is_some_and(|w| w.strong_count() > 0)
+    }
+
+    /// Whether a vector node's asset paints with its inherited color.
+    pub fn vector_inherits(&self, id: NodeId) -> bool {
+        self.vectors
+            .get(&id.0)
+            .and_then(|v| v.asset.as_ref())
+            .is_some_and(|a| a.inherits_color())
     }
 
     /// The table's copy of a source, if it holds one (nodes of the same
@@ -783,6 +795,12 @@ impl Host {
             cur = self.parent(cur);
         }
         None
+    }
+
+    /// The color an input's text and a drawing's `currentColor` paint
+    /// with: the nearest inherited color, else `DEFAULT_COLOR`.
+    pub fn current_color(&self, id: NodeId) -> u32 {
+        self.inherited_color(id).unwrap_or(DEFAULT_COLOR)
     }
 
     /// The color a span of text node `id` draws in.

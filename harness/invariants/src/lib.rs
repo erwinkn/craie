@@ -92,6 +92,9 @@ pub fn snapshot(ui: &Ui) -> Transaction<'static> {
         if let Some(label) = host.label(id) {
             t.label(id.0, label.to_string());
         }
+        if let Some(&c) = host.colors.get(&id.0) {
+            t.color(id.0, Some(c));
+        }
         // A vector's source: payload bytes, or a drawing's key.
         if let Some(v) = host.vectors.get(&id.0)
             && !v.bytes.is_empty()
@@ -447,9 +450,10 @@ const WORDS: &[&str] = &[
     "of",
 ];
 
-/// A runtime drawing: a dashed ring over a filled square.
+/// A runtime drawing: a dashed ring in the node's inherited color over
+/// a filled square.
 fn vector_drawing() -> craie_vector::svg::Drawing<'static> {
-    use craie_vector::svg::{Drawing, Shape};
+    use craie_vector::svg::{CURRENT_STROKE, Drawing, Shape};
     Drawing {
         view_box: "0 0 24 24".into(),
         shapes: vec![
@@ -462,6 +466,7 @@ fn vector_drawing() -> craie_vector::svg::Drawing<'static> {
                 geometry: "M22 12A10 10 0 0 1 2 12A10 10 0 0 1 22 12Z".into(),
                 fill: 0,
                 stroke: 0xFFFF_FFFF,
+                current: CURRENT_STROKE,
                 line: craie_vector::Stroke {
                     width: 2.0,
                     ..craie_vector::Stroke::default()
@@ -693,6 +698,7 @@ impl Gen {
                 0.0
             },
             letter_spacing: if self.rng.chance(0.2) { 1.5 } else { 0.0 },
+            inherit_color: self.rng.chance(0.3),
             ..TextSpan::default()
         }];
         if self.rng.chance(0.3)
@@ -938,6 +944,12 @@ impl Gen {
                     let bytes: Vec<u8> =
                         (0..n).flat_map(|_| self.rng.unit().to_le_bytes()).collect();
                     t.payload(id, bytes);
+                }
+                // The color spans and drawings below inherit, set or
+                // cleared.
+                11 => {
+                    let c = self.color() | 0xFF;
+                    t.color(id, (!self.rng.chance(0.25)).then_some(c));
                 }
                 _ => {
                     let c = self.color() | 0xFF;

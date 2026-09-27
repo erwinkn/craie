@@ -870,14 +870,13 @@ impl Ui {
             Mutation::InputConfig {
                 id,
                 font_size,
-                color,
                 placeholder,
                 multiline,
                 submit,
             } => {
-                let metrics =
-                    self.inputs
-                        .configure(*id, *font_size, *color, placeholder, *multiline);
+                let metrics = self
+                    .inputs
+                    .configure(*id, *font_size, placeholder, *multiline);
                 if let Some(state) = self.inputs.get_mut(*id) {
                     state.submit = *submit;
                 }
@@ -886,10 +885,6 @@ impl Ui {
                     self.host.revs.text_metrics.bump();
                     self.host.dirty.content.push(*id);
                     self.host.dirty.semantic.push(*id);
-                } else {
-                    // Color only: patch the chunk's paint records.
-                    self.host.revs.paint.bump();
-                    self.host.dirty.paint.push(*id);
                 }
             }
             Mutation::Role { id, role } => {
@@ -1096,9 +1091,14 @@ impl Ui {
             return;
         }
         let (bytes, asset) = self.host.vector_source(source, share, build);
+        let inherited = self.host.vector_inherits(NodeId(id));
         let v = self.host.vectors.entry(id).or_default();
         v.bytes = bytes;
         v.asset = asset;
+        // Starting or stopping `currentColor` changes the inheritors.
+        if self.host.vector_inherits(NodeId(id)) != inherited {
+            self.color_bounds += 1;
+        }
         self.host.copied_bytes += source.len() as u64;
         self.host.revs.resource.bump();
         self.host.dirty.content.push(id);
@@ -1184,7 +1184,8 @@ impl Ui {
         }
     }
 
-    /// Writes a node's inherited color; the text inheriting it repaints.
+    /// Writes a node's inherited color; the spans, inputs and
+    /// `currentColor` drawings inheriting it repaint.
     pub(crate) fn set_color(&mut self, node: NodeId, color: Option<u32>) {
         let old = match color {
             Some(c) => self.host.colors.insert(node.0, c),
@@ -1197,8 +1198,9 @@ impl Ui {
         if old.is_some() != color.is_some() {
             self.color_bounds += 1;
         }
-        // The inheritors hold while the tree, the text and the color
-        // roots do: a tween reuses them every frame.
+        // The inheritors hold while the tree, the text, the color roots
+        // and the drawings using `currentColor` do: a tween reuses them
+        // every frame.
         let key = (
             self.host.revs.structure,
             self.host.revs.text_content,
@@ -1217,20 +1219,26 @@ impl Ui {
         self.inheritors.insert(node.0, entry);
     }
 
-    /// Queues a paint patch for the text nodes whose nearest inherited
-    /// color comes from `node` (or would): its subtree, stopping at
-    /// descendants with a color of their own. Lists them in `found`.
+    /// Queues a paint patch for the nodes whose nearest inherited color
+    /// comes from `node` (or would): its subtree, stopping at descendants
+    /// with a color of their own. Lists them in `found`. The inheritors
+    /// are text with an inheriting span, inputs, and vectors whose
+    /// drawing uses `currentColor`.
     fn repaint_inheritors(&mut self, node: NodeId, mut found: Option<&mut Vec<u32>>) {
         let mut stack = std::mem::take(&mut self.node_scratch);
         stack.clear();
         stack.push(node);
         while let Some(n) = stack.pop() {
-            if self.host.kind(n) == Some(NodeKind::Text)
-                && self.host.paragraphs[n.index()]
+            let inherits = match self.host.kind(n) {
+                Some(NodeKind::Text) => self.host.paragraphs[n.index()]
                     .spans
                     .iter()
-                    .any(|s| s.inherit_color)
-            {
+                    .any(|s| s.inherit_color),
+                Some(NodeKind::Input) => true,
+                Some(NodeKind::Vector) => self.host.vector_inherits(n),
+                _ => false,
+            };
+            if inherits {
                 self.host.dirty.paint.push(n.0);
                 if let Some(f) = found.as_deref_mut() {
                     f.push(n.0);

@@ -2,7 +2,7 @@
 // Rust decoder must accept. Regenerate after wire format changes:
 //   bun packages/bridge/scripts/gen-fixture.ts
 import {
-  CHORD_FLAG, CLAIM_KIND, ENV_BIT, Encoder, FIT, NIL, ROLE, STATE_BIT, SUBMIT_KEY, SURFACE,
+  CHORD_FLAG, CLAIM_KIND, CURRENT, ENV_BIT, Encoder, FIT, NIL, ROLE, STATE_BIT, SUBMIT_KEY, SURFACE,
   parseChord, transformMatrix,
 } from "../src/wire.js"
 
@@ -39,7 +39,7 @@ enc.layout(0, {
 enc.spatial(0, transformMatrix([{ translateX: 3 }, { scale: 2 }]), 0.75, -2)
 enc.paint(0, 0x1122_33ff, 6.5, { color: 0xff00_00ff, width: 2 })
 enc.create(2, 2)                                    // input
-enc.inputConfig(2, 15, 0xffff_ffff, "type here", true, SUBMIT_KEY["mod+enter"])
+enc.inputConfig(2, 15, "type here", true, SUBMIT_KEY["mod+enter"])
 enc.interaction(2, 0x1ff, true)                     // all listeners, focusable
 enc.role(2, ROLE.multilineTextInput)
 enc.create(3, 3)                                    // surface
@@ -127,16 +127,17 @@ enc.create(7, 0)                                    // a layer container
 enc.layer(7, 6)                                     // owned from the vector
 enc.spatial(7, undefined, undefined, 50)            // z alone
 enc.place(NIL, 7, NIL)
-// A runtime drawing: a dashed arc path and an even-odd polygon.
+// A runtime drawing: a dashed arc path and an even-odd polygon filled
+// with the inherited color at half alpha (currentColor).
 const shape = {
   kind: 0, geometry: "M2 12a10 10 0 0 1 20 0", transform: "", dashes: "4 2",
-  fill: 0, fillRule: 0, stroke: 0x1122_33ff, strokeWidth: 2, join: 1, cap: 2,
+  fill: 0, fillRule: 0, stroke: 0x1122_33ff, current: 0, strokeWidth: 2, join: 1, cap: 2,
   miterLimit: 4, dashOffset: 1.5, opacity: 1,
 }
 enc.create(8, 5)                                    // vector
 enc.drawing(8, "0 0 24 24", [
   shape,
-  { ...shape, kind: 2, geometry: "4,4 20,4 12,20", transform: "rotate(90 12 12)", dashes: "", fill: 0xff00_00ff, fillRule: 1, stroke: 0, opacity: 0.5 },
+  { ...shape, kind: 2, geometry: "4,4 20,4 12,20", transform: "rotate(90 12 12)", dashes: "", fill: 0xffff_ff80, current: CURRENT.fill, fillRule: 1, stroke: 0, opacity: 0.5 },
 ])
 enc.place(0, 8, NIL)
 // An image node: encoded bytes (native decodes them later, off the UI

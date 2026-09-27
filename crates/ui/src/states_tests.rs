@@ -84,7 +84,7 @@ fn app() -> Ui {
         .place(0, 4, NIL);
     t.create(5, NodeKind::Input)
         .layout(5, &sized(100.0, 30.0))
-        .input_config(5, 16.0, 0xFFFF_FFFF, "", false)
+        .input_config(5, 16.0, "", false)
         .states(5, 0)
         .place(0, 5, NIL);
     ui.apply_txn(&t).unwrap();
@@ -390,6 +390,71 @@ fn inherited_hover_color_reaches_spans() {
     });
     ui.render(WIDE);
     assert_eq!(span(&ui), Some(0xFF00_00FF));
+}
+
+/// DF-24, DF-14: the same hover recolors a `currentColor` icon and an
+/// input without a color of their own, as it does the text: paint
+/// patches only, no layout, no shaping, no chunk rebuild, no new
+/// tessellation.
+#[test]
+fn inherited_hover_color_reaches_drawings_and_inputs() {
+    use craie_vector::svg::{CURRENT_STROKE, Drawing, Shape};
+    const GREY: u32 = 0x9AA0_AAFF;
+    const WHITE: u32 = 0xFFFF_FFFF;
+    let mut ui = app();
+    let icon = Drawing {
+        view_box: "0 0 24 24".into(),
+        shapes: vec![Shape {
+            geometry: "M4 12H20".into(),
+            fill: 0,
+            stroke: WHITE,
+            current: CURRENT_STROKE,
+            ..Shape::default()
+        }],
+    };
+    apply(&mut ui, |t| {
+        t.create(6, NodeKind::Vector)
+            .layout(6, &sized(20.0, 20.0))
+            .drawing(6, icon)
+            .place(1, 6, NIL);
+        t.create(7, NodeKind::Input)
+            .layout(7, &sized(60.0, 30.0))
+            .input_config(7, 16.0, "", false)
+            .place(1, 7, NIL);
+        t.color(1, Some(GREY));
+        t.variants(1, &[on(1, state_bit::HOVER, color(WHITE))]);
+    });
+    ui.render(WIDE);
+    // The icon's stroke is its first slot after the box's two.
+    let icon = |ui: &Ui| ui.scene().paint(6, PaintSlot(2));
+    let input = |ui: &Ui| [2, 3, 5].map(|s| ui.scene().paint(7, PaintSlot(s)));
+    assert_eq!(icon(&ui), Some(GREY));
+    // Text, placeholder (half alpha), caret.
+    assert_eq!(input(&ui), [Some(GREY), Some(0x9AA0_AA7F), Some(GREY)]);
+    let mesh = ui.vector_meshes.items(6).unwrap().as_ptr();
+    let before = ui.counters();
+    move_to(&mut ui, 150.0, 30.0);
+    ui.render(WIDE);
+    assert!(has(&ui, 1, state_bit::HOVER));
+    assert_eq!(icon(&ui), Some(WHITE));
+    assert_eq!(input(&ui), [Some(WHITE), Some(0xFFFF_FF7F), Some(WHITE)]);
+    let spent = ui.counters().since(&before);
+    assert_eq!(
+        (spent.layout_passes, spent.shapes, spent.chunks_built),
+        (0, 0, 0)
+    );
+    assert_eq!(ui.vector_meshes.items(6).unwrap().as_ptr(), mesh);
+    // Their own color wins over the row's; clearing it falls back.
+    apply(&mut ui, |t| {
+        t.color(6, Some(A)).color(7, Some(B));
+    });
+    ui.render(WIDE);
+    assert_eq!((icon(&ui), input(&ui)[0]), (Some(A), Some(B)));
+    apply(&mut ui, |t| {
+        t.color(6, None).color(7, None);
+    });
+    ui.render(WIDE);
+    assert_eq!((icon(&ui), input(&ui)[0]), (Some(WHITE), Some(WHITE)));
 }
 
 /// A state change declares through transitions: a hover fill tweens,

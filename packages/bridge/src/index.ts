@@ -306,6 +306,8 @@ export interface TextInputProps extends ListenerProps, Variants {
   borderColor?: string | number
   borderWidth?: number
   fontSize?: number
+  /** The text color, as a Text's: without it the input inherits its
+   * ancestors' color (white at the root), and variants apply to it. */
   color?: string | number
   placeholder?: string
   multiline?: boolean
@@ -452,7 +454,8 @@ export interface VectorAssetProps extends VectorBase {
 /** Runtime shapes: `Path`, `Circle`, ... children in a view box. The
  * paint props (`fill`, `stroke`, ...) are defaults the shapes inherit;
  * `opacity` is the node's (as `style.opacity`: the drawing fades as one
- * layer, and animates). */
+ * layer, and animates), and so is `color` (the inherited color
+ * `currentColor` paints with, as a Text's: variants apply to it). */
 export interface VectorShapeProps extends VectorBase, ShapeProps {
   asset?: undefined
   /** "minX minY width height". Empty or zero-size draws nothing. */
@@ -487,11 +490,11 @@ export function Vector(props: VectorProps) {
   const {
     children, viewBox, asset: _, fill, fillOpacity, fillRule, stroke, strokeOpacity,
     strokeWidth, strokeLinecap, strokeLinejoin, strokeMiterlimit, strokeDasharray,
-    strokeDashoffset, color, opacity, transform, ...rest
+    strokeDashoffset, opacity, transform, ...rest
   } = props as VectorShapeProps
   const shapes = flattenShapes(children, {
     fill, fillOpacity, fillRule, stroke, strokeOpacity, strokeWidth, strokeLinecap,
-    strokeLinejoin, strokeMiterlimit, strokeDasharray, strokeDashoffset, color, transform,
+    strokeLinejoin, strokeMiterlimit, strokeDasharray, strokeDashoffset, transform,
   }, viewBox)
   if (opacity !== undefined) {
     const o = Math.min(Math.max(Number(opacity), 0), 1)

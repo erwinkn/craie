@@ -30,7 +30,7 @@ fn app() -> Ui {
         .place(NIL, 0, NIL);
     t.create(1, NodeKind::Input)
         .layout(1, &size(200.0, 30.0))
-        .input_config(1, 16.0, 0xFFFF_FFFF, "", false)
+        .input_config(1, 16.0, "", false)
         .interaction(1, mask::INPUT | mask::KEY, true)
         .place(0, 1, NIL);
     t.create(2, NodeKind::View)
@@ -257,7 +257,7 @@ fn submit_keys() {
     let mut ui = app();
     let config = |ui: &mut Ui, multiline: bool, submit: SubmitKey| {
         apply(ui, |t| {
-            t.input_config_submit(1, 16.0, 0xFFFF_FFFF, "", multiline, submit);
+            t.input_config_submit(1, 16.0, "", multiline, submit);
             t.command(1, Command::SetText("".into()));
             t.command(1, Command::Focus);
         });
@@ -553,7 +553,7 @@ fn claims_are_validated() {
 
     // Submit bits 3 name no submit key.
     let mut t = Transaction::new(5);
-    t.input_config_submit(1, 16.0, 0, "", false, SubmitKey::ModEnter);
+    t.input_config_submit(1, 16.0, "", false, SubmitKey::ModEnter);
     let mut buf = wire::encode(&t);
     let flags = buf.last_mut().unwrap();
     assert_eq!(*flags, (SubmitKey::ModEnter as u8) << 1);

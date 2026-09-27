@@ -337,10 +337,11 @@ pub enum Mutation<'a> {
         text: Cow<'a, str>,
         spans: Range<u32>,
     },
+    /// An input's text color is its inherited color (`Color` on the
+    /// input or an ancestor), as a span's.
     InputConfig {
         id: u32,
         font_size: f32,
-        color: u32,
         placeholder: Cow<'a, str>,
         multiline: bool,
         submit: SubmitKey,
@@ -754,7 +755,6 @@ impl<'a> Transaction<'a> {
         &mut self,
         id: u32,
         font_size: f32,
-        color: u32,
         placeholder: impl Into<Cow<'a, str>>,
         multiline: bool,
     ) -> &mut Self {
@@ -764,7 +764,7 @@ impl<'a> Transaction<'a> {
         } else {
             SubmitKey::Enter
         };
-        self.input_config_submit(id, font_size, color, placeholder, multiline, submit)
+        self.input_config_submit(id, font_size, placeholder, multiline, submit)
     }
 
     /// Input config with its submit key.
@@ -772,7 +772,6 @@ impl<'a> Transaction<'a> {
         &mut self,
         id: u32,
         font_size: f32,
-        color: u32,
         placeholder: impl Into<Cow<'a, str>>,
         multiline: bool,
         submit: SubmitKey,
@@ -781,7 +780,6 @@ impl<'a> Transaction<'a> {
         self.push(Mutation::InputConfig {
             id,
             font_size,
-            color,
             placeholder,
             multiline,
             submit,

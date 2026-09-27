@@ -11,12 +11,17 @@
 //! opacity). Items outside the viewport are skipped before tessellating,
 //! and flattening never goes finer than an item's size over
 //! `MAX_DETAIL`, so a huge shape costs no more than a small one.
+//!
+//! An item painting with `currentColor` (`Paint::Current`) resolves to
+//! the node's inherited color at paint (`Host::current_color`). Its
+//! paint slot comes right after the box's two, so a color change
+//! patches those slots and nothing is tessellated or rebuilt.
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
 use craie_core::geom::{Affine, Rect};
-use craie_scene::{ChunkWriter, GradientPaint, gradient};
+use craie_scene::{ChunkWriter, GradientPaint, PaintSlot, gradient};
 use craie_vector::asset::{Asset, ItemStyle};
 use craie_vector::{Mesh, Paint};
 
@@ -27,6 +32,10 @@ use crate::ui::Ui;
 /// Device px of flattening error allowed.
 const TOLERANCE_PX: f32 = 0.25;
 
+/// The first `currentColor` slot: after the box's fill and border
+/// (`build_chunk`).
+const CURRENT_SLOTS: u32 = 2;
+
 /// A tessellated item in chunk-local units, and its paint.
 pub(crate) struct Prepared {
     pub(crate) mesh: Mesh,
@@ -35,6 +44,9 @@ pub(crate) struct Prepared {
 
 enum Prepaint {
     Solid(u32),
+    /// The inherited color times this tint (the item's opacity folded
+    /// into its alpha).
+    Current(u32),
     Gradient(GradientPaint),
 }
 
@@ -222,6 +234,17 @@ fn max_stretch(m: &Affine) -> f32 {
     (half + (half * half - det * det).max(0.0).sqrt()).sqrt()
 }
 
+/// Two 0xRRGGBBAA colors multiplied channel by channel (white is the
+/// identity).
+fn tint(color: u32, by: u32) -> u32 {
+    let mut out = 0;
+    for shift in [24, 16, 8, 0] {
+        let (a, b) = ((color >> shift) & 0xFF, (by >> shift) & 0xFF);
+        out |= ((a * b + 127) / 255) << shift;
+    }
+    out
+}
+
 /// `alpha` of a 0xRRGGBBAA color scaled by `opacity`.
 fn fade(color: u32, opacity: f32) -> u32 {
     let a = ((color & 0xFF) as f32 * opacity).round().clamp(0.0, 255.0) as u32;
@@ -354,6 +377,7 @@ fn prepare(asset: &Asset, content: Rect, scale: f32) -> Vec<Prepared> {
         }
         let paint = match &asset.paints[it.paint] {
             Paint::Solid(c) => Prepaint::Solid(fade(*c, it.opacity)),
+            Paint::Current(t) => Prepaint::Current(fade(*t, it.opacity)),
             Paint::Linear {
                 start,
                 end,
@@ -424,12 +448,45 @@ impl Ui {
         let items = self
             .vector_meshes
             .get(id.0, key, &asset, || prepare(&asset, content, scale));
+        // The inherited color's slots first, in item order, after the
+        // box's: `patch_vector_paint` finds them there.
+        let current = self.host.current_color(id);
+        let mut next = CURRENT_SLOTS;
+        for it in items.iter() {
+            if let Prepaint::Current(t) = it.paint {
+                let slot = w.paint(tint(current, t));
+                debug_assert_eq!(slot, PaintSlot(next));
+                next += 1;
+            }
+        }
+        let mut next = CURRENT_SLOTS;
         for it in items.iter() {
             let (slot, gradient) = match &it.paint {
                 Prepaint::Solid(c) => (w.paint(*c), false),
+                Prepaint::Current(_) => {
+                    next += 1;
+                    (PaintSlot(next - 1), false)
+                }
                 Prepaint::Gradient(g) => (w.gradient(g), true),
             };
             w.mesh(&it.mesh.vertices, &it.mesh.indices, slot, gradient);
+        }
+    }
+
+    /// Repaints a vector node's `currentColor` items with its inherited
+    /// color: one paint record each, no tessellation, no chunk rebuild.
+    pub(crate) fn patch_vector_paint(&mut self, id: NodeId) {
+        let Some(items) = self.vector_meshes.nodes.get(&id.0).map(|(_, i)| i) else {
+            return;
+        };
+        let current = self.host.current_color(id);
+        let mut slot = CURRENT_SLOTS;
+        for it in items.iter() {
+            if let Prepaint::Current(t) = it.paint {
+                self.scene
+                    .set_paint(id.0, PaintSlot(slot), tint(current, t));
+                slot += 1;
+            }
         }
     }
 }
@@ -1218,6 +1275,85 @@ mod drawing_tests {
         assert!(ui.vector_meshes.items(1).unwrap().is_empty());
     }
 
+    /// DF-24: a `currentColor` paint is the node's inherited color: its
+    /// own `COLOR`, else the nearest ancestor's, else white, times the
+    /// shape's tint (its opacity here). Its slots come first, after the
+    /// box's two; solid paints stay as drawn. Clearing a color falls back.
+    #[test]
+    fn current_color_resolves_nearest() {
+        use craie_scene::PaintSlot;
+        use craie_vector::svg::CURRENT_STROKE;
+        let mut d = ring("");
+        d.shapes[0].stroke = 0xFFFF_FF80;
+        d.shapes[0].current = CURRENT_STROKE;
+        d.shapes.push(Shape {
+            geometry: "M4 4H8V8Z".into(),
+            fill: 0x0000_FFFF,
+            ..Shape::default()
+        });
+        let mut ui = ui_with(&d, 1);
+        let paints = |ui: &Ui| [2, 3].map(|s| ui.scene().paint(1, PaintSlot(s)).unwrap());
+        assert_eq!(paints(&ui), [0xFFFF_FF80, 0x0000_FFFF], "white, as a span");
+        let step = |ui: &mut Ui, id: u32, color: Option<u32>| {
+            let mut t = Transaction::new(2);
+            t.color(id, color);
+            ui.apply_txn(&t).unwrap();
+            ui.render(Size::new(200.0, 400.0));
+            paints(ui)[0]
+        };
+        assert_eq!(
+            step(&mut ui, 0, Some(0x9AA0_AAFF)),
+            0x9AA0_AA80,
+            "the parent's"
+        );
+        assert_eq!(
+            step(&mut ui, 1, Some(0xFF00_00FF)),
+            0xFF00_0080,
+            "its own wins"
+        );
+        assert_eq!(step(&mut ui, 1, None), 0x9AA0_AA80);
+        assert_eq!(step(&mut ui, 0, None), 0xFFFF_FF80);
+        assert_eq!(paints(&ui)[1], 0x0000_FFFF);
+    }
+
+    /// A drawing that starts using `currentColor` after the inheritors of
+    /// a color were listed joins them, and one that stops leaves them.
+    #[test]
+    fn drawings_join_and_leave_inheritors() {
+        use craie_scene::PaintSlot;
+        use craie_vector::svg::CURRENT_STROKE;
+        let mut ui = ui_with(&ring(""), 1);
+        let apply = |ui: &mut Ui, f: &dyn Fn(&mut Transaction<'static>)| {
+            let mut t = Transaction::new(2);
+            f(&mut t);
+            ui.apply_txn(&t).unwrap();
+            ui.render(Size::new(200.0, 400.0));
+        };
+        apply(&mut ui, &|t| {
+            t.color(0, Some(0x1111_11FF));
+        });
+        let mut current = ring("");
+        current.shapes[0].current = CURRENT_STROKE;
+        apply(&mut ui, &|t| {
+            t.drawing(1, current.clone());
+        });
+        assert_eq!(ui.scene().paint(1, PaintSlot(2)), Some(0x1111_11FF));
+        apply(&mut ui, &|t| {
+            t.color(0, Some(0x2222_22FF));
+        });
+        assert_eq!(ui.scene().paint(1, PaintSlot(2)), Some(0x2222_22FF));
+        apply(&mut ui, &|t| {
+            t.drawing(1, ring(""));
+        });
+        let before = ui.counters();
+        apply(&mut ui, &|t| {
+            t.color(0, Some(0x3333_33FF));
+        });
+        let spent = ui.counters().since(&before);
+        assert_eq!((spent.paints_patched, spent.chunks_built), (0, 0));
+        assert_eq!(ui.scene().paint(1, PaintSlot(2)), Some(0xFFFF_FFFF));
+    }
+
     /// The wire carries every field of every shape.
     #[test]
     fn drawings_round_trip_the_wire() {
@@ -1228,6 +1364,7 @@ mod drawing_tests {
             transform: "translate(1 2)".into(),
             fill: 0x1122_3344,
             fill_rule: craie_vector::FillRule::EvenOdd,
+            current: craie_vector::svg::CURRENT_FILL,
             line: Stroke {
                 width: 1.5,
                 join: craie_vector::LineJoin::Round,
@@ -1248,21 +1385,21 @@ mod drawing_tests {
             let cut = wire::decode(&buf[..n]);
             assert!(cut.map_or(true, |c| c.mutations.is_empty()), "{n}");
         }
-        // PR5-09: unknown kind, rule, join or cap bytes, and a string ref
-        // past the table, fail to decode. The first shape follows the op
-        // byte, the id, the view box ref and the count.
+        // PR5-09: unknown kind, rule, join, cap or current bytes, and a
+        // string ref past the table, fail to decode. The first shape
+        // follows the op byte, the id, the view box ref and the count.
         let op = buf
             .windows(5)
             .position(|w| w == [wire::op::DRAWING, 5, 0, 0, 0])
             .unwrap();
         let shape = op + 1 + 4 + 4 + 2;
-        for at in [shape, shape + 1, shape + 2, shape + 3] {
+        for at in [shape, shape + 1, shape + 2, shape + 3, shape + 4] {
             let mut bad = buf.clone();
             bad[at] = 9;
             assert!(wire::decode(&bad).is_err(), "byte {}", at - shape);
         }
         let mut bad = buf.clone();
-        bad[shape + 4..shape + 8].copy_from_slice(&0xFFFFu32.to_le_bytes());
+        bad[shape + 5..shape + 9].copy_from_slice(&0xFFFFu32.to_le_bytes());
         assert!(wire::decode(&bad).is_err());
     }
 }

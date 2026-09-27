@@ -628,6 +628,10 @@ pub type Stops = Vec<(f32, u32)>;
 #[derive(Clone, Debug, PartialEq)]
 pub enum Paint {
     Solid(u32),
+    /// The node's inherited color (`currentColor`), resolved at paint,
+    /// multiplied channel by channel by this color (white: as is; the
+    /// facade folds `fillOpacity` or `strokeOpacity` into its alpha).
+    Current(u32),
     Linear {
         start: [f32; 2],
         end: [f32; 2],

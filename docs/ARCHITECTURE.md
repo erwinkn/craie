@@ -200,7 +200,9 @@ fields that hold them, so `_narrow: { padding: { left: 4 } }` and
 `_compact: { padding: { top: 6 } }` both apply), and a count of 0
 removes it (at most 256 variants of 8 terms); `ENVIRONMENT` sets the narrow
 and compact breakpoints; `COLOR` sets or clears the color a node's
-text inherits. Span flag bit 3 marks a span that inherits its color.
+text, inputs and `currentColor` drawings inherit (protocol 5: the input
+config carries no color, and a drawing shape a `current` flag byte).
+Span flag bit 3 marks a span that inherits its color.
 Validation rejects dead nodes and scopes, unknown bits and layout
 keys, box values on text, oversized tables, and non-finite breakpoints. Ops are u8-tagged,
 grouped by family in the high nibble. `wire::decode` yields a
@@ -839,7 +841,9 @@ transaction), are interned by content, and meshes are cached per
 asset, content box and display scale, so 200 nodes showing one icon
 parse once and tessellate once. Tessellation skips shapes outside the
 view box or at opacity 0 and flattens no finer than a shape's size
-over 2^16. The facade resolves `currentColor` to a `color` prop, and
+over 2^16. The facade resolves `currentColor` to a `G`'s `color`, or
+leaves it to native, which paints the node's inherited color (§13)
+through its own paint slot, so a hover recolors without tessellating;
 `Vector`'s `opacity` is the node's opacity (one layer, animatable);
 a `G`'s multiplies into its shapes. JS:
 
@@ -1252,8 +1256,9 @@ event loop, the window, the device, or the render target.
 One threadsafe function delivers `ack | events` frames. JS recycles
 ids at once and mirrors each slot's generation; events carry the
 generation and JS drops stale ones; the ack resolves `flush()`.
-Payload ops copy typed-array bytes once. Protocol version 4 (36-byte
-event records; claims). The session hands JS its output in native
+Payload ops copy typed-array bytes once. Protocol version 5 (36-byte
+event records and claims since 4; inherited color in drawings and
+inputs since 5). The session hands JS its output in native
 order: acks sit between event frames where they happened, so the ack
 of a transaction never overtakes an event raised before it applied,
 and the facade retires a claim set's old handlers on that ack.

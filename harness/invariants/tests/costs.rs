@@ -231,8 +231,8 @@ fn atlas_relocation_does_no_paragraph_layouts() {
     assert_eq!(ui.counters().shapes, shapes, "relocation must not reshape");
 }
 
-/// An input's color-only config change rebuilds its chunk but runs no
-/// layout and shapes nothing.
+/// An input's color change (its `COLOR`) runs no layout and shapes
+/// nothing.
 #[test]
 fn input_color_change_does_no_layouts() {
     let mut ui = Ui::new(1.0);
@@ -244,17 +244,17 @@ fn input_color_change_does_no_layouts() {
     };
     t.create(0, NodeKind::Input)
         .layout(0, &s)
-        .input_config(0, 16.0, 0xFFFF_FFFF, "type", false)
+        .input_config(0, 16.0, "type", false)
         .append(NIL, 0);
     ui.apply_txn(&t).unwrap();
     ui.render(VIEW);
     let mut t = Transaction::new(2);
-    t.input_config(0, 16.0, 0xFF00_00FF, "type", false);
+    t.color(0, Some(0xFF00_00FF));
     let c = frame(&mut ui, &t);
     assert_eq!((c.layout_passes, c.shapes), (0, 0), "{c:?}");
 }
 
-/// A non-empty input: a color-only change patches paint records; the
+/// A non-empty input: a color change (`COLOR`) patches paint records; the
 /// editor's buffer is not reshaped.
 #[test]
 fn nonempty_input_color_change_does_no_shapes() {
@@ -267,13 +267,13 @@ fn nonempty_input_color_change_does_no_shapes() {
     };
     t.create(0, NodeKind::Input)
         .layout(0, &s)
-        .input_config(0, 16.0, 0xFFFF_FFFF, "", false)
+        .input_config(0, 16.0, "", false)
         .command(0, craie_ui::mutation::Command::SetText("typed".into()))
         .append(NIL, 0);
     ui.apply_txn(&t).unwrap();
     ui.render(VIEW);
     let mut t = Transaction::new(2);
-    t.input_config(0, 16.0, 0xFF00_00FF, "", false);
+    t.color(0, Some(0xFF00_00FF));
     let c = frame(&mut ui, &t);
     assert_eq!(
         (c.layout_passes, c.shapes, c.chunks_built),
@@ -298,7 +298,7 @@ fn typing_counts_shapes() {
     };
     t.create(0, NodeKind::Input)
         .layout(0, &s)
-        .input_config(0, 16.0, 0xFFFF_FFFF, "", false)
+        .input_config(0, 16.0, "", false)
         .append(NIL, 0);
     ui.apply_txn(&t).unwrap();
     ui.render(VIEW);

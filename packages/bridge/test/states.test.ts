@@ -1,8 +1,8 @@
 import { test, expect } from "bun:test"
 import { createElement, StrictMode, Suspense, useState } from "react"
-import { createRoot, defineStates, Portal, Pressable, Text, View } from "../src/index.js"
+import { createRoot, defineStates, Path, Portal, Pressable, Text, TextInput, Vector, View } from "../src/index.js"
 import type { Transport, UiEvent } from "../src/host.js"
-import { ENV_BIT, layoutKeys, STATE_BIT } from "../src/wire.js"
+import { CURRENT, ENV_BIT, layoutKeys, STATE_BIT } from "../src/wire.js"
 import { readFrame, type Op } from "./crw2.js"
 
 class FakeTransport implements Transport {
@@ -357,4 +357,59 @@ test("COLOR stays with the native tree; scopes cross a Portal", async () => {
   expect(ops.find(o => o.tag === 0x02 && o.id === text)!.f[0]).toBe(0xffff_ffff)
   const table = ops.find(o => o.tag === 0xb1 && o.id === text)!
   expect(table.variants![0]!.terms.map(x => x.scope)).toEqual([menu])
+})
+
+// DF-24: an icon's currentColor is the node's inherited color, resolved
+// natively, so the hover recolors it as it does the label, with no JS.
+test("currentColor inherits: a hover recolors icon and label alike", async () => {
+  const t = new FakeTransport()
+  createRoot(t).renderSync(createElement(Pressable, { color: "#9aa0aa", _hover: { color: "#fff" } },
+    createElement(Vector, { viewBox: "0 0 24 24" }, createElement(Path, { d: "M4 12h16", stroke: "currentColor" })),
+    createElement(Text, {}, "Label")))
+  await tick()
+  const ops = t.ops()
+  const [pressable] = created(ops, 0)
+  expect(ops.filter(o => o.tag === 0xb3).map(o => [o.id, ...o.f])).toEqual([[pressable, 1, 0x9aa0_aaff]])
+  expect(ops.find(o => o.tag === 0xb1 && o.id === pressable)!.variants![0]!.values).toEqual([8, 1, 0xffff_ffff])
+  const shape = ops.find(o => o.tag === 0x72)!.shapes![0]!
+  // kind, rule, join, cap, current, fill, stroke, ...: the stroke is
+  // flagged, its color a white tint.
+  expect([shape.f[4], shape.f[6]]).toEqual([CURRENT.stroke, 0xffff_ffff])
+  // A Vector's own color is its COLOR, variants included.
+  const u = new FakeTransport()
+  createRoot(u).renderSync(createElement(Pressable, {},
+    createElement(Vector, { viewBox: "0 0 24 24", color: "#f00", _hover: { color: "#0f0" } },
+      createElement(Path, { d: "M4 12h16", stroke: "currentColor" }))))
+  await tick()
+  const vops = u.ops()
+  const [vector] = created(vops, 5)
+  expect(vops.filter(o => o.tag === 0xb3).map(o => [o.id, ...o.f])).toEqual([[vector, 1, 0xff00_00ff]])
+  expect(vops.find(o => o.tag === 0xb1 && o.id === vector)!.variants![0]!.values).toEqual([8, 1, 0x00ff_00ff])
+})
+
+// DF-14: an input's text color is its COLOR, own or inherited, so its
+// variants apply; nothing is left in the input config.
+test("a TextInput's color is its COLOR, variants included", async () => {
+  const errors: unknown[] = []
+  const log = console.error
+  console.error = (...a: unknown[]) => { errors.push(a.join(" ")) }
+  try {
+    const t = new FakeTransport()
+    createRoot(t).renderSync(createElement(Pressable, { color: "#9aa0aa" },
+      createElement(TextInput, { color: "#ccc", _hover: { color: "#fff" } }),
+      createElement(TextInput, {})))
+    await tick()
+    const ops = t.ops()
+    const [pressable] = created(ops, 0)
+    const [own, inherits] = created(ops, 2)
+    expect(ops.filter(o => o.tag === 0xb3).map(o => [o.id, ...o.f]))
+      .toEqual([[pressable, 1, 0x9aa0_aaff], [own, 1, 0xcccc_ccff]])
+    expect(ops.find(o => o.tag === 0xb1 && o.id === own)!.variants![0]!.values).toEqual([8, 1, 0xffff_ffff])
+    expect(ops.some(o => o.tag === 0xb1 && o.id === inherits)).toBe(false)
+    // font size, flags: no color.
+    expect(ops.find(o => o.tag === 0x41 && o.id === own)!.f).toEqual([14, 4])
+    expect(errors).toEqual([])
+  } finally {
+    console.error = log
+  }
 })

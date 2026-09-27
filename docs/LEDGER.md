@@ -267,20 +267,6 @@ Reviewer minors and nitpicks not fixed yet.
 - Resolves in: shape-level animation targets, or dashes in the shader
   (E07).
 
-### DF-14: no inherited color in drawings
-
-- Source: runtime vector shapes (work item 8) implementation (own
-  finding); narrowed in the PR #5 review (PR5-06).
-- Where: packages/bridge/src/shapes.ts (`paint`).
-- Claim: `currentColor` resolves to the `color` prop of the `Vector` or
-  a `G` above the shape, as `<svg color>` does; it does not inherit a
-  color from the node's ancestors (there is none to inherit), and
-  without a `color` prop it throws. The kit's token colors (`'ink-3'`)
-  must be resolved to colors before they reach a shape.
-- Why deferred: the color a node inherits comes with state styles and
-  paint sources (topic 5).
-- Resolves in: topic 5.
-
 ### DF-15: shapes must be direct children of a Vector
 
 - Source: runtime vector shapes (work item 8) implementation (own
@@ -393,22 +379,6 @@ Reviewer minors and nitpicks not fixed yet.
   text pipeline's own ops, not in the paint-and-layout overlay.
 - Resolves in: when a component needs a responsive type size; the
   facade can re-render with a different variant meanwhile.
-
-### DF-24: input color and vector currentColor
-
-- Source: work item 5.
-- Where: crates/ui/src/host.rs (`Host::colors`), the text input config,
-  the vector path.
-- Claim: `COLOR` reaches spans only. A TextInput keeps its config
-  color (the facade warns on `color` in its variants). A vector's
-  `currentColor` resolves in the facade to the `color` prop of the
-  `Vector` or a `G` above (PR #5, DF-14), not to the inherited `COLOR`:
-  `<Pressable color="#9aa0aa" _hover={{ color: "#fff" }}>` recolors its
-  label but not an icon drawn with `currentColor`.
-- Why deferred: the input's color lives in its editor config, and a
-  drawing's colors are resolved before they reach native.
-- Resolves in: one lookup of `Host::colors` at paint for both, which
-  closes DF-14 too.
 
 ### DF-25: no platform source for touch and reduced motion
 
@@ -859,3 +829,4 @@ Reviewer minors and nitpicks not fixed yet.
 - PR9-04 (gpu-tests review): the mechanism was stated as fact: it is "most likely" in the LEDGER and the run log, which name the binaries fixed.
 - PR9-05 (gpu-tests review, nit): the run log marked #9 merged while open: it merges with this text.
 - PR9-06 (gpu-tests review, nit): one shared `Gpu` helper in craie-render instead of three local copies: not done. It would be public API for tests in a crate checked for wasm32, where `Gpu` is not `Sync`; the copies are four lines each and say why.
+- DF-14 (no inherited color in drawings) and DF-24 (input color and vector `currentColor`): fixed in PR #N (inherited color). A `currentColor` with no `color` on a `G` above no longer throws: the facade flags the shape's fill or stroke (a `current` byte in each DRAWING shape, protocol 5) and native paints it with the node's inherited `COLOR` (its own, else the nearest ancestor's, else white, as a span) times the shape's opacity. A `Vector`'s `color` is its node's `COLOR`, so its variants and transitions apply; a `G`'s stays in the drawing. A change patches one paint slot per shape: a hover recoloring 1,000 icons is a paint patch each, with no layout, chunk rebuild, tessellation or allocation (EXPERIMENTS.md, state styles). A TextInput's color is its `COLOR` the same way: INPUT_CONFIG no longer carries one, its variants apply, and the facade's warning is gone. The kit's token colors (`'ink-3'`) still resolve before they reach a prop.
