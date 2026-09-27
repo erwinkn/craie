@@ -184,6 +184,9 @@ impl Ui {
         if let Some(label) = self.host.label(id) {
             an.set_label(label.to_string());
         }
+        if self.state_bits(id) & crate::states::state_bit::DISABLED != 0 {
+            an.set_disabled();
+        }
         let r = self.abs_rect(id);
         an.set_bounds(A11yRect {
             x0: r.origin.x as f64,

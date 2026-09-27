@@ -359,11 +359,9 @@ impl<A: App> ApplicationHandler for Driver<A> {
                 self.app.event(window, &ev);
             }
             WindowEvent::CursorLeft { .. } => {
-                // The pointer left the surface; report a move outside so
-                // hover/leave synthesis runs.
+                // The pointer left the surface: hover ends.
                 self.pointer = (-1.0, -1.0);
-                self.app
-                    .event(window, &Event::PointerMove { x: -1.0, y: -1.0 });
+                self.app.event(window, &Event::PointerLeave);
             }
             WindowEvent::MouseWheel { delta, .. } => {
                 let (dx, dy) = match delta {

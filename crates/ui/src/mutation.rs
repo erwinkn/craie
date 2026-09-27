@@ -130,6 +130,9 @@ pub struct TextSpan {
     /// Decoration flags (`craie_text::decoration`): underline,
     /// line-through. Paint, not metrics.
     pub decoration: u8,
+    /// Draw in the nearest inherited color (`COLOR` on the text node or
+    /// an ancestor), `color` when there is none.
+    pub inherit_color: bool,
     /// Added to each cluster's advance, logical points.
     pub letter_spacing: f32,
     /// Absolute line height, logical points; 0: the font's. Span zero's
@@ -149,6 +152,7 @@ impl Default for TextSpan {
             weight: 400,
             italic: false,
             decoration: 0,
+            inherit_color: false,
             letter_spacing: 0.0,
             line_height: 0.0,
             family: NIL,
@@ -423,6 +427,29 @@ pub enum Mutation<'a> {
         value: crate::animation::Value,
         timing: crate::animation::Timing,
     },
+    // state styles
+    /// Sets scope `id`'s app state bits (`states::state_bit`); the node
+    /// becomes a scope.
+    States {
+        id: u32,
+        bits: u64,
+    },
+    /// Replaces the node's variant table (empty removes it and restores
+    /// the base).
+    Variants {
+        id: u32,
+        variants: Cow<'a, [crate::states::VariantDecl]>,
+    },
+    /// The window-width breakpoints of `_narrow` and `_compact`.
+    Environment {
+        narrow_max: f32,
+        compact_max: f32,
+    },
+    /// Sets or clears the color the node's text descendants inherit.
+    Color {
+        id: u32,
+        color: Option<u32>,
+    },
 }
 
 impl Mutation<'_> {
@@ -451,8 +478,12 @@ impl Mutation<'_> {
             | Mutation::ListIndex { id, .. }
             | Mutation::ScrollAnchor { id, .. }
             | Mutation::Transition { id, .. }
-            | Mutation::Animate { id, .. } => id,
+            | Mutation::Animate { id, .. }
+            | Mutation::States { id, .. }
+            | Mutation::Variants { id, .. }
+            | Mutation::Color { id, .. } => id,
             Mutation::Place { child, .. } => child,
+            Mutation::Environment { .. } => NIL,
         }
     }
 }
@@ -610,6 +641,31 @@ impl<'a> Transaction<'a> {
         })
     }
 
+    /// Sets scope `id`'s app state bits.
+    pub fn states(&mut self, id: u32, bits: u64) -> &mut Self {
+        self.push(Mutation::States { id, bits })
+    }
+
+    /// Replaces the node's variant table.
+    pub fn variants(&mut self, id: u32, variants: &[crate::states::VariantDecl]) -> &mut Self {
+        self.push(Mutation::Variants {
+            id,
+            variants: variants.to_vec().into(),
+        })
+    }
+
+    pub fn environment(&mut self, narrow_max: f32, compact_max: f32) -> &mut Self {
+        self.push(Mutation::Environment {
+            narrow_max,
+            compact_max,
+        })
+    }
+
+    /// Sets or clears the node's inherited text color.
+    pub fn color(&mut self, id: u32, color: Option<u32>) -> &mut Self {
+        self.push(Mutation::Color { id, color })
+    }
+
     pub fn paragraph(
         &mut self,
         id: u32,
@@ -620,7 +676,10 @@ impl<'a> Transaction<'a> {
         let key: Vec<u32> = spans
             .iter()
             .flat_map(|s| {
-                let style = s.weight as u32 | (s.italic as u32) << 16 | (s.decoration as u32) << 24;
+                let style = s.weight as u32
+                    | (s.italic as u32) << 16
+                    | (s.inherit_color as u32) << 17
+                    | (s.decoration as u32) << 24;
                 [
                     s.start,
                     s.font_size.to_bits(),

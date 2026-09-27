@@ -670,7 +670,8 @@ impl Ui {
         if kind == NodeKind::Text {
             let spans = &self.host.paragraphs[id.index()].spans;
             for (i, s) in spans.iter().enumerate() {
-                self.scene.set_paint(id.0, PaintSlot(i as u32), s.color);
+                let c = self.host.span_color(id, s);
+                self.scene.set_paint(id.0, PaintSlot(i as u32), c);
             }
         } else {
             let p = self.host.paint[id.index()];
@@ -740,7 +741,7 @@ impl Ui {
             return;
         };
         for s in &p.spans {
-            w.paint(s.color);
+            w.paint(self.host.span_color(id, s));
         }
         // The content width the layout wrapped this leaf at. A retained
         // paragraph shaped for another width is stale: rewrap now.

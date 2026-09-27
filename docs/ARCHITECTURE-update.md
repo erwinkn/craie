@@ -416,6 +416,107 @@ bits). This is probably a new subsection of §3.
   with the 64-bit budget).
 - Closes S1: spans get variants through interactive spans (topic 11).
 
+**Built (work item 5).** As targeted, with these choices:
+
+```tsx
+defineStates(["unread", "streaming"])
+<Pressable group="row" selected={selected} states={{ unread: thread.unread }}
+  backgroundColor="#1b1d22" style={{ height: 36, transition: { backgroundColor: { duration: 0.12 } } }}
+  _hover={{ backgroundColor: "#24272e" }}
+  _selected={{ backgroundColor: "#2d3240", _hover: { backgroundColor: "#343a4a" } }}
+  _narrow={{ style: { height: 44 } }}>
+  <Text color="#9aa0aa" _unread={{ color: "#ffffff" }}>{thread.title}</Text>
+  <View style={{ opacity: 0 }} _row={{ _hover: { style: { opacity: 1 } } }} />
+</Pressable>
+```
+
+- Four ops in family 0xB0, still protocol 4: `STATES` (a scope's app
+  bits), `VARIANTS` (a node's table; empty removes it and restores the
+  base), `ENVIRONMENT` (breakpoints, default 1,023 and 639 pt as the
+  kit's) and `COLOR` (the inherited color). A node becomes a scope with
+  its first `STATES`. Bit index is rank: custom states 0 to 53, then
+  hover 54 up to disabled 63; the environment's ranks follow (narrow,
+  compact, touch, reduced motion).
+- Specificity: depth is the number of state and environment bits a
+  variant tests, then the latest rank it tests (its highest bit), then
+  declaration order. In the example, hovering a selected row gives
+  `#343a4a` (depth 2), a selected one `#2d3240`, a hovered one
+  `#24272e`. `_row._focusVisible` beats `_row._hover` (rank 56 over
+  54), while `_narrow._hover` against `_selected._hover` compares
+  selected with narrow only, both having hover. Variants overlay
+  property by property.
+- A restyle declares only the fields that differ from the last
+  resolved values, so hovering the row above touches its fill and
+  nothing else, and a transition tweens exactly that. A table's first
+  resolution and the first frame's environment write directly: a row
+  mounted selected, or a narrow window at launch, shows no transition.
+- Input bits are recomputed from native state after each dispatch,
+  transaction and accessibility action (the hovered node's ancestors,
+  the primary press's, the focused node's), not tracked per event, and
+  skipped when none of those, the modality or the tree changed. Focus
+  is visible after a key other than a bare modifier or a Cmd, Ctrl or
+  Alt chord, or in a text input. Disabled masks hover, pressed and
+  focus-visible. A touch change resolves every table (it masks hover
+  everywhere); a width change only the tables that test the
+  environment.
+- The pointer: leaving the window clears it (hover ends), and a wheel
+  event sets it. Hover at rest hit-tests again only when a table or a
+  listener reads hover. Detaching a node ends a press inside it; focus
+  stays on a node that moves, and its scopes' bits follow it.
+- A scope that dies makes its terms false; its id, reused, is a new
+  scope (terms hold the generation).
+- The node's own ops on a tabled node set its base, and the table
+  resolves again. `animate` on a tabled node sets the base too, so a
+  variant that overrides the property wins at the next restyle
+  (`LEDGER.md` DF-28).
+- Inherited color: the nearest `COLOR` on the node or an ancestor, else
+  the span's own color. A span inherits unless its Text sets `color`,
+  and a Text's own `color` travels as `COLOR` (its spans send white as
+  the fallback), so a new color or a tween repaints spans without a
+  paragraph op, a shape or a layout. An input keeps its config color,
+  and vector `currentColor` reads the Vector's or a `G`'s `color` prop,
+  not `COLOR` (DF-24). Inherited color follows the native tree, while
+  scopes follow React's: a Text in a `Portal` under a colored Pressable
+  keeps the Pressable's scope but draws its own color (white).
+- The facade (`@craie/bridge`, re-exported by `@craie/react`):
+  `defineStates`; `Pressable` is always a scope, a View with `group`
+  (a name makes `_name` address it) is one, and both take `selected`,
+  `expanded`, `checked`, `highlighted`, `disabled` and `states`. A
+  disabled Pressable stops `onPress`, leaves the Tab order and reads
+  as disabled to assistive technology. A `_` key is a state of the
+  nearest scope, an environment key, or a group up the tree; other `_`
+  keys and every value key a variant does not apply (`pointerEvents`,
+  `zIndex`, ...) are logged once and left out. Scopes flow through
+  React context, so a `Portal` (new: its children are window roots)
+  keeps its owner's; the context Provider is always there, so toggling
+  `group` keeps the children mounted. Variant tables resolve to ids
+  and go out at the seal, when their signature changed.
+- `_hover` on an element that is no scope means the nearest scope's
+  hover, where Marbre web means the element's own (`<Text _hover>`);
+  inside a Pressable the two agree (DF-29).
+- Layout values apply per key: one per property, axis and side. With
+  `padding` 16/12, `_narrow: { padding: { left: 4, right: 4 } }` and
+  `_compact: { padding: { top: 6, bottom: 6 } }`, a compact window gets
+  4/6, and `_narrow: { height: 44 }` keeps whatever width applies
+  (another variant's or the base). Suspense's `display: none` wins over
+  a variant's `display`. Border color and width are separate values.
+- Not yet: transform parts (a variant's transform replaces the whole
+  matrix, DF-21), transitions inside a variant (DF-22), text metrics in
+  variants (DF-23), a platform source for touch and reduced motion
+  (DF-25; `Ui::set_touch` and `set_reduced_motion` exist), variants on a
+  nested Text (interactive spans, DF-26), z, pointer events, visibility
+  and percent translate in variants (DF-29). Hover can oscillate when a
+  hover variant moves the node from under the pointer (DF-27).
+- Cost (`states_restyle`, CPU only, exe1 at load about 10, medians of
+  three; `EXPERIMENTS.md`, "State styles"): a hover change with 1, 100
+  or 1,000 dependents is 0.27, 11 or 116 µs from pointer move to
+  patched paint, against 4.2 µs over 1,000 cells with no table; no
+  allocation, no layout. Crossing the narrow breakpoint with 1,000
+  `_narrow` rows is 0.64 ms, against 0.50 ms for sending the 1,000
+  heights directly and 0.30 ms for the resize alone. So a restyle adds
+  about 0.1 µs per dependent, and a breakpoint is still one layout
+  pass.
+
 ## 6. Stacking and geometry
 
 Changes: §3 and §8 (draw order, layers), §4 (a geometry pass), §13 (hit

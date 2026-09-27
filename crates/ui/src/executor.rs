@@ -18,6 +18,7 @@ use crate::claims::{Claim, claim_kind};
 use crate::host::{Host, MAX_NODES, NodeId};
 use crate::list::{IdIndex, MAX_ITEMS};
 use crate::mutation::{Command, ItemDesc, Mutation, NIL, NodeKind, TextSpan, Transaction};
+use crate::states::{env_bit, state_bit, value_field};
 use crate::ui::Ui;
 use crate::wire::WireError;
 
@@ -55,6 +56,11 @@ pub const MAX_SPANS: usize = 0xFFFF;
 
 /// Claims per node: the wire's `u16` count.
 pub const MAX_CLAIMS: usize = 0xFFFF;
+
+/// Variants per node and terms per variant: a table resolves in
+/// O(variants × terms) on every change of a bit it reads.
+pub const MAX_VARIANTS: usize = 256;
+pub const MAX_TERMS: usize = 8;
 
 fn valid_spans(text: &str, spans: &[TextSpan], families: usize) -> Result<(), WireError> {
     let Some(first) = spans.first() else {
@@ -566,6 +572,44 @@ pub fn validate(host: &Host, txn: &Transaction<'_>) -> Result<Validated, WireErr
                     return Err(invalid("animation target out of range"));
                 }
             }
+            Mutation::States { id, bits } => {
+                need_live(&o, *id, "states on an absent node")?;
+                if bits & state_bit::INPUT != 0 {
+                    return Err(invalid("states sets an input bit"));
+                }
+            }
+            Mutation::Variants { id, variants } => {
+                need_live(&o, *id, "variants on an absent node")?;
+                let boxed = o.kind(*id).is_some_and(NodeKind::has_box);
+                if variants.len() > MAX_VARIANTS {
+                    return Err(invalid("too many variants on one node"));
+                }
+                for v in variants.iter() {
+                    if v.terms.len() > MAX_TERMS {
+                        return Err(invalid("too many terms in one variant"));
+                    }
+                    if !v.values.valid() || v.env & !env_bit::ALL != 0 {
+                        return Err(invalid("variant value out of range"));
+                    }
+                    if !boxed && v.values.mask & value_field::BOX != 0 {
+                        return Err(invalid("box variant on a node without a box"));
+                    }
+                    for t in &v.terms {
+                        need_live(&o, t.scope, "variant on an absent scope")?;
+                    }
+                }
+            }
+            Mutation::Environment {
+                narrow_max,
+                compact_max,
+            } => {
+                if !(finite(*narrow_max) && finite(*compact_max)) {
+                    return Err(invalid("non-finite breakpoint"));
+                }
+            }
+            Mutation::Color { id, .. } => {
+                need_live(&o, *id, "color on an absent node")?;
+            }
         }
     }
     Ok(done)
@@ -584,7 +628,7 @@ fn valid_target(prop: Prop, value: &Value) -> bool {
     match (prop, value) {
         (Prop::Transform, Value::Transform(t)) => t.0.iter().all(|v| v.is_finite()),
         (Prop::Opacity, Value::Opacity(o)) => (0.0..=1.0).contains(o),
-        (Prop::Fill | Prop::BorderColor, Value::Color(_)) => true,
+        (Prop::Fill | Prop::BorderColor | Prop::Color, Value::Color(_)) => true,
         (Prop::Width | Prop::Height, Value::Size(d)) => len(match d.expand() {
             taffy::style::ExpandedDimension::Length(v) => Some(v),
             _ => None,
@@ -604,6 +648,7 @@ impl Ui {
             self.apply_mutation(txn, step, m, &mut done);
         }
         self.seq = txn.seq;
+        self.restyle();
         Ok(())
     }
 
@@ -631,9 +676,14 @@ impl Ui {
                 }
                 self.host
                     .insert_before(NodeId(*parent), child, NodeId(*before));
+                // Its text may inherit another color now.
+                if !self.host.colors.is_empty() && !self.host.colors.contains_key(&child.0) {
+                    self.repaint_inheritors(child, None);
+                }
             }
             Mutation::Detach { id } => {
                 self.unhover(NodeId(*id));
+                self.unpress(NodeId(*id));
                 self.host.detach(NodeId(*id));
             }
             Mutation::Remove { id } => {
@@ -641,6 +691,7 @@ impl Ui {
                 // Its tweens end before the slot's generation moves.
                 self.end_animations_of(node, crate::animation::end_reason::REMOVED);
                 self.unhover(node);
+                self.unpress(node);
                 self.host.remove(node);
                 self.forget_node_state(node);
                 for slot in [&mut self.focus, &mut self.pressed] {
@@ -650,23 +701,18 @@ impl Ui {
                 }
                 self.pending_scrolls.retain(|(n, _, _)| *n != node);
             }
+            // A node with a variant table: its own ops set the base, and
+            // the restyle at the end of the transaction declares.
             Mutation::Layout { id, style } => {
-                let node = NodeId(*id);
-                let mut new = if *style == NIL {
+                let new = if *style == NIL {
                     crate::host::default_style().to_taffy()
                 } else {
                     txn.styles[*style as usize].clone()
                 };
-                // Animated fields: a transition tweens to the new value,
-                // so the row keeps the value on screen.
-                for prop in [Prop::Width, Prop::Height, Prop::Padding, Prop::Gap] {
-                    let next = layout_field(&new, prop);
-                    if !self.intercept(node, prop, next) {
-                        let current = self.row_value(node, prop);
-                        set_layout_field(&mut new, prop, current);
-                    }
+                match self.base_mut(*id) {
+                    Some(b) => b.layout = LayoutRow::from(&new),
+                    None => self.declare_layout(NodeId(*id), new),
                 }
-                self.set_layout(node, LayoutRow::from(&new));
             }
             Mutation::Spatial {
                 id,
@@ -674,16 +720,17 @@ impl Ui {
                 opacity,
                 z,
             } => {
-                let node = NodeId(*id);
                 // Not animatable: a z change reorders at once.
                 if let Some(z) = z {
-                    self.host.set_z(node, *z);
+                    self.host.set_z(NodeId(*id), *z);
                 }
-                let transform = transform
-                    .filter(|t| self.intercept(node, Prop::Transform, Value::Transform(*t)));
-                let opacity =
-                    opacity.filter(|o| self.intercept(node, Prop::Opacity, Value::Opacity(*o)));
-                self.set_spatial(node, transform, opacity);
+                match self.base_mut(*id) {
+                    Some(b) => {
+                        b.transform = transform.unwrap_or(b.transform);
+                        b.opacity = opacity.unwrap_or(b.opacity);
+                    }
+                    None => self.declare_spatial(NodeId(*id), *transform, *opacity),
+                }
             }
             Mutation::Layer { id, owner } => {
                 self.host.set_layer(NodeId(*id), *owner);
@@ -693,14 +740,24 @@ impl Ui {
                 fill,
                 radius,
                 border,
-            } => {
-                let node = NodeId(*id);
-                let fill = fill.filter(|c| self.intercept(node, Prop::Fill, Value::Color(*c)));
-                let border_color = border
-                    .map(|(c, _)| c)
-                    .filter(|c| self.intercept(node, Prop::BorderColor, Value::Color(*c)));
-                self.set_paint(node, fill, *radius, border_color, border.map(|(_, w)| w));
-            }
+            } => match self.base_mut(*id) {
+                Some(b) => {
+                    b.fill = fill.unwrap_or(b.fill);
+                    b.radius = radius.map_or(b.radius, |r| r.max(0.0));
+                    b.border = border.map_or(b.border, |(c, w)| (c, w.max(0.0)));
+                }
+                None => self.declare_paint(NodeId(*id), *fill, *radius, *border),
+            },
+            Mutation::Color { id, color } => match self.base_mut(*id) {
+                Some(b) => b.color = *color,
+                None => self.declare_color(NodeId(*id), *color),
+            },
+            Mutation::States { id, bits } => self.set_app_bits(*id, *bits),
+            Mutation::Variants { id, variants } => self.set_variants(*id, variants),
+            Mutation::Environment {
+                narrow_max,
+                compact_max,
+            } => self.set_breakpoints(*narrow_max, *compact_max),
             Mutation::Transition { id, transitions } => {
                 // Later changes use the new set; running tweens finish.
                 if transitions.is_empty() {
@@ -716,6 +773,13 @@ impl Ui {
                 timing,
             } => {
                 let node = NodeId(*id);
+                // On a tabled node it sets the base and runs; a variant
+                // that overrides the property wins at the restyle.
+                if let Some(t) = self.states.tables.get_mut(id) {
+                    crate::states::set_base(&mut t.base, *prop, *value);
+                    crate::states::set_base(&mut t.resolved, *prop, *value);
+                    self.states.queue.push(*id);
+                }
                 if self.start_animation(node, *prop, *value, *timing, true) {
                     // Applied at once: it ends now.
                     self.write_value(node, *prop, *value);
@@ -744,7 +808,11 @@ impl Ui {
                     || p.fonts.len() != spans.len()
                     || p.spans.len() != spans.len()
                     || p.spans.iter().zip(spans).any(|(a, b)| !a.same_metrics(b));
-                let colors_changed = p.spans.iter().zip(spans).any(|(a, b)| a.color != b.color);
+                let colors_changed = p
+                    .spans
+                    .iter()
+                    .zip(spans)
+                    .any(|(a, b)| a.color != b.color || a.inherit_color != b.inherit_color);
                 let decorations_changed = p
                     .spans
                     .iter()
@@ -846,14 +914,19 @@ impl Ui {
                 focusable,
                 selectable,
             } => {
-                let i = &mut self.host.interaction[*id as usize];
+                let hovers = self.host.hover_listeners;
+                let i = self.host.interaction[*id as usize];
                 if i.listeners != *listeners
                     || i.focusable != *focusable
                     || i.selectable != *selectable
                 {
-                    i.listeners = *listeners;
+                    let i = &mut self.host.interaction[*id as usize];
                     i.focusable = *focusable;
                     i.selectable = *selectable;
+                    self.host.set_listeners(*id as usize, *listeners);
+                    // A new hover listener: the hover at rest may be
+                    // stale (it was not tracked without one).
+                    self.hover_stale |= self.host.hover_listeners > hovers;
                     self.host.revs.semantic.bump();
                     self.host.dirty.semantic.push(*id);
                 }
@@ -976,6 +1049,20 @@ impl Ui {
         }
     }
 
+    /// `node` leaves the tree: a press inside it ends (and its pointer
+    /// capture), with no click on release. Focus stays: a node that
+    /// moves keeps it, and its scopes' bits follow it when it is placed
+    /// again.
+    fn unpress(&mut self, node: NodeId) {
+        if let Some(p) = self.pressed
+            && self.ancestors(p).any(|n| n == node)
+        {
+            self.pressed = None;
+            self.pressed_primary = false;
+            self.selecting = false;
+        }
+    }
+
     /// Sets a vector node's source (asset bytes or a drawing's key),
     /// shared with other nodes of the same source; `share` makes the
     /// source's shared copy and `build` decodes it when no node has it
@@ -1018,6 +1105,130 @@ impl Ui {
         self.vector_meshes.forget(node.0);
         self.animations.forget(node);
         self.layouts.forget(node);
+        self.forget_states(node);
+        self.inheritors.remove(&node.0);
+    }
+
+    /// Declares a node's layout (a full style): transitions intercept
+    /// the animated fields, then the row writer.
+    pub(crate) fn declare_layout(&mut self, node: NodeId, mut new: taffy::Style) {
+        // Animated fields: a transition tweens to the new value, so the
+        // row keeps the value on screen.
+        for prop in [Prop::Width, Prop::Height, Prop::Padding, Prop::Gap] {
+            let next = layout_field(&new, prop);
+            if !self.intercept(node, prop, next) {
+                let current = self.row_value(node, prop);
+                set_layout_field(&mut new, prop, current);
+            }
+        }
+        self.set_layout(node, LayoutRow::from(&new));
+    }
+
+    /// Declares a node's spatial fields (those given).
+    pub(crate) fn declare_spatial(
+        &mut self,
+        node: NodeId,
+        transform: Option<Affine>,
+        opacity: Option<f32>,
+    ) {
+        let transform =
+            transform.filter(|t| self.intercept(node, Prop::Transform, Value::Transform(*t)));
+        let opacity = opacity.filter(|o| self.intercept(node, Prop::Opacity, Value::Opacity(*o)));
+        self.set_spatial(node, transform, opacity);
+    }
+
+    /// Declares a node's box paint (the fields given).
+    pub(crate) fn declare_paint(
+        &mut self,
+        node: NodeId,
+        fill: Option<u32>,
+        radius: Option<f32>,
+        border: Option<(u32, f32)>,
+    ) {
+        let fill = fill.filter(|c| self.intercept(node, Prop::Fill, Value::Color(*c)));
+        let border_color = border
+            .map(|(c, _)| c)
+            .filter(|c| self.intercept(node, Prop::BorderColor, Value::Color(*c)));
+        self.set_paint(node, fill, radius, border_color, border.map(|(_, w)| w));
+    }
+
+    /// Declares a node's inherited color. Between two colors a
+    /// transition tweens; setting or clearing one jumps.
+    pub(crate) fn declare_color(&mut self, node: NodeId, color: Option<u32>) {
+        match color {
+            Some(c) => {
+                if self.intercept(node, Prop::Color, Value::Color(c)) {
+                    self.set_color(node, Some(c));
+                }
+            }
+            None => {
+                if let Some(i) = self.animations.find(node, Prop::Color) {
+                    self.end_animation(i, crate::animation::end_reason::CANCELLED);
+                }
+                self.set_color(node, None);
+            }
+        }
+    }
+
+    /// Writes a node's inherited color; the text inheriting it repaints.
+    pub(crate) fn set_color(&mut self, node: NodeId, color: Option<u32>) {
+        let old = match color {
+            Some(c) => self.host.colors.insert(node.0, c),
+            None => self.host.colors.remove(&node.0),
+        };
+        if old == color {
+            return;
+        }
+        self.host.revs.paint.bump();
+        if old.is_some() != color.is_some() {
+            self.color_bounds += 1;
+        }
+        // The inheritors hold while the tree, the text and the color
+        // roots do: a tween reuses them every frame.
+        let key = (
+            self.host.revs.structure,
+            self.host.revs.text_content,
+            self.color_bounds,
+        );
+        let mut entry = self.inheritors.remove(&node.0).unwrap_or_default();
+        if entry.0 == key {
+            for &n in &entry.1 {
+                self.host.dirty.paint.push(n);
+            }
+        } else {
+            entry.1.clear();
+            self.repaint_inheritors(node, Some(&mut entry.1));
+            entry.0 = key;
+        }
+        self.inheritors.insert(node.0, entry);
+    }
+
+    /// Queues a paint patch for the text nodes whose nearest inherited
+    /// color comes from `node` (or would): its subtree, stopping at
+    /// descendants with a color of their own. Lists them in `found`.
+    fn repaint_inheritors(&mut self, node: NodeId, mut found: Option<&mut Vec<u32>>) {
+        let mut stack = std::mem::take(&mut self.node_scratch);
+        stack.clear();
+        stack.push(node);
+        while let Some(n) = stack.pop() {
+            if self.host.kind(n) == Some(NodeKind::Text)
+                && self.host.paragraphs[n.index()]
+                    .spans
+                    .iter()
+                    .any(|s| s.inherit_color)
+            {
+                self.host.dirty.paint.push(n.0);
+                if let Some(f) = found.as_deref_mut() {
+                    f.push(n.0);
+                }
+            }
+            for &c in self.host.children(n) {
+                if !self.host.colors.contains_key(&c.0) {
+                    stack.push(c);
+                }
+            }
+        }
+        self.node_scratch = stack;
     }
 
     /// Writes a node's layout row; the one writer for layout inputs

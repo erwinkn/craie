@@ -32,6 +32,8 @@ use craie_core::geom::Affine;
 use craie_vector::svg::{Drawing, Shape, ShapeKind};
 use craie_vector::{FillRule, LineCap, LineJoin, Stroke};
 
+use crate::states::{TermDecl, Values, VariantDecl, layout_key, value_field};
+
 use crate::mutation::{
     Anchor, Claim, Command, ItemDesc, ItemTemplate, Mutation, NIL, NodeKind, Role, SubmitKey,
     TextSpan, Transaction,
@@ -84,6 +86,16 @@ pub mod op {
     // animation
     pub const TRANSITION: u8 = 0xA0;
     pub const ANIMATE: u8 = 0xA1;
+    // state styles
+    /// id u32 | bits u64 (app bits; input bits reject)
+    pub const STATES: u8 = 0xB0;
+    /// id u32 | count u16 | count × (term_count u8 | env u8 |
+    /// term_count × (scope u32, mask u64) | values); count 0 removes
+    pub const VARIANTS: u8 = 0xB1;
+    /// narrow_max f32 | compact_max f32
+    pub const ENVIRONMENT: u8 = 0xB2;
+    /// id u32 | set u8 | color u32
+    pub const COLOR: u8 = 0xB3;
 }
 
 /// SPATIAL op field mask bits.
@@ -136,6 +148,9 @@ pub mod span_flag {
     pub const ITALIC: u8 = 1 << 0;
     pub const UNDERLINE: u8 = 1 << 1;
     pub const LINE_THROUGH: u8 = 1 << 2;
+    /// Draw in the nearest inherited color; `color` is the fallback.
+    pub const INHERIT_COLOR: u8 = 1 << 3;
+    pub const ALL: u8 = ITALIC | UNDERLINE | LINE_THROUGH | INHERIT_COLOR;
 }
 
 /// Bytes per span row.
@@ -668,6 +683,39 @@ pub fn encode(txn: &Transaction<'_>) -> Vec<u8> {
                 put_anim_value(&mut ops, value);
                 put_timing(&mut ops, timing);
             }
+            Mutation::States { id, bits } => {
+                ops.push(op::STATES);
+                u32le(&mut ops, *id);
+                ops.extend_from_slice(&bits.to_le_bytes());
+            }
+            Mutation::Variants { id, variants } => {
+                ops.push(op::VARIANTS);
+                u32le(&mut ops, *id);
+                ops.extend_from_slice(&(variants.len() as u16).to_le_bytes());
+                for v in variants.iter() {
+                    ops.push(v.terms.len() as u8);
+                    ops.push(v.env);
+                    for t in &v.terms {
+                        u32le(&mut ops, t.scope);
+                        ops.extend_from_slice(&t.mask.to_le_bytes());
+                    }
+                    put_values(&mut ops, &v.values);
+                }
+            }
+            Mutation::Environment {
+                narrow_max,
+                compact_max,
+            } => {
+                ops.push(op::ENVIRONMENT);
+                f32le(&mut ops, *narrow_max);
+                f32le(&mut ops, *compact_max);
+            }
+            Mutation::Color { id, color } => {
+                ops.push(op::COLOR);
+                u32le(&mut ops, *id);
+                ops.push(color.is_some() as u8);
+                u32le(&mut ops, color.unwrap_or(0));
+            }
         }
     }
     // Span families go through the string table too.
@@ -699,6 +747,9 @@ pub fn encode(txn: &Transaction<'_>) -> Vec<u8> {
         if sp.decoration & 2 != 0 {
             flags |= span_flag::LINE_THROUGH;
         }
+        if sp.inherit_color {
+            flags |= span_flag::INHERIT_COLOR;
+        }
         out.push(flags);
         out.push(0);
         let family = family_refs.get(sp.family as usize).copied().unwrap_or(NIL);
@@ -711,7 +762,7 @@ pub fn encode(txn: &Transaction<'_>) -> Vec<u8> {
 }
 
 /// Writes a style record with only the fields in `mask`, as the JS
-/// encoder sends partial styles. Test support for the Rust side.
+/// encoder sends partial styles.
 #[cfg(test)]
 pub(crate) fn put_style_masked(out: &mut Vec<u8>, s: &Style, mask: u64) {
     out.extend_from_slice(&mask.to_le_bytes());
@@ -871,7 +922,7 @@ pub fn decode(buf: &[u8]) -> Result<Transaction<'_>, WireError> {
         let weight = r.u16()?;
         let flags = r.u8()?;
         let _reserved = r.u8()?;
-        if flags & !(span_flag::ITALIC | span_flag::UNDERLINE | span_flag::LINE_THROUGH) != 0 {
+        if flags & !span_flag::ALL != 0 {
             return Err(WireError::BadRef("span flags"));
         }
         let family_ref = r.u32()?;
@@ -896,6 +947,7 @@ pub fn decode(buf: &[u8]) -> Result<Transaction<'_>, WireError> {
             italic: flags & span_flag::ITALIC != 0,
             decoration: (flags & span_flag::UNDERLINE != 0) as u8
                 | ((flags & span_flag::LINE_THROUGH != 0) as u8) << 1,
+            inherit_color: flags & span_flag::INHERIT_COLOR != 0,
             letter_spacing,
             line_height,
             family,
@@ -1211,6 +1263,49 @@ pub fn decode(buf: &[u8]) -> Result<Transaction<'_>, WireError> {
                     timing,
                 }
             }
+            op::STATES => Mutation::States {
+                id: r.u32()?,
+                bits: r.u64()?,
+            },
+            op::VARIANTS => {
+                let id = r.u32()?;
+                let count = r.u16()? as usize;
+                let mut variants = Vec::with_capacity(count.min(r.remaining()));
+                for _ in 0..count {
+                    let term_count = r.u8()? as usize;
+                    let env = r.u8()?;
+                    let mut terms = Vec::with_capacity(term_count);
+                    for _ in 0..term_count {
+                        terms.push(TermDecl {
+                            scope: r.u32()?,
+                            mask: r.u64()?,
+                        });
+                    }
+                    let values = r.values()?;
+                    variants.push(VariantDecl { terms, env, values });
+                }
+                Mutation::Variants {
+                    id,
+                    variants: variants.into(),
+                }
+            }
+            op::ENVIRONMENT => Mutation::Environment {
+                narrow_max: r.f32()?,
+                compact_max: r.f32()?,
+            },
+            op::COLOR => {
+                let id = r.u32()?;
+                let set = r.u8()?;
+                let color = r.u32()?;
+                Mutation::Color {
+                    id,
+                    color: match set {
+                        0 => None,
+                        1 => Some(color),
+                        _ => return Err(WireError::BadRef("color flag")),
+                    },
+                }
+            }
             _ => return Err(WireError::BadOp(tag)),
         };
         txn.mutations.push(m);
@@ -1284,6 +1379,41 @@ fn put_anim_value(out: &mut Vec<u8>, v: &Value) {
     }
 }
 
+/// Variant values: mask u8, then by bit FILL u32, BORDER_COLOR u32,
+/// RADIUS f32, COLOR (set u8, u32), OPACITY f32, TRANSFORM 6 f32, LAYOUT
+/// (u64 layout keys, then the style fields they fall in, in schema
+/// order), BORDER_WIDTH f32.
+fn put_values(out: &mut Vec<u8>, v: &Values) {
+    use value_field::*;
+    out.push(v.mask);
+    if v.mask & FILL != 0 {
+        u32le(out, v.fill);
+    }
+    if v.mask & BORDER_COLOR != 0 {
+        u32le(out, v.border.0);
+    }
+    if v.mask & RADIUS != 0 {
+        f32le(out, v.radius);
+    }
+    if v.mask & COLOR != 0 {
+        out.push(v.color.is_some() as u8);
+        u32le(out, v.color.unwrap_or(0));
+    }
+    if v.mask & OPACITY != 0 {
+        f32le(out, v.opacity);
+    }
+    if v.mask & TRANSFORM != 0 {
+        v.transform.0.iter().for_each(|&x| f32le(out, x));
+    }
+    if v.mask & LAYOUT != 0 {
+        out.extend_from_slice(&v.layout_keys.to_le_bytes());
+        put_style_fields(out, &v.layout.to_taffy(), layout_key::fields(v.layout_keys));
+    }
+    if v.mask & BORDER_WIDTH != 0 {
+        f32le(out, v.border.1);
+    }
+}
+
 struct Reader<'a> {
     buf: &'a [u8],
     pos: usize,
@@ -1327,7 +1457,7 @@ impl Reader<'_> {
                 Value::Transform(Affine(m))
             }
             Prop::Opacity => Value::Opacity(self.f32()?),
-            Prop::Fill | Prop::BorderColor => Value::Color(self.u32()?),
+            Prop::Fill | Prop::BorderColor | Prop::Color => Value::Color(self.u32()?),
             Prop::Width | Prop::Height => Value::Size(taffy::Dimension::length(self.f32()?)),
             Prop::Padding => Value::Padding([
                 lp(self.f32()?),
@@ -1337,6 +1467,55 @@ impl Reader<'_> {
             ]),
             Prop::Gap => Value::Gap([lp(self.f32()?), lp(self.f32()?)]),
         })
+    }
+
+    fn values(&mut self) -> Result<Values, WireError> {
+        use value_field::*;
+        let mut v = Values {
+            mask: self.u8()?,
+            ..Values::default()
+        };
+        if v.mask & !value_field::ALL != 0 {
+            return Err(WireError::BadRef("value field"));
+        }
+        if v.mask & FILL != 0 {
+            v.fill = self.u32()?;
+        }
+        if v.mask & BORDER_COLOR != 0 {
+            v.border.0 = self.u32()?;
+        }
+        if v.mask & RADIUS != 0 {
+            v.radius = self.f32()?;
+        }
+        if v.mask & COLOR != 0 {
+            let set = self.u8()?;
+            let c = self.u32()?;
+            v.color = match set {
+                0 => None,
+                1 => Some(c),
+                _ => return Err(WireError::BadRef("color flag")),
+            };
+        }
+        if v.mask & OPACITY != 0 {
+            v.opacity = self.f32()?;
+        }
+        if v.mask & TRANSFORM != 0 {
+            for x in &mut v.transform.0 {
+                *x = self.f32()?;
+            }
+        }
+        if v.mask & LAYOUT != 0 {
+            v.layout_keys = self.u64()?;
+            if v.layout_keys & !layout_key::ALL != 0 {
+                return Err(WireError::BadRef("layout key"));
+            }
+            let fields = layout_key::fields(v.layout_keys);
+            v.layout = craie_layout::LayoutRow::from(&self.style(fields)?);
+        }
+        if v.mask & BORDER_WIDTH != 0 {
+            v.border.1 = self.f32()?;
+        }
+        Ok(v)
     }
 }
 

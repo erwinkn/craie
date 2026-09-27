@@ -2,7 +2,8 @@
 // Rust decoder must accept. Regenerate after wire format changes:
 //   bun packages/bridge/scripts/gen-fixture.ts
 import {
-  CHORD_FLAG, CLAIM_KIND, Encoder, NIL, ROLE, SUBMIT_KEY, SURFACE, parseChord, transformMatrix,
+  CHORD_FLAG, CLAIM_KIND, ENV_BIT, Encoder, NIL, ROLE, STATE_BIT, SUBMIT_KEY, SURFACE, parseChord,
+  transformMatrix,
 } from "../src/wire.js"
 
 const enc = new Encoder()
@@ -11,7 +12,7 @@ enc.create(1, 1)                                    // text
 const text = "héllo — مرحبا 日本語"
 const bold = new TextEncoder().encode("héllo ").length // byte offset of span 1
 enc.paragraph(1, text, [
-  { start: 0, fontSize: 18.5, color: 0x6dc7_ff80, lineHeight: 24 },
+  { start: 0, fontSize: 18.5, color: 0x6dc7_ff80, lineHeight: 24, inheritColor: true },
   {
     start: bold, fontSize: 18.5, color: 0xffff_ffff, weight: 700, italic: true,
     fontFamily: "monospace", decoration: 3, letterSpacing: 0.5,
@@ -83,6 +84,21 @@ enc.transition(0, {                                 // animation family
 })
 enc.animate(0, "backgroundColor", [0xff00_00ff], { duration: 300, easing: [0.1, 0.2, 0.3, 0.4] })
 enc.animate(0, "gap", [4, 6], { spring: {}, delay: 20 })
+enc.states(0, (1n << BigInt(STATE_BIT.selected)) | 1n) // state styles
+enc.variants(5, [                                  // on the row, scoped by the root
+  { terms: [{ scope: 0, mask: 1n << BigInt(STATE_BIT.selected) }], env: 0, values: { fill: 0x2d32_40ff, color: 0xffff_ffff } },
+  {
+    terms: [{ scope: 0, mask: 1n }], env: ENV_BIT.narrow,
+    values: {
+      borderColor: 0x0000_00ff, borderWidth: 1, radius: 3, color: null, opacity: 0.5,
+      transform: [1, 0, 0, 1, 0, 2], layout: { width: "50%", height: 44 },
+    },
+  },
+])
+enc.environment(900, 500)
+enc.color(0, 0x9aa0_aaff)
+enc.color(2, null)
+enc.animate(0, "color", [0xffff_ffff], { duration: 100 })
 
 // A vector node and a minimal asset (CRV1: a 10 x 10 view box, one
 // solid paint, one nonzero fill of a triangle), written by hand here;
