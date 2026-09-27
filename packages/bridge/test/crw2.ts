@@ -83,6 +83,9 @@ export function readFrame(buf: Uint8Array): Frame {
         if (m & 1) for (let i = 0; i < 6; i++) op.f.push(f32())
         if (m & 2) op.f.push(f32())
         if (m & 4) op.f.push(u32() | 0)
+        if (m & 8) for (let i = 0; i < 4; i++) op.f.push(f32())
+        if (m & 16) op.f.push(f32())
+        if (m & 32) op.f.push(f32(), f32())
         break
       }
       case 0x22: op.f.push(u32()); break // layer owner
@@ -152,7 +155,7 @@ export function readFrame(buf: Uint8Array): Frame {
       }
       case 0xa1: { // animate: prop, value by prop, timing
         const p = u8(); op.f.push(p)
-        const n = [6, 1, 0, 0, 1, 1, 4, 2, 0][p]!
+        const n = [6, 1, 0, 0, 1, 1, 4, 2, 0, 4, 1, 2][p]!
         if (p === 2 || p === 3 || p === 8) op.f.push(u32())
         for (let i = 0; i < n; i++) op.f.push(f32())
         op.f.push(u8()); for (let k = 0; k < 6; k++) op.f.push(f32())
@@ -166,7 +169,7 @@ export function readFrame(buf: Uint8Array): Frame {
           const nTerms = u8(), env = u8()
           const terms = []
           for (let k = 0; k < nTerms; k++) terms.push({ scope: u32(), mask: u64() })
-          const m = u8(), values = [m]
+          const m = u16(), values = [m]
           if (m & 1) values.push(u32())
           if (m & 2) values.push(u32())
           if (m & 4) values.push(f32())
@@ -175,6 +178,9 @@ export function readFrame(buf: Uint8Array): Frame {
           if (m & 32) for (let k = 0; k < 6; k++) values.push(f32())
           if (m & 64) { const keys = u64(); values.push(Number(keys)); skipFields(keyFields(keys)) }
           if (m & 128) values.push(f32())
+          if (m & 256) values.push(f32(), f32())
+          if (m & 512) values.push(f32(), f32())
+          for (const bit of [1024, 2048, 4096]) if (m & bit) values.push(f32())
           op.variants.push({ terms, env, values })
         }
         break

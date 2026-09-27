@@ -42,7 +42,7 @@ use crate::mutation::{
 pub use crate::mutation::{interaction_flag, trap_flag};
 
 pub const MAGIC: u32 = 0x3257_5243; // "CRW2"
-pub const VERSION: u16 = 8;
+pub const VERSION: u16 = 9;
 
 pub mod op {
     // structure
@@ -110,14 +110,24 @@ pub mod op {
     pub const COLOR: u8 = 0xB3;
 }
 
-/// SPATIAL op field mask bits.
+/// SPATIAL op field mask bits, in payload order. The transform parts
+/// compose as `translate · rotate · scale · matrix` about the center
+/// (`host::Parts`).
 pub mod spatial_field {
-    /// Six f32: CSS matrix(a, b, c, d, e, f), applied about the center.
+    /// Six f32: the free matrix, CSS matrix(a, b, c, d, e, f).
     pub const TRANSFORM: u8 = 1 << 0;
     /// One f32 in [0, 1].
     pub const OPACITY: u8 = 1 << 1;
     /// One i32: the order among siblings (higher paints later).
     pub const Z: u8 = 1 << 2;
+    /// Four f32: x, y in points, then x, y as fractions of the border
+    /// box.
+    pub const TRANSLATE: u8 = 1 << 3;
+    /// One f32: radians, clockwise.
+    pub const ROTATE: u8 = 1 << 4;
+    /// Two f32: x, y.
+    pub const SCALE: u8 = 1 << 5;
+    pub const ALL: u8 = (1 << 6) - 1;
 }
 
 /// PAINT op field mask bits.
@@ -423,36 +433,30 @@ pub fn encode(txn: &Transaction<'_>) -> Vec<u8> {
                 u32le(&mut ops, *id);
                 u32le(&mut ops, *style);
             }
-            Mutation::Spatial {
-                id,
-                transform,
-                opacity,
-                z,
-            } => {
+            Mutation::Spatial { id, patch: p, z } => {
+                use spatial_field::*;
                 ops.push(op::SPATIAL);
                 u32le(&mut ops, *id);
-                let mut mask = 0;
-                if transform.is_some() {
-                    mask |= spatial_field::TRANSFORM;
-                }
-                if opacity.is_some() {
-                    mask |= spatial_field::OPACITY;
-                }
-                if z.is_some() {
-                    mask |= spatial_field::Z;
-                }
-                ops.push(mask);
-                if let Some(t) = transform {
-                    for v in t.0 {
-                        f32le(&mut ops, v);
-                    }
-                }
-                if let Some(o) = opacity {
-                    f32le(&mut ops, *o);
-                }
+                let bit = |on: bool, b: u8| if on { b } else { 0 };
+                ops.push(
+                    bit(p.matrix.is_some(), TRANSFORM)
+                        | bit(p.opacity.is_some(), OPACITY)
+                        | bit(z.is_some(), Z)
+                        | bit(p.translate.is_some(), TRANSLATE)
+                        | bit(p.rotate.is_some(), ROTATE)
+                        | bit(p.scale.is_some(), SCALE),
+                );
+                let floats = p.matrix.iter().flat_map(|m| m.0);
+                let floats = floats.chain(p.opacity);
+                floats.for_each(|v| f32le(&mut ops, v));
                 if let Some(z) = z {
                     u32le(&mut ops, *z as u32);
                 }
+                let floats = p.translate.iter().flatten().copied();
+                let floats = floats
+                    .chain(p.rotate)
+                    .chain(p.scale.iter().flatten().copied());
+                floats.for_each(|v| f32le(&mut ops, v));
             }
             Mutation::Layer { id, owner } => {
                 ops.push(op::LAYER);
@@ -1001,36 +1005,36 @@ pub fn decode(buf: &[u8]) -> Result<Transaction<'_>, WireError> {
                 Mutation::Layout { id, style }
             }
             op::SPATIAL => {
+                use spatial_field::*;
                 let id = r.u32()?;
                 let mask = r.u8()?;
-                if mask & !(spatial_field::TRANSFORM | spatial_field::OPACITY | spatial_field::Z)
-                    != 0
-                {
+                if mask & !ALL != 0 {
                     return Err(WireError::BadRef("spatial mask"));
                 }
-                let transform = if mask & spatial_field::TRANSFORM != 0 {
-                    let mut m = [0.0f32; 6];
-                    for v in &mut m {
-                        *v = r.f32()?;
-                    }
-                    Some(Affine(m))
+                let has = |b: u8| mask & b != 0;
+                let matrix = if has(TRANSFORM) {
+                    Some(Affine(r.f32s()?))
                 } else {
                     None
                 };
-                let opacity = if mask & spatial_field::OPACITY != 0 {
-                    Some(r.f32()?)
+                let opacity = if has(OPACITY) { Some(r.f32()?) } else { None };
+                let z = if has(Z) { Some(r.u32()? as i32) } else { None };
+                let translate = if has(TRANSLATE) {
+                    Some(r.f32s()?)
                 } else {
                     None
                 };
-                let z = if mask & spatial_field::Z != 0 {
-                    Some(r.u32()? as i32)
-                } else {
-                    None
-                };
+                let rotate = if has(ROTATE) { Some(r.f32()?) } else { None };
+                let scale = if has(SCALE) { Some(r.f32s()?) } else { None };
                 Mutation::Spatial {
                     id,
-                    transform,
-                    opacity,
+                    patch: crate::host::SpatialPatch {
+                        translate,
+                        rotate,
+                        scale,
+                        matrix,
+                        opacity,
+                    },
                     z,
                 }
             }
@@ -1392,7 +1396,8 @@ fn put_timing(out: &mut Vec<u8>, t: &Timing) {
 
 /// An `Animate` target by property: transform 6 f32, opacity f32, a
 /// color u32, width or height f32, padding 4 f32 (left, right, top,
-/// bottom), gap 2 f32 (column, row). Lengths only.
+/// bottom), gap 2 f32 (column, row), translate 4 f32 (x, y points, x, y
+/// fractions), rotate f32 (radians), scale 2 f32. Lengths only.
 fn put_anim_value(out: &mut Vec<u8>, v: &Value) {
     let lp = |l: &taffy::LengthPercentage| match l.expand() {
         taffy::style::ExpandedLengthPercentage::Length(v) => v,
@@ -1411,16 +1416,20 @@ fn put_anim_value(out: &mut Vec<u8>, v: &Value) {
         ),
         Value::Padding(p) => p.iter().for_each(|l| f32le(out, lp(l))),
         Value::Gap(g) => g.iter().for_each(|l| f32le(out, lp(l))),
+        Value::Translate(t) => t.iter().for_each(|&x| f32le(out, x)),
+        Value::Rotate(r) => f32le(out, *r),
+        Value::Scale(s) => s.iter().for_each(|&x| f32le(out, x)),
     }
 }
 
-/// Variant values: mask u8, then by bit FILL u32, BORDER_COLOR u32,
+/// Variant values: mask u16, then by bit FILL u32, BORDER_COLOR u32,
 /// RADIUS f32, COLOR (set u8, u32), OPACITY f32, TRANSFORM 6 f32, LAYOUT
 /// (u64 layout keys, then the style fields they fall in, in schema
-/// order), BORDER_WIDTH f32.
+/// order), BORDER_WIDTH f32, TRANSLATE_X 2 f32 (points, fraction),
+/// TRANSLATE_Y 2 f32, ROTATE f32, SCALE_X f32, SCALE_Y f32.
 fn put_values(out: &mut Vec<u8>, v: &Values) {
     use value_field::*;
-    out.push(v.mask);
+    out.extend_from_slice(&v.mask.to_le_bytes());
     if v.mask & FILL != 0 {
         u32le(out, v.fill);
     }
@@ -1438,7 +1447,7 @@ fn put_values(out: &mut Vec<u8>, v: &Values) {
         f32le(out, v.opacity);
     }
     if v.mask & TRANSFORM != 0 {
-        v.transform.0.iter().for_each(|&x| f32le(out, x));
+        v.parts.matrix.0.iter().for_each(|&x| f32le(out, x));
     }
     if v.mask & LAYOUT != 0 {
         out.extend_from_slice(&v.layout_keys.to_le_bytes());
@@ -1446,6 +1455,18 @@ fn put_values(out: &mut Vec<u8>, v: &Values) {
     }
     if v.mask & BORDER_WIDTH != 0 {
         f32le(out, v.border.1);
+    }
+    let t = v.parts.translate;
+    for (bit, x) in [
+        (TRANSLATE_X, &[t[0], t[2]][..]),
+        (TRANSLATE_Y, &[t[1], t[3]]),
+        (ROTATE, &[v.parts.rotate]),
+        (SCALE_X, &[v.parts.scale[0]]),
+        (SCALE_Y, &[v.parts.scale[1]]),
+    ] {
+        if v.mask & bit != 0 {
+            x.iter().for_each(|&x| f32le(out, x));
+        }
     }
 }
 
@@ -1484,13 +1505,10 @@ impl Reader<'_> {
     fn anim_value(&mut self, prop: Prop) -> Result<Value, WireError> {
         let lp = taffy::LengthPercentage::length;
         Ok(match prop {
-            Prop::Transform => {
-                let mut m = [0.0f32; 6];
-                for v in &mut m {
-                    *v = self.f32()?;
-                }
-                Value::Transform(Affine(m))
-            }
+            Prop::Transform => Value::Transform(Affine(self.f32s()?)),
+            Prop::Translate => Value::Translate(self.f32s()?),
+            Prop::Rotate => Value::Rotate(self.f32()?),
+            Prop::Scale => Value::Scale(self.f32s()?),
             Prop::Opacity => Value::Opacity(self.f32()?),
             Prop::Fill | Prop::BorderColor | Prop::Color => Value::Color(self.u32()?),
             Prop::Width | Prop::Height => Value::Size(taffy::Dimension::length(self.f32()?)),
@@ -1507,12 +1525,9 @@ impl Reader<'_> {
     fn values(&mut self) -> Result<Values, WireError> {
         use value_field::*;
         let mut v = Values {
-            mask: self.u8()?,
+            mask: self.u16()?,
             ..Values::default()
         };
-        // Never true while `value_field::ALL` fills the `u8`; it stays for
-        // when the mask widens.
-        #[allow(clippy::bad_bit_mask)]
         if v.mask & !value_field::ALL != 0 {
             return Err(WireError::BadRef("value field"));
         }
@@ -1538,9 +1553,7 @@ impl Reader<'_> {
             v.opacity = self.f32()?;
         }
         if v.mask & TRANSFORM != 0 {
-            for x in &mut v.transform.0 {
-                *x = self.f32()?;
-            }
+            v.parts.matrix = Affine(self.f32s()?);
         }
         if v.mask & LAYOUT != 0 {
             v.layout_keys = self.u64()?;
@@ -1552,6 +1565,22 @@ impl Reader<'_> {
         }
         if v.mask & BORDER_WIDTH != 0 {
             v.border.1 = self.f32()?;
+        }
+        let t = &mut v.parts.translate;
+        if v.mask & TRANSLATE_X != 0 {
+            [t[0], t[2]] = self.f32s()?;
+        }
+        if v.mask & TRANSLATE_Y != 0 {
+            [t[1], t[3]] = self.f32s()?;
+        }
+        if v.mask & ROTATE != 0 {
+            v.parts.rotate = self.f32()?;
+        }
+        if v.mask & SCALE_X != 0 {
+            v.parts.scale[0] = self.f32()?;
+        }
+        if v.mask & SCALE_Y != 0 {
+            v.parts.scale[1] = self.f32()?;
         }
         Ok(v)
     }
@@ -1583,6 +1612,13 @@ impl<'a> Reader<'a> {
     }
     fn f32(&mut self) -> Result<f32, WireError> {
         Ok(f32::from_le_bytes(self.take(4)?.try_into().unwrap()))
+    }
+    fn f32s<const N: usize>(&mut self) -> Result<[f32; N], WireError> {
+        let mut out = [0.0; N];
+        for v in &mut out {
+            *v = self.f32()?;
+        }
+        Ok(out)
     }
 
     fn lp(&mut self) -> Result<LengthPercentage, WireError> {

@@ -30,6 +30,8 @@ pub mod mutation;
 mod order;
 #[cfg(test)]
 mod order_tests;
+#[cfg(test)]
+mod parts_tests;
 pub mod platform;
 mod press;
 #[cfg(test)]

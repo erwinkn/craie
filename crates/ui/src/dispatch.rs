@@ -5,7 +5,7 @@ use std::time::Instant;
 
 use crate::claims::{KeyMatch, claim_kind};
 use crate::events::{self, Event, Key, KeyInput, Mods, UiEvent, mask, out_kind};
-use craie_core::geom::{Affine, Point};
+use craie_core::geom::Point;
 
 use crate::geom::Rect;
 use crate::host::{NodeFlags, NodeId, ROOT};
@@ -159,10 +159,9 @@ impl Ui {
         let data = self.layouts.data(id);
         let size = data.rect.size;
         let mut q = Point::new(p.x - data.rect.origin.x, p.y - data.rect.origin.y);
-        let t = self.host.spatial[id.index()].transform;
-        if t != Affine::IDENTITY {
-            let m = t.about(Point::new(size.width / 2.0, size.height / 2.0));
-            q = m.invert()?.apply(q);
+        let s = &self.host.spatial[id.index()];
+        if s.transformed() {
+            q = s.local(size).invert()?.apply(q);
         }
         let overflow = style.overflow();
         let clips =

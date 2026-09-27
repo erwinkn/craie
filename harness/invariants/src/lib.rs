@@ -16,8 +16,8 @@ use std::collections::BTreeMap;
 use craie_core::geom::{Affine, Rect, Size};
 use craie_core::rng::Rng;
 use craie_scene::{RasterId, Resolved, Scene};
-use craie_ui::host::{NodeId, ROOT};
-use craie_ui::mutation::{Mutation, NIL, NodeKind, Role, TextSpan, Transaction};
+use craie_ui::host::{NodeId, Parts, ROOT};
+use craie_ui::mutation::{Mutation, NIL, NodeKind, Role, SpatialPatch, TextSpan, Transaction};
 use craie_ui::ui::Ui;
 
 /// Host spans as transaction spans: family indices move from the host's
@@ -56,11 +56,18 @@ pub fn snapshot(ui: &Ui) -> Transaction<'static> {
             t.layout(id.0, &style.to_taffy());
         }
         let s = host.spatial[id.index()];
-        if s.transform != Affine::IDENTITY || s.opacity != 1.0 || s.z != 0 {
+        let (p, none) = (s.parts, Parts::IDENTITY);
+        let patch = SpatialPatch {
+            translate: (p.translate != none.translate).then_some(p.translate),
+            rotate: (p.rotate != none.rotate).then_some(p.rotate),
+            scale: (p.scale != none.scale).then_some(p.scale),
+            matrix: (p.matrix != Affine::IDENTITY).then_some(p.matrix),
+            opacity: (s.opacity != 1.0).then_some(s.opacity),
+        };
+        if !patch.is_empty() || s.z != 0 {
             t.push(Mutation::Spatial {
                 id: id.0,
-                transform: (s.transform != Affine::IDENTITY).then_some(s.transform),
-                opacity: (s.opacity != 1.0).then_some(s.opacity),
+                patch,
                 z: (s.z != 0).then_some(s.z),
             });
         }
@@ -203,6 +210,15 @@ pub fn without_animation(t: &Transaction<'static>, twin: &Ui) -> Transaction<'st
                     }
                     Value::Opacity(o) => {
                         out.opacity(*id, o);
+                    }
+                    Value::Translate(v) => {
+                        out.translate(*id, v);
+                    }
+                    Value::Rotate(r) => {
+                        out.rotate(*id, r);
+                    }
+                    Value::Scale([sx, sy]) => {
+                        out.scale(*id, sx, sy);
                     }
                     Value::Color(c) if m_prop(m) == craie_ui::animation::Prop::Fill => {
                         out.fill(*id, c);
@@ -900,18 +916,35 @@ impl Gen {
                     let spans = self.spans(&mut t, &text);
                     t.paragraph(id, text, &spans);
                 }
-                8 => {
-                    let m = match self.rng.below(4) {
-                        0 => Affine::IDENTITY,
-                        1 => Affine::translate(
-                            self.rng.below(40) as f32 - 20.0,
-                            self.rng.below(40) as f32,
-                        ),
-                        2 => Affine::rotate(self.rng.unit() - 0.5),
-                        _ => Affine::scale(0.5 + self.rng.unit(), 0.5 + self.rng.unit()),
-                    };
-                    t.transform(id, m);
-                }
+                8 => match self.rng.below(7) {
+                    0 => {
+                        t.transform(id, Affine::IDENTITY);
+                    }
+                    1 => {
+                        let (x, y) = (self.rng.below(40) as f32 - 20.0, self.rng.below(40) as f32);
+                        t.transform(id, Affine::translate(x, y));
+                    }
+                    2 => {
+                        t.transform(id, Affine::rotate(self.rng.unit() - 0.5));
+                    }
+                    3 => {
+                        let (sx, sy) = (0.5 + self.rng.unit(), 0.5 + self.rng.unit());
+                        t.transform(id, Affine::scale(sx, sy));
+                    }
+                    // Parts: a percent translate follows the node's size.
+                    4 => {
+                        let x = self.rng.below(40) as f32 - 20.0;
+                        let fy = self.pick(&[0.0, 0.5, -1.0]);
+                        t.translate(id, [x, 0.0, 0.0, fy]);
+                    }
+                    5 => {
+                        t.rotate(id, self.pick(&[0.0, 0.3, -1.0, 3.0]));
+                    }
+                    _ => {
+                        let (sx, sy) = (0.5 + self.rng.unit(), 0.5 + self.rng.unit());
+                        t.scale(id, sx, sy);
+                    }
+                },
                 9 => match self.rng.below(3) {
                     0 => {
                         let o = self.pick(&[1.0, 1.0, 0.5, 0.25, 0.0]);
@@ -1066,7 +1099,7 @@ impl Gen {
             let id = nodes[g.below(nodes.len() as u32) as usize];
             let has_box = ui.host.kind(NodeId(id)).is_some_and(|k| k.has_box());
             let len = taffy::LengthPercentage::length;
-            let (prop, value) = match g.below(6) {
+            let (prop, value) = match g.below(9) {
                 0 => (
                     Prop::Transform,
                     Value::Transform(Affine::rotate(g.unit() - 0.5)),
@@ -1078,7 +1111,13 @@ impl Gen {
                     Value::Size(taffy::Dimension::length(20.0 + 100.0 * g.unit())),
                 ),
                 4 => (Prop::Padding, Value::Padding([len(g.below(8) as f32); 4])),
-                _ => (Prop::Gap, Value::Gap([len(g.below(8) as f32); 2])),
+                5 => (Prop::Gap, Value::Gap([len(g.below(8) as f32); 2])),
+                6 => (
+                    Prop::Translate,
+                    Value::Translate([0.0, 10.0, g.unit() - 0.5, 0.0]),
+                ),
+                7 => (Prop::Rotate, Value::Rotate(4.0 * (g.unit() - 0.5))),
+                _ => (Prop::Scale, Value::Scale([0.5 + g.unit(), 1.0])),
             };
             let tm = timing(g);
             t.animate(id, prop, value, tm);

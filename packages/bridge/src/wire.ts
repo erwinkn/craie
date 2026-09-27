@@ -14,7 +14,7 @@
 // across transactions.
 
 const MAGIC = 0x3257_5243 // "CRW2" little-endian
-export const VERSION = 8
+export const VERSION = 9
 export const NIL = 0xffff_ffff // no node / append / default style
 
 const enum Op {
@@ -96,6 +96,7 @@ export interface WireShape {
 
 /** Animatable properties — mirror animation.rs `Prop`. */
 export const ANIM_PROP = {
+  /** The free matrix (`style.transform`), tweened by decomposition. */
   transform: 0,
   opacity: 1,
   backgroundColor: 2,
@@ -107,6 +108,13 @@ export const ANIM_PROP = {
   /** The inherited color (text, inputs, `currentColor` drawings):
    * tweens between two set colors. */
   color: 8,
+  /** CSS `translate`, both axes: points and percentages tween
+   * component-wise (10 to "100%" passes 5 + 50%). */
+  translate: 9,
+  /** CSS `rotate`, by angle: 0 to 360 degrees is a full turn. */
+  rotate: 10,
+  /** CSS `scale`, both axes. */
+  scale: 11,
 } as const
 export type AnimProp = keyof typeof ANIM_PROP
 
@@ -153,7 +161,9 @@ export interface ItemDesc {
 }
 
 // Field mask bits — mirror wire.rs `spatial_field` / `paint_field`.
-const SPATIAL_FIELD = { TRANSFORM: 1 << 0, OPACITY: 1 << 1, Z: 1 << 2 } as const
+const SPATIAL_FIELD = {
+  TRANSFORM: 1 << 0, OPACITY: 1 << 1, Z: 1 << 2, TRANSLATE: 1 << 3, ROTATE: 1 << 4, SCALE: 1 << 5,
+} as const
 const PAINT_FIELD = { FILL: 1 << 0, RADIUS: 1 << 1, BORDER: 1 << 2 } as const
 const SPAN_ITALIC = 1 << 0
 const SPAN_UNDERLINE = 1 << 1
@@ -434,8 +444,32 @@ export interface StyleProps {
   flexShrink?: number
   aspectRatio?: number
   overflow?: "visible" | "clip" | "hidden" | "scroll" | { x?: string; y?: string }
+  /** Spatial: CSS `translate`, applied first of the parts (outermost).
+   * Points, or a percentage of the node's own border box (x of its
+   * width, y of its height) that follows its size. One value moves x
+   * alone (y 0, as CSS); `translateX` / `translateY` override one axis. */
+  translate?: LengthPct | readonly [LengthPct, LengthPct]
+  translateX?: LengthPct
+  translateY?: LengthPct
+  /** Spatial: CSS `rotate`, clockwise about the center. A number is
+   * degrees; strings take a CSS unit ("12deg", "0.5rad", "0.25turn").
+   * Tweens by angle. */
+  rotate?: Angle
+  /** Spatial: CSS `scale` about the center: one factor or [x, y];
+   * `scaleX` / `scaleY` override one axis. */
+  scale?: number | readonly [number, number]
+  scaleX?: number
+  scaleY?: number
   /** Spatial, not layout: travels in its own op and never relayouts.
-   * RN-style list, applied about the border-box center. */
+   * An RN-style list folded into one free matrix, applied about the
+   * border-box center after `translate`, `rotate` and `scale` (as CSS
+   * `transform` after the individual properties):
+   *
+   *     { translate: ["-50%", 0], rotate: 12, scale: 1.02,
+   *       transform: [{ skewX: "10deg" }] }
+   *
+   * composes translate · rotate · scale · skew. Prefer the parts: each
+   * tweens on its own and variants set one without the others. */
   transform?: Transform
   /** Spatial: group opacity in [0, 1]. */
   opacity?: number
@@ -446,6 +480,10 @@ export interface StyleProps {
   /** Not layout: declared transitions, sent in their own op. */
   transition?: Transitions
 }
+
+/** An angle: "45deg", "0.5rad", "0.25turn", "50grad", or a number (degrees in
+ * `style.rotate`, radians in a transform list, as before parts). */
+export type Angle = number | `${number}${"deg" | "grad" | "rad" | "turn"}`
 
 /** One RN-style transform step. Angles: "45deg", "0.5rad", or radians. */
 export type TransformStep =
@@ -745,10 +783,31 @@ export interface VariantValues {
    * `null` clears it. */
   color?: number | null
   opacity?: number
+  /** The free matrix. */
   transform?: Affine
+  /** Translate x and y, each [points, fraction of the border box]. */
+  translateX?: readonly [number, number]
+  translateY?: readonly [number, number]
+  /** Radians, clockwise. */
+  rotate?: number
+  scaleX?: number
+  scaleY?: number
   /** Layout values: each key it sets applies on its own (`height`
    * alone keeps the width that applies). */
   layout?: StyleProps
+}
+
+/** A SPATIAL op's fields; absent ones stay as they are. */
+export interface SpatialIn {
+  /** The free matrix. */
+  transform?: Affine
+  opacity?: number
+  z?: number
+  /** [x, y points, x, y fractions of the border box]. */
+  translate?: readonly [number, number, number, number]
+  /** Radians, clockwise. */
+  rotate?: number
+  scale?: readonly [number, number]
 }
 
 /** A variant: `values` apply while every term's scope holds all bits of
@@ -763,17 +822,114 @@ export interface VariantIn {
 const VALUE_FIELD = {
   FILL: 1 << 0, BORDER_COLOR: 1 << 1, RADIUS: 1 << 2, COLOR: 1 << 3,
   OPACITY: 1 << 4, TRANSFORM: 1 << 5, LAYOUT: 1 << 6, BORDER_WIDTH: 1 << 7,
+  TRANSLATE_X: 1 << 8, TRANSLATE_Y: 1 << 9, ROTATE: 1 << 10, SCALE_X: 1 << 11, SCALE_Y: 1 << 12,
 } as const
 
 export type Affine = [number, number, number, number, number, number]
 export const IDENTITY: Affine = [1, 0, 0, 1, 0, 0]
 
-function angle(v: string | number): number {
-  if (typeof v === "number") return v
-  if (v.endsWith("deg")) return (parseFloat(v) * Math.PI) / 180
-  if (v.endsWith("rad")) return parseFloat(v)
-  throw Error(`bad angle "${v}"`)
+/** An angle in radians; a bare number is radians (`unit` 1) or
+ * degrees (`unit` π/180). */
+function angle(v: string | number, unit = 1): number {
+  let r = typeof v === "number" ? v * unit : NaN
+  const m = typeof v === "string" ? /^(.+?)(deg|grad|rad|turn)$/.exec(v) : null
+  if (m) r = Number(m[1]) * ANGLE_UNIT[m[2] as keyof typeof ANGLE_UNIT]
+  if (!Number.isFinite(r)) throw Error(`bad angle "${v}"`)
+  return r
 }
+/** CSS angle units in radians. */
+const ANGLE_UNIT = { deg: Math.PI / 180, grad: Math.PI / 200, rad: 1, turn: 2 * Math.PI }
+
+/** A node's transform parts in wire form: translate [x, y points, x, y
+ * fractions of the border box], rotate (radians), scale [x, y], and
+ * the free matrix. They compose as translate · rotate · scale · matrix
+ * about the border-box center. */
+export interface Parts {
+  translate: [number, number, number, number]
+  rotate: number
+  scale: [number, number]
+  matrix: Affine
+}
+
+/** A translate length as [points, fraction]: 10 is [10, 0], "50%" is
+ * [0, 0.5]. */
+export function translateLength(v: unknown): [number, number] {
+  const r: [number, number] =
+    typeof v === "number" ? [v, 0]
+    : typeof v === "string" && v.endsWith("%") ? [0, Number(v.slice(0, -1)) / 100]
+    : [NaN, 0]
+  if (!Number.isFinite(r[0]) || !Number.isFinite(r[1])) throw Error(`bad translate "${String(v)}"`)
+  return r
+}
+
+/** CSS `translate` as [x, y]: one value moves x alone. */
+function translatePair(v: unknown): [unknown, unknown] {
+  return Array.isArray(v) ? (v.length === 2 ? [v[0], v[1]] : [NaN, NaN]) : [v, 0]
+}
+
+/** CSS `scale` as [x, y]: one value scales both. */
+function scalePair(v: unknown): [number, number] {
+  const r = Array.isArray(v) && v.length === 2 ? [v[0], v[1]] : [v, v]
+  if (!r.every(x => typeof x === "number" && Number.isFinite(x))) throw Error(`bad scale "${String(v)}"`)
+  return r as [number, number]
+}
+
+function factor(v: unknown, what: string): number {
+  if (typeof v !== "number" || !Number.isFinite(v)) throw Error(`bad ${what} "${String(v)}"`)
+  return v
+}
+
+/** The parts a style sets, per axis (unset: undefined): what a variant
+ * overrides. `translateX` and `scaleX` override `translate` and `scale`
+ * on their axis. */
+export function styleParts(s: StyleProps | undefined): Partial<VariantValues> {
+  const out: Partial<VariantValues> = {}
+  if (!s) return out
+  if (s.translate !== undefined) {
+    const [x, y] = translatePair(s.translate)
+    out.translateX = translateLength(x)
+    out.translateY = translateLength(y)
+  }
+  if (s.translateX !== undefined) out.translateX = translateLength(s.translateX)
+  if (s.translateY !== undefined) out.translateY = translateLength(s.translateY)
+  if (s.rotate !== undefined) out.rotate = angle(s.rotate, Math.PI / 180)
+  if (s.scale !== undefined) [out.scaleX, out.scaleY] = scalePair(s.scale)
+  if (s.scaleX !== undefined) out.scaleX = factor(s.scaleX, "scaleX")
+  if (s.scaleY !== undefined) out.scaleY = factor(s.scaleY, "scaleY")
+  if (s.transform !== undefined) out.transform = transformMatrix(s.transform)
+  return out
+}
+
+/** A style's whole transform: the parts it sets over the identity. */
+export function partsOf(s: StyleProps | undefined): Parts {
+  const p = styleParts(s)
+  const [tx, fx] = p.translateX ?? [0, 0]
+  const [ty, fy] = p.translateY ?? [0, 0]
+  return {
+    translate: [tx, ty, fx, fy],
+    rotate: p.rotate ?? 0,
+    scale: [p.scaleX ?? 1, p.scaleY ?? 1],
+    matrix: p.transform ?? IDENTITY,
+  }
+}
+
+/** An `animate` target for translate: a length or [x, y] as
+ * [x, y points, x, y fractions]. */
+export function translateTarget(v: unknown): [number, number, number, number] {
+  const [x, y] = translatePair(v)
+  const [tx, fx] = translateLength(x), [ty, fy] = translateLength(y)
+  return [tx, ty, fx, fy]
+}
+
+/** An `animate` target for rotate: degrees or an angle string, in
+ * radians. */
+export function rotateTarget(v: unknown): number {
+  if (typeof v !== "number" && typeof v !== "string") throw Error(`bad angle "${String(v)}"`)
+  return angle(v, Math.PI / 180)
+}
+
+/** An `animate` target for scale: a factor or [x, y]. */
+export const scaleTarget = scalePair
 
 /** p · c: apply `c` first, then `p` (CSS matrix order, like Affine::mul). */
 function mul(p: Affine, c: Affine): Affine {
@@ -851,18 +1007,21 @@ export function transformMatrix(t: Transform | undefined): Affine {
   return m
 }
 
+/** Style keys that never touch layout. */
+const SPATIAL_KEYS = [
+  "transform", "translate", "translateX", "translateY", "rotate", "scale", "scaleX", "scaleY",
+  "opacity", "zIndex", "transition",
+] as const
+
 /** The layout part of a style: everything but the spatial keys, or
  * undefined when nothing is left (`{ zIndex: 1 }` has no layout, like
  * no style at all). */
 export function layoutPart(s: StyleProps | undefined): StyleProps | undefined {
   if (!s) return undefined
   let rest = s
-  if (
-    s.transform !== undefined || s.opacity !== undefined || s.zIndex !== undefined ||
-    s.transition !== undefined
-  ) {
-    const { transform: _t, opacity: _o, zIndex: _z, transition: _tr, ...layout } = s
-    rest = layout
+  if (SPATIAL_KEYS.some(k => s[k] !== undefined)) {
+    rest = { ...s }
+    for (const k of SPATIAL_KEYS) delete rest[k]
   }
   for (const k in rest) if (rest[k as keyof StyleProps] !== undefined) return rest
   return undefined
@@ -941,20 +1100,27 @@ export class Encoder {
     this.ops.u32(id)
     this.ops.u32(ref)
   }
-  /** Transform (CSS matrix about the center), opacity and/or z (an
-   * i32: the order among siblings). */
-  spatial(id: number, transform?: Affine, opacity?: number, z?: number) {
+  /** Sets any of: the transform parts (`Parts`: each replaces only
+   * itself), opacity, and z (an i32: the order among siblings). */
+  spatial(id: number, s: SpatialIn) {
     const b = this.ops
+    const has = (k: keyof SpatialIn) => s[k] !== undefined
     b.u8(Op.Spatial)
     b.u32(id)
     b.u8(
-      (transform !== undefined ? SPATIAL_FIELD.TRANSFORM : 0) |
-        (opacity !== undefined ? SPATIAL_FIELD.OPACITY : 0) |
-        (z !== undefined ? SPATIAL_FIELD.Z : 0),
+      (has("transform") ? SPATIAL_FIELD.TRANSFORM : 0) |
+        (has("opacity") ? SPATIAL_FIELD.OPACITY : 0) |
+        (has("z") ? SPATIAL_FIELD.Z : 0) |
+        (has("translate") ? SPATIAL_FIELD.TRANSLATE : 0) |
+        (has("rotate") ? SPATIAL_FIELD.ROTATE : 0) |
+        (has("scale") ? SPATIAL_FIELD.SCALE : 0),
     )
-    if (transform !== undefined) for (const v of transform) b.f32(v)
-    if (opacity !== undefined) b.f32(opacity)
-    if (z !== undefined) b.u32(z >>> 0)
+    if (s.transform !== undefined) for (const v of s.transform) b.f32(v)
+    if (s.opacity !== undefined) b.f32(s.opacity)
+    if (s.z !== undefined) b.u32(s.z >>> 0)
+    if (s.translate !== undefined) for (const v of s.translate) b.f32(v)
+    if (s.rotate !== undefined) b.f32(s.rotate)
+    if (s.scale !== undefined) for (const v of s.scale) b.f32(v)
   }
   /** Makes `id` a layer container: hit testing passes through its own
    * box, and it never sorts below the sibling holding `owner` (NIL:
@@ -1238,11 +1404,12 @@ export class Encoder {
 
   /** Tweens one property to `value`, in the property's wire shape:
    * transform 6 numbers, a color as 0xRRGGBBAA, padding [left, right,
-   * top, bottom], gap [column, row], others one number. */
+   * top, bottom], gap [column, row], translate [x, y points, x, y
+   * fractions], rotate radians, scale [x, y], others one number. */
   animate(id: number, prop: AnimProp, value: readonly number[], timing: Timing) {
     const b = this.ops
     const code = ANIM_PROP[prop]
-    const want = [6, 1, 1, 1, 1, 1, 4, 2, 1][code]
+    const want = [6, 1, 1, 1, 1, 1, 4, 2, 1, 4, 1, 2][code]
     if (want === undefined || value.length !== want || !value.every(Number.isFinite)) {
       throw Error(`bad ${String(prop)} animation target`)
     }
@@ -1280,7 +1447,7 @@ export class Encoder {
       }
       const x = v.values
       const has = (k: keyof VariantValues) => x[k] !== undefined
-      b.u8(
+      b.u16(
         (has("fill") ? VALUE_FIELD.FILL : 0) |
           (has("borderColor") ? VALUE_FIELD.BORDER_COLOR : 0) |
           (has("radius") ? VALUE_FIELD.RADIUS : 0) |
@@ -1288,7 +1455,12 @@ export class Encoder {
           (has("opacity") ? VALUE_FIELD.OPACITY : 0) |
           (has("transform") ? VALUE_FIELD.TRANSFORM : 0) |
           (has("layout") ? VALUE_FIELD.LAYOUT : 0) |
-          (has("borderWidth") ? VALUE_FIELD.BORDER_WIDTH : 0),
+          (has("borderWidth") ? VALUE_FIELD.BORDER_WIDTH : 0) |
+          (has("translateX") ? VALUE_FIELD.TRANSLATE_X : 0) |
+          (has("translateY") ? VALUE_FIELD.TRANSLATE_Y : 0) |
+          (has("rotate") ? VALUE_FIELD.ROTATE : 0) |
+          (has("scaleX") ? VALUE_FIELD.SCALE_X : 0) |
+          (has("scaleY") ? VALUE_FIELD.SCALE_Y : 0),
       )
       if (x.fill !== undefined) b.u32(x.fill >>> 0)
       if (x.borderColor !== undefined) b.u32(x.borderColor >>> 0)
@@ -1302,6 +1474,11 @@ export class Encoder {
         putStyleFields(b, x.layout, keyFields(keys))
       }
       if (x.borderWidth !== undefined) b.f32(x.borderWidth)
+      for (const v of x.translateX ?? []) b.f32(v)
+      for (const v of x.translateY ?? []) b.f32(v)
+      if (x.rotate !== undefined) b.f32(x.rotate)
+      if (x.scaleX !== undefined) b.f32(x.scaleX)
+      if (x.scaleY !== undefined) b.f32(x.scaleY)
     }
   }
 

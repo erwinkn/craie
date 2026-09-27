@@ -39,7 +39,10 @@ enc.layout(0, {
   inset: { left: 4 },
   margin: { top: "auto" as const },
 })
-enc.spatial(0, transformMatrix([{ translateX: 3 }, { scale: 2 }]), 0.75, -2)
+enc.spatial(0, {                                    // every field
+  transform: transformMatrix([{ translateX: 3 }, { scale: 2 }]), opacity: 0.75, z: -2,
+  translate: [4, -1, 0.5, 0], rotate: Math.PI / 2, scale: [1.5, 0.5],
+})
 enc.paint(0, 0x1122_33ff, 6.5, { color: 0xff00_00ff, width: 2 })
 enc.create(2, 2)                                    // input
 enc.inputConfig(2, 15, "type here", true, SUBMIT_KEY["mod+enter"])
@@ -98,6 +101,7 @@ enc.variants(5, [                                  // on the row, scoped by the 
     values: {
       borderColor: 0x0000_00ff, borderWidth: 1, radius: 3, color: null, opacity: 0.5,
       transform: [1, 0, 0, 1, 0, 2], layout: { width: "50%", height: 44 },
+      translateX: [2, -0.5], rotate: 0.25, scaleY: 0.5,     // parts, one axis each
     },
   },
 ])
@@ -105,6 +109,9 @@ enc.environment(900, 500)
 enc.color(0, 0x9aa0_aaff)
 enc.color(2, null)
 enc.animate(0, "color", [0xffff_ffff], { duration: 100 })
+enc.animate(0, "translate", [1, 2, 0.5, -0.5], { duration: 100 })
+enc.animate(0, "rotate", [2 * Math.PI], { duration: 100 })
+enc.animate(0, "scale", [2, 3], { duration: 100 })
 
 // A vector node and a minimal asset (CRV1: a 10 x 10 view box, one
 // solid paint, one nonzero fill of a triangle), written by hand here;
@@ -132,7 +139,7 @@ enc.place(0, 6, NIL)
 enc.create(7, 0)                                    // a layer container
 enc.layer(7, 6)                                     // owned from the vector
 enc.role(7, ROLE.alertdialog)                       // the last role
-enc.spatial(7, undefined, undefined, 50)            // z alone
+enc.spatial(7, { z: 50 })                           // z alone
 enc.place(NIL, 7, NIL)
 // A runtime drawing: a dashed arc path and an even-odd polygon filled
 // with the inherited color at half alpha (currentColor).

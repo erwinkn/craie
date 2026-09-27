@@ -85,6 +85,7 @@ export {
   type Transform,
   type TransformStep,
   type Transitions,
+  type Angle,
 } from "./wire.js"
 export type {
   ClipboardEvt,
@@ -229,9 +230,14 @@ export interface VariantStyle {
   borderRadius?: number
   /** The color text, inputs and `currentColor` drawings inherit. */
   color?: string | number
-  /** Layout, `opacity` and `transform`. Keys that share a wire field
+  /** Layout, `opacity` and the transform parts (`translate`, `rotate`,
+   * `scale`, their axes, and `transform`). Keys that share a wire field
    * with ones the variant sets (`width` with `height`, the sides of
-   * `padding`) keep the element's own values. */
+   * `padding`) keep the element's own values; a transform part leaves
+   * the others alone, so a pressed `scale` keeps the base `rotate`:
+   *
+   *     <Pressable style={{ rotate: 12, transition: { scale: { duration: 120 } } }}
+   *       _hover={{ style: { scale: 1.02 } }} _pressed={{ style: { scale: 0.98 } }} /> */
   style?: StyleProps
 }
 /** State and environment variants, resolved natively (no render): a

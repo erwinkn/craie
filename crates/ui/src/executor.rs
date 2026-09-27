@@ -10,12 +10,11 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use craie_core::geom::Affine;
 use craie_layout::LayoutRow;
 
 use crate::animation::{Prop, Value};
 use crate::claims::{Claim, claim_kind};
-use crate::host::{Host, MAX_NODES, NodeId};
+use crate::host::{Host, MAX_NODES, NodeId, SpatialPatch};
 use crate::list::{IdIndex, MAX_ITEMS};
 use crate::mutation::{
     Command, ItemDesc, Mutation, NIL, NodeKind, TextSpan, Transaction, interaction_flag,
@@ -348,17 +347,14 @@ pub fn validate(host: &Host, txn: &Transaction<'_>) -> Result<Validated, WireErr
                     return Err(invalid("layout style out of range"));
                 }
             }
-            Mutation::Spatial {
-                id,
-                transform,
-                opacity,
-                ..
-            } => {
+            Mutation::Spatial { id, patch, .. } => {
                 need_live(&o, *id, "spatial on an absent node")?;
-                if transform.is_some_and(|t| !t.0.iter().all(|v| v.is_finite())) {
+                let mut parts = crate::host::Parts::IDENTITY;
+                patch.apply(&mut parts);
+                if !parts.is_finite() {
                     return Err(invalid("non-finite transform"));
                 }
-                if opacity.is_some_and(|v| !(0.0..=1.0).contains(&v)) {
+                if patch.opacity.is_some_and(|v| !(0.0..=1.0).contains(&v)) {
                     return Err(invalid("opacity outside [0, 1]"));
                 }
             }
@@ -637,6 +633,9 @@ fn valid_target(prop: Prop, value: &Value) -> bool {
     };
     match (prop, value) {
         (Prop::Transform, Value::Transform(t)) => t.0.iter().all(|v| v.is_finite()),
+        (Prop::Translate, Value::Translate(t)) => t.iter().all(|v| v.is_finite()),
+        (Prop::Rotate, Value::Rotate(r)) => r.is_finite(),
+        (Prop::Scale, Value::Scale(s)) => s.iter().all(|v| v.is_finite()),
         (Prop::Opacity, Value::Opacity(o)) => (0.0..=1.0).contains(o),
         (Prop::Fill | Prop::BorderColor | Prop::Color, Value::Color(_)) => true,
         (Prop::Width | Prop::Height, Value::Size(d)) => len(match d.expand() {
@@ -734,22 +733,19 @@ impl Ui {
                     None => self.declare_layout(NodeId(*id), new),
                 }
             }
-            Mutation::Spatial {
-                id,
-                transform,
-                opacity,
-                z,
-            } => {
+            Mutation::Spatial { id, patch, z } => {
                 // Not animatable: a z change reorders at once.
                 if let Some(z) = z {
                     self.host.set_z(NodeId(*id), *z);
                 }
-                match self.base_mut(*id) {
-                    Some(b) => {
-                        b.transform = transform.unwrap_or(b.transform);
-                        b.opacity = opacity.unwrap_or(b.opacity);
+                if !patch.is_empty() {
+                    match self.base_mut(*id) {
+                        Some(b) => {
+                            patch.apply(&mut b.parts);
+                            b.opacity = patch.opacity.unwrap_or(b.opacity);
+                        }
+                        None => self.declare_spatial(NodeId(*id), *patch),
                     }
-                    None => self.declare_spatial(NodeId(*id), *transform, *opacity),
                 }
             }
             Mutation::Layer { id, owner } => {
@@ -1194,16 +1190,25 @@ impl Ui {
     }
 
     /// Declares a node's spatial fields (those given).
-    pub(crate) fn declare_spatial(
-        &mut self,
-        node: NodeId,
-        transform: Option<Affine>,
-        opacity: Option<f32>,
-    ) {
-        let transform =
-            transform.filter(|t| self.intercept(node, Prop::Transform, Value::Transform(*t)));
-        let opacity = opacity.filter(|o| self.intercept(node, Prop::Opacity, Value::Opacity(*o)));
-        self.set_spatial(node, transform, opacity);
+    pub(crate) fn declare_spatial(&mut self, node: NodeId, p: SpatialPatch) {
+        let patch = SpatialPatch {
+            translate: p
+                .translate
+                .filter(|t| self.intercept(node, Prop::Translate, Value::Translate(*t))),
+            rotate: p
+                .rotate
+                .filter(|r| self.intercept(node, Prop::Rotate, Value::Rotate(*r))),
+            scale: p
+                .scale
+                .filter(|s| self.intercept(node, Prop::Scale, Value::Scale(*s))),
+            matrix: p
+                .matrix
+                .filter(|t| self.intercept(node, Prop::Transform, Value::Transform(*t))),
+            opacity: p
+                .opacity
+                .filter(|o| self.intercept(node, Prop::Opacity, Value::Opacity(*o))),
+        };
+        self.set_spatial(node, patch);
     }
 
     /// Declares a node's box paint (the fields given).
@@ -1330,25 +1335,26 @@ impl Ui {
         }
     }
 
-    /// Writes a node's spatial row (the fields given).
-    pub(crate) fn set_spatial(
-        &mut self,
-        node: NodeId,
-        transform: Option<Affine>,
-        opacity: Option<f32>,
-    ) {
+    /// Writes a node's spatial row (the fields given), composing the
+    /// transform parts when one changed: the one place they compose. A
+    /// composition that overflows keeps the row as it was.
+    pub(crate) fn set_spatial(&mut self, node: NodeId, patch: SpatialPatch) {
         let s = &mut self.host.spatial[node.index()];
         let before = (s.transformed(), s.layered());
         let mut changed = false;
         let mut moved = false;
-        if let Some(t) = transform
-            && s.transform != t
-        {
-            s.transform = t;
-            changed = true;
-            moved = true;
+        let mut parts = s.parts;
+        patch.apply(&mut parts);
+        if parts != s.parts {
+            let composed = parts.compose();
+            if composed.0.iter().all(|v| v.is_finite()) {
+                s.parts = parts;
+                s.composed = composed;
+                changed = true;
+                moved = true;
+            }
         }
-        if let Some(o) = opacity
+        if let Some(o) = patch.opacity
             && s.opacity != o
         {
             s.opacity = o;
