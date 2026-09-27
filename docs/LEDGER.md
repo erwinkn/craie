@@ -302,11 +302,12 @@ Reviewer minors and nitpicks not fixed yet.
   - PR3-06: `Ui::render` refreshes the index once layout is done;
     `dispatch` keeps its refresh as a backstop; the probe's hit test
     after a frame is pruned too.
-  - PR3-07: made true rather than softened: the pad scales with the
-    transform's condition number (‖A‖²/2|det A|), and a transform with
-    no inverse has an empty reach. A new test aims a million points at
-    the edges and corners of boxes squashed up to 100,000-fold; the old
-    pad fails it.
+  - PR3-07: fixed rather than softened, as far as tests reach: the pad
+    scales with the transform's condition number (‖A‖²/2|det A|), and a
+    transform with no inverse has an empty reach. A new test aims a
+    million points at the edges and corners of boxes squashed up to
+    100,000-fold; the old pad fails it. The docs no longer say "never":
+    `reach.rs` calls the pad an error estimate, not a proof.
   - PR3-08: the title and docs say walking a propagation path no longer
     allocates; the events themselves still do.
   - PR3-09: two reruns put wide 10k's refresh after one transform at
