@@ -506,7 +506,7 @@ defineStates(["unread", "streaming"])
   Variant tables resolve to ids and go out at the seal, when their
   signature changed.
 - `_hover` on an element that is no scope means the nearest scope's
-  hover, as on Marbre web and native: in
+  hover, as on Marbre web: in
   `<Pressable><Text _hover={{ color: "red" }} /></Pressable>` the text
   turns red with the pointer on the Pressable's padding. A state key
   with no scope above is logged once and left out; Marbre logs it in
