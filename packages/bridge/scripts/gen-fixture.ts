@@ -9,6 +9,7 @@ import {
 const enc = new Encoder()
 // Keyframe animations: every channel, every easing kind, both triggers.
 const pulse = {
+  index: 0,
   frames: [
     { at: 0, values: { opacity: 1, fill: 0x2d32_40ff, borderColor: 0x0000_00ff, color: 0xffff_ffff } },
     { at: 0.5, easing: [2, 4, 2], values: { opacity: 0.5, translateX: [2, 0.5], translateY: [-1, 0], rotate: 0.5, scaleX: 1.1, scaleY: 0.9 } },
@@ -105,7 +106,7 @@ enc.interaction(0, EVENT_MASK.press | EVENT_MASK.activate,  // a pressable keepi
 enc.variants(5, [                                  // on the row, scoped by the root
   {
     terms: [{ scope: 0, mask: 1n << BigInt(STATE_BIT.selected) }], env: 0, values: { fill: 0x2d32_40ff, color: 0xffff_ffff },
-    transitions: { backgroundColor: { duration: 150 } }, animations: [pulse], // motion while selected
+    transitions: { backgroundColor: { duration: 150 } }, animations: [pulse], block: 3, // motion while selected
   },
   {
     terms: [{ scope: 0, mask: 1n }], env: ENV_BIT.narrow,
@@ -174,10 +175,12 @@ enc.create(9, 7)                                    // image
 enc.payload(9, new Uint8Array([0x89, 0x50, 0x4e, 0x47, 1, 2, 3]))
 enc.imageConfig(9, FIT.contain)
 enc.animation(9, 0, true, [{                        // enter: a spring
+  index: 0,
   frames: [{ at: 0, values: { opacity: 0, translateY: [8, 0] } }],
   delay: 0.05, duration: 0, easing: [4, 300, 20, 1], iterations: 1, direction: 0, fill: 2,
 }])
-enc.animation(0, 1, false, [pulse, {                // the list: pulse shared
+enc.animation(0, 1, false, [pulse, {                // the list: pulse shared, then
+  index: 2,                                         // the third entry (the second is falsy)
   frames: [{ at: 1, easing: [1, 0.42, 0, 1, 1], values: { rotate: Math.PI } }],
   delay: 0, duration: 1, easing: [1, 0, 0, 1, 1], iterations: 2.5, direction: 3, fill: 3,
 }])

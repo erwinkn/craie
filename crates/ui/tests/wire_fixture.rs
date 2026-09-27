@@ -300,7 +300,14 @@ fn js_fixture_decodes_and_executes() {
     // Keyframe animations: the selected variant's timing and loop, the
     // image's enter (a spring, which sets the duration), and the root's
     // list, whose first entry shares the variant's keyframes.
-    assert_eq!((v[0].transitions.len(), v[0].animations.len()), (1, 1));
+    assert_eq!(
+        (
+            v[0].transitions.as_ref().map(Vec::len),
+            v[0].animations.len(),
+            v[0].block
+        ),
+        (Some(1), 1, 3)
+    );
     let lists: Vec<_> = txn
         .mutations
         .iter()
@@ -322,6 +329,7 @@ fn js_fixture_decodes_and_executes() {
         [(9, Trigger::Enter, true, 1), (0, Trigger::Base, false, 2)]
     );
     let (enter, list) = (&lists[0].3[0], &lists[1].3);
+    assert_eq!((enter.index, list[0].index, list[1].index), (0, 0, 2));
     assert!(matches!(enter.easing, Easing::Spring { .. }) && enter.duration > 0.0);
     assert_eq!((enter.delay, enter.fill), (0.05, Fill::Backwards));
     assert!(std::sync::Arc::ptr_eq(

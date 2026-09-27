@@ -227,6 +227,9 @@ export interface FrameValues {
 /** A keyframe animation in wire form: seconds, `EasingIn`s, and the
  * direction and fill codes (keyframes.rs `Direction`, `Fill`). */
 export interface AnimationIn {
+  /** Its position in the author's list, 0 to 255: its identity. Rising
+   * within a list. */
+  index: number
   frames: readonly { at: number; easing?: EasingIn; values: FrameValues }[]
   delay: number
   duration: number
@@ -586,12 +589,14 @@ export interface StyleProps {
    * `zIndex`: no stacking contexts, ties keep tree order). Never
    * relayouts; Tab order and accessibility keep tree order. */
   zIndex?: number
-  /** Not layout: declared transitions, sent in their own op. In a
-   * variant, moving into it tweens with its timing for a property, and
-   * moving out with the base's (CSS: the timing of the style being
-   * entered). A running keyframe animation covers the properties it
-   * sets; a transition then tweens the value underneath. */
-  transition?: Transitions
+  /** Not layout: declared transitions, sent in their own op. A
+   * variant's list replaces the node's while it holds, as CSS's
+   * `transition` does: moving into it (and changes during it) tween
+   * with its timings, properties it leaves out jump, and `"none"`
+   * times nothing; moving out uses the node's list. A running keyframe
+   * animation covers the properties it sets; a transition then tweens
+   * the value underneath. */
+  transition?: Transitions | "none"
 }
 
 /** An angle: "45deg", "0.5rad", "0.25turn", "50grad", or a number (degrees in
@@ -931,11 +936,15 @@ export interface VariantIn {
   terms: readonly { scope: number; mask: bigint }[]
   env: number
   values: VariantValues
-  /** Timings of the properties that tween while the variant is the most
-   * specific active one with a timing for them (per property). */
+  /** The transition list that replaces the node's while the variant is
+   * the most specific active one with a list (`{}`: none tween); unset,
+   * the variant says nothing. */
   transitions?: Transitions
   /** Keyframe animations that run while the variant is active. */
   animations?: readonly AnimationIn[]
+  /** The variant's position among the node's declared variant blocks,
+   * counting those not sent: its animations' identity. */
+  block?: number
 }
 
 // Variant value bits — mirror states.rs `value_field`.
@@ -970,8 +979,8 @@ function checkEasing(e: EasingIn) {
 /** Checks what native checks of an animation (keyframes.rs
  * `Animation::is_valid`) and throws. */
 function checkAnimation(a: AnimationIn) {
-  const secs = (v: number) => Number.isFinite(v) && v >= 0 && v <= 600
-  if (!secs(a.delay) || !secs(a.duration)) throw Error(`bad animation delay or duration`)
+  if (!(Math.abs(a.delay) <= 600)) throw Error(`bad animation delay ${a.delay * 1000} ms (within ±600 s)`)
+  if (!(a.duration >= 0 && a.duration <= 600)) throw Error(`bad animation duration ${a.duration * 1000} ms`)
   checkEasing(a.easing)
   const it = a.iterations
   if (!(it === Infinity ? a.duration > 0 || a.easing[0] === 4 : it >= 0 && it <= 1e6)) {
@@ -1275,7 +1284,12 @@ export class Encoder {
    * writes it. */
   private animationRefs(list: readonly AnimationIn[]): number[] {
     if (list.length > MAX_ANIMATIONS) throw Error(`at most ${MAX_ANIMATIONS} animations per list`)
-    list.forEach(checkAnimation)
+    list.forEach((a, i) => {
+      if (!(Number.isInteger(a.index) && a.index >= 0 && a.index <= 255 && (i === 0 || a.index > list[i - 1]!.index))) {
+        throw Error(`animation indices must rise within [0, 255] (got ${a.index})`)
+      }
+      checkAnimation(a)
+    })
     return list.map(a => this.keyframesRef(a.frames))
   }
 
@@ -1283,6 +1297,7 @@ export class Encoder {
     const b = this.ops
     b.u8(list.length)
     list.forEach((a, i) => {
+      b.u8(a.index)
       b.u16(refs[i]!)
       b.f32(a.delay)
       b.f32(a.duration)
@@ -1703,6 +1718,9 @@ export class Encoder {
     const b = this.ops
     // Checked, and keyframes defined, before the op starts.
     const motion = variants.map(v => {
+      if (v.block !== undefined && !(Number.isInteger(v.block) && v.block >= 0 && v.block <= 0xffff)) {
+        throw Error(`bad variant block ${v.block}`)
+      }
       const props = (Object.keys(ANIM_PROP) as AnimProp[]).filter(p => v.transitions?.[p] !== undefined)
       return {
         props,
@@ -1737,7 +1755,7 @@ export class Encoder {
           (has("rotate") ? VALUE_FIELD.ROTATE : 0) |
           (has("scaleX") ? VALUE_FIELD.SCALE_X : 0) |
           (has("scaleY") ? VALUE_FIELD.SCALE_Y : 0) |
-          (m.props.length ? VALUE_FIELD.TRANSITIONS : 0) |
+          (v.transitions ? VALUE_FIELD.TRANSITIONS : 0) |
           (m.refs ? VALUE_FIELD.ANIMATIONS : 0),
       )
       if (x.fill !== undefined) b.u32(x.fill >>> 0)
@@ -1757,14 +1775,17 @@ export class Encoder {
       if (x.rotate !== undefined) b.f32(x.rotate)
       if (x.scaleX !== undefined) b.f32(x.scaleX)
       if (x.scaleY !== undefined) b.f32(x.scaleY)
-      if (m.props.length) {
+      if (v.transitions) {
         b.u8(m.props.length)
         m.props.forEach((p, i) => {
           b.u8(ANIM_PROP[p])
           putTiming(b, m.timings[i]!)
         })
       }
-      if (m.refs) this.putAnimations(v.animations!, m.refs)
+      if (m.refs) {
+        b.u16(v.block ?? vi)
+        this.putAnimations(v.animations!, m.refs)
+      }
     })
   }
 

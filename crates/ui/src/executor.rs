@@ -600,8 +600,14 @@ pub fn validate(host: &Host, txn: &Transaction<'_>) -> Result<Validated, WireErr
                     for t in &v.terms {
                         need_live(&o, t.scope, "variant on an absent scope")?;
                     }
-                    valid_transitions(&v.transitions)?;
+                    valid_transitions(v.transitions.as_deref().unwrap_or_default())?;
                     valid_animations(&v.animations, boxed)?;
+                }
+                let blocks = variants.iter().filter(|v| !v.animations.is_empty());
+                for (k, v) in blocks.clone().enumerate() {
+                    if blocks.clone().take(k).any(|u| u.block == v.block) {
+                        return Err(invalid("variant block declared twice"));
+                    }
                 }
             }
             Mutation::Environment {
@@ -636,15 +642,16 @@ fn valid_transitions(transitions: &[Transition]) -> Result<(), WireError> {
     Ok(())
 }
 
-/// Keyframe animations: a bounded list, in range, box colors only on a
-/// node with a box.
+/// Keyframe animations: a bounded list, in range, indices ascending, box
+/// colors only on a node with a box.
 fn valid_animations(animations: &[Animation], boxed: bool) -> Result<(), WireError> {
     if animations.len() > crate::keyframes::MAX_ANIMATIONS {
         return Err(invalid("too many animations in one list"));
     }
-    for a in animations {
-        if !a.is_valid() {
-            return Err(invalid("animation out of range"));
+    for (k, a) in animations.iter().enumerate() {
+        a.check().map_err(invalid)?;
+        if k > 0 && animations[k - 1].index >= a.index {
+            return Err(invalid("animation indices out of order"));
         }
         if !boxed && a.keyframes.mask() & value_field::BOX != 0 {
             return Err(invalid("paint animation on a node without a box"));
@@ -685,6 +692,9 @@ impl Ui {
     /// nothing changes.
     pub fn execute(&mut self, txn: &Transaction<'_>) -> Result<(), WireError> {
         let mut done = validate(&self.host, txn)?;
+        if !self.states.env_reported {
+            self.report_env();
+        }
         self.motion.begin();
         self.begin_traps();
         for (step, m) in txn.mutations.iter().enumerate() {

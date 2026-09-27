@@ -231,8 +231,11 @@ export interface ListenerProps {
 
 /** Which animation ended (`onAnimationEnd`): `enter` or `animation`,
  * its index in that prop, and why: `finished`, `cancelled` (it left the
- * list), `retargeted` (the entry at its index changed, and restarted)
- * or `removed` (the node went). Loops never end. */
+ * list, or the node stopped being drawn: `hidden`, detached) or
+ * `retargeted` (the keyframes at its index changed, and it restarted).
+ * Loops never end. A removed node reports nothing: its handler goes
+ * with it (`removed` is for `animate`, whose promise JS resolves itself
+ * when the node goes). */
 export interface AnimationEndEvt {
   target: HostNode
   animation: "enter" | "animation"
@@ -256,11 +259,19 @@ export interface AnimationEndEvt {
 export interface MotionProps {
   /** Runs once, when the node is created (later changes do nothing).
    * Fill defaults to `backwards`: the first frame shows from mount,
-   * through the delay. */
+   * through the delay. With `fill: "forwards"` or `"both"` the last
+   * frame holds over the node's own value for good: later style
+   * changes to the properties it sets don't show (LEDGER DF-58). A
+   * running `enter` keeps on when reduced motion turns on (DF-59). */
   enter?: Animations
-  /** Runs while set. An entry that changes restarts; one equal by value
-   * keeps running across renders. Fill defaults to `none`: the values
-   * return when it ends or stops. */
+  /** Runs while set. An entry is its index in the list: one whose
+   * keyframes change restarts; a timing change applies in place (as
+   * CSS); one that ended stays ended while listed (a re-render or a
+   * reduced-motion change doesn't replay it); entries coming and going
+   * around it (falsy ones) leave it running. Fill defaults to `none`:
+   * the values return when it ends or stops. On a node not drawn
+   * (`hidden`, under a hidden ancestor) nothing runs, and everything
+   * starts over when it is drawn again, as CSS does. */
   animation?: Animations
   /** A finite `enter` or `animation` ended. */
   onAnimationEnd?: (e: AnimationEndEvt) => void
@@ -283,8 +294,11 @@ export interface VariantStyle {
    *     <Pressable style={{ rotate: 12, transition: { scale: { duration: 120 } } }}
    *       _hover={{ style: { scale: 1.02 } }} _pressed={{ style: { scale: 0.98 } }} />
    *
-   * `style.transition` times the move into the variant, per property;
-   * moving out uses the base's (or a less specific active variant's). */
+   * `style.transition` replaces the node's list while the variant
+   * holds, as CSS does: the move into it and changes during it tween
+   * with its timings, the properties it leaves out jump, and `"none"`
+   * times nothing. Moving out uses the base's list (or a less specific
+   * active variant's). */
   style?: StyleProps
   /** Runs while the variant holds, started and stopped natively. Its
    * ends are not reported (LEDGER DF-56). */

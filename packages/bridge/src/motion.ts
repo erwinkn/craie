@@ -17,7 +17,8 @@ import {
 } from "./wire.js"
 
 /** What `enter` and `animation` take: one animation, a list (falsy
- * entries skip, keeping the others' indices), or nothing. */
+ * entries skip, keeping the others' indices), or nothing. An entry is
+ * its index: entries coming and going around it leave it running. */
 export type Animations =
   | KeyframeAnimation
   | readonly (KeyframeAnimation | false | null | undefined)[]
@@ -73,9 +74,16 @@ function linearPoints(points: readonly (number | readonly [number, number])[]): 
   return out.flatMap((o, i) => [inp[i]!, o])
 }
 
+const KEYFRAME_KEYS = new Set([
+  "at", "easing", "opacity", "translate", "translateX", "translateY", "rotate",
+  "scale", "scaleX", "scaleY", "backgroundColor", "borderColor", "color",
+])
+
 /** A keyframe's values in wire form; `boxed`: the node has a box (not
- * a Text), so background and border colors apply. */
+ * a Text), so background and border colors apply. An unknown key (a
+ * typo, a property keyframes cannot animate) throws. */
 function frameValues(k: Keyframe, boxed: boolean): FrameValues {
+  for (const key in k) if (!KEYFRAME_KEYS.has(key)) throw Error(`keyframes cannot animate "${key}"`)
   const v: FrameValues = {}
   if (k.backgroundColor !== undefined || k.borderColor !== undefined) {
     if (!boxed) throw Error("a Text animates no box paint: wrap it in a View")
@@ -97,7 +105,8 @@ function frameValues(k: Keyframe, boxed: boolean): FrameValues {
 }
 
 /** One animation in wire form under the reduced-motion setting
- * (`reduced`), or null when the policy drops it:
+ * (`reduced`), `index` its position in the author's list, or null when
+ * the policy drops it:
  * - `skip`: a loop does not start; a finite animation takes no time,
  *   so it ends at once and its fill (`forwards`) holds the end;
  * - `fade`: only opacity frames go (none: as `skip`);
@@ -107,6 +116,7 @@ export function animationIn(
   defaultFill: number,
   reduced: boolean,
   boxed = true,
+  index = 0,
 ): AnimationIn | null {
   let frames = a.keyframes.map(k => ({
     at: k.at,
@@ -122,6 +132,7 @@ export function animationIn(
   }
   const iterations = a.iterations === "infinite" ? Infinity : a.iterations ?? 1
   const out: AnimationIn = {
+    index,
     frames,
     delay: ms(a.delay ?? 0),
     duration: ms(a.duration ?? 0),
@@ -143,31 +154,29 @@ function ms(v: number): number {
   return v / 1000
 }
 
-/** A prop's animations in wire form, and each one's index in the prop
- * (dropped entries shift the wire indices). */
+/** A prop's animations in wire form, each carrying its index in the
+ * prop: native keys it by that, so a falsy or dropped entry leaves the
+ * others running, and ends report it. */
 export function animationList(
   v: Animations,
   defaultFill: number,
   reduced: boolean,
   boxed = true,
-): { list: AnimationIn[]; index: number[] } {
-  const list: AnimationIn[] = []
-  const index: number[] = []
+): AnimationIn[] {
   const all = !v ? [] : Array.isArray(v) ? v : [v as KeyframeAnimation]
+  const list: AnimationIn[] = []
   all.forEach((a, i) => {
-    const w = a ? animationIn(a, defaultFill, reduced, boxed) : null
-    if (w) {
-      list.push(w)
-      index.push(i)
-    }
+    const w = a ? animationIn(a, defaultFill, reduced, boxed, i) : null
+    if (w) list.push(w)
   })
-  return { list, index }
+  return list
 }
 
 /** Transitions under the reduced-motion setting: `skip` (the default)
  * drops a property's timing (its changes jump), `fade` keeps opacity's
- * alone, `keep` keeps it. */
-export function transitionsIn(t: Transitions | undefined, reduced: boolean): Transitions | undefined {
+ * alone, `keep` keeps it. `"none"` is the empty list. */
+export function transitionsIn(t: Transitions | "none" | undefined, reduced: boolean): Transitions | undefined {
+  if (t === "none") return {}
   if (!t || !reduced) return t
   const out: Transitions = {}
   for (const k in t) {

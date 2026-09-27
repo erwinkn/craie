@@ -623,18 +623,15 @@ impl Ui {
             .max_by(f64::total_cmp)
     }
 
-    /// The node's transition for `prop`: the most specific active
-    /// variant's that has one (the style being entered), else its own.
+    /// The node's transition for `prop`, from the list of the most
+    /// specific active variant that has one (the style being entered; it
+    /// replaces the node's list, as CSS), else from its own.
     fn transition(&self, node: NodeId, prop: Prop) -> Option<Timing> {
-        if let Some(t) = self.states.variant_transition(node.0, prop) {
-            return Some(t);
-        }
-        self.host
-            .transitions
-            .get(&node.0)?
-            .iter()
-            .find(|t| t.prop == prop)
-            .map(|t| t.timing)
+        let list: &[Transition] = match self.states.variant_transitions(node.0) {
+            Some(list) => list,
+            None => self.host.transitions.get(&node.0)?,
+        };
+        list.iter().find(|t| t.prop == prop).map(|t| t.timing)
     }
 
     /// The value in the node's row, or under the keyframe animation

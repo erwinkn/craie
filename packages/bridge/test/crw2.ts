@@ -18,6 +18,8 @@ export interface Op {
     terms: { scope: number; mask: bigint }[]; env: number; values: number[]
     /** Per timing: prop, kind, then six numbers. */
     transitions?: number[][]
+    /** The block position keying the animations. */
+    block?: number
     animations?: Anim[]
   }[]
   /** KEYFRAMES: the frames (its table index is its order in the frame). */
@@ -33,9 +35,10 @@ export interface Op {
   shapes?: { strings: string[]; f: number[] }[]
 }
 
-/** An animation: its keyframes' table index, then the timing. */
+/** An animation: its index in the author's list, its keyframes' table
+ * index, then the timing. */
 export interface Anim {
-  keyframes: number; delay: number; duration: number; easing: number[]
+  index: number; keyframes: number; delay: number; duration: number; easing: number[]
   iterations: number; direction: number; fill: number
 }
 
@@ -222,7 +225,7 @@ export function readFrame(buf: Uint8Array): Frame {
               v.transitions.push(t)
             }
           }
-          if (m & 16384) v.animations = readAnims()
+          if (m & 16384) { v.block = u16(); v.animations = readAnims() }
           op.variants.push(v)
         }
         break
@@ -248,7 +251,7 @@ export function readFrame(buf: Uint8Array): Frame {
     const out: Anim[] = []
     for (let n = u8(); n > 0; n--) {
       out.push({
-        keyframes: u16(), delay: f32(), duration: f32(), easing: readEasing(),
+        index: u8(), keyframes: u16(), delay: f32(), duration: f32(), easing: readEasing(),
         iterations: f32(), direction: u8(), fill: u8(),
       })
     }

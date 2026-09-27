@@ -17,7 +17,7 @@ use craie_core::dirty::DirtyQueue;
 use craie_layout::LayoutRow;
 use taffy::Style;
 
-use crate::animation::{Prop, Timing, Transition, Value};
+use crate::animation::{Prop, Transition, Value};
 use crate::geom::Size;
 use crate::host::{NodeId, Parts, SpatialPatch};
 use crate::keyframes::{Animation, Trigger};
@@ -313,15 +313,19 @@ pub struct TermDecl {
 }
 
 /// A variant as sent: its values apply while every term holds and the
-/// environment has every bit of `env`. Its transitions time the changes
-/// into it (the style being entered, as CSS); its animations run while
-/// it holds.
+/// environment has every bit of `env`. Its transitions, when it has a
+/// list, replace the node's while it holds (the style being entered
+/// times the changes, as CSS; an empty list: none); its animations run
+/// while it holds.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct VariantDecl {
     pub terms: Vec<TermDecl>,
     pub env: u8,
     pub values: Values,
-    pub transitions: Vec<Transition>,
+    pub transitions: Option<Vec<Transition>>,
+    /// Its position among the node's flattened variant blocks, before
+    /// any was left out: its animations' identity.
+    pub block: u16,
     pub animations: Vec<Animation>,
 }
 
@@ -341,9 +345,9 @@ struct Variant {
     values: Values,
     /// The layout values as a style, when there are any.
     layout: Option<Style>,
-    /// Its index in the declared list: its animations' identity.
-    decl: usize,
-    transitions: Vec<Transition>,
+    /// `VariantDecl::block`.
+    block: u16,
+    transitions: Option<Vec<Transition>>,
     animations: Vec<Animation>,
 }
 
@@ -425,6 +429,8 @@ pub struct States {
     /// The next restyle snaps every table (the first size's).
     snap_next: bool,
     pub(crate) env: u8,
+    /// JS has been told the environment (`Ui::report_env`).
+    pub(crate) env_reported: bool,
     narrow_max: f32,
     compact_max: f32,
     /// Keyboard modality: the last key or pointer press was a key.
@@ -457,6 +463,7 @@ impl Default for States {
             sized: false,
             snap_next: false,
             env: 0,
+            env_reported: false,
             narrow_max: 1023.0,
             compact_max: 639.0,
             keyboard: false,
@@ -487,21 +494,20 @@ impl States {
         out
     }
 
-    /// The transition for `prop` of the most specific active variant of
-    /// `id`'s table that has one.
-    pub(crate) fn variant_transition(&self, id: u32, prop: Prop) -> Option<Timing> {
+    /// The transition list of the most specific active variant of `id`'s
+    /// table that has one: it replaces the node's own while it holds.
+    pub(crate) fn variant_transitions(&self, id: u32) -> Option<&[Transition]> {
         let t = self.tables.get(&id).filter(|t| t.transitioned)?;
         t.variants
             .iter()
             .rev()
-            .filter(|v| !v.transitions.is_empty() && self.active(v))
-            .find_map(|v| v.transitions.iter().find(|t| t.prop == prop))
-            .map(|t| t.timing)
+            .filter(|v| v.transitions.is_some() && self.active(v))
+            .find_map(|v| v.transitions.as_deref())
     }
 
     /// The animations of `id`'s active variants, in composite order:
     /// (key, rank, animation).
-    pub(crate) fn variant_animations(&self, id: u32) -> Vec<(u32, u32, Animation)> {
+    pub(crate) fn variant_animations(&self, id: u32) -> Vec<(u64, u64, Animation)> {
         let Some(t) = self.tables.get(&id).filter(|t| t.animated) else {
             return Vec::new();
         };
@@ -510,9 +516,9 @@ impl States {
             if v.animations.is_empty() || !self.active(v) {
                 continue;
             }
-            for (i, a) in v.animations.iter().enumerate() {
-                let key = crate::keyframes::key(Trigger::Variant, v.decl, i);
-                let rank = crate::keyframes::rank(Trigger::Variant, pos, i);
+            for a in &v.animations {
+                let key = crate::keyframes::key(Trigger::Variant, v.block, a.index);
+                let rank = crate::keyframes::rank(Trigger::Variant, pos, a.index);
                 out.push((key, rank, a.clone()));
             }
         }
@@ -769,8 +775,7 @@ impl Ui {
         };
         let mut keyed: Vec<((u32, u32), Variant)> = decls
             .iter()
-            .enumerate()
-            .map(|(decl, d)| {
+            .map(|d| {
                 let terms = d
                     .terms
                     .iter()
@@ -787,7 +792,7 @@ impl Ui {
                     env: d.env,
                     values: d.values,
                     layout,
-                    decl,
+                    block: d.block,
                     transitions: d.transitions.clone(),
                     animations: d.animations.clone(),
                 };
@@ -807,7 +812,7 @@ impl Ui {
             st.scope(t.scope, t.generation).dependents.push(id);
         }
         let uses_env = variants.iter().any(|v| v.env != 0);
-        let transitioned = variants.iter().any(|v| !v.transitions.is_empty());
+        let transitioned = variants.iter().any(|v| v.transitions.is_some());
         let animated = variants.iter().any(|v| !v.animations.is_empty());
         let uses_hover = variants
             .iter()
@@ -931,11 +936,19 @@ impl Ui {
         self.states.queue_env(changed);
         self.force_paint = true;
         // JS applies each animation's reduced-motion policy.
-        if changed & env_bit::REDUCED_MOTION != 0 {
-            let mut e = self.event(crate::events::out_kind::ENVIRONMENT, NodeId::NIL);
-            e.key = env as u32;
-            self.pending_events.push(e);
+        if changed & env_bit::REDUCED_MOTION != 0 && self.states.env_reported {
+            self.report_env();
         }
+    }
+
+    /// Tells JS the environment (`out_kind::ENVIRONMENT`): once when the
+    /// session starts (with its first transaction), so a new host learns
+    /// what was set before it, then on each reduced-motion change.
+    pub(crate) fn report_env(&mut self) {
+        self.states.env_reported = true;
+        let mut e = self.event(crate::events::out_kind::ENVIRONMENT, NodeId::NIL);
+        e.key = self.states.env as u32;
+        self.pending_events.push(e);
     }
 
     /// Sets the breakpoints (`ENVIRONMENT`); the next frame applies them.

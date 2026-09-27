@@ -24,6 +24,8 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use craie_core::rev::Rev;
+
 use crate::animation::{MAX_SECS, Prop, Spring, bezier, end_reason, lerp_color};
 use crate::host::{NodeId, Spatial, SpatialPatch};
 use crate::states::value_field;
@@ -101,6 +103,13 @@ impl Easing {
 
     /// Progress at `x` in [0, 1]; may leave [0, 1] (overshoot).
     pub fn at(&self, x: f64) -> f64 {
+        self.eval(x, false)
+    }
+
+    /// `at`, with CSS's before flag: in a backwards-filled delay, a step
+    /// that jumps at `x` has not jumped yet (`steps(n, jump-start)` is 0
+    /// there, not 1/n).
+    fn eval(&self, x: f64, before: bool) -> f64 {
         match self {
             Easing::Bezier([x1, y1, x2, y2]) => {
                 bezier(x, *x1 as f64, *y1 as f64, *x2 as f64, *y2 as f64)
@@ -110,6 +119,9 @@ impl Easing {
                 let mut step = (x * n).floor();
                 if matches!(*jump, jump::START | jump::BOTH) {
                     step += 1.0;
+                }
+                if before && (x * n).fract() == 0.0 {
+                    step -= 1.0;
                 }
                 let jumps = match *jump {
                     jump::NONE => n - 1.0,
@@ -250,12 +262,21 @@ impl Sample {
     }
 
     /// In range: finite, opacity in [0, 1], a color where `mask` has one.
-    fn valid(&self, mask: u16) -> bool {
-        (mask & value_field::COLOR == 0 || self.color.is_some())
-            && (0.0..=1.0).contains(&self.opacity)
+    fn check(&self, mask: u16) -> Result<(), &'static str> {
+        if mask & value_field::COLOR != 0 && self.color.is_none() {
+            return Err("keyframe color missing");
+        }
+        if !(self.opacity.is_finite()
             && self.translate.iter().all(|v| v.is_finite())
             && self.rotate.is_finite()
-            && self.scale.iter().all(|v| v.is_finite())
+            && self.scale.iter().all(|v| v.is_finite()))
+        {
+            return Err("keyframe value not finite");
+        }
+        if !(0.0..=1.0).contains(&self.opacity) {
+            return Err("keyframe opacity outside [0, 1]");
+        }
+        Ok(())
     }
 }
 
@@ -345,24 +366,44 @@ impl Keyframes {
     /// In range: 1 to `MAX_FRAMES` frames, offsets in [0, 1] and not
     /// descending, known channels, values and easings in range.
     pub fn is_valid(&self) -> bool {
-        (1..=MAX_FRAMES).contains(&self.frames.len())
-            && self.frames.iter().all(|f| {
-                (0.0..=1.0).contains(&f.at)
-                    && f.mask & !CHANNELS == 0
-                    && f.values.valid(f.mask)
-                    && f.easing.as_ref().is_none_or(Easing::is_valid)
-            })
-            && self.frames.windows(2).all(|w| w[0].at <= w[1].at)
+        self.check().is_ok()
+    }
+
+    /// `is_valid`, with what is wrong.
+    pub fn check(&self) -> Result<(), &'static str> {
+        if self.frames.is_empty() {
+            return Err("keyframes without a frame");
+        }
+        if self.frames.len() > MAX_FRAMES {
+            return Err("too many keyframes");
+        }
+        for f in &self.frames {
+            if !(0.0..=1.0).contains(&f.at) {
+                return Err("keyframe offset outside [0, 1]");
+            }
+            if f.mask & !CHANNELS != 0 {
+                return Err("keyframe channel unknown");
+            }
+            f.values.check(f.mask)?;
+            if !f.easing.as_ref().is_none_or(Easing::is_valid) {
+                return Err("keyframe easing out of range");
+            }
+        }
+        if self.frames.windows(2).any(|w| w[0].at > w[1].at) {
+            return Err("keyframe offsets out of order");
+        }
+        Ok(())
     }
 
     /// Overwrites the channels of `out` at iteration progress `p`, the
     /// implicit end frames taking `out`'s values (what lies under).
-    fn sample_into(&self, out: &mut Sample, p: f64, easing: &Easing) {
+    /// `before`: CSS's before flag (`Easing::eval`).
+    fn sample_into(&self, out: &mut Sample, p: f64, easing: &Easing, before: bool) {
         let mut bits = self.mask;
         while bits != 0 {
             let bit = bits & bits.wrapping_neg();
             bits &= bits - 1;
-            let v = self.channel(bit, p, out.get(bit), easing);
+            let v = self.channel(bit, p, out.get(bit), easing, before);
             out.set(bit, v);
         }
     }
@@ -371,7 +412,7 @@ impl Keyframes {
     /// at or before `p` and the next one after (the implicit frames at 0
     /// and 1 hold `under`; an underlying color that is unset holds the
     /// nearest frame's).
-    fn channel(&self, bit: u16, p: f64, under: Ch, default: &Easing) -> Ch {
+    fn channel(&self, bit: u16, p: f64, under: Ch, default: &Easing, before: bool) -> Ch {
         let mut from = (0.0, under, default);
         let mut to = None;
         for f in self.frames.iter().filter(|f| f.mask & bit != 0) {
@@ -395,7 +436,7 @@ impl Keyframes {
             return v;
         }
         let x = (p - at) / (to_at - at);
-        lerp(v, to_v, easing.at(x) as f32)
+        lerp(v, to_v, easing.eval(x, before) as f32)
     }
 }
 
@@ -457,7 +498,12 @@ impl Fill {
 /// seconds.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Animation {
+    /// Its position in the author's list, before any entry was filtered
+    /// out (a falsy one, a reduced-motion drop): with its trigger (and
+    /// variant block), its identity. Ascending in a list.
+    pub index: u8,
     pub keyframes: Arc<Keyframes>,
+    /// Seconds before it starts; negative starts it partway through (CSS).
     pub delay: f32,
     /// One iteration. With a spring easing, the spring's settle time
     /// (`Animation::new` sets it).
@@ -479,6 +525,7 @@ impl Animation {
             _ => duration,
         };
         Animation {
+            index: 0,
             keyframes,
             delay: 0.0,
             duration,
@@ -490,13 +537,29 @@ impl Animation {
     }
 
     pub fn is_valid(&self) -> bool {
-        let secs = |v: f32| v.is_finite() && (0.0..=MAX_SECS).contains(&v);
-        secs(self.delay)
-            && secs(self.duration)
-            && self.easing.is_valid()
-            && (self.iterations == f32::INFINITY && self.duration > 0.0
-                || (0.0..=1e6).contains(&self.iterations))
-            && self.keyframes.is_valid()
+        self.check().is_ok()
+    }
+
+    /// `is_valid`, with what is wrong: a delay in [-`MAX_SECS`,
+    /// `MAX_SECS`], a duration in [0, `MAX_SECS`], a finite count in [0,
+    /// 1e6] or an infinite one of some duration, easing and keyframes in
+    /// range.
+    pub fn check(&self) -> Result<(), &'static str> {
+        if !(-MAX_SECS..=MAX_SECS).contains(&self.delay) {
+            return Err("animation delay out of range");
+        }
+        if !(0.0..=MAX_SECS).contains(&self.duration) {
+            return Err("animation duration out of range");
+        }
+        if !self.easing.is_valid() {
+            return Err("animation easing out of range");
+        }
+        if !(self.iterations == f32::INFINITY && self.duration > 0.0
+            || (0.0..=1e6).contains(&self.iterations))
+        {
+            return Err("animation iterations out of range");
+        }
+        self.keyframes.check()
     }
 
     /// Runs forever.
@@ -541,6 +604,19 @@ impl Animation {
         (Some(p), true)
     }
 
+    /// Writes its sample at `t` seconds after its start over `out` (what
+    /// lies under); false when it shows none there.
+    fn sample(&self, t: f64, out: &mut Sample) -> bool {
+        let Some(p) = self.progress(t).0 else {
+            return false;
+        };
+        // CSS's before flag: in the delay, going forwards.
+        let before = t < self.delay as f64
+            && matches!(self.direction, Direction::Normal | Direction::Alternate);
+        self.keyframes.sample_into(out, p, &self.easing, before);
+        true
+    }
+
     /// Iteration `i`'s progress at `frac` in the declared direction.
     fn directed(&self, i: f64, frac: f64) -> f64 {
         let odd = i.rem_euclid(2.0) >= 1.0;
@@ -577,34 +653,45 @@ impl Trigger {
     }
 }
 
-/// An animation's identity, also its `ANIMATION_END` key without the
-/// reason: index | (trigger + 1) << 16 | variant declaration index << 24.
-pub(crate) fn key(trigger: Trigger, variant: usize, index: usize) -> u32 {
-    index as u32 | (trigger as u32 + 1) << 16 | (variant as u32) << 24
+/// An animation's identity: its trigger, the variant block declaring it
+/// (its position among the node's flattened blocks, before any was
+/// skipped) and its index in the author's list (`Animation::index`).
+/// The low 32 bits are its `ANIMATION_END` key without the reason:
+/// index | (trigger + 1) << 16.
+pub(crate) fn key(trigger: Trigger, block: u16, index: u8) -> u64 {
+    index as u64 | (trigger as u64 + 1) << 16 | (block as u64) << 32
 }
 
 /// Its composite order: enter, then the node's list, then variants by
 /// specificity (`position` in the table's order), each in list order.
-pub(crate) fn rank(trigger: Trigger, position: usize, index: usize) -> u32 {
-    (trigger as u32) << 24 | (position as u32) << 8 | index as u32
+pub(crate) fn rank(trigger: Trigger, position: usize, index: u8) -> u64 {
+    (trigger as u64) << 48 | (position as u64) << 8 | index as u64
 }
 
-fn trigger_of(key: u32) -> u32 {
-    (key >> 16 & 0xFF) - 1
+fn trigger_of(key: u64) -> u32 {
+    (key >> 16 & 0xFF) as u32 - 1
 }
 
-/// A running (or holding) keyframe animation.
+/// A declared keyframe animation: running, holding its fill, or done.
 #[derive(Clone, Debug)]
 pub(crate) struct Running {
-    key: u32,
-    rank: u32,
+    key: u64,
+    rank: u64,
     anim: Animation,
     start: f64,
     /// Its end is reported to JS (`out_kind::ANIMATION_END`).
     notify: bool,
-    /// Past its active phase: it holds its forward fill, or goes at the
-    /// next frame.
+    /// Past its active phase: it holds its forward fill, or stays as a
+    /// tombstone (covering and showing nothing) while it is declared, so
+    /// a re-send of it does not play it again.
     done: bool,
+}
+
+impl Running {
+    /// It shows a sample: running, or holding its forward fill.
+    fn shows(&self) -> bool {
+        !self.done || self.anim.fill.forwards()
+    }
 }
 
 /// A node's animations and what lies under them.
@@ -619,11 +706,53 @@ pub(crate) struct NodeMotion {
     under: Sample,
     /// The underlying values changed since the last sample.
     stale: bool,
+    /// The node is not drawn (`Ui::drawn`): nothing runs, covers or needs
+    /// frames, and every animation starts over when it is drawn again
+    /// (CSS's `display: none`).
+    parked: bool,
 }
 
 impl NodeMotion {
     fn cover(&self) -> u16 {
-        self.list.iter().fold(0, |m, r| m | r.anim.props())
+        if self.parked {
+            return 0;
+        }
+        self.list
+            .iter()
+            .filter(|r| r.shows())
+            .fold(0, |m, r| m | r.anim.props())
+    }
+
+    /// Animations that need frames.
+    fn live(&self) -> usize {
+        if self.parked {
+            return 0;
+        }
+        self.list.iter().filter(|r| !r.done).count()
+    }
+
+    /// The spatial pin (`Spatial::PIN_*`) it needs: an animation that
+    /// has not ended holds the transform record and opacity layer of
+    /// what it covers, so its frames at identity or opacity 1 (a loop's
+    /// boundary) change no draw topology and allocate nothing.
+    fn pin(&self) -> u8 {
+        if self.parked {
+            return 0;
+        }
+        let props = self
+            .list
+            .iter()
+            .filter(|r| !r.done)
+            .fold(0, |a, r| a | r.anim.props());
+        let has = |p: Prop| props & 1 << p as u16 != 0;
+        let mut pin = 0;
+        if has(Prop::Translate) || has(Prop::Rotate) || has(Prop::Scale) {
+            pin |= Spatial::PIN_TRANSFORM;
+        }
+        if has(Prop::Opacity) {
+            pin |= Spatial::PIN_LAYER;
+        }
+        pin
     }
 }
 
@@ -631,7 +760,8 @@ impl NodeMotion {
 #[derive(Default)]
 pub struct Motion {
     nodes: HashMap<u32, NodeMotion>,
-    /// Animations in their delay or active phase: they need frames.
+    /// Animations in their delay or active phase on drawn nodes: they
+    /// need frames.
     live: usize,
     /// Some node's underlying values changed.
     stale: bool,
@@ -640,7 +770,11 @@ pub struct Motion {
     /// Transactions executed (`births`' clock).
     txn: u64,
     /// Ends found by a frame, reported after it.
-    ended: Vec<(NodeId, u32)>,
+    ended: Vec<(NodeId, u64)>,
+    /// The structure revision the last drawn check saw.
+    structure: Rev,
+    /// A node gained a record since: check again.
+    recheck: bool,
 }
 
 impl Motion {
@@ -667,7 +801,7 @@ impl Motion {
     /// clean).
     pub(crate) fn forget(&mut self, node: NodeId) {
         if let Some(m) = self.nodes.remove(&node.0) {
-            self.live -= m.list.iter().filter(|r| !r.done).count();
+            self.live -= m.live();
         }
     }
 
@@ -676,7 +810,8 @@ impl Motion {
         self.live
     }
 
-    /// Nodes with keyframe animations (running or holding a fill).
+    /// Nodes with keyframe animations (running, holding a fill, or done
+    /// while still declared).
     pub fn node_count(&self) -> usize {
         self.nodes.len()
     }
@@ -787,16 +922,18 @@ impl Ui {
         true
     }
 
-    /// Starts animation `anim` on `node` now.
+    /// Starts animation `anim` on `node` now (parked with it when the
+    /// node is not drawn).
     fn start_keyframes(
         &mut self,
         node: NodeId,
-        key: u32,
-        rank: u32,
+        key: u64,
+        rank: u64,
         anim: Animation,
         notify: bool,
     ) {
-        let rows = self.row_sample(node);
+        // A new record: whether its node is drawn is checked next frame.
+        self.motion.recheck |= !self.motion.nodes.contains_key(&node.0);
         let m = self
             .motion
             .nodes
@@ -806,15 +943,8 @@ impl Ui {
                 covered: 0,
                 under: Sample::default(),
                 stale: false,
+                parked: false,
             });
-        // Newly covered props: what the rows hold lies under.
-        let fresh = anim.props() & !m.covered;
-        for p in COVERABLE {
-            if fresh & 1 << p as u16 != 0 {
-                m.under.copy(&rows, p);
-            }
-        }
-        m.covered |= fresh;
         let at = m.list.partition_point(|r| r.rank < rank);
         m.list.insert(
             at,
@@ -827,74 +957,62 @@ impl Ui {
                 done: false,
             },
         );
-        m.stale = true;
-        self.motion.live += 1;
-        self.motion.stale = true;
+        if !m.parked {
+            self.motion.live += 1;
+        }
         self.force_paint = true;
-        self.pin_loops(node);
+        self.recover(node);
     }
 
-    /// A loop holds the node's transform record and opacity layer, so
-    /// its frames at identity or opacity 1 change no draw topology (and
-    /// allocate nothing). The hold goes with the last loop.
-    fn pin_loops(&mut self, node: NodeId) {
-        let looping = self.motion.nodes.get(&node.0).map_or(0, |m| {
-            m.list
-                .iter()
-                .filter(|r| r.anim.infinite())
-                .fold(0, |a, r| a | r.anim.props())
-        });
-        let has = |p: Prop| looping & 1 << p as u16 != 0;
-        let mut pin = 0;
-        if has(Prop::Translate) || has(Prop::Rotate) || has(Prop::Scale) {
-            pin |= Spatial::PIN_TRANSFORM;
-        }
-        if has(Prop::Opacity) {
-            pin |= Spatial::PIN_LAYER;
-        }
-        self.pin_spatial(node, pin);
-    }
-
-    /// Ends the animation of `node` at `i` in its list (reported with
-    /// `reason` when JS asked and it had not ended). Props nothing covers
-    /// any more take their underlying values back at once.
-    fn end_keyframes(&mut self, node: NodeId, i: usize, reason: u32) {
-        let Some(m) = self.motion.nodes.get_mut(&node.0) else {
-            return;
-        };
-        let r = m.list.remove(i);
-        if !r.done {
-            self.motion.live -= 1;
-            if r.notify && !r.anim.infinite() {
-                self.report_keyframes_end(node, r.key, reason);
-            }
-        }
-        self.uncover(node);
-    }
-
-    /// Restores the props no animation of `node` covers any more; drops
-    /// its record when none runs.
-    fn uncover(&mut self, node: NodeId) {
+    /// Brings the node's cover up to its list: newly covered props take
+    /// what the rows hold as what lies under; props nothing covers any
+    /// more take theirs back at once. Drops the record when its list is
+    /// empty, and sets the node's pin.
+    fn recover(&mut self, node: NodeId) {
+        let rows = self.row_sample(node);
         let Some(m) = self.motion.nodes.get_mut(&node.0) else {
             return;
         };
         let before = m.covered;
         m.covered = m.cover();
+        let fresh = m.covered & !before;
+        for p in COVERABLE {
+            if fresh & 1 << p as u16 != 0 {
+                m.under.copy(&rows, p);
+            }
+        }
         m.stale = true;
         self.motion.stale = true;
-        let (gone, under) = (before & !m.covered, m.under);
+        let (gone, under, pin) = (before & !m.covered, m.under, m.pin());
         if m.list.is_empty() {
             self.motion.nodes.remove(&node.0);
         }
         if gone != 0 {
             self.write_sample(node, gone, &under);
         }
-        self.pin_loops(node);
+        self.pin_spatial(node, pin);
     }
 
-    fn report_keyframes_end(&mut self, node: NodeId, key: u32, reason: u32) {
+    /// Ends the animation of `node` at `i` in its list (reported with
+    /// `reason` when JS asked and it was running).
+    fn end_keyframes(&mut self, node: NodeId, i: usize, reason: u32) {
+        let Some(m) = self.motion.nodes.get_mut(&node.0) else {
+            return;
+        };
+        let parked = m.parked;
+        let r = m.list.remove(i);
+        if !r.done && !parked {
+            self.motion.live -= 1;
+            if r.notify && !r.anim.infinite() {
+                self.report_keyframes_end(node, r.key, reason);
+            }
+        }
+        self.recover(node);
+    }
+
+    fn report_keyframes_end(&mut self, node: NodeId, key: u64, reason: u32) {
         let mut e = self.event(crate::events::out_kind::ANIMATION_END, node);
-        e.key = key | reason << 8;
+        e.key = key as u32 | reason << 8;
         self.pending_events.push(e);
     }
 
@@ -911,7 +1029,7 @@ impl Ui {
     }
 
     /// Applies an `ANIMATION` op: `enter` starts only with the node's
-    /// creation; the node's list replaces the one running.
+    /// creation; the node's list replaces the one declared.
     pub(crate) fn declare_animations(
         &mut self,
         node: NodeId,
@@ -924,96 +1042,191 @@ impl Ui {
                 if !self.motion.newborn(node) {
                     return;
                 }
-                for (i, a) in anims.iter().enumerate() {
-                    let key = key(trigger, 0, i);
-                    self.start_keyframes(node, key, rank(trigger, 0, i), a.clone(), notify);
+                for a in anims {
+                    let (key, rank) = (key(trigger, 0, a.index), rank(trigger, 0, a.index));
+                    self.start_keyframes(node, key, rank, a.clone(), notify);
                 }
             }
             _ => {
-                let want: Vec<(u32, u32, Animation)> = anims
+                let want: Vec<(u64, u64, Animation)> = anims
                     .iter()
-                    .enumerate()
-                    .map(|(i, a)| (key(trigger, 0, i), rank(trigger, 0, i), a.clone()))
+                    .map(|a| {
+                        (
+                            key(trigger, 0, a.index),
+                            rank(trigger, 0, a.index),
+                            a.clone(),
+                        )
+                    })
                     .collect();
                 self.sync_keyframes(node, trigger, &want, notify);
             }
         }
     }
 
-    /// Makes `trigger`'s running animations of `node` the `want` list
-    /// (key, rank, animation): one with an equal key and animation keeps
-    /// running (its rank updated), a changed one restarts (`RETARGETED`),
-    /// one no longer wanted ends (`CANCELLED`), and a new one starts.
+    /// Makes `trigger`'s animations of `node` the `want` list (key, rank,
+    /// animation). One whose key is no longer wanted ends (`CANCELLED`);
+    /// one wanted with other keyframes starts over (`RETARGETED`); one
+    /// wanted with the same keyframes carries on, taking its new timing
+    /// in place while it runs (CSS) and staying over when done; a new key
+    /// starts.
     pub(crate) fn sync_keyframes(
         &mut self,
         node: NodeId,
         trigger: Trigger,
-        want: &[(u32, u32, Animation)],
+        want: &[(u64, u64, Animation)],
         notify: bool,
     ) {
         let t = trigger as u32;
         while let Some(m) = self.motion.nodes.get(&node.0) {
-            let stale = m.list.iter().position(|r| {
-                trigger_of(r.key) == t && !want.iter().any(|w| w.0 == r.key && w.2 == r.anim)
+            let stale = m.list.iter().enumerate().find_map(|(i, r)| {
+                if trigger_of(r.key) != t {
+                    return None;
+                }
+                match want.iter().find(|w| w.0 == r.key) {
+                    None => Some((i, end_reason::CANCELLED)),
+                    Some(w) if w.2.keyframes != r.anim.keyframes => {
+                        Some((i, end_reason::RETARGETED))
+                    }
+                    Some(_) => None,
+                }
             });
-            let Some(i) = stale else { break };
-            let reason = if want.iter().any(|w| w.0 == m.list[i].key) {
-                end_reason::RETARGETED
-            } else {
-                end_reason::CANCELLED
-            };
+            let Some((i, reason)) = stale else { break };
             self.end_keyframes(node, i, reason);
         }
+        let mut kept = false;
         for (key, rank, anim) in want {
-            match self.motion.nodes.get_mut(&node.0) {
-                Some(m) if m.list.iter().any(|r| r.key == *key) => {
-                    for r in m.list.iter_mut().filter(|r| r.key == *key) {
-                        r.rank = *rank;
-                        r.notify = notify;
+            let held = self
+                .motion
+                .nodes
+                .get_mut(&node.0)
+                .and_then(|m| m.list.iter_mut().find(|r| r.key == *key));
+            match held {
+                Some(r) => {
+                    r.rank = *rank;
+                    r.notify = notify;
+                    if !r.done {
+                        r.anim = anim.clone();
                     }
-                    m.list.sort_by_key(|r| r.rank);
-                    m.stale = true;
-                    self.motion.stale = true;
+                    kept = true;
                 }
-                _ => self.start_keyframes(node, *key, *rank, anim.clone(), notify),
+                None => self.start_keyframes(node, *key, *rank, anim.clone(), notify),
             }
+        }
+        if let Some(m) = self.motion.nodes.get_mut(&node.0).filter(|_| kept) {
+            m.list.sort_by_key(|r| r.rank);
+            m.stale = true;
+            self.motion.stale = true;
         }
     }
 
     /// Starts and stops the node's variant animations with its variants.
     pub(crate) fn sync_variant_animations(&mut self, id: u32) {
         let want = self.states.variant_animations(id);
-        let running = self.motion.nodes.get(&id).is_some_and(|m| {
+        let declared = self.motion.nodes.get(&id).is_some_and(|m| {
             m.list
                 .iter()
                 .any(|r| trigger_of(r.key) == Trigger::Variant as u32)
         });
-        if !want.is_empty() || running {
+        if !want.is_empty() || declared {
             self.sync_keyframes(NodeId(id), Trigger::Variant, &want, false);
         }
     }
 
-    /// Samples every node with keyframe animations and writes their rows
-    /// (the top of `render`, after the tweens wrote the underlying
-    /// values). Ends finished animations; one without a forward fill lets
-    /// go of its props. Nodes with nothing running and nothing changed
-    /// are skipped; idle, nothing runs.
+    /// Whether `node` is drawn: in a root's tree, with no `display: none`
+    /// on it or above. Exits (next) will count an exiting subtree as
+    /// drawn, though it is detached: this is the test, not attachment.
+    fn drawn(&self, node: NodeId) -> bool {
+        let mut cur = node;
+        loop {
+            let Some(n) = self.host.node(cur) else {
+                return false;
+            };
+            if self.host.display_none(cur) {
+                return false;
+            }
+            let p = n.parent();
+            if p.is_nil() {
+                return true;
+            }
+            if !p.is_node() {
+                return false;
+            }
+            cur = p;
+        }
+    }
+
+    /// Parks the animations of nodes no longer drawn (their running ones
+    /// end, `CANCELLED`) and starts over those of nodes drawn again, as
+    /// CSS does across `display: none`. Runs when the tree's structure or
+    /// visibility changed, or a node gained animations.
+    fn park_undrawn(&mut self) {
+        let ids: Vec<u32> = self.motion.nodes.keys().copied().collect();
+        for id in ids {
+            let node = NodeId(id);
+            let drawn = self.drawn(node);
+            let Some(m) = self.motion.nodes.get_mut(&id) else {
+                continue;
+            };
+            if m.parked != drawn {
+                continue;
+            }
+            if drawn {
+                m.parked = false;
+                for r in &mut m.list {
+                    r.start = self.time;
+                    r.done = false;
+                }
+                self.motion.live += m.live();
+            } else {
+                self.motion.live -= m.live();
+                m.parked = true;
+                let ends: Vec<u64> = m
+                    .list
+                    .iter()
+                    .filter(|r| !r.done && r.notify && !r.anim.infinite())
+                    .map(|r| r.key)
+                    .collect();
+                for key in ends {
+                    self.report_keyframes_end(node, key, end_reason::CANCELLED);
+                }
+            }
+            self.force_paint = true;
+            self.recover(node);
+        }
+        self.motion.recheck = false;
+        self.motion.structure = self.host.revs.structure;
+    }
+
+    /// Samples every drawn node with keyframe animations and writes their
+    /// rows (the top of `render`, after the tweens wrote the underlying
+    /// values). Marks finished animations done; one without a forward
+    /// fill lets go of its props. Nodes with nothing running and nothing
+    /// changed are skipped; idle, nothing runs.
     pub(crate) fn run_keyframes(&mut self) {
+        if (self.motion.recheck || self.motion.structure != self.host.revs.structure)
+            && !self.motion.nodes.is_empty()
+        {
+            self.park_undrawn();
+        }
         if !self.motion.busy() {
             return;
         }
         let now = self.time;
         let mut nodes = std::mem::take(&mut self.motion.nodes);
         let mut ended = std::mem::take(&mut self.motion.ended);
+        let mut emptied = false;
         for (&id, m) in nodes.iter_mut() {
             let mut touched = std::mem::take(&mut m.stale);
+            if m.parked {
+                continue;
+            }
             let mut finished = false;
             for r in m.list.iter_mut().filter(|r| !r.done) {
                 touched = true;
                 if r.anim.progress(now - r.start).1 {
                     r.done = true;
                     self.motion.live -= 1;
-                    finished |= !r.anim.fill.forwards();
+                    finished = true;
                     if r.notify {
                         ended.push((NodeId(id), r.key));
                     }
@@ -1024,14 +1237,16 @@ impl Ui {
             }
             let before = m.covered;
             if finished {
-                m.list.retain(|r| !r.done || r.anim.fill.forwards());
+                // A done `enter` is never declared again: nothing to
+                // keep unless it holds its fill.
+                let enter = Trigger::Enter as u32;
+                m.list.retain(|r| r.shows() || trigger_of(r.key) != enter);
+                emptied |= m.list.is_empty();
                 m.covered = m.cover();
             }
             let mut out = m.under;
-            for r in &m.list {
-                if let (Some(p), _) = r.anim.progress(now - r.start) {
-                    r.anim.keyframes.sample_into(&mut out, p, &r.anim.easing);
-                }
+            for r in m.list.iter().filter(|r| r.shows()) {
+                r.anim.sample(now - r.start, &mut out);
             }
             // Released props show what lies under; the rest the sample.
             let gone = before & !m.covered;
@@ -1039,8 +1254,13 @@ impl Ui {
                 self.write_sample(NodeId(id), gone, &m.under);
             }
             self.write_sample(NodeId(id), m.covered, &out);
+            if finished {
+                self.pin_spatial(NodeId(id), m.pin());
+            }
         }
-        nodes.retain(|_, m| !m.list.is_empty());
+        if emptied {
+            nodes.retain(|_, m| !m.list.is_empty());
+        }
         self.motion.nodes = nodes;
         self.motion.stale = false;
         for (node, key) in ended.drain(..) {
@@ -1076,10 +1296,8 @@ mod tests {
 
     /// The sample at `t` over `under`.
     fn at(a: &Animation, t: f64, under: Sample) -> Option<Sample> {
-        let (p, _) = a.progress(t);
         let mut out = under;
-        a.keyframes.sample_into(&mut out, p?, &a.easing);
-        Some(out)
+        a.sample(t, &mut out).then_some(out)
     }
 
     fn close(a: f32, b: f32) -> bool {
@@ -1176,6 +1394,15 @@ mod tests {
         f0.easing = Some(end);
         let a = anim(vec![f0, opacity(1.0, 1.0)], 1.0);
         assert!(close(at(&a, 0.6, Sample::default()).unwrap().opacity, 0.5));
+        // CSS's before flag: in a backwards-filled delay, jump-start
+        // shows the first frame, not the first step; once running, the
+        // first step.
+        let mut a = anim(vec![opacity(0.0, 0.0), opacity(1.0, 1.0)], 1.0);
+        a.easing = start;
+        a.delay = 1.0;
+        a.fill = Fill::Backwards;
+        let o = |t: f64| at(&a, t, Sample::default()).unwrap().opacity;
+        assert_eq!([o(0.5), o(1.0), o(1.3)], [0.0, 0.25, 0.5]);
     }
 
     #[test]

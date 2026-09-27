@@ -800,41 +800,77 @@ Reviewer minors and nitpicks not fixed yet.
   unreported, because native starts and stops variant animations
   without JS and sends them with notify off.
 - Why deferred: nothing waits on one. Kit variant motion is loops and
-  presses, and the facade would also need the variant's declaration
-  index back.
+  presses. The key already carries the variant's block position
+  (review #21), so reporting needs only notify and a JS lookup.
 - Resolves in: the first consumer that chains work on a state's
   animation.
 
-### DF-57: end indices of a list replaced under reduced motion
+### DF-58: an `enter` with a forwards fill holds for good
 
-- Source: work item 6 (keyframe animations).
-- Where: packages/bridge/src/host.ts (`motionIndex`, `dispatchEvent`).
-- Claim: an end event carries the wire index, and the host maps it
-  back to the prop's index through the list it sent last. When
-  reduced motion dropped entries and a new list replaces the old one,
-  the old list's `retargeted` or `cancelled` ends arrive after the new
-  map is in place. Take `[spin, fadeIn]`, with `reducedMotion: "fade"`
-  on the 200 ms fadeIn, so it sends as `[fadeIn]`. Within 200 ms it is
-  replaced by `[pop, spin, fadeIn]`, which sends as `[pop, fadeIn]`.
-  Native ends the old fadeIn (wire 0) as retargeted, and the new map
-  reads wire 0 as `pop` (index 0) instead of fadeIn (index 1). Without
-  reduced motion, or when the policy drops nothing, the map is the
-  identity and every index is right.
-- Why deferred: it needs a per-send generation in the event key (or
-  the old maps kept until their ends arrive), for a case that needs
-  reduced motion, a dropped loop, and a replaced list with a handler
-  that reads `index`.
-- Resolves in: when a consumer reads `index` on retargeted ends.
+- Source: work item 6 (keyframe animations), review #21 m5.
+- Where: crates/ui/src/keyframes.rs (`run_keyframes`,
+  `declare_animations`), packages/bridge/src/index.ts (`enter`).
+- Claim: an `enter` with `fill: "forwards"` or `"both"` holds its last
+  frame over the node's own value after it ends, and nothing clears
+  it: an enter op applies only in the transaction that creates the
+  node, so no later op can re-declare or drop it. Take `enter={{
+  keyframes: [{ at: 1, opacity: 0.5 }], fill: "forwards" }}`: a later
+  `style={{ opacity: 1 }}` doesn't show. The default fill
+  (`backwards`) and `none` let go at the end, as intended.
+- Why deferred: it is what the declaration says (CSS holds a forwards
+  fill as long as the animation is applied, and an enter is applied
+  for the node's life), and no kit preset uses a forwards enter. An
+  empty `enter` op after creation could clear it if one ever needs to.
+- Resolves in: exits (next PR), if an exit needs to take over from a
+  holding enter; else the first consumer that hits it.
+
+### DF-59: a running `enter` keeps on when reduced motion turns on
+
+- Source: work item 6 (keyframe animations), review #21 docs nit.
+- Where: packages/bridge/src/host.ts (`setReducedMotion`).
+- Claim: turning reduced motion on re-sends each node's transitions,
+  `animation` list and variants under the new policies, but not
+  `enter`: an enter applies only at creation, so a re-send would do
+  nothing. An enter already running when the setting flips plays out
+  at full length (at most its duration, 200 ms for the kit's).
+- Why deferred: the window is one enter's length, and cutting it
+  short needs an "end now" op for a running enter.
+- Resolves in: with exits (next PR), which need to end enters early
+  too, or when the platform bit lands (DF-25).
+
+### DF-60: a reversed transition runs its full duration
+
+- Source: work item 6 (keyframe animations), review #21 m1.
+- Where: crates/ui/src/animation.rs (`Ui::transition`).
+- Claim: CSS shortens a transition that reverses mid-flight (its
+  "reversing shortening factor": leaving hover 30 ms into a 120 ms
+  scale-in takes about 30 ms back). Craie retargets from the current
+  value with the full duration of the style being entered, so the
+  same exit takes the base's whole timing.
+- Why deferred: not small. It needs the reversing-adjusted start value
+  and factor kept per tween (CSS Transitions §3.4.4), for a difference
+  that shows only on quick in-and-out gestures.
+- Resolves in: with DF-5 (retargeting restarts the full duration),
+  which touches the same path.
 
 ## Closed
 
+- DF-57 (work item 6, review #21 M1): end indices were wire indices
+  mapped back through the last list sent, so an old list's ends could
+  read the new map. An animation's identity is now its index in the
+  author's list, sent on the wire: the end event carries it and the
+  host's `motionIndex` map is gone.
+
 - DF-22 (work item 6, keyframe animations): a variant could change
   what a property is, not how it moves. A variant's `style.transition`
-  now times the changes into it (the most specific active variant
-  that times a property, else the node's own), per property, and its
+  now replaces the node's transition list while the variant is the
+  most specific active one with a list, as CSS does (review #21 m1;
+  Marbre's web kit emits a whole list per variant), and its
   `animation` runs natively while it holds: `_hover: { style: { scale:
   1.02, transition: { scale: { duration: 120 } } } }` scales in over
-  120 ms and back with the base's timing.
+  120 ms and back with the base's timing, and an opacity change during
+  that hover jumps. `transition: "none"` in a variant times nothing.
+  CSS's shortening of a reversed transition is DF-60.
 
 - DF-21 (work item 6, transform parts): a variant's transform replaced
   the whole matrix. The spatial row now holds translate, rotate, scale
@@ -1165,3 +1201,13 @@ Reviewer minors and nitpicks not fixed yet.
 - PR20-08 (groups review, n3): a `group` bit in `Interaction` spares Tab and group walks a `Ui::groups` lookup on each node. It isn't a `NodeFlags` bit because the header's flag byte is full (8 of 8) and the header is 16 bytes. `Interaction` stays 12 bytes.
 - PR20-09 (groups review, n4): the Built paragraph says an outer selectOnFocus group's arrow into a nested group activates the inner group's stop.
 - PR20-10 (groups review, n5): the group node reports AccessKit's orientation from its flags (horizontal or vertical; none for both). `the_orientation_is_in_the_accessibility_tree` covers all three.
+- PR21-01 (animations review, M1): native keyed an animation by its position on the wire, so a falsy or policy-dropped entry restarted every entry after it (`[busy && fade, spin]`: `busy` going false restarted the spin). Each entry now carries its index in the author's list, counted before filtering (a u8 first in the entry; indices rise within a list, checked). The key is `index | trigger + 1 << 16 | block << 32` (u64): a variant's block is its position among the node's flattened blocks, sent or not (a u16 before the ANIMATIONS count), so 256+ variants no longer collide. The end event's index is the prop's index; `motionIndex` is gone (DF-57 closed). `entries_keep_their_phase_as_others_come_and_go` covers the list (the drop is the same op as a reduced-motion one) and a variant block appearing before a loop's; the facade test covers an empty block keeping the later block's position.
+- PR21-02 (animations review, M2): a finished finite animation without a forwards fill was forgotten, so any re-sync replayed it. It now stays as a tombstone while its key is declared (not live, covers nothing, not sampled) and goes when its entry does or its variant stops applying. A re-send with the same key and keyframes updates in place (timing only while it runs, as CSS); changed keyframes restart it. `a_done_animation_never_replays_while_declared` covers (a) an app state restyling a held hover, (b) `[shake]` growing to `[shake, spin]`, (c) re-timing to 0 s and back (no replay, no second end) and a running one re-timed to 0 s ending once; `a_list_restarts_on_changed_keyframes_only` covers timing in place and keyframes restarting.
+- PR21-03 (animations review, m1): a variant's `transition` replaces the node's list while it holds, as CSS and Marbre's web kit do; `"none"` or `{}` sends an empty list (TRANSITIONS bit with count 0). Leaving uses the base's list. `a_variant_transition_list_replaces_the_nodes` covers the jump during hover, leaving, and an empty list. DF-22's closing note says so; the reversed-transition shortening is DF-60.
+- PR21-04 (animations review, m2): animations on a node that isn't drawn (display none, under a hidden ancestor, detached) no longer run, count as live or force frames; running ones end `cancelled`, and all start over when the node is drawn again, as CSS does. `Ui::drawn` walks the ancestors (exits will keep an exiting subtree drawn though detached; the hook comment is there), rechecked when the structure revision moves or a node gains motion. `animations_run_only_on_drawn_nodes` covers a spinner under a hidden parent and a detached node.
+- PR21-05 (animations review, m3): any animation not yet done pins the parts it covers, finite ones included, until it ends. The allocations invariant's pulse is now 100 iterations and lands on boundaries with 0 allocations (pinning loops only: 332 allocations over the run).
+- PR21-06 (animations review, m4): the facade throws on unknown keyframe keys, naming the key (`keyframes cannot animate "bg"`). Native's validation names the fault: frames out of order, offsets outside [0, 1], no frame, non-finite values, opacity range, unknown channel, easing and timing ranges (`malformed_keyframes_say_why`).
+- PR21-07 (animations review, m5): an `enter` with a forwards or both fill holds over the node's value for good: documented in topic 7, the `enter` JSDoc and DF-58.
+- PR21-08 (animations review, m6): native reports the environment once when a session starts (its first transaction), so a host created late learns reduced motion; later reports come only on change (`the_session_starts_with_the_environment`).
+- PR21-09 (animations review, m7): delays in [-600, 600] s are accepted on both sides and start partway through, as CSS (`a_negative_delay_starts_partway`, and the facade's delay test).
+- PR21-10 (animations review, nits): steps take CSS's before flag (jump-start and jump-both show 0 during a backwards-filled delay); the `AnimationEndEvt` JSDoc drops `removed` (a removed node reports nothing; `animate` resolves `removed` in JS on release); the Rust encoder checks its keyframes table index (`the_encoder_checks_its_keyframes_table`); `the_more_specific_variant_animation_wins` ranks two variants animating one property; topic 7 says a changed entry's keyframes restart it, not its position; DF-59 records a running `enter` continuing after reduced motion turns on.

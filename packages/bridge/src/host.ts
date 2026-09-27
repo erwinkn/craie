@@ -327,9 +327,6 @@ export interface HostNode {
   /** The `animation` list last sent, after the policy, and whether it
    * reports ends ("": none). */
   sentAnimation?: string
-  /** Per trigger (enter, animation): each sent animation's index in
-   * its prop, for `onAnimationEnd`. */
-  motionIndex?: [number[]?, number[]?]
   /** `animate` calls not ended yet, oldest first (native keeps one tween
    * per property, so ends arrive in call order per property). */
   pendingAnims?: { prop: number; resolve: (end: AnimationEnd) => void }[]
@@ -786,12 +783,13 @@ function variantsKey(list: readonly VariantIn[]): string {
 }
 
 /** A variant block's motion in wire form, under the reduced-motion
- * setting: its `style.transition` and `animation`. */
+ * setting: its `style.transition` (declared, even empty or `"none"`, it
+ * replaces the node's list while the variant holds) and `animation`. */
 function variantMotion(n: HostNode, block: Record<string, any>, reduced: boolean): Pick<VariantIn, "transitions" | "animations"> {
   const out: Pick<VariantIn, "transitions" | "animations"> = {}
   const t = transitionsIn(block.style?.transition, reduced)
-  if (t && Object.values(t).some(x => x !== undefined)) out.transitions = t
-  const { list } = animationList(block.animation, FILL.none, reduced, n.kind !== 1)
+  if (t) out.transitions = t
+  const list = animationList(block.animation, FILL.none, reduced, n.kind !== 1)
   if (list.length) out.animations = list
   return out
 }
@@ -1039,7 +1037,9 @@ export class CraieHost {
       if (!n.mounted || n.textParent) continue
       const list: VariantIn[] = []
       const hidden = !!(n.props.hidden || n.suspended)
-      for (const p of flattenVariants(n.props, n.props.__scopes ?? null)) {
+      // A block's position counts the blocks not sent: it keys the
+      // variant's animations, so others coming and going leave them be.
+      for (const [block, p] of flattenVariants(n.props, n.props.__scopes ?? null).entries()) {
         const values = variantValues(n, p.block, hidden)
         const motion = variantMotion(n, p.block, this.reducedMotion)
         if (!values && !motion.transitions && !motion.animations) continue
@@ -1048,7 +1048,7 @@ export class CraieHost {
           if (!ref.node?.mounted) break
           terms.push({ scope: ref.node.id, mask })
         }
-        if (terms.length === p.terms.size) list.push({ terms, env: p.env, values: values ?? {}, ...motion })
+        if (terms.length === p.terms.size) list.push({ terms, env: p.env, values: values ?? {}, ...motion, block })
       }
       const key = variantsKey(list)
       if (key !== (n.sentVariants ?? "")) {
@@ -1178,9 +1178,9 @@ export class CraieHost {
         const reason = END_REASON[(ev.key >>> 8) & 0xff] ?? "cancelled"
         const trigger = (ev.key >>> 16) & 0xff
         if (trigger) {
-          // A keyframe animation's (key: index | reason << 8 | trigger
-          // + 1 << 16).
-          const index = root.motionIndex?.[trigger - 1]?.[prop] ?? prop
+          // A keyframe animation's (key: its index in the prop | reason
+          // << 8 | trigger + 1 << 16).
+          const index = prop
           const animation = trigger === 1 ? "enter" : "animation"
           root.props.onAnimationEnd?.({ target: root, animation, index, finished: reason === "finished", reason })
           break
@@ -1298,7 +1298,6 @@ export class CraieHost {
     n.sentVariants = undefined
     n.sentTransitions = undefined
     n.sentAnimation = undefined
-    n.motionIndex = undefined
     this.nodes.set(n.id, n)
     if (!this.ready()) return
     const enc = this.encoder
@@ -1784,7 +1783,7 @@ export class CraieHost {
   private sendAnimations(n: HostNode, trigger: 0 | 1) {
     const p = n.props
     const fill = trigger === 0 ? FILL.backwards : FILL.none
-    const { list, index } = animationList(trigger === 0 ? p.enter : p.animation, fill, this.reducedMotion, n.kind !== 1)
+    const list = animationList(trigger === 0 ? p.enter : p.animation, fill, this.reducedMotion, n.kind !== 1)
     const notify = p.onAnimationEnd !== undefined && list.some(a => a.iterations !== Infinity)
     if (trigger === 1) {
       const key = list.length ? JSON.stringify([notify, list]) : ""
@@ -1793,7 +1792,6 @@ export class CraieHost {
     } else if (!list.length) {
       return
     }
-    ;(n.motionIndex ??= [])[trigger] = index
     this.encoder.animation(n.id, trigger, notify, list)
   }
 

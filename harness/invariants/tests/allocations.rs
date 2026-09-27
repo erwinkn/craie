@@ -162,7 +162,8 @@ fn steady_frames_do_not_allocate() {
 
     // Keyframe loops: a spin and a pulse on two nodes, sampled each frame
     // on the native clock, allocate nothing past their start, iteration
-    // boundaries included.
+    // boundaries included. The pulse is finite (100 iterations): it pins
+    // like a loop until it ends.
     let spin = Arc::new(Keyframes::new(vec![
         frame(0.0, value_field::ROTATE, |s| s.rotate = 0.0),
         frame(1.0, value_field::ROTATE, |s| s.rotate = TAU),
@@ -186,7 +187,14 @@ fn steady_frames_do_not_allocate() {
             5,
             Trigger::Base,
             false,
-            &[forever(&spin, 2.0), forever(&pulse, 0.5)],
+            &[
+                forever(&spin, 2.0),
+                Animation {
+                    index: 1,
+                    iterations: 100.0,
+                    ..forever(&pulse, 0.5)
+                },
+            ],
         );
     // They start at 0.5: every quarter second after is exact in binary.
     ui.set_time(0.5);

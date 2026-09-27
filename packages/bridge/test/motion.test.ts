@@ -159,14 +159,19 @@ test("reduced motion: skip, fade and keep, followed live", async () => {
   const [list] = tagged(ops, 0xa3)
   const [skipped, faded, kept] = list!.animations!
   expect(list!.animations!.length).toBe(3)
+  // Each keeps its index in the prop: the dropped loops move nothing.
+  expect(list!.animations!.map(a => a.index)).toEqual([1, 2, 3])
   expect([skipped!.delay, skipped!.duration, skipped!.fill]).toEqual([0, 0, 1])
   expect(faded!.duration).toBeCloseTo(0.2, 5)
   expect(tagged(ops, 0xa2).find(k => k.frames![0]!.mask === 16)!.frames![0]!.values).toEqual([0])
   expect([kept!.iterations, kept!.duration]).toEqual([Infinity, 2])
-  // The variant loses both its transition (skip) and its loop.
-  expect(tagged(ops, 0xb1)[0]!.variants).toEqual([])
+  // The variant loses its loop, and its transition (skip): its list
+  // is empty, and still replaces the node's while hover holds.
+  const [hover] = tagged(ops, 0xb1)[0]!.variants!
+  expect([hover!.transitions, hover!.animations]).toEqual([[], undefined])
 
-  // Ends map back to the prop's indices: wire 2 is `animation[3]`.
+  // Ends carry the prop's index: the fade is `animation[1]`, alone on
+  // the wire.
   const got: unknown[] = []
   const t2 = new FakeTransport()
   createRoot(t2).renderSync(createElement(View, {
@@ -177,8 +182,8 @@ test("reduced motion: skip, fade and keep, followed live", async () => {
   reduced(t2, true)
   await tick()
   const [only] = tagged(t2.ops(), 0xa3)
-  expect([only!.notify, only!.animations!.length]).toEqual([1, 1])
-  t2.event!(ev(15, 0, 0 | (0 << 8) | (2 << 16)))
+  expect([only!.notify, only!.animations!.map(a => a.index)]).toEqual([1, [1]])
+  t2.event!(ev(15, 0, 1 | (0 << 8) | (2 << 16)))
   expect(got).toEqual([["animation", 1, "finished"]])
 
   // Off again: everything goes back as declared.
@@ -186,4 +191,43 @@ test("reduced motion: skip, fade and keep, followed live", async () => {
   await tick()
   expect(tagged(t.ops(), 0xa3)[0]!.animations!.length).toBe(5)
   expect(tagged(t.ops(), 0xb1)[0]!.variants!.length).toBe(1)
+})
+
+test("keyframes name what they cannot animate", () => {
+  const a = (k: Record<string, unknown>) => ({ keyframes: [{ at: 0, ...k } as Keyframe], duration: 100 })
+  expect(() => animationIn(a({ bg: "red" }), 0, false)).toThrow(/"bg"/)
+  expect(() => animationIn(a({ backgroundColour: "red" }), 0, false)).toThrow(/"backgroundColour"/)
+  expect(() => animationIn(a({ width: 10 }), 0, false)).toThrow(/"width"/)
+})
+
+test("a negative delay starts partway, within 600 s", () => {
+  const enc = new Encoder()
+  const a = (delay: number) => animationIn({ keyframes: [{ at: 0, opacity: 0 }], duration: 1000, delay }, 0, false)!
+  expect(a(-500).delay).toBeCloseTo(-0.5, 9)
+  enc.animation(1, 1, false, [a(-500), { ...a(-600_000), index: 1 }])
+  expect(() => enc.animation(1, 1, false, [a(-600_500)])).toThrow(/delay/)
+  expect(() => enc.animation(1, 1, false, [a(0), a(0)])).toThrow(/indices/)
+})
+
+test("variants: blocks keep their positions, and a transition list replaces", async () => {
+  const t = new FakeTransport()
+  const root = createRoot(t)
+  const render = (busy: boolean) =>
+    root.renderSync(createElement(View, {
+      group: true,
+      style: { transition: { opacity: { duration: 100 } } },
+      _pressed: busy ? { style: { opacity: 0.5 } } : {},
+      _hover: { style: { scale: 1.02, transition: "none" } },
+      _selected: { animation: loop(pulse, 400) },
+    }))
+  render(false)
+  await tick()
+  const sent = () => tagged(t.ops(), 0xb1)[0]!.variants!
+  // The empty `_pressed` block goes unsent but keeps its position: the
+  // loop is block 2 either way. `"none"` sends an empty list.
+  let [hover, selected] = sent()
+  expect([hover!.transitions, hover!.block, selected!.block]).toEqual([[], undefined, 2])
+  render(true)
+  await tick()
+  expect(sent().map(v => v.block)).toEqual([undefined, undefined, 2])
 })

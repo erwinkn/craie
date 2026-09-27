@@ -118,8 +118,10 @@ pub mod op {
     /// id u32 | count u16 | count × (term_count u8 | env u8 |
     /// term_count × (scope u32, mask u64) | values | motion); count 0
     /// removes. The values' mask may carry `value_field::TRANSITIONS`
-    /// (then count u8 × (prop u8, timing)) and `ANIMATIONS` (count u8 ×
-    /// animation), in that order, after the values.
+    /// (then count u8 × (prop u8, timing): the list that replaces the
+    /// node's while the variant holds; count 0: none) and `ANIMATIONS`
+    /// (block u16, the variant's position among the node's flattened
+    /// blocks | count u8 × animation), in that order, after the values.
     pub const VARIANTS: u8 = 0xB1;
     /// narrow_max f32 | compact_max f32
     pub const ENVIRONMENT: u8 = 0xB2;
@@ -756,7 +758,7 @@ pub fn encode(txn: &Transaction<'_>) -> Vec<u8> {
                         u32le(&mut ops, t.scope);
                         ops.extend_from_slice(&t.mask.to_le_bytes());
                     }
-                    let motion = if v.transitions.is_empty() {
+                    let motion = if v.transitions.is_none() {
                         0
                     } else {
                         value_field::TRANSITIONS
@@ -766,14 +768,15 @@ pub fn encode(txn: &Transaction<'_>) -> Vec<u8> {
                         value_field::ANIMATIONS
                     };
                     put_values(&mut ops, &v.values, motion);
-                    if !v.transitions.is_empty() {
-                        ops.push(v.transitions.len() as u8);
-                        for t in &v.transitions {
+                    if let Some(list) = &v.transitions {
+                        ops.push(list.len() as u8);
+                        for t in list {
                             ops.push(t.prop as u8);
                             put_timing(&mut ops, &t.timing);
                         }
                     }
                     if !v.animations.is_empty() {
+                        ops.extend_from_slice(&v.block.to_le_bytes());
                         ops.push(v.animations.len() as u8);
                         for a in &v.animations {
                             put_animation(&mut ops, &keyframes, a);
@@ -1435,31 +1438,34 @@ pub fn decode(buf: &[u8]) -> Result<Transaction<'_>, WireError> {
                     let mut values = r.values(value_field::MOTION)?;
                     let motion = values.mask & value_field::MOTION;
                     values.mask &= !value_field::MOTION;
-                    let mut transitions = Vec::new();
+                    let mut transitions = None;
                     if motion & value_field::TRANSITIONS != 0 {
                         let count = r.u8()? as usize;
                         if count > Prop::COUNT {
                             return Err(WireError::BadRef("transition count"));
                         }
+                        let mut list = Vec::with_capacity(count);
                         for _ in 0..count {
                             let prop = Prop::from_u8(r.u8()?)
                                 .ok_or(WireError::BadRef("animation property"))?;
-                            transitions.push(Transition {
+                            list.push(Transition {
                                 prop,
                                 timing: r.timing()?,
                             });
                         }
+                        transitions = Some(list);
                     }
-                    let animations = if motion & value_field::ANIMATIONS != 0 {
-                        r.animations(&keyframes)?
-                    } else {
-                        Vec::new()
-                    };
+                    let (mut block, mut animations) = (0, Vec::new());
+                    if motion & value_field::ANIMATIONS != 0 {
+                        block = r.u16()?;
+                        animations = r.animations(&keyframes)?;
+                    }
                     variants.push(VariantDecl {
                         terms,
                         env,
                         values,
                         transitions,
+                        block,
                         animations,
                     });
                 }
@@ -1697,7 +1703,9 @@ fn intern_keyframes(
         if table.contains_key(&key) {
             continue;
         }
-        table.insert(key, table.len() as u16);
+        let index = u16::try_from(table.len())
+            .expect("more than 65,536 keyframes lists in one transaction");
+        table.insert(key, index);
         ops.push(op::KEYFRAMES);
         let frames = a.keyframes.frames();
         ops.extend_from_slice(&(frames.len() as u16).to_le_bytes());
@@ -1709,7 +1717,8 @@ fn intern_keyframes(
     }
 }
 
-/// An animation: keyframes u16 (the table index) | delay f32 | duration
+/// An animation: index u8 (its position in the author's list,
+/// `Animation::index`) | keyframes u16 (the table index) | delay f32 | duration
 /// f32 (ignored with a spring easing: its settle time) | easing |
 /// iterations f32 (inf: infinite) | direction u8 | fill u8
 /// (`keyframes::Direction`, `Fill`).
@@ -1718,6 +1727,7 @@ fn put_animation(
     table: &std::collections::HashMap<*const Keyframes, u16>,
     a: &Animation,
 ) {
+    out.push(a.index);
     out.extend_from_slice(&table[&Arc::as_ptr(&a.keyframes)].to_le_bytes());
     f32le(out, a.delay);
     f32le(out, a.duration);
@@ -1804,6 +1814,7 @@ impl Reader<'_> {
         let count = self.u8()? as usize;
         let mut out = Vec::with_capacity(count);
         for _ in 0..count {
+            let index = self.u8()?;
             let keyframes = table
                 .get(self.u16()? as usize)
                 .ok_or(WireError::BadRef("keyframes"))?
@@ -1812,6 +1823,7 @@ impl Reader<'_> {
             let duration = self.f32()?;
             let easing = self.easing()?.ok_or(WireError::BadRef("easing"))?;
             let mut a = Animation::new(keyframes, duration, easing);
+            a.index = index;
             a.delay = delay;
             a.iterations = self.f32()?;
             a.direction =
