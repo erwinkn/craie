@@ -826,12 +826,18 @@ impl Ui {
                     .iter()
                     .zip(spans)
                     .any(|(a, b)| a.decoration != b.decoration);
+                // Press marks draw nothing: kept, no repaint.
+                let presses_changed = p
+                    .spans
+                    .iter()
+                    .zip(spans)
+                    .any(|(a, b)| a.pressable != b.pressable);
                 if text_changed {
                     p.text.clear();
                     p.text.push_str(text);
                     self.host.copied_bytes += text.len() as u64;
                 }
-                if metrics_changed || colors_changed || decorations_changed {
+                if metrics_changed || colors_changed || decorations_changed || presses_changed {
                     p.spans.clear();
                     p.spans.extend_from_slice(spans);
                     self.host.copied_bytes += std::mem::size_of_val(spans) as u64;
@@ -917,16 +923,19 @@ impl Ui {
                 listeners,
                 focusable,
                 selectable,
+                press,
             } => {
                 let hovers = self.host.hover_listeners;
                 let i = self.host.interaction[*id as usize];
                 if i.listeners != *listeners
                     || i.focusable != *focusable
                     || i.selectable != *selectable
+                    || i.press != *press
                 {
                     let i = &mut self.host.interaction[*id as usize];
                     i.focusable = *focusable;
                     i.selectable = *selectable;
+                    i.press = *press;
                     self.host.set_listeners(*id as usize, *listeners);
                     // A new hover listener: the hover at rest may be
                     // stale (it was not tracked without one).
@@ -1070,6 +1079,19 @@ impl Ui {
             self.pressed = None;
             self.pressed_primary = false;
             self.selecting = false;
+        }
+        // A pressable's press cancels, with an event while it is still
+        // there (a moved node's listener hears it).
+        if let Some(p) = self.press
+            && self.ancestors(p.node).any(|n| n == node)
+        {
+            self.cancel_press();
+        }
+        if self
+            .key_press
+            .is_some_and(|k| self.ancestors(k).any(|n| n == node))
+        {
+            self.key_press = None;
         }
     }
 

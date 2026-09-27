@@ -18,14 +18,14 @@ use std::collections::HashMap;
 use craie_core::rev::Rev;
 use std::time::Instant;
 
-use crate::events::{Event, Mods, UiEvent};
+use crate::events::{Mods, UiEvent, activate_source};
 use craie_core::geom::{Affine, Point};
 
 use crate::geom::{Rect, Size};
 use crate::host::{Host, NodeId, Revs};
 use crate::input::{Inputs, KeyAction};
 use crate::layout::{self, Layouts, MeasuredText};
-use crate::mutation::{Command, NodeKind, Transaction};
+use crate::mutation::{Command, NodeKind, Transaction, press};
 use crate::scene::Scene;
 use crate::scene_sync::SceneSync;
 use crate::surface::{self, Quad, SurfacePainter};
@@ -58,6 +58,11 @@ pub struct Ui {
     pub(crate) pressed: Option<NodeId>,
     /// That press is of the primary button (the `pressed` state bit).
     pub(crate) pressed_primary: bool,
+    /// The primary press of a pressable in progress (`press.rs`).
+    pub(crate) press: Option<crate::press::Press>,
+    /// The focused pressable a held Space presses (the `pressed` state
+    /// bit; its key up activates).
+    pub(crate) key_press: Option<NodeId>,
     /// Where the pointer last was, while it is in the window.
     pub(crate) last_pointer: Option<(f32, f32)>,
     /// A hover recheck waits for moving spaces to settle.
@@ -147,6 +152,8 @@ impl Ui {
             hover: None,
             pressed: None,
             pressed_primary: false,
+            press: None,
+            key_press: None,
             last_pointer: None,
             hover_stale: false,
             states: Default::default(),
@@ -321,23 +328,17 @@ impl Ui {
                     self.set_focus(None);
                 }
             }
-            // Equivalent to a tap at the node's center: runs the real
-            // pointer path so listeners and capture behave identically.
+            // The nearest pressable, the node or an ancestor, activates
+            // (a disabled one swallows it), with no hit test: nothing
+            // drawn over it gets the click, and focus and the pointer's
+            // modality stay.
             Action::Click => {
-                let r = self.abs_rect(id);
-                let x = r.origin.x + r.size.width / 2.0;
-                let y = r.origin.y + r.size.height / 2.0;
-                self.dispatch(&Event::PointerDown {
-                    x,
-                    y,
-                    button: crate::events::Button::Primary,
-                    mods: Mods::default(),
-                });
-                self.dispatch(&Event::PointerUp {
-                    x,
-                    y,
-                    button: crate::events::Button::Primary,
-                });
+                let pressable = self
+                    .ancestors(id)
+                    .find(|&n| self.host.interaction(n).press & press::PRESSABLE != 0);
+                if let Some(p) = pressable {
+                    self.activate(p, activate_source::ACCESSIBILITY, Mods::default());
+                }
             }
             Action::ScrollUp => {
                 self.scroll_by(id, 0.0, -self.page_step(id));

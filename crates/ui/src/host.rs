@@ -223,6 +223,8 @@ pub struct Interaction {
     pub focusable: bool,
     /// Its text descendants (itself included) form one selection domain.
     pub selectable: bool,
+    /// Press flags (`mutation::press`).
+    pub press: u8,
     pub role: Role,
     /// States reported while clear (`mutation::reported`).
     pub reported: u8,

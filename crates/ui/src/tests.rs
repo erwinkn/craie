@@ -676,11 +676,12 @@ fn a11y_tree_maps_roles_names_focus() {
     assert_eq!(tree.focus, aid(NodeId(2)));
 }
 
-/// An assistive-tech Click runs the real pointer path — listeners
-/// see a down/up pair at the node's center.
+/// An assistive-tech Click activates the pressable (no pointer
+/// events, no hit test); on a plain node it does nothing.
 #[test]
-fn a11y_click_synthesizes_pointer() {
+fn a11y_click_activates() {
     use crate::a11y::aid;
+    use crate::mutation::press;
     use accesskit::{Action, ActionRequest, TreeId};
 
     let mut t = Transaction::new(1);
@@ -692,7 +693,8 @@ fn a11y_click_synthesizes_pointer() {
     let st1 = t.style(&s);
     t.create(0, NodeKind::View);
     t.push(Mutation::Layout { id: 0, style: st1 });
-    t.interaction(0, mask::POINTER_DOWN | mask::POINTER_UP, false);
+    let listeners = mask::POINTER_DOWN | mask::POINTER_UP | mask::ACTIVATE;
+    t.interaction_press(0, listeners, false, press::PRESSABLE);
     t.place(NIL, 0, NIL);
     t.seq = 1;
     let buf = wire::encode(&t);
@@ -700,15 +702,20 @@ fn a11y_click_synthesizes_pointer() {
     let mut ui = Ui::new(1.0);
     ui.apply(&buf).unwrap();
     ui.render(Size::new(400.0, 300.0));
-    ui.a11y_action(&ActionRequest {
-        action: Action::Click,
-        target_tree: TreeId::ROOT,
-        target_node: aid(NodeId(0)),
-        data: None,
-    });
-    let kinds: Vec<u8> = ui.take_events().iter().map(|e| e.kind).collect();
-    assert!(kinds.contains(&out_kind::POINTER_DOWN));
-    assert!(kinds.contains(&out_kind::POINTER_UP));
+    let click = |ui: &mut Ui| {
+        ui.a11y_action(&ActionRequest {
+            action: Action::Click,
+            target_tree: TreeId::ROOT,
+            target_node: aid(NodeId(0)),
+            data: None,
+        });
+        ui.take_events().iter().map(|e| e.kind).collect::<Vec<u8>>()
+    };
+    assert_eq!(click(&mut ui), [out_kind::ACTIVATE]);
+    let mut t = Transaction::new(2);
+    t.interaction(0, listeners, false);
+    ui.apply_txn(&t).unwrap();
+    assert_eq!(click(&mut ui), []);
 }
 
 /// ScrollIntoView walks ancestors and clamps offsets so the target
@@ -2544,7 +2551,7 @@ fn unknown_span_flag_bits_reject() {
     assert_eq!(buf[at], 0);
     let mut ok = buf.clone();
     ok[at] = wire::span_flag::ALL;
-    for bit in [1u8 << 4, 1 << 7] {
+    for bit in [1u8 << 5, 1 << 7] {
         let mut bad = buf.clone();
         bad[at] |= bit;
         assert!(ui.apply(&bad).is_err(), "bit {bit:#x}");

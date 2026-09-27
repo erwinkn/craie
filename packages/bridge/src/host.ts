@@ -6,6 +6,7 @@
 // generation, so an event for a previous occupant of an id is dropped.
 
 import {
+  ACTIVATE_SOURCE,
   CHORD_FLAG,
   CLAIM_KIND,
   CUSTOM_STATES,
@@ -17,6 +18,8 @@ import {
   EVENT_MASK,
   FIT,
   NIL,
+  PRESS_FLAG,
+  PRESS_PHASE,
   REPORTED,
   ROLE,
   SUBMIT_KEY,
@@ -418,6 +421,9 @@ function inheritSpan(parent: TextSpanIn, props: Record<string, any>): TextSpanIn
     decoration: props.textDecorationLine !== undefined ? own.decoration : parent.decoration,
     letterSpacing: props.letterSpacing !== undefined ? own.letterSpacing : parent.letterSpacing,
     lineHeight: parent.lineHeight,
+    // Presses on a pressable nested Text's span, or a span inside it,
+    // go to it (`spanTarget`).
+    pressable: isPressable(props) || !!parent.pressable,
   }
 }
 
@@ -453,7 +459,8 @@ function sameSpan(a: TextSpanIn, b: TextSpanIn): boolean {
   return a.fontSize === b.fontSize && a.color === b.color && !!a.inheritColor === !!b.inheritColor &&
     a.weight === b.weight && !!a.italic === !!b.italic &&
     a.fontFamily === b.fontFamily && (a.decoration ?? 0) === (b.decoration ?? 0) &&
-    (a.letterSpacing ?? 0) === (b.letterSpacing ?? 0) && (a.lineHeight ?? 0) === (b.lineHeight ?? 0)
+    (a.letterSpacing ?? 0) === (b.letterSpacing ?? 0) && (a.lineHeight ?? 0) === (b.lineHeight ?? 0) &&
+    !!a.pressable === !!b.pressable
 }
 
 // Listener prop name -> mask bit; emit INTERACTION when the mask changes.
@@ -471,6 +478,24 @@ const LISTENERS: Record<string, number> = {
   onChangeText: EVENT_MASK.input,
   onSubmit: EVENT_MASK.input,
   onScroll: EVENT_MASK.scroll,
+  onPress: EVENT_MASK.activate,
+  onPressIn: EVENT_MASK.press,
+  onPressOut: EVENT_MASK.press,
+}
+
+/** A node that owns presses: a Pressable (`__pressable`), or anything
+ * with a press listener (a Text with `onPress`). */
+function isPressable(props: Record<string, any>): boolean {
+  return !!props.__pressable || typeof props.onPress === "function" ||
+    typeof props.onPressIn === "function" || typeof props.onPressOut === "function"
+}
+
+/** The node's `PRESS_FLAG` bits: a disabled pressable swallows its
+ * presses; `preventFocusOnPress` keeps focus where it is. */
+function pressFlags(props: Record<string, any>): number {
+  if (!isPressable(props)) return 0
+  return PRESS_FLAG.pressable | (props.disabled ? PRESS_FLAG.disabled : 0) |
+    (props.preventFocusOnPress ? PRESS_FLAG.keepFocus : 0)
 }
 
 function listenerMask(props: Record<string, any>): number {
@@ -925,10 +950,11 @@ export class CraieHost {
       r.paragraphRev = ((r.paragraphRev ?? 0) + 1) >>> 0
       this.encoder.paragraph(r.id, text, spans)
     }
-    const interaction = `${mask},${!!r.props.focusable},${!!r.props.selectable}`
+    const press = pressFlags(r.props)
+    const interaction = `${mask},${!!r.props.focusable},${!!r.props.selectable},${press}`
     if (interaction !== r.sentInteraction) {
       r.sentInteraction = interaction
-      this.encoder.interaction(r.id, mask, !!r.props.focusable, !!r.props.selectable)
+      this.encoder.interaction(r.id, mask, !!r.props.focusable, !!r.props.selectable, press)
     }
   }
 
@@ -1053,6 +1079,15 @@ export class CraieHost {
       case EVENT_KIND.pointerMove: p.onPointerMove?.(pointer); break
       case EVENT_KIND.pointerDown: p.onPointerDown?.(pointer); break
       case EVENT_KIND.pointerUp: p.onPointerUp?.(pointer); break
+      case EVENT_KIND.press: {
+        const phase = (ev.key >>> 4) & 3
+        if (phase === PRESS_PHASE.in) p.onPressIn?.(pointer)
+        else p.onPressOut?.({ ...pointer, cancelled: phase === PRESS_PHASE.cancel })
+        break
+      }
+      case EVENT_KIND.activate:
+        p.onPress?.({ ...pointer, source: ACTIVATE_SOURCE[(ev.key >>> 4) & 3] ?? "pointer" })
+        break
       case EVENT_KIND.pointerEnter: p.onPointerEnter?.(e); break
       case EVENT_KIND.pointerLeave: p.onPointerLeave?.(e); break
       case EVENT_KIND.wheel: p.onWheel?.({ ...e, dx: ev.a, dy: ev.b }); break
@@ -1130,13 +1165,16 @@ export class CraieHost {
 
   private spanTarget(root: HostNode, ev: UiEvent): HostNode {
     const span = ev.key >>> 16
+    const press = ev.kind === EVENT_KIND.press || ev.kind === EVENT_KIND.activate
     const handler = POINTER_HANDLER[ev.kind]
-    if (!root.spanOwners || span === 0 || !handler) return root
+    if (!root.spanOwners || span === 0 || !(handler || press)) return root
     // Hit-tested against another span table: the span index is stale.
     if (ev.revision !== (root.paragraphRev ?? 0)) return root
+    // Presses go to the innermost pressable nested Text (the one native
+    // marked the span for), pointer events to the innermost listener.
     for (let n: HostNode | undefined = root.spanOwners[span - 1]; n; n = n.textParent) {
-      if (typeof n.props[handler] === "function") return n
       if (n === root) break
+      if (press ? isPressable(n.props) : typeof n.props[handler!] === "function") return n
     }
     return root
   }
@@ -1568,14 +1606,16 @@ export class CraieHost {
       }
     }
 
-    // Listener mask + focusable flag (a text root's: at the seal).
+    // Listener mask, focusable and press flags (a text root's: at the
+    // seal).
     const oldMask = listenerMask(oldProps), newMask = listenerMask(props)
+    const newPress = pressFlags(props)
     if (
       n.kind !== 1 &&
       (oldMask !== newMask || !!oldProps.focusable !== !!props.focusable ||
-        !!oldProps.selectable !== !!props.selectable)
+        !!oldProps.selectable !== !!props.selectable || pressFlags(oldProps) !== newPress)
     ) {
-      enc.interaction(id, newMask, !!props.focusable, !!props.selectable)
+      enc.interaction(id, newMask, !!props.focusable, !!props.selectable, newPress)
     }
 
     // Claims: a new version when the declaration changes; the handlers

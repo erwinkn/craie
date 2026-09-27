@@ -172,6 +172,10 @@ impl Ui {
                 an.add_action(Action::Click);
                 an.set_toggled(Toggled::from(bits & state_bit::CHECKED != 0));
             }
+            // Any pressable takes a click (a pressable row, a tab).
+            _ if props.press & crate::mutation::press::PRESSABLE != 0 => {
+                an.add_action(Action::Click)
+            }
             _ => {}
         }
         // Expanded and selected only where the prop was given: a plain

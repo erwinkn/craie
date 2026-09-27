@@ -528,7 +528,7 @@ test("nested Text flattens to spans of one paragraph node", async () => {
   expect(paragraphOf(t, id)!.text).toBe("Hé all!")
 })
 
-test("pointer events on a span reach its nested Text", async () => {
+test("activations on a span reach its nested Text", async () => {
   const t = new FakeTransport()
   const root = createRoot(t)
   const hits: string[] = []
@@ -540,14 +540,18 @@ test("pointer events on a span reach its nested Text", async () => {
   )
   await tick()
   const id = t.ops(0).find(o => o.tag === 0x01)!.id
-  // The root's listener mask covers its nested Texts' listeners.
+  // The root's listener mask covers its nested Texts' listeners
+  // (activate), and the root is pressable itself.
   const inter = t.ops(0).find(o => o.tag === 0x60 && o.id === id)!
-  expect((inter.f[0]! & (1 << 2)) !== 0).toBe(true)
+  expect((inter.f[0]! & (1 << 10)) !== 0).toBe(true)
+  expect(inter.f[1]).toBe(0x10)
   const spans = paragraphOf(t, id, 0)!.spans
   expect(spans.length).toBe(3)
+  // The link's span is pressable (span flag bit 4), the others not.
+  expect(spans.map(s => !!s.pressable)).toEqual([false, true, false])
   // Revision 1: native applied one paragraph op.
   const up = (span: number, revision = 1): UiEvent => ({
-    kind: 3, node: id, generation: 0, revision, x: 0, y: 0, a: 0, b: 0,
+    kind: 20, node: id, generation: 0, revision, x: 0, y: 0, a: 0, b: 0,
     key: (1 << 8) | ((span + 1) << 16), text: "",
   })
   t.eventCb!(up(1)) // "here": the nested link
@@ -578,7 +582,7 @@ test("a span event from an older span table reaches the root", async () => {
   const all = t.frames.flatMap(f => readFrame(f).ops)
   expect(all.filter(o => o.tag === 0x40 && o.id === id).length).toBe(1)
   const up = (revision: number): UiEvent => ({
-    kind: 3, node: id, generation: 0, revision, x: 0, y: 0, a: 0, b: 0,
+    kind: 20, node: id, generation: 0, revision, x: 0, y: 0, a: 0, b: 0,
     key: (1 << 8) | (2 << 16), text: "",
   })
   t.eventCb!(up(1)) // hit-tested before the resend: stale
@@ -718,7 +722,7 @@ test("a span event survives 256 owner replacements as stale", async () => {
     await tick()
   }
   const up = (revision: number): UiEvent => ({
-    kind: 3, node: id, generation: 0, revision, x: 0, y: 0, a: 0, b: 0,
+    kind: 20, node: id, generation: 0, revision, x: 0, y: 0, a: 0, b: 0,
     key: (1 << 8) | (2 << 16), text: "",
   })
   t.eventCb!(up(1)) // from the first table

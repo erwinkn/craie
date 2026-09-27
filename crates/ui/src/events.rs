@@ -276,6 +276,34 @@ pub mod out_kind {
     /// sent: key 0 = loaded, x/y = the natural size in pixels; key 1 =
     /// failed, `text` = why.
     pub const IMAGE: u8 = 18;
+    /// A primary press on the innermost pressable (`press.rs`): key =
+    /// mods | phase << 4 (`press_phase`) | button << 8 | span << 16, as
+    /// a pointer record's; x/y window, a/b node-relative.
+    pub const PRESS: u8 = 19;
+    /// A pressable activated (`press.rs`): key = mods | source << 4
+    /// (`activate_source`) | button << 8 | span << 16. x/y are the
+    /// release point, or the node's center from a key or assistive
+    /// technology; a/b node-relative.
+    pub const ACTIVATE: u8 = 20;
+}
+
+/// `PRESS` phases (key bits 4 and 5).
+pub mod press_phase {
+    /// The primary button went down on the pressable.
+    pub const IN: u32 = 0;
+    /// It came up (anywhere; an `ACTIVATE` follows when over the node).
+    pub const OUT: u32 = 1;
+    /// The press ended without a release: window focus lost, the node
+    /// left the tree, or it became disabled.
+    pub const CANCEL: u32 = 2;
+}
+
+/// What activated a pressable (`ACTIVATE` key bits 4 and 5).
+pub mod activate_source {
+    pub const POINTER: u32 = 0;
+    /// Enter on key down or Space on key up.
+    pub const KEY: u32 = 1;
+    pub const ACCESSIBILITY: u32 = 2;
 }
 
 /// A key record's `key` field: the modifiers in bits 0 to 3 (as
@@ -341,6 +369,8 @@ pub mod mask {
     pub const FOCUS: u32 = 1 << 6;
     pub const INPUT: u32 = 1 << 7;
     pub const SCROLL: u32 = 1 << 8;
+    pub const PRESS: u32 = 1 << 9;
+    pub const ACTIVATE: u32 = 1 << 10;
 }
 
 /// Maps an outbound event kind to its listener mask bit.
@@ -355,6 +385,8 @@ pub fn mask_for(kind: u8) -> u32 {
         out_kind::FOCUS | out_kind::BLUR => mask::FOCUS,
         out_kind::CHANGE | out_kind::SUBMIT => mask::INPUT,
         out_kind::SCROLL => mask::SCROLL,
+        out_kind::PRESS => mask::PRESS,
+        out_kind::ACTIVATE => mask::ACTIVATE,
         _ => 0,
     }
 }

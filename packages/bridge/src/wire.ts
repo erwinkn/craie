@@ -14,7 +14,7 @@
 // across transactions.
 
 const MAGIC = 0x3257_5243 // "CRW2" little-endian
-export const VERSION = 6
+export const VERSION = 7
 export const NIL = 0xffff_ffff // no node / append / default style
 
 const enum Op {
@@ -158,6 +158,7 @@ const SPAN_ITALIC = 1 << 0
 const SPAN_UNDERLINE = 1 << 1
 const SPAN_LINE_THROUGH = 1 << 2
 const SPAN_INHERIT_COLOR = 1 << 3
+const SPAN_PRESSABLE = 1 << 4
 /** Span decoration bits (`TextSpanIn.decoration`). */
 export const DECORATION = { underline: 1, lineThrough: 2 } as const
 
@@ -232,7 +233,28 @@ export const EVENT_KIND = {
   /** An image node decoded (key 0: x/y = the natural size in pixels) or
    * failed (key 1: text = why). */
   image: 18,
+  /** A pressable's press (press.rs; primary button only): key = mods |
+   * phase << 4 (`PRESS_PHASE`) | button << 8 | span + 1 << 16 (0: none),
+   * x/y = the pointer, a/b = node-relative, revision = the paragraph
+   * revision when a span is set. */
+  press: 19,
+  /** A pressable activated, once per pointer click, Enter or Space, or
+   * accessibility click: key = mods | source << 4 (`ACTIVATE_SOURCE`) |
+   * button << 8 (1: primary, 0: none) | span + 1 << 16, x/y = the
+   * release point or else the node's center, a/b = node-relative. */
+  activate: 20,
 } as const
+
+/** A press event's phase — mirror events.rs `press_phase`. */
+export const PRESS_PHASE = { in: 0, out: 1, cancel: 2 } as const
+/** Where an activation came from — mirror events.rs `activate_source`. */
+export const ACTIVATE_SOURCE = ["pointer", "keyboard", "accessibility"] as const
+export type ActivateSource = (typeof ACTIVATE_SOURCE)[number]
+
+/** Press flags on a node's interaction — mirror mutation.rs `press`:
+ * the node owns presses and activates; a disabled one swallows them;
+ * pressing it keeps focus where it is. */
+export const PRESS_FLAG = { pressable: 1, disabled: 2, keepFocus: 4 } as const
 
 /** How an image fills its box — mirror image.rs `Fit`. */
 export const FIT = { cover: 0, contain: 1, fill: 2 } as const
@@ -324,6 +346,8 @@ export const EVENT_MASK = {
   focus: 1 << 6,
   input: 1 << 7,
   scroll: 1 << 8,
+  press: 1 << 9,
+  activate: 1 << 10,
 } as const
 
 // Style schema — mask bit order must match wire.rs `mod field`.
@@ -615,6 +639,9 @@ export interface TextSpanIn {
   /** Draw in the nearest inherited color (`Encoder.color` on the text
    * or an ancestor); `color` when there is none. */
   inheritColor?: boolean
+  /** A nested Text with `onPress`: presses on the span go to its text
+   * node, with the span's index. */
+  pressable?: boolean
 }
 
 /** The layout keys `s` sets — mirror states.rs `layout_key`: one per
@@ -949,7 +976,7 @@ export class Encoder {
     const key = JSON.stringify(spans.map(sp => [
       sp.start, sp.fontSize, sp.color >>> 0, sp.weight ?? 400, sp.italic ? 1 : 0,
       sp.decoration ?? 0, sp.letterSpacing ?? 0, sp.lineHeight ?? 0, sp.fontFamily || null,
-      sp.inheritColor ? 1 : 0,
+      sp.inheritColor ? 1 : 0, sp.pressable ? 1 : 0,
     ]))
     let start = this.spanIx.get(key)
     if (start === undefined) {
@@ -966,7 +993,8 @@ export class Encoder {
           (sp.italic ? SPAN_ITALIC : 0) |
           (d & DECORATION.underline ? SPAN_UNDERLINE : 0) |
           (d & DECORATION.lineThrough ? SPAN_LINE_THROUGH : 0) |
-          (sp.inheritColor ? SPAN_INHERIT_COLOR : 0),
+          (sp.inheritColor ? SPAN_INHERIT_COLOR : 0) |
+          (sp.pressable ? SPAN_PRESSABLE : 0),
         )
         w.u8(0)
         w.u32(sp.fontFamily ? this.strRef(sp.fontFamily) : NIL)
@@ -1011,12 +1039,12 @@ export class Encoder {
     this.ops.u32(s)
   }
   /** Listener mask and flags: `selectable` makes the node's text
-   * descendants one selection domain. */
-  interaction(id: number, listeners: number, focusable: boolean, selectable = false) {
+   * descendants one selection domain; `press` is `PRESS_FLAG` bits. */
+  interaction(id: number, listeners: number, focusable: boolean, selectable = false, press = 0) {
     this.ops.u8(Op.Interaction)
     this.ops.u32(id)
     this.ops.u32(listeners >>> 0)
-    this.ops.u8((focusable ? 1 : 0) | (selectable ? 2 : 0))
+    this.ops.u8((focusable ? 1 : 0) | (selectable ? 2 : 0) | (press & 7) << 4)
   }
   /** A node's claim set (id NIL: the window list), replacing the one
    * before; an empty set removes it. */

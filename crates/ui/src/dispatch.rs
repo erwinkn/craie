@@ -10,7 +10,7 @@ use craie_core::geom::{Affine, Point};
 use crate::geom::Rect;
 use crate::host::{NodeFlags, NodeId, ROOT};
 use crate::input::{KeyAction, SubmitKey};
-use crate::mutation::NodeKind;
+use crate::mutation::{NodeKind, press};
 use crate::ui::Ui;
 
 /// Whether `p` passes a clip: each bounded axis must contain it, and the
@@ -171,7 +171,7 @@ impl Ui {
     }
 
     /// The span of text node `id` under window point (x, y).
-    fn span_at(&self, id: NodeId, x: f32, y: f32) -> Option<u32> {
+    pub(crate) fn span_at(&self, id: NodeId, x: f32, y: f32) -> Option<u32> {
         if self.host.kind(id) != Some(NodeKind::Text) {
             return None;
         }
@@ -208,6 +208,8 @@ impl Ui {
         if self.focus == next {
             return;
         }
+        // A held Space presses the focused node only.
+        self.key_press = None;
         if let Some(old) = self.focus {
             if self.host.kind(old) == Some(NodeKind::Input) {
                 // A composition in progress becomes committed text.
@@ -278,6 +280,9 @@ impl Ui {
                 if let Some(hit) = target {
                     self.emit_pointer(hit, out_kind::POINTER_UP, *x, *y, *button, Mods::default());
                 }
+                if *button == crate::events::Button::Primary {
+                    self.press_up(*x, *y);
+                }
             }
             Event::Wheel { x, y, dx, dy } => {
                 // The pointer is there: hover at rest tests from here.
@@ -316,6 +321,7 @@ impl Ui {
                 self.key_down(k)
             }
             Event::KeyUp(k) => {
+                self.press_key_up(k);
                 if let Some(f) = self.focus {
                     let composing = self
                         .inputs
@@ -362,11 +368,19 @@ impl Ui {
                     self.set_hover(None, x, y);
                 }
             }
+            // Losing the window ends the press and the hover, with
+            // events: the release and the moves happen elsewhere.
             Event::Focus(gained) => {
                 if !gained {
-                    self.hover = None;
+                    self.cancel_press();
+                    self.key_press = None;
+                    if self.hover.is_some() {
+                        let (x, y) = self.last_pointer.unwrap_or_default();
+                        self.set_hover(None, x, y);
+                    }
                     self.pressed = None;
                     self.pressed_primary = false;
+                    self.selecting = false;
                     self.last_pointer = None;
                 }
             }
@@ -463,18 +477,29 @@ impl Ui {
         let hit = self.hit_test(x, y);
         self.pressed = hit;
         self.pressed_primary = button == crate::events::Button::Primary;
+        // A press on or inside a keep-focus node (`preventFocusOnPress`)
+        // leaves focus, carets and the text selection alone, as a
+        // prevented `mousedown` does on the web.
+        let keep = hit.is_some_and(|h| {
+            self.ancestors(h)
+                .any(|n| self.host.interaction(n).press & press::KEEP_FOCUS != 0)
+        });
 
         // Focus: nearest focusable/input ancestor of the hit; clicking
         // non-focusable space blurs.
-        let focus_target = hit.and_then(|h| {
-            self.ancestors(h).find(|&id| {
-                self.host.kind(id) == Some(NodeKind::Input) || self.host.interaction(id).focusable
-            })
-        });
-        self.set_focus(focus_target);
+        if !keep {
+            let focus_target = hit.and_then(|h| {
+                self.ancestors(h).find(|&id| {
+                    self.host.kind(id) == Some(NodeKind::Input)
+                        || self.host.interaction(id).focusable
+                })
+            });
+            self.set_focus(focus_target);
+        }
 
         // Input hit: caret/selection.
         if let Some(id) = hit
+            && !keep
             && self.host.kind(id) == Some(NodeKind::Input)
             && button == crate::events::Button::Primary
         {
@@ -505,7 +530,7 @@ impl Ui {
         // selectable domain, or clears one; a press in an input clears it
         // (the input keeps its own selection).
         let in_input = hit.is_some_and(|h| self.host.kind(h) == Some(NodeKind::Input));
-        if button == crate::events::Button::Primary {
+        if button == crate::events::Button::Primary && !keep {
             if in_input {
                 self.selecting = false;
                 self.set_text_selection(None);
@@ -515,6 +540,10 @@ impl Ui {
         }
         if let Some(hit) = hit {
             self.emit_pointer(hit, out_kind::POINTER_DOWN, x, y, button, mods);
+        }
+        // Only the primary button presses, as only it clicks on the web.
+        if button == crate::events::Button::Primary {
+            self.press_down(hit, x, y, mods);
         }
         if button == crate::events::Button::Secondary {
             self.pointer_claim(hit, claim_kind::CONTEXT_MENU, x, y, String::new());
@@ -610,6 +639,9 @@ impl Ui {
                 self.set_focus(Some(next));
             }
         }
+
+        // Enter and Space on a focused pressable.
+        self.press_key_down(k);
 
         // Text selection keys, outside inputs: copy, select all, clear.
         if focused_input.is_none() && self.text_selection.is_some() {

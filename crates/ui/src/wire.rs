@@ -41,7 +41,7 @@ use crate::mutation::{
 };
 
 pub const MAGIC: u32 = 0x3257_5243; // "CRW2"
-pub const VERSION: u16 = 6;
+pub const VERSION: u16 = 7;
 
 pub mod op {
     // structure
@@ -65,6 +65,7 @@ pub mod op {
     pub const ROLE: u8 = 0x50;
     pub const LABEL: u8 = 0x51;
     // interaction
+    /// id u32 | listeners u32 | flags u8 (`interaction_flag`)
     pub const INTERACTION: u8 = 0x60;
     /// id u32 (NIL: the window list) | version u32 | count u16 |
     /// count × (kind u8, flags u8, mods u8, 0 u8, key u32)
@@ -149,6 +150,9 @@ pub mod input_flag {
 pub mod interaction_flag {
     pub const FOCUSABLE: u8 = 1 << 0;
     pub const SELECTABLE: u8 = 1 << 1;
+    /// Bits 4 to 6: the press flags (`mutation::press`), shifted.
+    pub const PRESS_SHIFT: u8 = 4;
+    pub const ALL: u8 = FOCUSABLE | SELECTABLE | crate::mutation::press::ALL << PRESS_SHIFT;
 }
 
 /// Text span flag bits.
@@ -158,7 +162,9 @@ pub mod span_flag {
     pub const LINE_THROUGH: u8 = 1 << 2;
     /// Draw in the nearest inherited color; `color` is the fallback.
     pub const INHERIT_COLOR: u8 = 1 << 3;
-    pub const ALL: u8 = ITALIC | UNDERLINE | LINE_THROUGH | INHERIT_COLOR;
+    /// A press on the span presses its node (`TextSpan::pressable`).
+    pub const PRESSABLE: u8 = 1 << 4;
+    pub const ALL: u8 = ITALIC | UNDERLINE | LINE_THROUGH | INHERIT_COLOR | PRESSABLE;
 }
 
 /// Bytes per span row.
@@ -526,6 +532,7 @@ pub fn encode(txn: &Transaction<'_>) -> Vec<u8> {
                 listeners,
                 focusable,
                 selectable,
+                press,
             } => {
                 ops.push(op::INTERACTION);
                 u32le(&mut ops, *id);
@@ -539,7 +546,7 @@ pub fn encode(txn: &Transaction<'_>) -> Vec<u8> {
                         interaction_flag::SELECTABLE
                     } else {
                         0
-                    },
+                    } | press << interaction_flag::PRESS_SHIFT,
                 );
             }
             Mutation::Claims {
@@ -763,6 +770,9 @@ pub fn encode(txn: &Transaction<'_>) -> Vec<u8> {
         if sp.inherit_color {
             flags |= span_flag::INHERIT_COLOR;
         }
+        if sp.pressable {
+            flags |= span_flag::PRESSABLE;
+        }
         out.push(flags);
         out.push(0);
         let family = family_refs.get(sp.family as usize).copied().unwrap_or(NIL);
@@ -961,6 +971,7 @@ pub fn decode(buf: &[u8]) -> Result<Transaction<'_>, WireError> {
             decoration: (flags & span_flag::UNDERLINE != 0) as u8
                 | ((flags & span_flag::LINE_THROUGH != 0) as u8) << 1,
             inherit_color: flags & span_flag::INHERIT_COLOR != 0,
+            pressable: flags & span_flag::PRESSABLE != 0,
             letter_spacing,
             line_height,
             family,
@@ -1106,7 +1117,7 @@ pub fn decode(buf: &[u8]) -> Result<Transaction<'_>, WireError> {
             },
             op::INTERACTION => {
                 let (id, listeners, flags) = (r.u32()?, r.u32()?, r.u8()?);
-                if flags & !(interaction_flag::FOCUSABLE | interaction_flag::SELECTABLE) != 0 {
+                if flags & !interaction_flag::ALL != 0 {
                     return Err(WireError::BadRef("interaction flags"));
                 }
                 Mutation::Interaction {
@@ -1114,6 +1125,7 @@ pub fn decode(buf: &[u8]) -> Result<Transaction<'_>, WireError> {
                     listeners,
                     focusable: flags & interaction_flag::FOCUSABLE != 0,
                     selectable: flags & interaction_flag::SELECTABLE != 0,
+                    press: flags >> interaction_flag::PRESS_SHIFT,
                 }
             }
             op::CLAIMS => {

@@ -121,6 +121,33 @@ export interface PointerEvt {
   alt?: boolean
   meta?: boolean
 }
+/** An activation (`onPress`): a primary click released over the node,
+ * Enter or Space on it while focused, or an assistive-technology click.
+ * A click carries its release point and the modifiers held when the
+ * press began (`button` 1); a key or assistive click carries the node's
+ * center (`button` 0). */
+export interface PressEvt extends PointerEvt {
+  source: "pointer" | "keyboard" | "accessibility"
+}
+/** A press ending (`onPressOut`): released, anywhere, or `cancelled`
+ * (window focus lost, the node disabled or removed mid-press). */
+export interface PressOutEvt extends PointerEvt {
+  cancelled: boolean
+}
+/** Press listeners: the innermost pressable under the pointer owns a
+ * press, so a Pressable inside a Pressable presses alone. */
+export interface PressProps {
+  /** Activated: once per click (the web's rule: pressed and released
+   * over the node, wherever the pointer went meanwhile), per Enter key
+   * down (repeats too) or Space key up while focused, or per assistive
+   * click. A key claim on the chord wins over it. */
+  onPress?: (e: PressEvt) => void
+  /** A primary pointer press began on the node (not keys: the web's
+   * `pointerdown`). */
+  onPressIn?: (e: PointerEvt) => void
+  /** The press ended; `onPress` follows when it was a click. */
+  onPressOut?: (e: PressOutEvt) => void
+}
 export interface KeyEvt {
   target: HostNode
   x: number
@@ -220,7 +247,8 @@ export interface StateProps {
   /** Checked, on the check roles; on others a styling state only. */
   checked?: boolean
   highlighted?: boolean
-  /** Also masks hover and press, and stops `onPress`. */
+  /** Also masks hover and press; a disabled Pressable swallows its
+   * presses (neither it nor a Pressable around it activates). */
   disabled?: boolean
   /** Custom states (`defineStates`) by name. */
   states?: Record<string, boolean>
@@ -255,17 +283,18 @@ export interface ViewProps extends ListenerProps, StateProps, Variants {
   hidden?: boolean
   children?: ReactNode
 }
-export interface PressableProps extends ViewProps {
-  /** Primary pointer released over the node. */
-  onPress?: (e: PointerEvt) => void
+export interface PressableProps extends ViewProps, PressProps {
+  /** Pressing keeps focus where it is (a composer's mention button),
+   * and the Pressable leaves the Tab order unless `focusable`. */
+  preventFocusOnPress?: boolean
 }
 /** Text props. A Text nested in a Text has no native node: its text and
  * style become spans of the outermost Text's paragraph, and its pointer
- * listeners (`onPress` too) receive the events over its own span. */
-export interface TextProps extends ListenerProps, Variants {
+ * and press listeners receive the events over its own span. A Text with
+ * a press listener is pressable (a link), but not focusable, like a web
+ * span; a nested one activates when pressed and released on its span. */
+export interface TextProps extends ListenerProps, PressProps, Variants {
   style?: StyleProps
-  /** Primary pointer released over this text (or this nested span). */
-  onPress?: (e: PointerEvt) => void
   /** This Text alone is a selection domain (on the outermost Text). */
   selectable?: boolean
   fontSize?: number
@@ -418,28 +447,17 @@ export function View(props: ViewProps) {
 }
 
 /** A View that is a button for assistive technology and fires `onPress`
- * on primary pointer release. Always a scope. */
-export function Pressable({ onPress, ...props }: PressableProps) {
+ * on activation (`PressProps`). Focusable unless disabled or
+ * `preventFocusOnPress`. Always a scope. */
+export function Pressable(props: PressableProps) {
   return useHost("view", {
     accessibilityRole: "button",
     ...props,
-    focusable: !props.disabled && (props.focusable ?? true),
-    onPointerUp: (e: PointerEvt) => {
-      props.onPointerUp?.(e)
-      if ((e.button ?? 1) === 1 && !props.disabled) onPress?.(e)
-    },
+    __pressable: true,
+    focusable: !props.disabled && (props.focusable ?? !props.preventFocusOnPress),
   }, true)
 }
-export function Text({ onPress, ...rest }: TextProps) {
-  const props: TextProps = onPress
-    ? {
-        ...rest,
-        onPointerUp: (e: PointerEvt) => {
-          rest.onPointerUp?.(e)
-          if ((e.button ?? 1) === 1) onPress(e)
-        },
-      }
-    : rest
+export function Text(props: TextProps) {
   // Flatten primitive children ("a" {b} "c") into a single `text` prop so
   // mixed string/expression JSX still forms one paragraph. Nested
   // non-primitive children (styled spans) keep their instances.

@@ -246,7 +246,7 @@ test("a TextInput is its own scope, with no disabled", async () => {
   ])
 })
 
-test("disabled stops onPress; color transitions travel as prop 8", async () => {
+test("disabled marks the press flags; color transitions travel as prop 8", async () => {
   const t = new FakeTransport()
   const root = createRoot(t)
   let presses = 0
@@ -260,12 +260,15 @@ test("disabled stops onPress; color transitions travel as prop 8", async () => {
   const ops = t.ops()
   expect(ops.find(o => o.tag === 0xb0)!.bits).toBe(bit("disabled"))
   expect(ops.find(o => o.tag === 0xa0)!.f.slice(0, 2)).toEqual([1, 8])
-  const up = { kind: 3, node: 0, generation: 0, revision: 0, x: 0, y: 0, a: 0, b: 0, key: 1 << 8, text: "" }
-  t.event!(up)
-  expect(presses).toBe(0)
+  // Native swallows a disabled pressable's presses: pressable (0x10)
+  // and disabled (0x20), not focusable.
+  const flags = () => t.ops().filter(o => o.tag === 0x60).at(-1)!.f[1]
+  expect(flags()).toBe(0x30)
   root.renderSync(createElement(App, { disabled: false }))
   await tick()
-  t.event!(up)
+  expect(flags()).toBe(0x11)
+  const activate = { kind: 20, node: 0, generation: 0, revision: 0, x: 0, y: 0, a: 0, b: 0, key: 1 << 8, text: "" }
+  t.event!(activate)
   expect(presses).toBe(1)
 })
 
