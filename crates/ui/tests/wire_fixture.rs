@@ -40,18 +40,26 @@ fn js_fixture_decodes_and_executes() {
     assert_eq!(ui.apply(&buf).unwrap(), 99);
     let host = &ui.host;
 
-    // remove(1): view + input + surface + list + row remain.
-    assert_eq!(host.len(), 6);
+    // remove(1): view + input + surface + list + row + vector + layer
+    // remain.
+    assert_eq!(host.len(), 7);
     assert_eq!(host.kind(NodeId(0)), Some(NodeKind::View));
     let paint = host.paint[0];
     assert_eq!(paint.fill, 0x1122_33ff);
     assert_eq!(paint.radius, 6.5);
     assert_eq!((paint.border_color, paint.border_width), (0xff00_00ff, 2.0));
 
-    // Spatial: translateX(3) · scale(2), opacity 0.75.
+    // Spatial: translateX(3) · scale(2), opacity 0.75, z -2.
     let s = host.spatial[0];
     assert_eq!(s.transform, Affine([2.0, 0.0, 0.0, 2.0, 3.0, 0.0]));
     assert_eq!(s.opacity, 0.75);
+    assert_eq!(s.z, -2);
+
+    // A layer container owned from inside the root, with z alone.
+    assert_eq!(host.owners[&7], 6);
+    assert_eq!(host.spatial[7].z, 50);
+    assert_eq!(host.spatial[7].opacity, 1.0);
+    assert_eq!(host.paint_order(NodeId::NIL)[..], [NodeId(0), NodeId(7)]);
 
     // Input: listeners, focusable, explicit role, config.
     assert_eq!(host.kind(NodeId(2)), Some(NodeKind::Input));

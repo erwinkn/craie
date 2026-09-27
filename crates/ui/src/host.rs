@@ -8,7 +8,7 @@
 //! ```text
 //! nodes[]        header: parent, child span, kind, flags, generation
 //! layout[]       the node's own layout inputs (no shared records)
-//! spatial[]      local transform, opacity, scroll offset
+//! spatial[]      local transform, opacity, scroll offset, z
 //! paint[]        fill, border, radius
 //! paragraphs[]   UTF-8 text + style span list (text nodes)
 //! interaction[]  listener mask, focusable, role
@@ -17,7 +17,7 @@
 //!
 //! Children are a `Span` into one capacity-classed pool, so a leaf pays
 //! nothing for children. Truly sparse facts (labels, surface payloads,
-//! list states) live in id-keyed maps.
+//! list states, paint orders, layer owners) live in id-keyed maps.
 //!
 //! Every mutation advances the revisions it can invalidate and queues the
 //! dirty work it creates. Queues schedule work; revisions prove validity.
@@ -90,6 +90,14 @@ impl NodeFlags {
     pub const TEXT: NodeFlags = NodeFlags(1 << 2);
     /// The hit-test reach is stale (`reach.rs`); so is every ancestor's.
     pub const REACH: NodeFlags = NodeFlags(1 << 3);
+    /// Its children paint in a sorted order, held in `Host::orders`
+    /// (`order.rs`); without it they paint in tree order.
+    pub const SORTED: NodeFlags = NodeFlags(1 << 4);
+    /// Its paint order is queued for re-sorting.
+    pub const ORDER: NodeFlags = NodeFlags(1 << 5);
+    /// A layer container: never a hit target itself (`box-none`), and
+    /// never sorts below the sibling that holds its owner.
+    pub const LAYER: NodeFlags = NodeFlags(1 << 6);
 
     pub fn contains(self, other: NodeFlags) -> bool {
         self.0 & other.0 != 0
@@ -145,6 +153,8 @@ pub struct Spatial {
     pub opacity: f32,
     /// Content offset of a scroll container (logical points).
     pub scroll: [f32; 2],
+    /// Order among its siblings (`order.rs`): higher paints later.
+    pub z: i32,
 }
 
 impl Default for Spatial {
@@ -153,6 +163,7 @@ impl Default for Spatial {
             transform: Affine::IDENTITY,
             opacity: 1.0,
             scroll: [0.0; 2],
+            z: 0,
         }
     }
 }
@@ -288,6 +299,18 @@ pub struct Host {
     pub list_index: Vec<u32>,
     /// List states and scroll anchors (§7).
     pub lists: crate::list::Lists,
+    /// Paint orders of the parents flagged `SORTED`, NIL keying the root
+    /// level (`order.rs`).
+    pub(crate) orders: HashMap<u32, Vec<NodeId>>,
+    /// Layer containers' owners (NIL: none), id-keyed.
+    pub owners: HashMap<u32, u32>,
+    /// `SORTED` and `ORDER` for the root level, which has no header.
+    pub(crate) root_flags: NodeFlags,
+    /// Parents whose paint order is queued (flagged `ORDER`).
+    pub(crate) order_queue: Vec<u32>,
+    /// `revs.structure` at the last `refresh_orders`: owners resolve
+    /// through the tree, so any structure change re-sorts their parents.
+    pub(crate) order_rev: Rev,
     pub revs: Revs,
     pub dirty: DirtyQueues,
     /// Bytes copied from transactions into host stores: paragraph text
@@ -340,6 +363,11 @@ impl Host {
             colors: HashMap::new(),
             list_index: Vec::new(),
             lists: crate::list::Lists::default(),
+            orders: HashMap::new(),
+            owners: HashMap::new(),
+            root_flags: NodeFlags::NONE,
+            order_queue: Vec::new(),
+            order_rev: Rev::ZERO,
             revs: Revs::default(),
             dirty: DirtyQueues::default(),
             copied_bytes: 0,
@@ -465,6 +493,8 @@ impl Host {
         self.vectors.remove(&id.0);
         self.claims.remove(&id.0);
         self.colors.remove(&id.0);
+        self.orders.remove(&id.0);
+        self.owners.remove(&id.0);
         self.list_index[i] = NIL;
         self.lists.forget(id.0);
         if kind == NodeKind::Surface {
@@ -504,6 +534,14 @@ impl Host {
         }
         self.nodes[child.index()].parent = parent.0;
         self.revs.structure.bump();
+        // A child with a z or an owner sorts; so does any child of a
+        // parent that already does.
+        if self.spatial[child.index()].z != 0
+            || self.nodes[child.index()].flags.contains(NodeFlags::LAYER)
+            || self.order_flags(parent).contains(NodeFlags::SORTED)
+        {
+            self.queue_order(parent);
+        }
         self.mark_layout(child);
         self.dirty.semantic.push(child.0);
         if parent.is_node() {
@@ -533,6 +571,9 @@ impl Host {
         }
         self.nodes[id.index()].parent = NodeId::DETACHED.0;
         self.revs.structure.bump();
+        if self.order_flags(parent).contains(NodeFlags::SORTED) {
+            self.queue_order(parent);
+        }
         if parent.is_node() {
             // The parent's layout depended on this child.
             self.mark_layout(parent);
@@ -566,6 +607,15 @@ impl Host {
         self.vectors.remove(&id.0);
         self.claims.remove(&id.0);
         self.colors.remove(&id.0);
+        self.orders.remove(&id.0);
+        self.owners.remove(&id.0);
+        // Its layers lose their owner: a reuse of the id must not adopt
+        // them.
+        for owner in self.owners.values_mut() {
+            if *owner == id.0 {
+                *owner = NIL;
+            }
+        }
         self.list_index[i] = NIL;
         self.lists.forget(id.0);
         let generation = self.nodes[i].generation.wrapping_add(1);

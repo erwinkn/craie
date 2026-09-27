@@ -249,6 +249,52 @@ Reviewer minors and nitpicks not fixed yet.
 - Resolves in: the winit 0.31 upgrade, or a macOS-only position read
   if a drop target needs it first.
 
+### DF-17: Tab and accessibility reach layers after the app
+
+- Source: sibling z and layers (work item 4) implementation (own
+  finding).
+- Where: crates/ui/src/dispatch.rs (`focusables`), crates/ui/src/a11y.rs.
+- Claim: a layer container is a root-level node after the app's roots,
+  and Tab and the accessibility tree keep tree order. So Tab reaches a
+  menu opened from a toolbar button only after every focusable node of
+  the app, and a screen reader reads layers last, in open order.
+- Why deferred: where focus goes into and out of a layer is work item
+  3's (focus traps, `modal`, owners' scopes); reading a layer next to
+  its owner is the accessibility pass's (topic 13).
+- Resolves in: work item 3, then topic 13.
+
+### DF-18: a z change walks the whole tree for the draw order
+
+- Source: sibling z (work item 4) measurement (`zorder` example).
+- Where: crates/ui/src/scene_sync.rs (`walk_tree`).
+- Claim: a z change bumps `structure_rev`, like an insert, and the next
+  frame rebuilds the draw order with one walk of the whole tree. At
+  100k nodes that frame took 6.0 to 8.8 ms against 2.5 to 3.7 ms after
+  a transform change (exe1, loaded); the re-sort itself took 28 to 74
+  µs. At 5k nodes: 0.31 to 0.45 ms against 0.17 to 0.29 ms.
+- Why deferred: it is the cost every structure change already pays,
+  and the draw order is a derived cache by decision (§8). Patching one
+  parent's range needs the draw list ranged per parent.
+- Resolves in: an incremental draw-order patch for structure changes,
+  if reordering or inserting in large trees shows up in a frame
+  profile (it would serve inserts and moves too).
+
+### DF-19: layers owned coarsely
+
+- Source: sibling z and layers (work item 4) implementation (own
+  finding).
+- Where: packages/bridge/src/index.ts (`Layer`).
+- Claim: a `Layer`'s owner is the enclosing `Layer`'s container, and a
+  top-level `Layer` has none. So an unowned layer with a negative z
+  sorts under the app (the kit's layer tokens are all positive), and
+  owners know nothing finer than a layer (a trap inside it). The other
+  way round, a top-level `Layer` defaults to z 0: an app root with a
+  positive `zIndex` covers every unowned layer.
+- Why deferred: the native op takes any node as owner; finding a finer
+  one (the trap, or the host node that opened the layer) is work item
+  3's, with focus traps.
+- Resolves in: work item 3.
+
 ### DF-21: a variant's transform replaces the whole matrix
 
 - Source: work item 5 (state styles).
@@ -497,3 +543,14 @@ Reviewer minors and nitpicks not fixed yet.
     (a NUL character key is now invalid), the platform's key
     translation (`us_char`, F13 to F24), the drop fallback, the window
     list's old versions pruned on ack, and submit key `none`.
+- PR6-01 (zorder review): an owner layer closed with its last child while a layer it owned stayed open, which then lost its owner for good: a container stays open while it has children or open layers it owns, closing cascades to an idle owner, and `Layer`'s cleanup effect is gone (tested with the review's repro, which fails on the old code, and the cascade).
+- PR6-02 (zorder review): the harness snapshot sent `LAYER` before the owner's create when the owner's id was higher: layer ops go in a pass after every create, and `Gen` sets layers with random owners (any node, none, later removed).
+- PR6-03 (zorder review): a style of only spatial keys sent a layout op (`{}` against no style): `layoutPart` returns undefined when no defined key is left (tested undefined, `{zIndex: 1}`, undefined).
+- PR6-04 (zorder review): the randomized order test compared the index against a walk reading the same order: a new oracle over random z, layers, owners, moves, detaches and reused ids checks the stable sort by z, each layer above its owner's sibling, the drawn order and hits, before and after the refresh (dropping the owner raise or the stale-reader re-sort fails it); new tests cover a reused sorted parent's id, z and `LAYER` set while detached, an app root remounted under an open layer, an insert before a sibling in a layer, and Suspense hiding and revealing a layer's children.
+- PR6-05 (zorder review): the scene walk copied each sorted parent's order per visit: it lends the order out of `Host::orders` for the walk (`mem::take`) and puts it back.
+- PR6-06 (zorder review): a non-integer `zIndex` threw in the commit: it is rounded and clamped to an i32, NaN is 0, with a warning logged once.
+- PR6-07 (zorder review): closing a layer missing from the open list would have dropped the last one: the splice is guarded.
+- PR6-08 (zorder review): `LAYER` was accepted on any kind: it is a structural error on anything but a View (tested); `order.rs` and `Mutation::Layer` document the owners that silently count as none.
+- PR6-09 (zorder review): between a transaction and a refresh, a direct `hit_test` sorts stale parents on the spot: documented on `hit_test` (it takes `&self`, so it cannot refresh lazily).
+- PR6-10 (zorder review): EXPERIMENTS says the frame column excludes the re-sort; DF-19 adds that an app root with a positive `zIndex` covers unowned layers; DF-20 is closed.
+- DF-20 (an owner-only layer closed when Suspense hid it): fixed in the PR #6 review (PR6-01); a Suspense hide removes no layer's children, so nothing closes.

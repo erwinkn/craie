@@ -56,11 +56,12 @@ pub fn snapshot(ui: &Ui) -> Transaction<'static> {
             t.layout(id.0, &style.to_taffy());
         }
         let s = host.spatial[id.index()];
-        if s.transform != Affine::IDENTITY || s.opacity != 1.0 {
+        if s.transform != Affine::IDENTITY || s.opacity != 1.0 || s.z != 0 {
             t.push(Mutation::Spatial {
                 id: id.0,
                 transform: (s.transform != Affine::IDENTITY).then_some(s.transform),
                 opacity: (s.opacity != 1.0).then_some(s.opacity),
+                z: (s.z != 0).then_some(s.z),
             });
         }
         if kind.has_box() {
@@ -125,6 +126,12 @@ pub fn snapshot(ui: &Ui) -> Transaction<'static> {
         for &c in host.children(id) {
             t.append(id.0, c.0);
         }
+    }
+    // After every create: an owner may have a higher id than its layer.
+    let mut layers: Vec<_> = host.owners.iter().map(|(&l, &o)| (l, o)).collect();
+    layers.sort_unstable();
+    for (layer, owner) in layers {
+        t.layer(layer, owner);
     }
     t
 }
@@ -863,10 +870,28 @@ impl Gen {
                     };
                     t.transform(id, m);
                 }
-                9 => {
-                    let o = self.pick(&[1.0, 1.0, 0.5, 0.25, 0.0]);
-                    t.opacity(id, o);
-                }
+                9 => match self.rng.below(3) {
+                    0 => {
+                        let o = self.pick(&[1.0, 1.0, 0.5, 0.25, 0.0]);
+                        t.opacity(id, o);
+                    }
+                    1 => {
+                        let z = self.pick(&[0, 0, 1, -1, 2]);
+                        t.z(id, z);
+                    }
+                    // A layer owned by any other node, sibling or not, or
+                    // by none; owners removed later leave it unowned.
+                    _ if kind == NodeKind::View => {
+                        let owner = self.pick(&nodes);
+                        let owner = if owner == id || self.rng.chance(0.25) {
+                            NIL
+                        } else {
+                            owner
+                        };
+                        t.layer(id, owner);
+                    }
+                    _ => {}
+                },
                 10 => {
                     let r = self.pick(&[Role::None, Role::Button, Role::Group, Role::Heading]);
                     t.role(id, r);

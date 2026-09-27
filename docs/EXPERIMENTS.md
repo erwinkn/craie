@@ -254,6 +254,49 @@ Two older bugs, fixed in the PR #3 review:
   of half the box, at an origin a border offsets. Borders in the
   randomized test found it.
 
+### Sibling z: sorting and hit testing (work item 4)
+
+`cargo run --release -p craie-harness --example zorder`. E15's wide
+tree (groups of 5,000 cells 6 pt square), headless on exe1 with a load
+average of 22 to 38; ranges are three runs.
+
+One z change in a parent of 5,000 children, mean of 50 changes: the
+re-sort alone, then the next frame without it (`render` after the
+re-sort: the draw-order rebuild and the scene), against the frame after
+a transform change of the same cell.
+
+| tree | children with z | re-sort | frame after z | frame after a transform |
+|------|-----------------|---------|---------------|-------------------------|
+| 5k   | none before     | 13 to 14 µs | 0.31 to 0.44 ms | 0.17 to 0.29 ms |
+| 5k   | 1 in 10         | 17 to 30 µs | 0.35 to 0.45 ms | 0.18 to 0.23 ms |
+| 100k | none before     | 28 to 74 µs | 6.2 to 7.1 ms   | 2.5 to 3.7 ms   |
+| 100k | 1 in 10         | 35 to 43 µs | 6.0 to 8.8 ms   | 2.8 to 2.9 ms   |
+
+- The sort is not the cost: Rust's stable sort is adaptive, so one z
+  among 5,000 zeros is about a linear pass.
+- The frame is: a z change bumps `structure_rev`, like an insert, and
+  the draw order rebuilds with one walk of the whole tree (`LEDGER.md`,
+  DF-18). No layout runs and no chunk rebuilds (`z_change_costs_no_layout`
+  checks both).
+- Rerun twice after the PR #6 review (the scene walk lends a sorted
+  order instead of copying it), load average 20 to 26: within noise.
+  Two cells ran slower than their range, both with no z before: the
+  5k re-sort at 13 to 18 µs, and the 100k frame after z at 7.9 to
+  9.0 ms. The others fell inside or just below their ranges.
+
+Hit tests at 100k nodes along E15's 1,000-point path (µs per test,
+allocations per test):
+
+| z | walk | index |
+|---|------|-------|
+| none | 1,273 to 2,678, 0 allocs | 7.3 to 7.9, 0 allocs |
+| 1 in 10 cells ±1 | 1,570 to 2,377, 0 allocs | 8.1 to 11.5, 0 allocs |
+
+A sorted parent is borrowed as-is after the frame's refresh, so hit
+testing stays allocation-free. The index costs up to 1.5 times more with
+z on a tenth of all cells, an extreme case: it visits those children
+out of memory order. Rerun on the Mac with the command above.
+
 ### State styles: native restyle cost (work item 5)
 
 `cargo run --release -p craie-harness --example states_restyle`

@@ -322,6 +322,7 @@ pub fn validate(host: &Host, txn: &Transaction<'_>) -> Result<(), WireError> {
                 id,
                 transform,
                 opacity,
+                ..
             } => {
                 need_live(&o, *id, "spatial on an absent node")?;
                 if transform.is_some_and(|t| !t.0.iter().all(|v| v.is_finite())) {
@@ -329,6 +330,18 @@ pub fn validate(host: &Host, txn: &Transaction<'_>) -> Result<(), WireError> {
                 }
                 if opacity.is_some_and(|v| !(0.0..=1.0).contains(&v)) {
                     return Err(invalid("opacity outside [0, 1]"));
+                }
+            }
+            Mutation::Layer { id, owner } => {
+                need_live(&o, *id, "layer on an absent node")?;
+                if o.kind(*id) != Some(NodeKind::View) {
+                    return Err(invalid("layer on a non-view node"));
+                }
+                if *owner != NIL {
+                    need_live(&o, *owner, "layer owned by an absent node")?;
+                    if owner == id {
+                        return Err(invalid("layer owned by itself"));
+                    }
                 }
             }
             Mutation::Paint {
@@ -633,13 +646,23 @@ impl Ui {
                 id,
                 transform,
                 opacity,
-            } => match self.base_mut(*id) {
-                Some(b) => {
-                    b.transform = transform.unwrap_or(b.transform);
-                    b.opacity = opacity.unwrap_or(b.opacity);
+                z,
+            } => {
+                // Not animatable: a z change reorders at once.
+                if let Some(z) = z {
+                    self.host.set_z(NodeId(*id), *z);
                 }
-                None => self.declare_spatial(NodeId(*id), *transform, *opacity),
-            },
+                match self.base_mut(*id) {
+                    Some(b) => {
+                        b.transform = transform.unwrap_or(b.transform);
+                        b.opacity = opacity.unwrap_or(b.opacity);
+                    }
+                    None => self.declare_spatial(NodeId(*id), *transform, *opacity),
+                }
+            }
+            Mutation::Layer { id, owner } => {
+                self.host.set_layer(NodeId(*id), *owner);
+            }
             Mutation::Paint {
                 id,
                 fill,
