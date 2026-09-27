@@ -1,0 +1,17 @@
+[package]
+name = "craie-svg-import"
+description = "Build-time SVG import: usvg into Craie vector assets (never shipped)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[[bin]]
+name = "craie-svg"
+path = "src/main.rs"
+
+[dependencies]
+craie-core.workspace = true
+craie-vector.workspace = true
+usvg = { version = "=0.46.0", default-features = false }

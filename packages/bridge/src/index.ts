@@ -3,23 +3,61 @@
 //   host.ts:   runApp(bindings, new URL("./app.tsx", import.meta.url))
 //   app.tsx:   const root = attachApp(bindings); root.render(<View ...>...</View>)
 
-import React, { createContext, createElement, type ReactNode } from "react"
+import React, {
+  createContext,
+  createElement,
+  useEffect,
+  useState,
+  type ReactNode,
+  type Ref,
+} from "react"
 import ReactReconciler from "react-reconciler"
 import { ConcurrentRoot, DefaultEventPriority } from "react-reconciler/constants.js"
-import { CraieHost, type HostNode, type Transport } from "./host.js"
-import type { StyleProps } from "./wire.js"
+import {
+  CraieHost,
+  onFrameStats as onFrameStatsInternal,
+  type FrameStats as FrameStatsReport,
+  type HostNode,
+  type SurfaceParam,
+  type Transport,
+} from "./host.js"
+import {
+  SURFACE,
+  type AccessibilityRole,
+  type AnimProp,
+  type AnimationEnd,
+  type Easing,
+  type EndReason,
+  type ItemDesc,
+  type ListTemplate,
+  type ScrollAnchor,
+  type StyleProps,
+} from "./wire.js"
 
 export { attachApp, decodeEvents, loadBindings, runApp, NativeTransport } from "./native.js"
-export type {
-  Bindings,
-  NativeClientHandle,
-  NativeHostHandle,
-  PaintQuad,
-  PaintSpec,
-  PainterFn,
-} from "./native.js"
-export { Encoder, NIL, type StyleProps } from "./wire.js"
-export type { HostNode, Transport, UiEvent } from "./host.js"
+export type { Bindings, NativeClientHandle, NativeHostHandle } from "./native.js"
+export {
+  ANCHOR,
+  ANIM_PROP,
+  EASING,
+  END_REASON,
+  Encoder,
+  NIL,
+  ROLE,
+  SURFACE,
+  transformMatrix,
+  type AccessibilityRole,
+  type ItemDesc,
+  type ListTemplate,
+  type ScrollAnchor,
+  type StyleProps,
+  type Timing,
+  type Transform,
+  type TransformStep,
+  type Transitions,
+} from "./wire.js"
+export type { FrameStats, HostNode, SurfaceParam, Transport, UiEvent } from "./host.js"
+export { onFrameStats } from "./host.js"
 
 /** Pointer position + target passed to pointer/wheel listeners. `x`/`y`
  * are window-absolute logical points; `rx`/`ry` are relative to the
@@ -54,6 +92,9 @@ export interface ScrollEvt {
 }
 
 export interface ListenerProps {
+  /** The native node: `focus`, `blur`, `scrollTo`, `setText`,
+   * `animate`. */
+  ref?: Ref<HostNode>
   onPointerMove?: (e: PointerEvt) => void
   onPointerDown?: (e: PointerEvt) => void
   onPointerUp?: (e: PointerEvt) => void
@@ -69,6 +110,9 @@ export interface ListenerProps {
 
 export interface ViewProps extends ListenerProps {
   style?: StyleProps
+  /** The View's text descendants form one selection domain: drag to
+   * select across them, Cmd/Ctrl+C copies in tree order. */
+  selectable?: boolean
   backgroundColor?: string | number
   borderRadius?: number
   borderColor?: string | number
@@ -77,37 +121,72 @@ export interface ViewProps extends ListenerProps {
   focusable?: boolean
   /** Accessibility name announced by assistive technology. */
   accessibilityLabel?: string
+  /** Accessibility role; a plain View has none. */
+  accessibilityRole?: AccessibilityRole
+  /** Sends `display: none`. */
   hidden?: boolean
   children?: ReactNode
 }
-export interface TextProps {
+export interface PressableProps extends ViewProps {
+  /** Primary pointer released over the node. */
+  onPress?: (e: PointerEvt) => void
+}
+/** Text props. A Text nested in a Text has no native node: its text and
+ * style become spans of the outermost Text's paragraph, and its pointer
+ * listeners (`onPress` too) receive the events over its own span. */
+export interface TextProps extends ListenerProps {
   style?: StyleProps
+  /** Primary pointer released over this text (or this nested span). */
+  onPress?: (e: PointerEvt) => void
+  /** This Text alone is a selection domain (on the outermost Text). */
+  selectable?: boolean
   fontSize?: number
   color?: string | number
+  fontWeight?: number | "normal" | "bold"
+  fontStyle?: "normal" | "italic"
+  /** Family name or generic (`"monospace"`, `"serif"`); the default is
+   * `system-ui`. */
+  fontFamily?: string
+  textDecorationLine?: "none" | "underline" | "line-through" | "underline line-through"
+  /** Added to each character's advance, logical points. */
+  letterSpacing?: number
+  /** Absolute line height, logical points (per paragraph: the outermost
+   * Text's). */
+  lineHeight?: number
   /** Accessibility name; defaults to the text content. */
   accessibilityLabel?: string
+  accessibilityRole?: AccessibilityRole
   hidden?: boolean
   children?: ReactNode // strings land on the wire as text
   text?: string
 }
-export interface CustomProps extends ListenerProps {
+export interface SurfaceProps extends ListenerProps {
   style?: StyleProps
   backgroundColor?: string | number
   borderRadius?: number
   borderColor?: string | number
   borderWidth?: number
-  /** Which registered painter renders this node (see
-   *  `NativeHost.registerPainter` / `runApp` `painters`). */
-  tag: number
-  /** Up to 4 floats of author data for the painter. */
-  data?: number[]
-  /** String payload for the painter. */
-  text?: string
-  /** Accessibility name announced by assistive technology. */
+  /** Native surface kind (see `SURFACE`); Rust hosts may register more. */
+  kind: number
+  /** Up to four kind-specific parameters: colors or `{ f32 }` values. */
+  params?: SurfaceParam[]
+  /** Kind-specific data, copied once per change (identity compare). */
+  payload?: ArrayBufferView
   accessibilityLabel?: string
+  accessibilityRole?: AccessibilityRole
   hidden?: boolean
 }
+export interface BarsProps extends Omit<SurfaceProps, "kind" | "params" | "payload"> {
+  /** Bar heights in [0, 1]. A new array means new data. */
+  values: Float32Array
+  color: string | number
+  /** Color of the tallest bar; defaults to `color`. */
+  maxColor?: string | number
+  /** Gap between bars, logical points (default 2). */
+  gap?: number
+}
 export interface TextInputProps extends ListenerProps {
+  accessibilityRole?: AccessibilityRole
   style?: StyleProps
   backgroundColor?: string | number
   borderRadius?: number
@@ -120,18 +199,50 @@ export interface TextInputProps extends ListenerProps {
   focusable?: boolean
   /** Accessibility name announced by assistive technology. */
   accessibilityLabel?: string
-  /** Controlled value; native sends `onChangeText` for edits and accepts
-   * external replacement when the prop actually changes. */
+  /** Initial text. Inputs are uncontrolled: later `value` changes are
+   * ignored; call `setText` on the node ref to replace the text.
+   * Native reports edits through `onChangeText`. */
   value?: string
   onChangeText?: (text: string) => void
   onSubmit?: (text: string) => void
   hidden?: boolean
 }
 
+/** The latest native frame statistics (`null` until the first report).
+ * Reports come only while frames are drawn. */
+export function useFrameStats(): FrameStatsReport | null {
+  const [stats, setStats] = useState<FrameStatsReport | null>(null)
+  useEffect(() => onFrameStatsInternal(setStats), [])
+  return stats
+}
+
 export function View(props: ViewProps) {
   return createElement("view", props)
 }
-export function Text(props: TextProps) {
+
+/** A View that is a button for assistive technology and fires `onPress`
+ * on primary pointer release. */
+export function Pressable({ onPress, ...props }: PressableProps) {
+  return createElement("view", {
+    accessibilityRole: "button",
+    focusable: true,
+    ...props,
+    onPointerUp: (e: PointerEvt) => {
+      props.onPointerUp?.(e)
+      if ((e.button ?? 1) === 1) onPress?.(e)
+    },
+  })
+}
+export function Text({ onPress, ...rest }: TextProps) {
+  const props: TextProps = onPress
+    ? {
+        ...rest,
+        onPointerUp: (e: PointerEvt) => {
+          rest.onPointerUp?.(e)
+          if ((e.button ?? 1) === 1) onPress(e)
+        },
+      }
+    : rest
   // Flatten primitive children ("a" {b} "c") into a single `text` prop so
   // mixed string/expression JSX still forms one paragraph. Nested
   // non-primitive children (styled spans) keep their instances.
@@ -141,26 +252,149 @@ export function Text(props: TextProps) {
     children !== undefined &&
     flattenText(children) !== undefined
   ) {
-    return createElement("text", { ...props, text: flattenText(children), children: undefined })
+    return createElement("text", {
+      accessibilityRole: "text",
+      ...props,
+      text: flattenText(children),
+      children: undefined,
+    })
   }
-  return createElement("text", props)
+  return createElement("text", { accessibilityRole: "text", ...props })
 }
 
-export function Custom(props: CustomProps) {
-  return createElement("custom", props)
+/** A native drawing surface fed by payload bytes. */
+export function Surface(props: SurfaceProps) {
+  return createElement("surface", props)
 }
 
-export function ScrollView(props: ViewProps) {
+export interface VectorProps extends ListenerProps {
+  style?: StyleProps
+  backgroundColor?: string | number
+  borderRadius?: number
+  borderColor?: string | number
+  borderWidth?: number
+  /** A vector asset: the bytes `craie-svg in.svg out.crv` writes (SVG
+   * is imported at build time). Its view box is the node's intrinsic
+   * size; the drawing fits its content box, centered, aspect kept. */
+  asset: Uint8Array
+  accessibilityLabel?: string
+  accessibilityRole?: AccessibilityRole
+  hidden?: boolean
+}
+
+/** A vector drawing (icons, illustrations) from a prepared asset. An
+ * image for assistive technology unless a role is given. */
+export function Vector(props: VectorProps) {
+  return createElement("vector", { accessibilityRole: "image", ...props })
+}
+
+/** Bar chart surface (`SURFACE.bars`). */
+export function Bars({ values, color, maxColor, gap, ...props }: BarsProps) {
+  return createElement("surface", {
+    ...props,
+    kind: SURFACE.bars,
+    params: [color, maxColor ?? 0, { f32: gap ?? 2 }],
+    payload: values,
+  })
+}
+
+export interface ScrollViewProps extends ViewProps {
+  /** Scroll anchoring (default "keep-visible"): the top visible list
+   * item keeps its place when extents above it change. "stick-to-end"
+   * also holds the end when the view is already there. */
+  anchor?: ScrollAnchor
+}
+
+export function ScrollView(props: ScrollViewProps) {
   return createElement("view", {
+    accessibilityRole: "scrollView",
     ...props,
     style: { overflow: "scroll", ...props.style },
   })
 }
 
+export interface ListProps<T> {
+  /** The items. Treated as immutable: a changed item is a new object. */
+  items: readonly T[]
+  /** Stable key of an item's row. */
+  keyOf: (item: T, index: number) => string | number
+  /** Renders one item's row content. */
+  renderItem: (item: T, index: number) => ReactNode
+  /** An item's description for native estimates: its row template
+   * (index into `templates`) and its text length in characters. Native
+   * computes the estimate; rendered rows replace it with their height. */
+  describe?: (item: T) => ItemDesc
+  /** Row templates: fixed extent, horizontal insets, wrapping font size. */
+  templates?: readonly ListTemplate[]
+  /** Extent of an item without a template (default 44). */
+  estimatedItemSize?: number
+  /** Distance rendered beyond the viewport, each side (default 400). */
+  overscan?: number
+  /** Rows rendered before native reports the first range (default 12). */
+  initialCount?: number
+  style?: StyleProps
+  accessibilityLabel?: string
+}
+
+interface Range {
+  first: number
+  end: number
+  /** Key of the item kept rendered for focus. */
+  keepKey?: unknown
+}
+
+/** A virtualized list. Put it inside a ScrollView: native lays out only
+ * the rows in the range it reports (plus a focused row), places them at
+ * their item offsets, and anchors the scroll position. */
+export function List<T>(props: ListProps<T>) {
+  const { items, keyOf, renderItem, initialCount = 12, ...rest } = props
+  const [range, setRange] = useState<Range>(() => ({
+    first: 0,
+    end: Math.min(items.length, initialCount),
+  }))
+  const onRange = (e: { first: number; end: number; keepKey?: unknown; current: boolean }) =>
+    setRange((r) => ({
+      // Indices from an older item order are dropped: native reports
+      // again for the current one.
+      first: e.current ? e.first : r.first,
+      end: e.current ? e.end : r.end,
+      keepKey: e.keepKey,
+    }))
+  const row = (i: number) =>
+    createElement(
+      "view",
+      { key: keyOf(items[i]!, i), listIndex: i, accessibilityRole: "listItem" },
+      renderItem(items[i]!, i),
+    )
+  const rows: ReactNode[] = []
+  const end = Math.min(range.end, items.length)
+  for (let i = range.first; i < end; i++) rows.push(row(i))
+  // The focused item by identity, wherever items moved it.
+  if (range.keepKey !== undefined) {
+    const keep = keyIndex(items, keyOf, range.keepKey)
+    if (keep >= 0 && (keep < range.first || keep >= end)) rows.push(row(keep))
+  }
+  return createElement(
+    "list",
+    { accessibilityRole: "list", ...rest, items, keyOf, onRange },
+    rows,
+  )
+}
+
+/** Index of the item with `key`, or -1. */
+function keyIndex<T>(items: readonly T[], keyOf: (item: T, i: number) => unknown, key: unknown) {
+  for (let i = 0; i < items.length; i++) if (keyOf(items[i]!, i) === key) return i
+  return -1
+}
+
 export function TextInput(props: TextInputProps) {
   // focusable by default; a Tab ring that skips the only editable field
   // would surprise.
-  return createElement("input", { focusable: true, ...props })
+  return createElement("input", {
+    focusable: true,
+    accessibilityRole: props.multiline ? "multilineTextInput" : "textInput",
+    ...props,
+  })
 }
 
 function flattenText(children: ReactNode): string | undefined {
@@ -199,7 +433,7 @@ const config = {
   // String children are absorbed into the `text` prop via
   // shouldSetTextContent; createTextInstance covers mixed content.
   createTextInstance: (text: string, root: CraieHost) =>
-    root.node("text", { text }),
+    root.node("text", { text, accessibilityRole: "text" }),
 
   appendInitialChild: (parent: HostNode, child: HostNode) => {
     // Parent has no id yet; replayed by materialize.
@@ -223,10 +457,11 @@ const config = {
   commitTextUpdate: (n: HostNode, _old: string, text: string) =>
     n.root.setTextContent(n, text),
 
-  hideInstance: (n: HostNode) => n.root.setHidden(n, true),
-  hideTextInstance: (n: HostNode) => n.root.setHidden(n, true),
-  unhideInstance: (n: HostNode) => n.root.setHidden(n, false),
-  unhideTextInstance: (n: HostNode) => n.root.setHidden(n, false),
+  // Suspense hiding is `display: none`: the one way to hide.
+  hideInstance: (n: HostNode) => n.root.setSuspended(n, true),
+  hideTextInstance: (n: HostNode) => n.root.setSuspended(n, true),
+  unhideInstance: (n: HostNode) => n.root.setSuspended(n, false),
+  unhideTextInstance: (n: HostNode) => n.root.setSuspended(n, false),
 
   getPublicInstance: (n: HostNode) => n,
   getRootHostContext: () => context,

@@ -10,28 +10,48 @@ import {
   loadBindings,
   runApp as run,
   type Bindings,
-  type PainterFn,
   type Root,
 } from "@craie/bridge"
 
 export {
   View,
+  Pressable,
   Text,
   TextInput,
   ScrollView,
-  Custom,
+  List,
+  Surface,
+  Bars,
+  Vector,
+  useFrameStats,
+  onFrameStats,
   createRoot,
   loadBindings,
   NativeTransport,
   decodeEvents,
   Encoder,
   NIL,
+  ROLE,
+  SURFACE,
+  ANCHOR,
 } from "@craie/bridge"
 export type {
+  ListProps,
+  ScrollViewProps,
+  ListTemplate,
+  ItemDesc,
+  ScrollAnchor,
   ViewProps,
+  PressableProps,
   TextProps,
   TextInputProps,
-  CustomProps,
+  SurfaceProps,
+  BarsProps,
+  VectorProps,
+  FrameStats,
+  Timing,
+  Transitions,
+  SurfaceParam,
   ListenerProps,
   PointerEvt,
   KeyEvt,
@@ -40,12 +60,12 @@ export type {
   Transport,
   UiEvent,
   StyleProps,
+  Transform,
+  TransformStep,
+  AccessibilityRole,
   Bindings,
   NativeClientHandle,
   NativeHostHandle,
-  PaintQuad,
-  PaintSpec,
-  PainterFn,
   Root,
 } from "@craie/bridge"
 
@@ -63,7 +83,6 @@ export function runApp(
     title?: string
     width?: number
     height?: number
-    painters?: Record<number, PainterFn>
   } = {},
   bindings?: Bindings,
 ): Promise<void> {

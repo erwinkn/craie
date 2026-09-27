@@ -1,0 +1,29 @@
+[package]
+name = "craie-text"
+description = "Shaping, paragraph layout, editing, glyph rasterization"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+craie-core.workspace = true
+craie-scene.workspace = true
+swash.workspace = true
+etagere.workspace = true
+harfrust.workspace = true
+skrifa.workspace = true
+unicode-bidi.workspace = true
+unicode-linebreak.workspace = true
+unicode-segmentation.workspace = true
+unicode-script.workspace = true
+unicode-properties.workspace = true
+
+[features]
+# Pinned test fonts (assets/fonts) as the default font source: for tests
+# and the E01 comparison. Never enabled by a release crate.
+pinned-fonts = []
+
+[dev-dependencies]
+craie-text = { path = ".", features = ["pinned-fonts"] }
+

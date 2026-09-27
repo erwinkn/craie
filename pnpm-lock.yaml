@@ -21,6 +21,32 @@ importers:
         specifier: ^0.28.2
         version: 0.28.2
 
+  examples/list:
+    dependencies:
+      '@craie/react':
+        specifier: workspace:*
+        version: link:../../packages/react
+      react:
+        specifier: ^19.2.0
+        version: 19.3.0
+    devDependencies:
+      esbuild:
+        specifier: ^0.28.2
+        version: 0.28.2
+
+  examples/pulse:
+    dependencies:
+      '@craie/react':
+        specifier: workspace:*
+        version: link:../../packages/react
+      react:
+        specifier: ^19.2.0
+        version: 19.3.0
+    devDependencies:
+      esbuild:
+        specifier: ^0.28.2
+        version: 0.28.2
+
   examples/todo:
     dependencies:
       '@craie/react':

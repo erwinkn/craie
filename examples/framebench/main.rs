@@ -14,6 +14,12 @@
 //! then:
 //!
 //!   cargo run --release --example framebench -- <dir> <rows> [--reps 3]
+//!     [--family name]
+//!
+//! Text lays out in the Text default family, `system-ui` (SF on macOS),
+//! unless `--family` names another; `sans-serif` (Helvetica on macOS),
+//! step 2's Parley default, is the reference for comparisons with it.
+//! Each JSON row records the requested family and the resolved face.
 //!
 //! Deliberate differences from the gpui-react fixture, matching what
 //! Craie can do today:
@@ -30,9 +36,9 @@ use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
-use craie::geom::Size;
-use craie::gpu::{Gpu, Renderer};
-use craie::ui::Ui;
+use craie_core::geom::Size;
+use craie_render::{Gpu, Renderer};
+use craie_ui::ui::Ui;
 
 const SCALE: f32 = 2.0;
 const VIEW: Size = Size {
@@ -183,9 +189,9 @@ impl GpuSide {
 
     /// Scene upload + one draw submit — the GPU work inside a frame.
     fn draw(&mut self, ui: &mut Ui) {
-        self.renderer.sync_atlas(&self.gpu, &mut ui.text.atlas);
+        self.renderer.prepare(&self.gpu, ui.scene_mut());
         self.renderer
-            .draw(&self.gpu, &self.view, self.w, self.h, ui.scene());
+            .draw(&self.gpu, &self.view, self.w, self.h, ui.scene_mut());
     }
 }
 
@@ -204,15 +210,40 @@ fn draw(ui: &mut Ui, gpu: &mut Option<GpuSide>) -> (f64, f64, f64) {
     (layout_ms + paint_ms + ms(t), layout_ms, paint_ms)
 }
 
+/// The family name of the face `family` resolves to for 400 upright text.
+fn resolved_face(ui: &mut Ui, family: &str) -> String {
+    use craie_text::paragraph::Resolve;
+    let attrs = craie_text::fonts::FontAttrs {
+        weight: 400,
+        italic: false,
+    };
+    let Some(font) = ui.text.fonts.primary(family, attrs) else {
+        return String::new();
+    };
+    let store = &ui.text.fonts.store;
+    let face = store.face_data(store.instance_data(font).face);
+    craie_text::swash::FontRef::from_index(face.bytes.as_ref().as_ref(), face.index as usize)
+        .and_then(|f| {
+            f.localized_strings()
+                .find_by_id(craie_text::swash::StringId::Family, None)
+        })
+        .map(|s| s.chars().collect())
+        .unwrap_or_default()
+}
+
 // -------------------------------------------------------------------- main
 
 fn main() {
+    // Text lays out on the system's fonts.
+    craie_platform_winit::fonts::install();
     let args: Vec<String> = std::env::args().collect();
-    let dir = args.get(1).map(String::as_str).unwrap_or("/tmp/craie-framebench/wire");
-    let rows: usize = args
-        .get(2)
-        .and_then(|s| s.parse().ok())
-        .expect("usage: framebench <dir> <rows> [--ops N] [--warmup N] [--reps N] [--json path] [--no-gpu]");
+    let dir = args
+        .get(1)
+        .map(String::as_str)
+        .unwrap_or("/tmp/craie-framebench/wire");
+    let rows: usize = args.get(2).and_then(|s| s.parse().ok()).expect(
+        "usage: framebench <dir> <rows> [--ops N] [--warmup N] [--reps N] [--json path] [--no-gpu] [--family name]",
+    );
     let opt = |name: &str, default: usize| -> usize {
         args.windows(2)
             .find(|w| w[0] == name)
@@ -227,6 +258,12 @@ fn main() {
         .windows(2)
         .find(|w| w[0] == "--json")
         .map(|w| w[1].clone());
+    // The Text default family (default: system-ui); `sans-serif` matches
+    // the Parley-era default for same-font comparisons.
+    let family = args
+        .windows(2)
+        .find(|w| w[0] == "--family")
+        .map(|w| w[1].clone());
 
     let mount = load_frame(dir, "mount", rows);
     let updates = load_frames(dir, "updates", rows);
@@ -235,11 +272,16 @@ fn main() {
     assert_eq!(updates.len(), ops, "updates frame count != --ops");
     assert_eq!(scrolls.len(), ops, "scroll frame count != --ops");
 
-    eprintln!("framebench flow rows={rows} ops={ops} warmup={warmup} reps={reps} gpu={gpu_enabled}");
+    eprintln!(
+        "framebench flow rows={rows} ops={ops} warmup={warmup} reps={reps} gpu={gpu_enabled}"
+    );
     let mut json = String::from("[\n");
 
     for rep in 0..reps {
         let mut ui = Ui::new(SCALE);
+        if let Some(f) = &family {
+            ui.text.set_default_family(f);
+        }
         let mut gpu = gpu_enabled.then(GpuSide::new);
         let baseline = live();
         let baseline_histo = histo();
@@ -315,9 +357,21 @@ fn main() {
             kib(after_removal, after_scrolls),
         );
 
-        let st = |s: &Stats| format!("{{\"median\":{:.4},\"mean\":{:.4},\"min\":{:.4}}}", s.median, s.mean, s.min);
+        let st = |s: &Stats| {
+            format!(
+                "{{\"median\":{:.4},\"mean\":{:.4},\"min\":{:.4}}}",
+                s.median, s.mean, s.min
+            )
+        };
+        // The requested family and the face it resolved to (the row text
+        // resolved it before the first draw).
+        let requested = ui.text.fonts.default_family().to_string();
+        let face = resolved_face(&mut ui, &requested);
+        if rep == 0 {
+            eprintln!("  family {requested:?} -> face {face:?}");
+        }
         json += &format!(
-            "  {{\"rows\":{rows},\"rep\":{rep},\"mountMs\":{mount_ms:.4},\"firstDrawMs\":{first_draw:.4},\
+            "  {{\"rows\":{rows},\"rep\":{rep},\"family\":{requested:?},\"face\":{face:?},\"mountMs\":{mount_ms:.4},\"firstDrawMs\":{first_draw:.4},\
              \"updateApplyMs\":{},\"updateDrawMs\":{},\"scrollApplyMs\":{},\"scrollDrawMs\":{},\
              \"removeMs\":{remove_ms:.4},\"emptyDrawMs\":{empty_draw:.4},\
              \"liveBytes\":{{\"baseline\":{baseline},\"afterMount\":{after_mount},\"afterFirstDraw\":{after_first_draw},\

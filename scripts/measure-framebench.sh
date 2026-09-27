@@ -5,6 +5,10 @@
 #
 #   scripts/measure-framebench.sh [out-dir] [rows ...]
 #
+# Text uses the Text default family (system-ui). FAMILY=sans-serif selects
+# the step-2 reference font (Helvetica on macOS); results record the
+# requested family and the resolved face.
+#
 # Writes <out>/wire/*-flow-<rows>.bin inputs and <out>/result-<rows>.json
 # per row count. Only the `flow` scene exists today; list
 # virtualization and a native scroll/input path are planned work, at
@@ -23,7 +27,7 @@ cargo build --release --example framebench
 for rows in $ROWS; do
   bun examples/js/dump-framebench.tsx "$OUT/wire" "$rows"
   ./target/release/examples/framebench "$OUT/wire" "$rows" \
-    --reps 3 --json "$OUT/result-flow-$rows.json"
+    --reps 3 ${FAMILY:+--family "$FAMILY"} --json "$OUT/result-flow-$rows.json"
 done
 
 echo "results in $OUT"

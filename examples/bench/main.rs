@@ -17,13 +17,11 @@ use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
-use craie::geom::Size;
-use craie::ui::Ui;
-use craie::wire::Encoder;
+use craie_core::geom::Size;
+use craie_ui::mutation::{Mutation, NodeKind, Transaction};
+use craie_ui::ui::Ui;
 use taffy::{Dimension, FlexDirection, LengthPercentage, Rect, Style};
 
-const KIND_VIEW: u8 = 0;
-const KIND_TEXT: u8 = 1;
 const NIL: u32 = u32::MAX;
 const SCALE: f32 = 2.0;
 /// Logical viewport ~1600x1000 physical at 2x.
@@ -87,6 +85,26 @@ fn report(p: &Phase) {
     eprintln!("  {:>26}: {:>8.2} ms, {:>7} allocs", p.name, p.ms, p.allocs);
 }
 
+/// Primitives the last draw list draws.
+fn drawn(scene: &craie_scene::Scene) -> u32 {
+    scene
+        .draw_list()
+        .cmds
+        .iter()
+        .map(|c| match c {
+            craie_scene::DrawCmd::Rects { count, .. }
+            | craie_scene::DrawCmd::Glyphs { count, .. } => *count,
+            _ => 0,
+        })
+        .sum()
+}
+
+/// Seals a transaction as CRW2 bytes.
+fn finish(mut t: Transaction<'_>, seq: u64) -> Vec<u8> {
+    t.seq = seq;
+    craie_ui::wire::encode(&t)
+}
+
 fn style(f: impl FnOnce(&mut Style)) -> Style {
     let mut s = Style::default();
     f(&mut s);
@@ -99,61 +117,61 @@ const ROWS: u32 = 5000;
 const UPDATE_ROWS: u32 = 500;
 
 fn build_rows_txn() -> Vec<u8> {
-    let mut enc = Encoder::new();
-    enc.style(
-        0,
-        &style(|s| {
-            s.display = taffy::Display::Flex;
-            s.flex_direction = FlexDirection::Column;
-            s.size = taffy::Size {
-                width: Dimension::percent(1.0),
-                height: Dimension::auto(),
-            };
-        }),
-    );
-    enc.style(
-        1,
-        &style(|s| {
-            s.display = taffy::Display::Flex;
-            s.padding = Rect {
-                left: LengthPercentage::length(8.0),
-                right: LengthPercentage::length(8.0),
-                top: LengthPercentage::length(4.0),
-                bottom: LengthPercentage::length(4.0),
-            };
-        }),
-    );
+    let mut enc = Transaction::new(0);
+    enc.style(&style(|s| {
+        s.display = taffy::Display::Flex;
+        s.flex_direction = FlexDirection::Column;
+        s.size = taffy::Size {
+            width: Dimension::percent(1.0),
+            height: Dimension::auto(),
+        };
+    }));
+    enc.style(&style(|s| {
+        s.display = taffy::Display::Flex;
+        s.padding = Rect {
+            left: LengthPercentage::length(8.0),
+            right: LengthPercentage::length(8.0),
+            top: LengthPercentage::length(4.0),
+            bottom: LengthPercentage::length(4.0),
+        };
+    }));
 
-    enc.create(0, KIND_VIEW);
-    enc.set_style(0, 0);
-    enc.view_paint(0, 0x1415_18FF);
+    enc.create(0, NodeKind::View);
+    enc.push(Mutation::Layout { id: 0, style: 0 });
+    enc.fill(0, 0x1415_18FF);
     enc.place(NIL, 0, NIL);
 
     for i in 0..ROWS {
         let row = 1 + i * 2;
         let text = row + 1;
-        enc.create(row, KIND_VIEW);
-        enc.set_style(row, 1);
-        enc.view_paint(row, if i % 2 == 0 { 0x1B1D_24FF } else { 0x2022_2BFF });
+        enc.create(row, NodeKind::View);
+        enc.push(Mutation::Layout { id: row, style: 1 });
+        enc.fill(row, if i % 2 == 0 { 0x1B1D_24FF } else { 0x2022_2BFF });
         enc.place(0, row, NIL);
-        enc.create(text, KIND_TEXT);
-        enc.set_text(
+        enc.create(text, NodeKind::Text);
+        enc.text(
             text,
-            &format!("row {i}: the quick brown fox jumps over {i} lazy dogs"),
+            format!("row {i}: the quick brown fox jumps over {i} lazy dogs"),
+            14.0,
+            0xECEC_F0FF,
         );
-        enc.text_props(text, 14.0, 0xECEC_F0FF);
         enc.place(row, text, NIL);
     }
-    enc.finish(1)
+    finish(enc, 1)
 }
 
 fn update_rows_txn(seq: u64) -> Vec<u8> {
-    let mut enc = Encoder::new();
+    let mut enc = Transaction::new(0);
     for i in (0..ROWS).step_by((ROWS / UPDATE_ROWS) as usize) {
         let text = 1 + i * 2 + 1;
-        enc.set_text(text, &format!("row {i}: UPDATED at seq {seq}"));
+        enc.text(
+            text,
+            format!("row {i}: UPDATED at seq {seq}"),
+            14.0,
+            0xECEC_F0FF,
+        );
     }
-    enc.finish(seq)
+    finish(enc, seq)
 }
 
 fn bench_rows() {
@@ -181,9 +199,10 @@ fn bench_rows() {
     ui.paint(VIEW);
     report(&t.stop("paint+emit (cold)"));
     eprintln!(
-        "  {:>26}: {} instances, {} rasters, {} cache entries",
+        "  {:>26}: {} drawn primitives, {} chunks built, {} rasters, {} cache entries",
         "scene",
-        ui.scene().items.len(),
+        drawn(ui.scene()),
+        ui.counters().chunks_built,
         ui.text.cache.stats.rasters,
         ui.text.cache.len()
     );
@@ -199,9 +218,7 @@ fn bench_rows() {
     report(&t.stop("layout (warm, unchanged)"));
     eprintln!(
         "  {:>26}: {} hits / {} misses total",
-        "taffy cache",
-        ui.layouts.cache_hits,
-        ui.layouts.cache_misses
+        "taffy cache", ui.layouts.cache_hits, ui.layouts.cache_misses
     );
 
     // Incremental: 500 text updates, the classic "some rows changed" case.
@@ -218,7 +235,7 @@ fn bench_rows() {
     ui.paint(VIEW);
     report(&t.stop("paint (500 dirty)"));
 
-    let header = std::mem::size_of::<craie::host::NodeHeader>();
+    let header = std::mem::size_of::<craie_ui::host::NodeHeader>();
     eprintln!(
         "  {:>26}: {} nodes x {header} B = {} KiB headers; live heap {} KiB",
         "retained state",
@@ -230,7 +247,7 @@ fn bench_rows() {
     // --- production overheads ------------------------------------------
     // Session commit copy: the napi boundary does Vec::from(&[u8]) — one
     // memcpy per commit — then the UI thread drains under one lock.
-    let session = craie::bridge::Session::new();
+    let session = craie_ui::bridge::Session::new();
     let txn = build_rows_txn();
     let t = Timer::start();
     session.submit(Vec::from(&txn[..])).unwrap();
@@ -249,7 +266,7 @@ fn bench_rows() {
 /// wgpu overhead on the built scene: atlas upload, instance-buffer write,
 /// one draw call, GPU completion. Headless adapter.
 fn bench_gpu(ui: &mut Ui) {
-    use craie::gpu::{Gpu, Renderer};
+    use craie_render::{Gpu, Renderer};
     let gpu = Gpu::headless();
     let format = wgpu::TextureFormat::Rgba8UnormSrgb;
     let mut renderer = Renderer::new(&gpu, format);
@@ -271,18 +288,20 @@ fn bench_gpu(ui: &mut Ui) {
     let view = target.create_view(&Default::default());
 
     let t = Timer::start();
-    renderer.sync_atlas(&gpu, &mut ui.text.atlas);
-    report(&t.stop("atlas upload"));
+    renderer.prepare(&gpu, ui.scene_mut());
+    report(&t.stop("upload (first)"));
     eprintln!(
-        "  {:>26}: {} bytes uploaded",
-        "atlas",
-        renderer.atlas_upload_bytes
+        "  {:>26}: {} bytes ({} atlas)",
+        "upload", renderer.stats.upload_bytes, renderer.atlas_upload_bytes
     );
 
-    let scene = ui.scene().clone();
     let t = Timer::start();
-    renderer.draw(&gpu, &view, w, h, &scene);
-    report(&t.stop("draw submit (upload+1 call)"));
+    renderer.draw(&gpu, &view, w, h, ui.scene_mut());
+    report(&t.stop("draw submit (first)"));
+    eprintln!(
+        "  {:>26}: {} draw calls, {} passes",
+        "draw", renderer.stats.draw_calls, renderer.stats.passes
+    );
 
     let t = Timer::start();
     gpu.device
@@ -293,10 +312,16 @@ fn bench_gpu(ui: &mut Ui) {
         .unwrap();
     report(&t.stop("gpu completion (first)"));
 
-    // Steady state: same scene again — warmup effects excluded.
+    // Steady state: same scene again — warmup effects excluded. An
+    // unchanged scene uploads nothing.
     let t = Timer::start();
-    renderer.draw(&gpu, &view, w, h, &scene);
+    renderer.prepare(&gpu, ui.scene_mut());
+    renderer.draw(&gpu, &view, w, h, ui.scene_mut());
     report(&t.stop("draw submit (warm)"));
+    eprintln!(
+        "  {:>26}: {} bytes",
+        "upload (warm)", renderer.stats.upload_bytes
+    );
     let t = Timer::start();
     gpu.device
         .poll(wgpu::PollType::Wait {
@@ -315,7 +340,7 @@ const STREAM_TOKENS: u32 = 300;
 /// A message row: avatar gutter view + a column of (header, body, maybe
 /// code block) texts. Mirrors a chat transcript's real shape — variable
 /// text length and a mix of leaf kinds per row.
-fn message(enc: &mut Encoder, base: u32, i: u32) {
+fn message(enc: &mut Transaction<'static>, base: u32, i: u32) {
     let row = base;
     let avatar = base + 1;
     let col = base + 2;
@@ -323,22 +348,24 @@ fn message(enc: &mut Encoder, base: u32, i: u32) {
     let body = base + 4;
     let code = base + 5;
 
-    enc.create(row, KIND_VIEW);
-    enc.set_style(row, 1); // row style
+    enc.create(row, NodeKind::View);
+    enc.push(Mutation::Layout { id: row, style: 1 }); // row style
     enc.place(0, row, NIL);
 
-    enc.create(avatar, KIND_VIEW);
-    enc.set_style(avatar, 2); // 28x28 avatar
-    enc.view_paint(avatar, 0x3A3D_4AFF);
+    enc.create(avatar, NodeKind::View);
+    enc.push(Mutation::Layout {
+        id: avatar,
+        style: 2,
+    }); // 28x28 avatar
+    enc.fill(avatar, 0x3A3D_4AFF);
     enc.place(row, avatar, NIL);
 
-    enc.create(col, KIND_VIEW);
-    enc.set_style(col, 3); // column
+    enc.create(col, NodeKind::View);
+    enc.push(Mutation::Layout { id: col, style: 3 }); // column
     enc.place(row, col, NIL);
 
-    enc.create(header, KIND_TEXT);
-    enc.set_text(header, &format!("user-{}", i % 17));
-    enc.text_props(header, 13.0, 0x9AA0_AEFF);
+    enc.create(header, NodeKind::Text);
+    enc.text(header, format!("user-{}", i % 17), 13.0, 0x9AA0_AEFF);
     enc.place(col, header, NIL);
 
     let body_text = match i % 5 {
@@ -354,98 +381,113 @@ fn message(enc: &mut Encoder, base: u32, i: u32) {
         3 => "Here's the diff you asked for.".to_string(),
         _ => "ok".to_string(),
     };
-    enc.create(body, KIND_TEXT);
-    enc.set_text(body, &body_text);
-    enc.text_props(body, 14.0, 0xECEC_F0FF);
+    enc.create(body, NodeKind::Text);
+    enc.text(body, body_text.clone(), 14.0, 0xECEC_F0FF);
     enc.place(col, body, NIL);
 
     // Every fourth message carries a code block.
     if i % 4 == 3 {
-        enc.create(code, KIND_TEXT);
-        enc.set_text(
+        enc.create(code, NodeKind::Text);
+        enc.text(
             code,
             "fn render(&mut self) {\n    self.scene.items.clear();\n    self.paint(viewport);\n}",
+            12.0,
+            0xB1E1_8AFF,
         );
-        enc.text_props(code, 12.0, 0xB1E1_8AFF);
         enc.place(col, code, NIL);
     }
 }
 
 fn build_transcript_txn() -> Vec<u8> {
-    let mut enc = Encoder::new();
-    enc.style(
-        0,
-        &style(|s| {
-            s.display = taffy::Display::Flex;
-            s.flex_direction = FlexDirection::Column;
-            s.size = taffy::Size {
-                width: Dimension::percent(1.0),
-                height: Dimension::auto(),
-            };
-        }),
-    );
-    enc.style(
-        1,
-        &style(|s| {
-            s.display = taffy::Display::Flex;
-            s.gap = taffy::Size {
-                width: LengthPercentage::length(10.0),
-                height: LengthPercentage::length(2.0),
-            };
-            s.padding = Rect {
-                left: LengthPercentage::length(12.0),
-                right: LengthPercentage::length(12.0),
-                top: LengthPercentage::length(6.0),
-                bottom: LengthPercentage::length(6.0),
-            };
-        }),
-    );
-    enc.style(
-        2,
-        &style(|s| {
-            s.size = taffy::Size {
-                width: Dimension::length(28.0),
-                height: Dimension::length(28.0),
-            };
-            s.flex_shrink = 0.0;
-        }),
-    );
-    enc.style(
-        3,
-        &style(|s| {
-            s.display = taffy::Display::Flex;
-            s.flex_direction = FlexDirection::Column;
-            s.flex_grow = 1.0;
-        }),
-    );
+    let mut enc = Transaction::new(0);
+    enc.style(&style(|s| {
+        s.display = taffy::Display::Flex;
+        s.flex_direction = FlexDirection::Column;
+        s.size = taffy::Size {
+            width: Dimension::percent(1.0),
+            height: Dimension::auto(),
+        };
+    }));
+    enc.style(&style(|s| {
+        s.display = taffy::Display::Flex;
+        s.gap = taffy::Size {
+            width: LengthPercentage::length(10.0),
+            height: LengthPercentage::length(2.0),
+        };
+        s.padding = Rect {
+            left: LengthPercentage::length(12.0),
+            right: LengthPercentage::length(12.0),
+            top: LengthPercentage::length(6.0),
+            bottom: LengthPercentage::length(6.0),
+        };
+    }));
+    enc.style(&style(|s| {
+        s.size = taffy::Size {
+            width: Dimension::length(28.0),
+            height: Dimension::length(28.0),
+        };
+        s.flex_shrink = 0.0;
+    }));
+    enc.style(&style(|s| {
+        s.display = taffy::Display::Flex;
+        s.flex_direction = FlexDirection::Column;
+        s.flex_grow = 1.0;
+    }));
 
-    enc.create(0, KIND_VIEW);
-    enc.set_style(0, 0);
-    enc.view_paint(0, 0x1415_18FF);
+    enc.create(0, NodeKind::View);
+    enc.push(Mutation::Layout { id: 0, style: 0 });
+    enc.fill(0, 0x1415_18FF);
     enc.place(NIL, 0, NIL);
 
     for i in 0..MESSAGES {
-        message(&mut enc, 1 + i * 8, i);
+        // Six ids per message (its widest shape): dense enough for the
+        // executor's id slack (a message without a code block leaves one).
+        message(&mut enc, 1 + i * 6, i);
     }
-    enc.finish(1)
+    finish(enc, 1)
 }
 
 /// One streaming transaction per token: the last message's body grows a
 /// word at a time, which is how a response actually arrives.
 fn stream_txn(text_id: u32, seq: u64, acc: &mut String) -> Vec<u8> {
     const WORDS: &[&str] = &[
-        "the", "renderer", "keeps", "one", "ordered", "instance", "stream",
-        "so", "paint", "order", "is", "vector", "order", "and", "a", "frame",
-        "is", "a", "single", "draw", "call", "regardless", "of", "node",
-        "count", "in", "the", "retained", "tree",
+        "the",
+        "renderer",
+        "keeps",
+        "one",
+        "ordered",
+        "instance",
+        "stream",
+        "so",
+        "paint",
+        "order",
+        "is",
+        "vector",
+        "order",
+        "and",
+        "a",
+        "frame",
+        "is",
+        "a",
+        "single",
+        "draw",
+        "call",
+        "regardless",
+        "of",
+        "node",
+        "count",
+        "in",
+        "the",
+        "retained",
+        "tree",
     ];
     if !acc.is_empty() {
         acc.push(' ');
     }
     acc.push_str(WORDS[(seq as usize) % WORDS.len()]);
-    let mut enc = Encoder::new();
-    enc.set_text(text_id, acc);
-    enc.finish(seq)
+    let mut enc = Transaction::new(0);
+    enc.text(text_id, acc.clone(), 14.0, 0xECEC_F0FF);
+    finish(enc, seq)
 }
 
 fn bench_transcript() {
@@ -467,9 +509,10 @@ fn bench_transcript() {
     ui.paint(VIEW);
     report(&t.stop("paint+emit (cold)"));
     eprintln!(
-        "  {:>26}: {} instances, {} rasters, {} cache entries",
+        "  {:>26}: {} drawn primitives, {} chunks built, {} rasters, {} cache entries",
         "scene",
-        ui.scene().items.len(),
+        drawn(ui.scene()),
+        ui.counters().chunks_built,
         ui.text.cache.stats.rasters,
         ui.text.cache.len()
     );
@@ -479,7 +522,7 @@ fn bench_transcript() {
     report(&t.stop("paint (warm, unchanged)"));
 
     // Streaming: one transaction per token into a new trailing message.
-    let last_body = 1 + (MESSAGES - 1) * 8 + 4;
+    let last_body = 1 + (MESSAGES - 1) * 6 + 4;
     let mut acc = String::new();
     let mut apply_ms = 0.0;
     let mut layout_ms = 0.0;
@@ -500,7 +543,10 @@ fn bench_transcript() {
     }
     let total = t_all.elapsed().as_secs_f64() * 1000.0;
     let allocs = ALLOCS.load(Ordering::Relaxed) - allocs0;
-    eprintln!("  {:>26}: {STREAM_TOKENS} txns in {total:.2} ms ({allocs} allocs)", "stream totals");
+    eprintln!(
+        "  {:>26}: {STREAM_TOKENS} txns in {total:.2} ms ({allocs} allocs)",
+        "stream totals"
+    );
     eprintln!(
         "  {:>26}: apply {apply_ms:.2} ms, layout {layout_ms:.2} ms, paint {paint_ms:.2} ms",
         "stream phase sums"
@@ -522,6 +568,8 @@ fn bench_transcript() {
 }
 
 fn main() {
+    // Text lays out on the system's fonts.
+    craie_platform_winit::fonts::install();
     bench_rows();
     bench_transcript();
 }

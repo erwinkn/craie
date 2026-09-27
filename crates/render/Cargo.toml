@@ -1,0 +1,18 @@
+[package]
+name = "craie-render"
+description = "wgpu renderer for craie-scene"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+craie-core.workspace = true
+craie-scene.workspace = true
+wgpu.workspace = true
+bytemuck.workspace = true
+pollster.workspace = true
+
+
+[dev-dependencies]
+craie-vector.workspace = true

@@ -1,45 +1,150 @@
-// Binary transaction encoder — the exact mirror of crates/craie/src/wire.rs.
+// CRW2 transaction encoder — the mirror of crates/ui/src/wire.rs.
 //
-//   header: magic "CRW1" u32 | version u16 | flags u16 | seq u64 | strings u32
+//   header:  magic "CRW2" u32 | version u16 | flags u16 | seq u64
+//            string_count u32 | style_count u32 | span_count u32
 //   strings: count x (u32 byte_len + utf8)
-//   ops:     flat u8-tagged records to end of buffer
+//   styles:  count x (u64 presence mask + fields in schema order)
+//   spans:   count x 28 bytes (start u32, font_size f32, color u32,
+//            weight u16, flags u8, reserved u8, family u32, letter
+//            spacing f32, line height f32)
+//   ops:     u8-tagged records to the end of the buffer
 //
-// Style ops carry a u64 presence mask + positional fields (see FIELD).
-// Strings are interned per transaction and referenced by index.
+// Strings, styles, and spans are per-transaction tables: ops refer to
+// them by index and everything resets after `finish`. Nothing persists
+// across transactions.
 
-const MAGIC = 0x3157_5243 // "CRW1" little-endian
-const VERSION = 1
-export const NIL = 0xffff_ffff // no node / append / clear
+const MAGIC = 0x3257_5243 // "CRW2" little-endian
+const VERSION = 3
+export const NIL = 0xffff_ffff // no node / append / default style
 
 const enum Op {
+  // structure
   Create = 0x01,
-  SetText = 0x02,
-  TextProps = 0x03,
-  SetStyle = 0x04,
-  Place = 0x05,
-  Detach = 0x06,
-  Remove = 0x07,
-  Hidden = 0x08,
-  Style = 0x09,
-  ViewPaint = 0x0a,
-  Paint = 0x0b,
-  Props = 0x0c,
-  InputProps = 0x0d,
-  Command = 0x0e,
-  Custom = 0x0f,
-  Label = 0x10,
+  Place = 0x02,
+  Detach = 0x03,
+  Remove = 0x04,
+  // layout
+  Layout = 0x10,
+  // spatial
+  Spatial = 0x20,
+  // paint
+  Paint = 0x30,
+  // text
+  Paragraph = 0x40,
+  InputConfig = 0x41,
+  // semantics
+  Role = 0x50,
+  Label = 0x51,
+  // interaction
+  Interaction = 0x60,
+  // payload
+  Surface = 0x70,
+  Payload = 0x71,
+  // command
+  Command = 0x80,
+  // lists
+  ListConfig = 0x90,
+  ListSplice = 0x91,
+  ListIndex = 0x92,
+  ScrollAnchor = 0x93,
+  // animation
+  Transition = 0xa0,
+  Animate = 0xa1,
 }
 
-// PAINT op field mask bits — mirror wire.rs `mod paint_field`.
-const PAINT_FIELD = { COLOR: 1 << 0, RADIUS: 1 << 1, BORDER: 1 << 2 } as const
+/** Animatable properties — mirror animation.rs `Prop`. */
+export const ANIM_PROP = {
+  transform: 0,
+  opacity: 1,
+  backgroundColor: 2,
+  borderColor: 3,
+  width: 4,
+  height: 5,
+  padding: 6,
+  gap: 7,
+} as const
+export type AnimProp = keyof typeof ANIM_PROP
+
+/** CSS named easings as cubic-bezier control points. */
+export const EASING = {
+  linear: [0, 0, 1, 1],
+  ease: [0.25, 0.1, 0.25, 1],
+  "ease-in": [0.42, 0, 1, 1],
+  "ease-out": [0, 0, 0.58, 1],
+  "ease-in-out": [0.42, 0, 0.58, 1],
+} as const
+export type Easing = keyof typeof EASING | readonly [number, number, number, number]
+
+/** A timing in milliseconds (as RN Animated): a CSS curve over
+ * `duration` (default easing `ease`), or a spring (defaults: stiffness
+ * 170, damping 26, mass 1). */
+export type Timing =
+  | { duration: number; delay?: number; easing?: Easing }
+  | { spring: { stiffness?: number; damping?: number; mass?: number }; delay?: number }
+
+/** `style.transition`: later changes of these properties tween. */
+export type Transitions = Partial<Record<AnimProp, Timing>>
+
+/** Scroll anchoring policies — mirror mutation.rs `Anchor`. */
+export const ANCHOR = { "keep-visible": 0, "stick-to-end": 1, none: 2 } as const
+export type ScrollAnchor = keyof typeof ANCHOR
+
+/** A row template for native estimates — mirror mutation.rs
+ * `ItemTemplate`: fixed extent, horizontal insets, wrapping font size. */
+export interface ListTemplate {
+  base?: number
+  inset?: number
+  fontSize?: number
+}
+/** An item's description for native estimates: its template and text
+ * length in characters. `id` is the item's identity (the bridge interns
+ * the item's key); NIL for none. */
+export interface ItemDesc {
+  template?: number
+  textLength?: number
+  id?: number
+  /** The same (unchanged) item the splice removes under `id`: a move. */
+  unchanged?: boolean
+}
+
+// Field mask bits — mirror wire.rs `spatial_field` / `paint_field`.
+const SPATIAL_FIELD = { TRANSFORM: 1 << 0, OPACITY: 1 << 1 } as const
+const PAINT_FIELD = { FILL: 1 << 0, RADIUS: 1 << 1, BORDER: 1 << 2 } as const
+const SPAN_ITALIC = 1 << 0
+const SPAN_UNDERLINE = 1 << 1
+const SPAN_LINE_THROUGH = 1 << 2
+/** Span decoration bits (`TextSpanIn.decoration`). */
+export const DECORATION = { underline: 1, lineThrough: 2 } as const
 
 // COMMAND op sub-tags — mirror wire.rs `mod cmd`.
 const enum Cmd {
   Focus = 0,
   Blur = 1,
-  SetInputText = 2,
+  SetText = 2,
   ScrollTo = 3,
 }
+
+/** Accessibility roles — mirror mutation.rs `Role`. */
+export const ROLE = {
+  none: 0,
+  button: 1,
+  text: 2,
+  textInput: 3,
+  multilineTextInput: 4,
+  scrollView: 5,
+  image: 6,
+  header: 7,
+  link: 8,
+  checkbox: 9,
+  adjustable: 10,
+  list: 11,
+  listItem: 12,
+  group: 13,
+} as const
+export type AccessibilityRole = keyof typeof ROLE
+
+/** Built-in surface kinds — mirror surface.rs `kind`. */
+export const SURFACE = { bars: 1 } as const
 
 // Outbound event kinds + listener mask bits — mirror events.rs.
 export const EVENT_KIND = {
@@ -56,7 +161,27 @@ export const EVENT_KIND = {
   change: 11,
   submit: 12,
   scroll: 13,
+  /** A list's rendered range: a = first, b = end, x = kept item index
+   * (-1), y = the list's splice revision (mod 2^24), key = kept item id. */
+  listRange: 14,
+  /** An `animate` tween ended: key = property | reason << 8. */
+  animationEnd: 15,
+  /** Native frame statistics (node NIL): x = frames per second, y = mean
+   * CPU ms per frame, a = the largest, b = mean layout and scene ms,
+   * key = live nodes, revision = running tweens. */
+  frameStats: 16,
 } as const
+
+/** Why a tween ended — mirror animation.rs `end_reason`. */
+export const END_REASON = ["finished", "cancelled", "retargeted", "removed"] as const
+export type EndReason = (typeof END_REASON)[number]
+
+/** What `node.animate` resolves with: `finished` when it reached its
+ * target. */
+export interface AnimationEnd {
+  finished: boolean
+  reason: EndReason
+}
 
 export const EVENT_MASK = {
   pointerMove: 1 << 0,
@@ -142,7 +267,27 @@ export interface StyleProps {
   flexShrink?: number
   aspectRatio?: number
   overflow?: "visible" | "clip" | "hidden" | "scroll" | { x?: string; y?: string }
+  /** Spatial, not layout: travels in its own op and never relayouts.
+   * RN-style list, applied about the border-box center. */
+  transform?: Transform
+  /** Spatial: group opacity in [0, 1]. */
+  opacity?: number
+  /** Not layout: declared transitions, sent in their own op. */
+  transition?: Transitions
 }
+
+/** One RN-style transform step. Angles: "45deg", "0.5rad", or radians. */
+export type TransformStep =
+  | { translateX: number }
+  | { translateY: number }
+  | { scale: number }
+  | { scaleX: number }
+  | { scaleY: number }
+  | { rotate: string | number }
+  | { skewX: string | number }
+  | { skewY: string | number }
+  | { matrix: readonly [number, number, number, number, number, number] }
+export type Transform = readonly TransformStep[]
 
 const textEncoder = new TextEncoder()
 
@@ -285,7 +430,8 @@ function putStyle(w: Writer, s: StyleProps) {
     putLPA(w, s.maxHeight ?? "auto")
   }
   if (s.padding !== undefined) for (const e of edge4(s.padding, 0)) putLP(w, e)
-  if (s.margin !== undefined) for (const e of edge4(s.margin, "auto" as const)) putLPA(w, e)
+  // Unset margin sides are 0 (CSS and React Native), not auto.
+  if (s.margin !== undefined) for (const e of edge4<LengthPctAuto>(s.margin, 0)) putLPA(w, e)
   if (s.borderWidth !== undefined) for (const e of edge4(s.borderWidth, 0)) putLP(w, e)
   if (hasInset) {
     const base = edge4(s.inset, "auto" as const)
@@ -305,15 +451,137 @@ function putStyle(w: Writer, s: StyleProps) {
   }
 }
 
-/** One transaction being encoded. Call `finish` to get the wire bytes. */
+/** One style span of a paragraph (span zero starts at 0). */
+export interface TextSpanIn {
+  start: number
+  fontSize: number
+  color: number
+  weight?: number
+  italic?: boolean
+  /** Family name or generic ("monospace"); absent: the default family. */
+  fontFamily?: string
+  /** `DECORATION` bits. */
+  decoration?: number
+  /** Added to each character's advance, logical points. */
+  letterSpacing?: number
+  /** Absolute line height, logical points; span zero's applies to the
+   * paragraph. */
+  lineHeight?: number
+}
+
+export type Affine = [number, number, number, number, number, number]
+export const IDENTITY: Affine = [1, 0, 0, 1, 0, 0]
+
+function angle(v: string | number): number {
+  if (typeof v === "number") return v
+  if (v.endsWith("deg")) return (parseFloat(v) * Math.PI) / 180
+  if (v.endsWith("rad")) return parseFloat(v)
+  throw Error(`bad angle "${v}"`)
+}
+
+/** p · c: apply `c` first, then `p` (CSS matrix order, like Affine::mul). */
+function mul(p: Affine, c: Affine): Affine {
+  const [a, b, cc, d, e, f] = p
+  const [a2, b2, c2, d2, e2, f2] = c
+  return [
+    a * a2 + cc * b2,
+    b * a2 + d * b2,
+    a * c2 + cc * d2,
+    b * c2 + d * d2,
+    a * e2 + cc * f2 + e,
+    b * e2 + d * f2 + f,
+  ]
+}
+
+/** A timing on the wire: kind u8, delay f32, five f32 (a curve:
+ * duration, x1, y1, x2, y2; a spring: stiffness, damping, mass, 0, 0),
+ * seconds natively. Checks what native checks (finite, delays and
+ * durations up to 600 s, curve x in [0, 1], positive springs) and
+ * throws. */
+export function timingValues(t: Timing): number[] {
+  const secs = (ms: unknown, what: string) => {
+    if (typeof ms !== "number" || !Number.isFinite(ms) || ms < 0 || ms > 600_000) {
+      throw Error(`bad ${what} ${String(ms)}`)
+    }
+    return ms / 1000
+  }
+  const delay = secs(t.delay ?? 0, "delay")
+  if ("spring" in t) {
+    const s = [t.spring.stiffness ?? 170, t.spring.damping ?? 26, t.spring.mass ?? 1]
+    if (!s.every(v => typeof v === "number" && Number.isFinite(v) && v > 0)) {
+      throw Error("spring stiffness, damping, and mass must be positive")
+    }
+    return [1, delay, ...s, 0, 0]
+  }
+  const e = typeof t.easing === "object" ? t.easing : EASING[t.easing ?? "ease"]
+  if (!e || e.length !== 4 || !e.every(v => typeof v === "number" && Number.isFinite(v))) {
+    throw Error(`unknown easing "${String(t.easing)}"`)
+  }
+  if (!(e[0]! >= 0 && e[0]! <= 1 && e[2]! >= 0 && e[2]! <= 1)) throw Error("easing x outside [0, 1]")
+  return [0, delay, secs(t.duration, "duration"), ...e]
+}
+
+/** Writes values from `timingValues`. */
+function putTiming(b: Writer, v: readonly number[]) {
+  b.u8(v[0]!)
+  for (let i = 1; i < 7; i++) b.f32(v[i]!)
+}
+
+/** Folds an RN-style transform list into one matrix. Like CSS, the list
+ * composes left to right, so the last step applies to points first. */
+export function transformMatrix(t: Transform | undefined): Affine {
+  let m: Affine = IDENTITY
+  for (const step of t ?? []) {
+    const [k, v] = Object.entries(step)[0] as [string, any]
+    let s: Affine
+    switch (k) {
+      case "translateX": s = [1, 0, 0, 1, v, 0]; break
+      case "translateY": s = [1, 0, 0, 1, 0, v]; break
+      case "scale": s = [v, 0, 0, v, 0, 0]; break
+      case "scaleX": s = [v, 0, 0, 1, 0, 0]; break
+      case "scaleY": s = [1, 0, 0, v, 0, 0]; break
+      case "rotate": {
+        const r = angle(v)
+        s = [Math.cos(r), Math.sin(r), -Math.sin(r), Math.cos(r), 0, 0]
+        break
+      }
+      case "skewX": s = [1, 0, Math.tan(angle(v)), 1, 0, 0]; break
+      case "skewY": s = [1, Math.tan(angle(v)), 0, 1, 0, 0]; break
+      case "matrix": s = [...v] as Affine; break
+      default: throw Error(`unknown transform "${k}"`)
+    }
+    m = mul(m, s)
+  }
+  return m
+}
+
+/** The layout part of a style: everything but the spatial keys. */
+export function layoutPart(s: StyleProps | undefined): StyleProps | undefined {
+  if (!s) return undefined
+  if (s.transform === undefined && s.opacity === undefined && s.transition === undefined) return s
+  const { transform: _t, opacity: _o, transition: _tr, ...rest } = s
+  return rest
+}
+
+/** Key-order-independent stringify for style interning. */
+export function styleKey(s: StyleProps | undefined): string {
+  return s ? canon(s) : ""
+}
+
+/** One transaction being encoded. Call `finish` to get the wire bytes;
+ * every table resets afterwards. */
 export class Encoder {
-  private w = new Writer()
+  private out = new Writer()
+  private ops = new Writer()
+  private styleBytes = new Writer()
+  private spanBytes = new Writer()
   private strings: string[] = []
   private stringIx = new Map<string, number>()
-  private opBytes = new Writer()
-  /** wire style id -> already defined; new styles are interned here. */
-  private styleIds = new Map<string, number>()
-  private nextStyleId = 0
+  private styleIx = new Map<string, number>()
+  private styleCount = 0
+  private spanCount = 0
+  /** Span lists interned by content: most paragraphs share one style. */
+  private spanIx = new Map<string, number>()
 
   private strRef(s: string): number {
     const hit = this.stringIx.get(s)
@@ -324,167 +592,294 @@ export class Encoder {
     return ix
   }
 
+  /** Interns a layout style into this transaction's table. */
+  private styleRef(s: StyleProps | undefined): number {
+    if (!s) return NIL
+    const key = canon(s)
+    const hit = this.styleIx.get(key)
+    if (hit !== undefined) return hit
+    const ix = this.styleCount++
+    this.styleIx.set(key, ix)
+    putStyle(this.styleBytes, s)
+    return ix
+  }
+
+  /** Whether any op has been recorded since the last `finish`. */
+  get empty(): boolean {
+    return this.ops.at === 0
+  }
+
   create(id: number, kind: number) {
-    this.opBytes.u8(Op.Create)
-    this.opBytes.u32(id)
-    this.opBytes.u8(kind)
-  }
-  setText(id: number, text: string) {
-    this.opBytes.u8(Op.SetText)
-    this.opBytes.u32(id)
-    this.opBytes.u32(this.strRef(text))
-  }
-  textProps(id: number, fontSize: number, color: number) {
-    this.opBytes.u8(Op.TextProps)
-    this.opBytes.u32(id)
-    this.opBytes.f32(fontSize)
-    this.opBytes.u32(color >>> 0)
-  }
-  setStyle(id: number, wireStyle: number) {
-    this.opBytes.u8(Op.SetStyle)
-    this.opBytes.u32(id)
-    this.opBytes.u32(wireStyle >>> 0)
+    this.ops.u8(Op.Create)
+    this.ops.u32(id)
+    this.ops.u8(kind)
   }
   place(parent: number, child: number, before: number) {
-    this.opBytes.u8(Op.Place)
-    this.opBytes.u32(parent)
-    this.opBytes.u32(child)
-    this.opBytes.u32(before)
+    this.ops.u8(Op.Place)
+    this.ops.u32(parent)
+    this.ops.u32(child)
+    this.ops.u32(before)
   }
   detach(id: number) {
-    this.opBytes.u8(Op.Detach)
-    this.opBytes.u32(id)
+    this.ops.u8(Op.Detach)
+    this.ops.u32(id)
   }
   remove(id: number) {
-    this.opBytes.u8(Op.Remove)
-    this.opBytes.u32(id)
+    this.ops.u8(Op.Remove)
+    this.ops.u32(id)
   }
-  hidden(id: number, hidden: boolean) {
-    this.opBytes.u8(Op.Hidden)
-    this.opBytes.u32(id)
-    this.opBytes.u8(hidden ? 1 : 0)
+  /** Sets a node's layout inputs; `undefined` restores the defaults.
+   * Spatial keys must already be split off (see `layoutPart`). */
+  layout(id: number, style: StyleProps | undefined) {
+    const ref = this.styleRef(style)
+    this.ops.u8(Op.Layout)
+    this.ops.u32(id)
+    this.ops.u32(ref)
   }
-  viewPaint(id: number, color: number) {
-    this.opBytes.u8(Op.ViewPaint)
-    this.opBytes.u32(id)
-    this.opBytes.u32(color >>> 0)
+  /** Transform (CSS matrix about the center) and/or opacity. */
+  spatial(id: number, transform?: Affine, opacity?: number) {
+    const b = this.ops
+    b.u8(Op.Spatial)
+    b.u32(id)
+    b.u8(
+      (transform !== undefined ? SPATIAL_FIELD.TRANSFORM : 0) |
+        (opacity !== undefined ? SPATIAL_FIELD.OPACITY : 0),
+    )
+    if (transform !== undefined) for (const v of transform) b.f32(v)
+    if (opacity !== undefined) b.f32(opacity)
   }
   /** Masked paint update: fill, corner radius, border (color, width). */
   paint(
     id: number,
-    color?: number,
+    fill?: number,
     radius?: number,
     border?: { color: number; width: number },
   ) {
-    const b = this.opBytes
+    const b = this.ops
     b.u8(Op.Paint)
     b.u32(id)
     b.u8(
-      (color !== undefined ? PAINT_FIELD.COLOR : 0) |
+      (fill !== undefined ? PAINT_FIELD.FILL : 0) |
         (radius !== undefined ? PAINT_FIELD.RADIUS : 0) |
         (border !== undefined ? PAINT_FIELD.BORDER : 0),
     )
-    if (color !== undefined) b.u32(color >>> 0)
+    if (fill !== undefined) b.u32(fill >>> 0)
     if (radius !== undefined) b.f32(radius)
     if (border !== undefined) { b.u32(border.color >>> 0); b.f32(border.width) }
   }
-  props(id: number, listeners: number, focusable: boolean) {
-    this.opBytes.u8(Op.Props)
-    this.opBytes.u32(id)
-    this.opBytes.u32(listeners >>> 0)
-    this.opBytes.u8(focusable ? 1 : 0)
+  /** A paragraph: UTF-8 text plus its style span list. Span starts are
+   * UTF-8 byte offsets; span zero starts at 0. */
+  paragraph(id: number, text: string, spans: readonly TextSpanIn[]) {
+    const s = this.strRef(text)
+    // JSON: family names are escaped and the list keeps its row
+    // boundaries, so different span lists never share a key.
+    const key = JSON.stringify(spans.map(sp => [
+      sp.start, sp.fontSize, sp.color >>> 0, sp.weight ?? 400, sp.italic ? 1 : 0,
+      sp.decoration ?? 0, sp.letterSpacing ?? 0, sp.lineHeight ?? 0, sp.fontFamily || null,
+    ]))
+    let start = this.spanIx.get(key)
+    if (start === undefined) {
+      start = this.spanCount
+      this.spanIx.set(key, start)
+      for (const sp of spans) {
+        const w = this.spanBytes
+        w.u32(sp.start)
+        w.f32(sp.fontSize)
+        w.u32(sp.color >>> 0)
+        w.u16(sp.weight ?? 400)
+        const d = sp.decoration ?? 0
+        w.u8(
+          (sp.italic ? SPAN_ITALIC : 0) |
+          (d & DECORATION.underline ? SPAN_UNDERLINE : 0) |
+          (d & DECORATION.lineThrough ? SPAN_LINE_THROUGH : 0),
+        )
+        w.u8(0)
+        w.u32(sp.fontFamily ? this.strRef(sp.fontFamily) : NIL)
+        w.f32(sp.letterSpacing ?? 0)
+        w.f32(sp.lineHeight ?? 0)
+        this.spanCount++
+      }
+    }
+    this.ops.u8(Op.Paragraph)
+    this.ops.u32(id)
+    this.ops.u32(s)
+    this.ops.u32(start)
+    this.ops.u32(spans.length)
   }
-  inputProps(
-    id: number,
-    fontSize: number,
-    color: number,
-    placeholder: string,
-    multiline: boolean,
-  ) {
-    this.opBytes.u8(Op.InputProps)
-    this.opBytes.u32(id)
-    this.opBytes.f32(fontSize)
-    this.opBytes.u32(color >>> 0)
-    this.opBytes.u32(this.strRef(placeholder))
-    this.opBytes.u8(multiline ? 1 : 0)
+  inputConfig(id: number, fontSize: number, color: number, placeholder: string, multiline: boolean) {
+    const s = this.strRef(placeholder)
+    this.ops.u8(Op.InputConfig)
+    this.ops.u32(id)
+    this.ops.f32(fontSize)
+    this.ops.u32(color >>> 0)
+    this.ops.u32(s)
+    this.ops.u8(multiline ? 1 : 0)
   }
-  cmdFocus(id: number) {
-    this.opBytes.u8(Op.Command)
-    this.opBytes.u32(id)
-    this.opBytes.u8(Cmd.Focus)
+  role(id: number, role: number) {
+    this.ops.u8(Op.Role)
+    this.ops.u32(id)
+    this.ops.u8(role)
   }
-  cmdBlur(id: number) {
-    this.opBytes.u8(Op.Command)
-    this.opBytes.u32(id)
-    this.opBytes.u8(Cmd.Blur)
-  }
-  cmdSetInputText(id: number, text: string) {
-    this.opBytes.u8(Op.Command)
-    this.opBytes.u32(id)
-    this.opBytes.u8(Cmd.SetInputText)
-    this.opBytes.u32(this.strRef(text))
-  }
-  cmdScrollTo(id: number, x: number, y: number) {
-    this.opBytes.u8(Op.Command)
-    this.opBytes.u32(id)
-    this.opBytes.u8(Cmd.ScrollTo)
-    this.opBytes.f32(x)
-    this.opBytes.f32(y)
-  }
-  /** Custom-element payload: painter tag + 4 floats + text. */
-  custom(id: number, tag: number, data: readonly number[], text: string) {
-    const b = this.opBytes
-    b.u8(Op.Custom)
-    b.u32(id)
-    b.u32(tag >>> 0)
-    for (let i = 0; i < 4; i++) b.f32(data[i] ?? 0)
-    b.u32(this.strRef(text))
-  }
-
   /** Accessibility name (empty string clears it). */
   label(id: number, text: string) {
-    const b = this.opBytes
-    b.u8(Op.Label)
+    const s = this.strRef(text)
+    this.ops.u8(Op.Label)
+    this.ops.u32(id)
+    this.ops.u32(s)
+  }
+  /** Listener mask and flags: `selectable` makes the node's text
+   * descendants one selection domain. */
+  interaction(id: number, listeners: number, focusable: boolean, selectable = false) {
+    this.ops.u8(Op.Interaction)
+    this.ops.u32(id)
+    this.ops.u32(listeners >>> 0)
+    this.ops.u8((focusable ? 1 : 0) | (selectable ? 2 : 0))
+  }
+  surface(id: number, kind: number, params: readonly number[]) {
+    this.ops.u8(Op.Surface)
+    this.ops.u32(id)
+    this.ops.u32(kind >>> 0)
+    for (let i = 0; i < 4; i++) this.ops.u32((params[i] ?? 0) >>> 0)
+  }
+  /** Surface payload: the typed array's bytes, copied once. */
+  payload(id: number, bytes: ArrayBufferView) {
+    const view = new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.byteLength)
+    const b = this.ops
+    b.u8(Op.Payload)
     b.u32(id)
-    b.u32(this.strRef(text))
+    b.u32(view.byteLength)
+    b.reserve(view.byteLength)
+    b.bytes.set(view, b.at)
+    b.at += view.byteLength
+  }
+  cmdFocus(id: number) {
+    this.ops.u8(Op.Command)
+    this.ops.u32(id)
+    this.ops.u8(Cmd.Focus)
+  }
+  cmdBlur(id: number) {
+    this.ops.u8(Op.Command)
+    this.ops.u32(id)
+    this.ops.u8(Cmd.Blur)
+  }
+  cmdSetText(id: number, text: string) {
+    const s = this.strRef(text)
+    this.ops.u8(Op.Command)
+    this.ops.u32(id)
+    this.ops.u8(Cmd.SetText)
+    this.ops.u32(s)
+  }
+  cmdScrollTo(id: number, x: number, y: number) {
+    this.ops.u8(Op.Command)
+    this.ops.u32(id)
+    this.ops.u8(Cmd.ScrollTo)
+    this.ops.f32(x)
+    this.ops.f32(y)
   }
 
-  /** Interns a style; emits a `style` op on first sight and returns its
-   * wire id. Identical style objects share one definition. */
-  styleIdFor(s: StyleProps | undefined): number {
-    if (!s) return NIL
-    const key = canon(s)
-    const hit = this.styleIds.get(key)
-    if (hit !== undefined) return hit
-    const id = this.nextStyleId++
-    this.styleIds.set(key, id)
-    this.opBytes.u8(Op.Style)
-    this.opBytes.u32(id)
-    putStyle(this.opBytes, s)
-    return id
+  listConfig(id: number, overscan: number, fallback: number, templates: readonly ListTemplate[]) {
+    const b = this.ops
+    b.u8(Op.ListConfig)
+    b.u32(id)
+    b.f32(overscan)
+    b.f32(fallback)
+    b.u16(templates.length)
+    for (const t of templates) {
+      b.f32(t.base ?? 0)
+      b.f32(t.inset ?? 0)
+      b.f32(t.fontSize ?? 0)
+    }
+  }
+  /** Replaces items `at..at + remove` with `items` (11 bytes each). */
+  listSplice(id: number, at: number, remove: number, items: readonly ItemDesc[]) {
+    const b = this.ops
+    b.u8(Op.ListSplice)
+    b.u32(id)
+    b.u32(at)
+    b.u32(remove)
+    b.u32(items.length)
+    b.reserve(items.length * 11)
+    for (const d of items) {
+      b.u16(d.template ?? 0)
+      b.u32(d.textLength ?? 0)
+      b.u32(d.id ?? NIL)
+      b.u8(d.unchanged ? 1 : 0)
+    }
+  }
+  /** Tags a list row with its item index (NIL clears). */
+  listIndex(id: number, index: number) {
+    this.ops.u8(Op.ListIndex)
+    this.ops.u32(id)
+    this.ops.u32(index)
+  }
+  scrollAnchor(id: number, anchor: ScrollAnchor) {
+    this.ops.u8(Op.ScrollAnchor)
+    this.ops.u32(id)
+    this.ops.u8(ANCHOR[anchor])
   }
 
+  /** Replaces a node's declared transitions (none: clears). */
+  transition(id: number, transitions: Transitions | undefined) {
+    const b = this.ops
+    const list = (Object.keys(ANIM_PROP) as AnimProp[]).filter(p => transitions?.[p] !== undefined)
+    // Every timing checked before a byte is written: a bad one throws
+    // with the op buffer unchanged.
+    const timings = list.map(p => timingValues(transitions![p]!))
+    b.u8(Op.Transition)
+    b.u32(id)
+    b.u8(list.length)
+    list.forEach((p, i) => {
+      b.u8(ANIM_PROP[p])
+      putTiming(b, timings[i]!)
+    })
+  }
+
+  /** Tweens one property to `value`, in the property's wire shape:
+   * transform 6 numbers, a color as 0xRRGGBBAA, padding [left, right,
+   * top, bottom], gap [column, row], others one number. */
+  animate(id: number, prop: AnimProp, value: readonly number[], timing: Timing) {
+    const b = this.ops
+    const code = ANIM_PROP[prop]
+    const want = [6, 1, 1, 1, 1, 1, 4, 2][code]
+    if (want === undefined || value.length !== want || !value.every(Number.isFinite)) {
+      throw Error(`bad ${String(prop)} animation target`)
+    }
+    const t = timingValues(timing)
+    b.u8(Op.Animate)
+    b.u32(id)
+    b.u8(code)
+    if (prop === "backgroundColor" || prop === "borderColor") b.u32(value[0]! >>> 0)
+    else for (const v of value) b.f32(v)
+    putTiming(b, t)
+  }
+
+  /** Seals the transaction and resets every table for the next one. */
   finish(seq: number | bigint): Uint8Array {
-    const w = this.w
+    const w = this.out
+    w.at = 0
     w.u32(MAGIC)
     w.u16(VERSION)
     w.u16(0)
     w.u64(seq)
     w.u32(this.strings.length)
+    w.u32(this.styleCount)
+    w.u32(this.spanCount)
     for (const s of this.strings) w.str(s)
-    w.reserve(this.opBytes.at)
-    w.bytes.set(this.opBytes.bytes.subarray(0, this.opBytes.at), w.at)
-    w.at += this.opBytes.at
-    return w.bytes.slice(0, w.at)
-  }
-
-  /** Clears per-transaction state (strings + ops) while keeping the
-   * buffers and the style table — style definitions persist on the
-   * native side for the life of the session. */
-  reset() {
-    this.w.at = 0
-    this.opBytes.at = 0
+    for (const part of [this.styleBytes, this.spanBytes, this.ops]) {
+      w.reserve(part.at)
+      w.bytes.set(part.bytes.subarray(0, part.at), w.at)
+      w.at += part.at
+    }
+    const buf = w.bytes.slice(0, w.at)
+    this.ops.at = 0
+    this.styleBytes.at = 0
+    this.spanBytes.at = 0
     this.strings.length = 0
     this.stringIx.clear()
+    this.styleIx.clear()
+    this.spanIx.clear()
+    this.styleCount = 0
+    this.spanCount = 0
+    return buf
   }
 }

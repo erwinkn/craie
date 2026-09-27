@@ -1,5 +1,7 @@
-//! Milestone 0 demo: Parley -> Swash -> Craie atlas -> wgpu, in a real
-//! native window.
+//! Text demo: owned paragraphs (HarfRust + skrifa) -> Swash -> raster
+//! atlas -> scene chunks -> wgpu, in a real native window. One chunk per
+//! paragraph; a span's index is its paint slot, so each chunk's paint
+//! records hold its spans' colors in order.
 //!
 //!   cargo run --example text                 open the window
 //!   cargo run --example text -- --screenshot out.png [w h scale]
@@ -8,12 +10,12 @@
 //! The window path is deliberately idle: a frame is produced only when the
 //! OS asks (expose) or the app requests one after a resize/scale change.
 
-use craie::geom::{Point, Size};
-use craie::gpu::{Gpu, Renderer, WindowSurface};
-use craie::platform::{self, Window};
-use craie::scene::{Color, Instance, Scene};
-use craie::text::parley::style::{FontStyle, FontWeight, GenericFamily, LineHeight, StyleProperty};
-use craie::text::{ParagraphSpec, TextEngine, TextSpan};
+use craie_core::geom::{Affine, Point, Rect, Size};
+use craie_platform_winit::{self as platform, Window};
+use craie_render::{Gpu, Renderer, WindowSurface};
+use craie_scene::{ChunkWriter, Color, NONE, OrderItem, Placement, Scene};
+use craie_text::TextEngine;
+use craie_text::paragraph::{SpanStyle, TextSpec, TextStyle};
 
 const MARGIN: f32 = 48.0;
 const GAP: f32 = 20.0;
@@ -24,173 +26,244 @@ const DIM: Color = Color::rgb(0x9a, 0xa0, 0xae);
 const ACCENT: Color = Color::rgb(0x6d, 0xc7, 0xff);
 const CODE_BG: Color = Color::rgb(0x22, 0x24, 0x2b);
 
-/// One paragraph of demo content: text plus its default style and ranged
-/// overrides.
+/// One paragraph of demo content: text, spans with their family (""
+/// is the default), color (span i paints with paint slot i), and
+/// decorations. Families resolve to fonts when the scene is built.
 struct Para {
     text: String,
-    defaults: Vec<StyleProperty<'static, Color>>,
-    spans: Vec<TextSpan>,
+    spans: Vec<SpanStyle>,
+    families: Vec<&'static str>,
+    colors: Vec<Color>,
+    decorations: Vec<u8>,
     /// Give this paragraph a background quad (exercises the quad pipeline).
     backing: bool,
 }
 
-fn para(text: &str, size: f32, spans: Vec<TextSpan>) -> Para {
-    Para {
-        text: text.to_string(),
-        defaults: vec![
-            StyleProperty::Brush(FG),
-            StyleProperty::FontFamily(GenericFamily::SansSerif.into()),
-            StyleProperty::FontSize(size),
-            StyleProperty::LineHeight(LineHeight::FontSizeRelative(1.25)),
-        ],
-        spans,
-        backing: false,
+/// A styled stretch of a paragraph: the first occurrence of `needle`.
+struct Mark {
+    needle: &'static str,
+    weight: u16,
+    italic: bool,
+    family: &'static str,
+    color: Color,
+    decoration: u8,
+}
+
+fn mark(needle: &'static str, weight: u16, italic: bool, color: Color) -> Mark {
+    Mark {
+        needle,
+        weight,
+        italic,
+        family: "",
+        color,
+        decoration: 0,
     }
 }
 
-fn span(text: &str, needle: &str, style: StyleProperty<'static, Color>) -> TextSpan {
-    let start = text.find(needle).expect("span needle not in text");
-    TextSpan {
-        range: start..start + needle.len(),
-        style,
+/// A paragraph in `FG` at `size` in `family`, with `marks` (not
+/// overlapping) as spans; the text between them keeps the base style.
+fn para(text: &str, size: f32, family: &'static str, marks: &[Mark]) -> Para {
+    let base = TextStyle {
+        size,
+        ..TextStyle::default()
+    };
+    let mut ranges: Vec<(usize, &Mark)> = marks
+        .iter()
+        .map(|m| (text.find(m.needle).expect("mark needle not in text"), m))
+        .collect();
+    ranges.sort_by_key(|r| r.0);
+    let mut p = Para {
+        text: text.to_string(),
+        spans: Vec::new(),
+        families: Vec::new(),
+        colors: Vec::new(),
+        decorations: Vec::new(),
+        backing: false,
+    };
+    let mut push =
+        |start: usize, style: TextStyle, family: &'static str, color: Color, deco: u8| {
+            p.spans.push(SpanStyle {
+                start: start as u32,
+                style,
+            });
+            p.families.push(family);
+            p.colors.push(color);
+            p.decorations.push(deco);
+        };
+    push(0, base, family, FG, 0);
+    for (start, m) in ranges {
+        let style = TextStyle {
+            weight: m.weight,
+            italic: m.italic,
+            ..base
+        };
+        let fam = if m.family.is_empty() {
+            family
+        } else {
+            m.family
+        };
+        push(start, style, fam, m.color, m.decoration);
+        let end = start + m.needle.len();
+        if end < text.len() {
+            push(end, base, family, FG, 0);
+        }
     }
+    // A mark at 0 replaces the base span.
+    if p.spans.len() > 1 && p.spans[1].start == 0 {
+        p.spans.remove(0);
+        p.families.remove(0);
+        p.colors.remove(0);
+        p.decorations.remove(0);
+    }
+    p
 }
 
 /// The demo content: the milestone-required strings, mixed styling in one
-/// paragraph, a monospace run, and an emoji probe.
+/// paragraph (with an inline monospace span), a monospace paragraph, and
+/// an emoji probe.
 fn paragraphs() -> Vec<Para> {
-    let mut out = Vec::new();
-
-    out.push(para(
-        "Craie",
-        44.0,
-        vec![span(
-            "Craie",
-            "Craie",
-            StyleProperty::FontWeight(FontWeight::new(650.0)),
-        )],
-    ));
-
-    out.push(para(
-        "React → retained native state → native pixels",
-        17.0,
-        vec![span(
-            "React → retained native state → native pixels",
-            "retained native state",
-            StyleProperty::Brush(ACCENT),
-        )],
-    ));
-
-    out.push(para(
-        "The quick brown fox jumps over the lazy dog.  ffi AV To",
-        17.0,
-        vec![],
-    ));
-
-    let mixed = "A normal run, a bold run, an italic run, and `code → atlas` inline.";
-    out.push(para(
-        mixed,
-        16.0,
-        vec![
-            span(
-                mixed,
-                "a bold run",
-                StyleProperty::FontWeight(FontWeight::new(700.0)),
-            ),
-            span(
-                mixed,
-                "an italic run",
-                StyleProperty::FontStyle(FontStyle::Italic),
-            ),
-            span(
-                mixed,
-                "`code → atlas`",
-                StyleProperty::FontFamily(GenericFamily::Monospace.into()),
-            ),
-            span(mixed, "code → atlas", StyleProperty::Brush(ACCENT)),
-        ],
-    ));
-
-    out.push(para("English — 日本語 — مرحبا بالعالم", 20.0, vec![]));
-
-    out.push(para("Emoji probe: 🎨 🚀 👩‍💻 🦀 (color atlas)", 16.0, vec![]));
-
-    let wrap_text = "Wrapping probe: the retained host should do no work while idle. This \
-                     paragraph exists to exercise break_all_lines at the current width; \
-                     resizing the window must reflow it without re-rasterizing glyphs \
-                     that are already in the atlas.";
-    out.push(para(
-        wrap_text,
+    let mut code = para(
+        "let inst = Instance::quad(x, y, w, h, color); // monospace",
         14.0,
-        vec![span(
-            wrap_text,
-            "no work while idle",
-            StyleProperty::Brush(DIM),
-        )],
-    ));
-
-    let code = "let inst = Instance::quad(x, y, w, h, color); // monospace";
-    let mut code_para = para(
-        code,
-        14.0,
-        vec![
-            span(
-                code,
-                code,
-                StyleProperty::FontFamily(GenericFamily::Monospace.into()),
-            ),
-            span(code, "// monospace", StyleProperty::Brush(DIM)),
-        ],
+        "monospace",
+        &[mark("// monospace", 400, false, DIM)],
     );
-    code_para.backing = true;
-    out.push(code_para);
-
-    out
+    code.backing = true;
+    vec![
+        para("Craie", 44.0, "", &[mark("Craie", 650, false, FG)]),
+        para(
+            "React → retained native state → native pixels",
+            17.0,
+            "",
+            &[Mark {
+                decoration: craie_text::decoration::UNDERLINE,
+                ..mark("retained native state", 400, false, ACCENT)
+            }],
+        ),
+        para(
+            "The quick brown fox jumps over the lazy dog.  ffi AV To",
+            17.0,
+            "",
+            &[],
+        ),
+        para(
+            "A normal run, a bold run, an italic run, and `code → atlas` inline.",
+            16.0,
+            "",
+            &[
+                mark("a bold run", 700, false, FG),
+                mark("an italic run", 400, true, FG),
+                Mark {
+                    family: "monospace",
+                    ..mark("`code → atlas`", 400, false, ACCENT)
+                },
+            ],
+        ),
+        para("English — 日本語 — مرحبا بالعالم", 20.0, "", &[]),
+        para("Emoji probe: 🎨 🚀 👩‍💻 🦀 (color atlas)", 16.0, "", &[]),
+        para(
+            "Wrapping probe: the retained host should do no work while idle. This \
+             paragraph exists to exercise line breaking at the current width; \
+             resizing the window must reflow it without re-rasterizing glyphs \
+             that are already in the atlas.",
+            14.0,
+            "",
+            &[mark("no work while idle", 400, false, DIM)],
+        ),
+        code,
+    ]
 }
 
-/// Lays out every paragraph at the current logical width and emits the
-/// flat scene (physical pixels via `scale` at emit time).
-/// Returns (scene, runs, glyph instances, rasters performed this pass).
+/// Lays out every paragraph at the current logical size and rebuilds
+/// one chunk per paragraph in `scene` (kept across rebuilds so the glyph
+/// cache's raster ids stay valid). Returns (runs, glyph instances,
+/// rasters performed this pass).
 fn build_scene(
+    scene: &mut Scene,
     text: &mut TextEngine,
     paras: &[Para],
-    width: f32,
+    size: Size,
     scale: f32,
-) -> (Scene, u32, u32, u64) {
-    let wrap = width - 2.0 * MARGIN;
-    let mut scene = Scene {
-        clear: Some(BG),
-        items: Vec::new(),
-    };
+) -> (u32, u32, u64) {
+    scene.clear = BG;
+    scene.scale = scale;
+    if scene.transforms.is_empty() {
+        let root = scene.transforms.alloc(Affine::IDENTITY, NONE);
+        scene.transforms.set_order(vec![root]);
+    }
+    scene.transforms.set_local(0, Affine::scale(scale, scale));
+    let wrap = size.width - 2.0 * MARGIN;
     let rasters_before = text.cache.stats.rasters;
-    let mut runs = 0;
+    let (mut runs, mut glyphs) = (0, 0);
+    let mut w = ChunkWriter::new();
+    let mut order = Vec::new();
     let mut y = MARGIN;
-    for para in paras {
-        let layout = text.layout_paragraph(
-            &ParagraphSpec {
+    for (i, para) in paras.iter().enumerate() {
+        // Each span's family resolves to a font once (cached per family
+        // and style in the engine).
+        let spans: Vec<SpanStyle> = para
+            .spans
+            .iter()
+            .zip(&para.families)
+            .map(|(sp, fam)| SpanStyle {
+                style: TextStyle {
+                    font: text.font(fam, sp.style.weight, sp.style.italic),
+                    ..sp.style
+                },
+                ..*sp
+            })
+            .collect();
+        let layout = text.layout_text(
+            &TextSpec {
                 text: &para.text,
-                defaults: &para.defaults,
-                spans: &para.spans,
+                spans: &spans,
             },
             Some(wrap),
         );
+        for c in &para.colors {
+            w.paint(c.0);
+        }
         // The backing rect paints under this paragraph's glyphs.
         if para.backing {
-            scene.items.push(Instance::quad(
-                (MARGIN - 8.0) * scale,
-                (y - 4.0) * scale,
-                (layout.width() + 16.0) * scale,
-                (layout.height() + 8.0) * scale,
-                CODE_BG.0,
-            ));
+            let slot = w.paint(CODE_BG.0);
+            w.rect(
+                Rect::new(-8.0, -4.0, layout.width + 16.0, layout.height + 8.0),
+                0.0,
+                slot,
+            );
         }
-        let emitted = text.emit(&layout, Point::new(MARGIN, y), scale, None, &mut scene.items);
+        let emitted = text.emit_paragraph(
+            &layout,
+            Point::ZERO,
+            scale,
+            None,
+            &para.decorations,
+            &mut scene.atlas,
+            &mut w,
+        );
         runs += emitted.glyph_runs;
-        y += layout.height() + GAP;
+        glyphs += emitted.glyphs;
+        let id = i as u32;
+        scene.commit_chunk(id, &mut w);
+        scene.set_placement(
+            id,
+            Placement {
+                offset: [MARGIN, y],
+                transform: 0,
+                clip: NONE,
+            },
+        );
+        order.push(OrderItem::Chunk(id));
+        y += layout.height + GAP;
     }
-    let rasters = text.cache.stats.rasters - rasters_before;
-    let glyphs = scene.items.len() as u32;
-    (scene, runs, glyphs, rasters)
+    scene.set_order(order, Vec::new());
+    let mut missing = Vec::new();
+    scene.prepare(
+        Size::new(size.width * scale, size.height * scale),
+        &mut missing,
+    );
+    text.ensure_resident(&missing, &mut scene.atlas);
+    (runs, glyphs, text.cache.stats.rasters - rasters_before)
 }
 
 // ---------------------------------------------------------------- window
@@ -218,10 +291,14 @@ impl Inner {
         let (w, h) = window.size();
         let scale = window.scale_factor() as f32;
         self.surface.resize(&self.gpu, w, h);
-        let (scene, runs, glyphs, rasters) =
-            build_scene(&mut self.text, &self.paras, w as f32 / scale, scale);
-        self.scene = scene;
-        self.renderer.sync_atlas(&self.gpu, &mut self.text.atlas);
+        let (runs, glyphs, rasters) = build_scene(
+            &mut self.scene,
+            &mut self.text,
+            &self.paras,
+            Size::new(w as f32 / scale, h as f32 / scale),
+            scale,
+        );
+        self.renderer.prepare(&self.gpu, &mut self.scene);
         eprintln!(
             "[craie] layout {w}x{h} @{scale:.2}x — {runs} runs, {glyphs} glyph instances, \
              {rasters} rasters, cache {} hits / {} misses",
@@ -240,8 +317,14 @@ impl platform::App for Demo {
         let mut text = TextEngine::new();
         let paras = paragraphs();
         let scale = window.scale_factor() as f32;
-        let (scene, runs, glyphs, rasters) =
-            build_scene(&mut text, &paras, w as f32 / scale, scale);
+        let mut scene = Scene::new();
+        let (runs, glyphs, rasters) = build_scene(
+            &mut scene,
+            &mut text,
+            &paras,
+            Size::new(w as f32 / scale, h as f32 / scale),
+            scale,
+        );
         let mut inner = Inner {
             gpu,
             surface,
@@ -251,7 +334,7 @@ impl platform::App for Demo {
             scene,
             frames: 0,
         };
-        inner.renderer.sync_atlas(&inner.gpu, &mut inner.text.atlas);
+        inner.renderer.prepare(&inner.gpu, &mut inner.scene);
         eprintln!(
             "[craie] ready {w}x{h} @{scale:.2}x — {runs} runs, {glyphs} glyph instances, {rasters} rasters"
         );
@@ -281,7 +364,9 @@ impl platform::App for Demo {
             _ => return,
         };
         let view = frame.texture.create_view(&Default::default());
-        inner.renderer.draw(&inner.gpu, &view, w, h, &inner.scene);
+        inner
+            .renderer
+            .draw(&inner.gpu, &view, w, h, &mut inner.scene);
         window.pre_present_notify();
         inner.gpu.queue.present(frame);
         inner.frames += 1;
@@ -296,17 +381,23 @@ fn run_screenshot(path: &str, w: u32, h: u32, scale: f32) {
     let mut renderer = Renderer::new(&gpu, format);
     let mut text = TextEngine::new();
     let paras = paragraphs();
-    let (scene, runs, glyphs, rasters) =
-        build_scene(&mut text, &paras, w as f32 / scale, scale);
+    let mut scene = Scene::new();
+    let (runs, glyphs, rasters) = build_scene(
+        &mut scene,
+        &mut text,
+        &paras,
+        Size::new(w as f32 / scale, h as f32 / scale),
+        scale,
+    );
     eprintln!(
         "[craie] headless {w}x{h} @{scale}x — {runs} runs, {glyphs} glyph instances, {rasters} rasters"
     );
-    renderer.sync_atlas(&gpu, &mut text.atlas);
+    renderer.prepare(&gpu, &mut scene);
     eprintln!(
         "[craie] atlas: {} alpha pages, {} color pages, {} allocations, {} bytes uploaded",
-        text.atlas.stats.alpha_pages,
-        text.atlas.stats.color_pages,
-        text.atlas.stats.allocations,
+        scene.atlas.stats.alpha_pages,
+        scene.atlas.stats.color_pages,
+        scene.atlas.stats.allocations,
         renderer.atlas_upload_bytes,
     );
 
@@ -325,7 +416,7 @@ fn run_screenshot(path: &str, w: u32, h: u32, scale: f32) {
         view_formats: &[],
     });
     let view = target.create_view(&Default::default());
-    renderer.draw(&gpu, &view, w, h, &scene);
+    renderer.draw(&gpu, &view, w, h, &mut scene);
 
     // Readback: texture -> 256-aligned buffer -> PNG.
     let row_bytes = w * 4;
@@ -398,6 +489,8 @@ fn run_screenshot(path: &str, w: u32, h: u32, scale: f32) {
 }
 
 fn main() {
+    // Text lays out on the system's fonts.
+    craie_platform_winit::fonts::install();
     let args: Vec<String> = std::env::args().collect();
     if let Some(i) = args.iter().position(|a| a == "--screenshot") {
         let path = args.get(i + 1).map(String::as_str).unwrap_or("text.png");

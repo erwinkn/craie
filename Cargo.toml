@@ -1,7 +1,32 @@
 [workspace]
 resolver = "3"
-members = ["crates/craie", "crates/node"]
-default-members = ["crates/craie"]
+members = [
+    "crates/core",
+    "crates/layout",
+    "crates/scene",
+    "crates/render",
+    "crates/text",
+    "crates/vector",
+    "crates/ui",
+    "crates/platform-winit",
+    "crates/node",
+    "harness/invariants",
+    "tools/svg-import",
+]
+# craie-node is an N-API cdylib: it links only inside Node, so plain
+# `cargo test` leaves it out.
+default-members = [
+    "crates/core",
+    "crates/layout",
+    "crates/scene",
+    "crates/render",
+    "crates/text",
+    "crates/vector",
+    "crates/ui",
+    "crates/platform-winit",
+    "harness/invariants",
+    "tools/svg-import",
+]
 
 [workspace.package]
 version = "0.0.0"
@@ -10,16 +35,35 @@ license = "MIT OR Apache-2.0"
 repository = "https://github.com/erwinkn/craie"
 
 [workspace.dependencies]
-winit = "=0.31.0-beta.3"
+craie-core = { path = "crates/core" }
+craie-layout = { path = "crates/layout" }
+craie-scene = { path = "crates/scene" }
+craie-render = { path = "crates/render" }
+craie-text = { path = "crates/text" }
+craie-ui = { path = "crates/ui" }
+craie-vector = { path = "crates/vector" }
+craie-platform-winit = { path = "crates/platform-winit" }
+taffy = { version = "=0.14.0", default-features = false, features = ["std", "flexbox", "content_size"] }
+# Text only: the image-data default pulls `image`.
+arboard = { version = "3.6.1", default-features = false }
+png = "=0.18.1"
+winit = "=0.30.13"
 wgpu = "=30.0.1"
 parley = "=0.11.1"
 swash = "=0.2.10"
+harfrust = "=0.12.0"
+skrifa = "=0.44.0"
+fontique = "=0.11.1"
+unicode-bidi = "=0.3.18"
+unicode-linebreak = "=0.1.5"
+unicode-segmentation = "=1.13.3"
+unicode-script = "=0.5.8"
+unicode-properties = { version = "=0.1.4", default-features = false, features = ["emoji"] }
 etagere = "=0.3.0"
+lyon_tessellation = "=1.0.22"
 accesskit = "=0.25.0"
-# Vendored AccessKit winit adapter for winit 0.31 betas (upstream
-# accesskit_winit tracks stable winit only).
-accesskit_winit = { package = "martensite-accesskit-winit", version = "=0.18.0", default-features = false }
-bytemuck = "=1.25.2"
+accesskit_winit = "=0.34.0"
+bytemuck = { version = "=1.25.2", features = ["derive"] }
 pollster = "=1.0.1"
 tracing = "=0.1.44"
 

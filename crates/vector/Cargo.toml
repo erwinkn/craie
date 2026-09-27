@@ -1,0 +1,11 @@
+[package]
+name = "craie-vector"
+description = "Vector paths and paints: building, lyon tessellation into meshes, prepared assets"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+craie-core.workspace = true
+lyon_tessellation.workspace = true

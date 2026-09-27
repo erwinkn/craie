@@ -1,0 +1,16 @@
+[package]
+name = "gpui-pulse"
+version = "0.0.0"
+edition = "2024"
+publish = false
+description = "The Pulse demo in GPUI, for comparison with the React-on-Craie version"
+
+# Not a member of Craie's workspace: GPUI stays out of Craie's graph.
+[workspace]
+
+[dependencies]
+gpui = "=0.2.2"
+libc = "0.2"
+
+[profile.release]
+debug = 1

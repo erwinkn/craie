@@ -1,0 +1,64 @@
+[package]
+name = "craie-platform-winit"
+description = "Desktop platform: winit window, events, clipboard, IME, AccessKit adapter"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+craie-core.workspace = true
+craie-scene.workspace = true
+craie-render.workspace = true
+craie-text.workspace = true
+craie-ui.workspace = true
+winit.workspace = true
+wgpu.workspace = true
+accesskit.workspace = true
+accesskit_winit.workspace = true
+arboard.workspace = true
+# System font discovery and fallback (the platform side of FontSource).
+fontique.workspace = true
+
+
+[dev-dependencies]
+taffy.workspace = true
+# Tests that measure text use the pinned fonts, not the machine's.
+craie-text = { workspace = true, features = ["pinned-fonts"] }
+png.workspace = true
+# Build-time SVG import, for the vector example only (never shipped).
+craie-svg-import = { path = "../../tools/svg-import" }
+craie-vector.workspace = true
+
+# Rust examples live at the repository root (see ../../examples/).
+[[example]]
+name = "text"
+path = "../../examples/text/main.rs"
+
+[[example]]
+name = "sizes"
+path = "../../examples/sizes/main.rs"
+
+[[example]]
+name = "app"
+path = "../../examples/app/main.rs"
+
+[[example]]
+name = "bench"
+path = "../../examples/bench/main.rs"
+
+[[example]]
+name = "framebench"
+path = "../../examples/framebench/main.rs"
+
+[[example]]
+name = "fontcost"
+path = "../../examples/fontcost/main.rs"
+
+[[example]]
+name = "vector"
+path = "../../examples/vector/main.rs"
+
+[target.'cfg(unix)'.dependencies]
+# The headless loop's thread CPU clock.
+libc = "0.2"
