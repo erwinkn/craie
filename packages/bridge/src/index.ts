@@ -298,7 +298,9 @@ export interface BarsProps extends Omit<SurfaceProps, "kind" | "params" | "paylo
   /** Gap between bars, logical points (default 2). */
   gap?: number
 }
-export interface TextInputProps extends ListenerProps, Variants {
+/** A TextInput is a scope: its own `_hover` and `_focus` read its own
+ * states. `disabled` waits for a read-only input natively. */
+export interface TextInputProps extends ListenerProps, Omit<StateProps, "disabled">, Variants {
   accessibilityRole?: AccessibilityRole
   style?: StyleProps
   backgroundColor?: string | number
@@ -332,9 +334,9 @@ const ScopeContext = createContext<ScopeChain | null>(null)
 
 /** A host element with the scope chain its variants read. A scope
  * heads the chain it and its children see; children get it through
- * context, so a Portal's content keeps its owner's scopes. The
- * Provider is there even when the element is no scope, so toggling
- * `group` keeps the children mounted. */
+ * context, and a Portal or Layer starts a new chain. The Provider is
+ * there even when the element is no scope, so toggling `group` keeps
+ * the children mounted. */
 function useHost(type: string, props: Record<string, any>, scope = false) {
   const outer = useContext(ScopeContext)
   const [ref] = useState<ScopeRef>(() => ({ node: null }))
@@ -354,10 +356,17 @@ function useHost(type: string, props: Record<string, any>, scope = false) {
 
 /** Renders `children` as a window root, above the app (overlays,
  * menus, tooltips). They keep the context of where the Portal sits,
- * scopes included. */
+ * except scopes: native hover and focus follow the native tree, where
+ * the content is not inside its owner, so state keys in it read scopes
+ * inside it only (as on web, and as inherited color does). */
 export function Portal({ children }: { children?: ReactNode }) {
   const host = useContext(HostContext)
-  return host ? reconciler.createPortal(children, host, null, null) : null
+  return host ? reconciler.createPortal(unscoped(children), host, null, null) : null
+}
+
+/** `children` with an empty scope chain (Portal, Layer). */
+function unscoped(children: ReactNode) {
+  return createElement(ScopeContext.Provider, { value: null }, children)
 }
 
 /** Window-level shortcuts, matched after every claim on the focus path
@@ -642,7 +651,8 @@ export interface LayerProps {
  *   </Dialog></Layer>
  *
  * The container is transparent to hit testing: a press where its
- * children are not reaches whatever is below. */
+ * children are not reaches whatever is below. As in a Portal, state
+ * keys inside read scopes inside the layer only. */
 export function Layer({ z = 0, children }: LayerProps) {
   const host = useContext(HostContext)
   const owner = useContext(LayerOwner)
@@ -656,7 +666,7 @@ export function Layer({ z = 0, children }: LayerProps) {
     else container.props = props
   }, [z])
   return reconciler.createPortal(
-    createElement(LayerOwner.Provider, { value: container }, children),
+    createElement(LayerOwner.Provider, { value: container }, unscoped(children)),
     container, null, null,
   )
 }
@@ -742,7 +752,7 @@ export function TextInput(props: TextInputProps) {
     focusable: true,
     accessibilityRole: props.multiline ? "multilineTextInput" : "textInput",
     ...props,
-  })
+  }, true)
 }
 
 function flattenText(children: ReactNode): string | undefined {

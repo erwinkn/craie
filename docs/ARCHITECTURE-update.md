@@ -363,8 +363,10 @@ bits). This is probably a new subsection of §3.
   `defineStates`), core states first, then each plugin's in priority order.
 - **Scope references are resolved by the facade.** A variant names the
   scopes it reads by node id and generation. The facade resolves "nearest"
-  and named scopes (`_row`) through the React tree, so content portaled into
-  a layer keeps its owner's scope. Native keeps a list of dependents per
+  and named scopes (`_row`) through the React tree, up to the nearest
+  portal or layer: content there reads scopes inside it only, since the
+  hover and focus bits come from the native tree, where it is not inside
+  its opener (as on Marbre web). Native keeps a list of dependents per
   scope, so a bit change restyles exactly those nodes.
 - **Variant tables.** A node with state styles carries its base values and
   its variants. A condition is a conjunction of terms: a scope reference
@@ -475,25 +477,32 @@ defineStates(["unread", "streaming"])
   the fallback), so a new color or a tween repaints spans without a
   paragraph op, a shape or a layout. An input keeps its config color,
   and vector `currentColor` reads the Vector's or a `G`'s `color` prop,
-  not `COLOR` (DF-24). Inherited color follows the native tree, while
-  scopes follow React's: a Text in a `Portal` under a colored Pressable
-  keeps the Pressable's scope but draws its own color (white).
+  not `COLOR` (DF-24). A `Portal` or `Layer` starts fresh for both: a
+  Text in a `Portal` under a colored Pressable reads neither its color
+  nor its scope.
 - The facade (`@craie/bridge`, re-exported by `@craie/react`):
-  `defineStates`; `Pressable` is always a scope, a View with `group`
-  (a name makes `_name` address it) is one, and both take `selected`,
-  `expanded`, `checked`, `highlighted`, `disabled` and `states`. A
-  disabled Pressable stops `onPress`, leaves the Tab order and reads
-  as disabled to assistive technology. A `_` key is a state of the
+  `defineStates`; `Pressable` and `TextInput` are always scopes, a
+  View with `group` (a name makes `_name` address it) is one, and all
+  take `selected`, `expanded`, `checked`, `highlighted` and `states`,
+  and all but `TextInput` take `disabled` (a read-only input is not
+  native yet). A disabled Pressable stops `onPress`, leaves the Tab
+  order and reads as disabled to assistive technology. A `_` key is a state of the
   nearest scope, an environment key, or a group up the tree; other `_`
   keys and every value key a variant does not apply (`pointerEvents`,
   `zIndex`, ...) are logged once and left out. Scopes flow through
-  React context, so a `Portal` (new: its children are window roots)
-  keeps its owner's; the context Provider is always there, so toggling
-  `group` keeps the children mounted. Variant tables resolve to ids
+  React context, which a `Portal` (new: its children are window roots)
+  or a `Layer` resets. Otherwise the item in `<Pressable
+  expanded><Layer><Text _hover={{ color: "red" }} /></Layer></Pressable>`
+  would turn red with the pointer on the trigger, not on the item. The
+  context Provider is always there, so toggling `group`
+  keeps the children mounted. Variant tables resolve to ids
   and go out at the seal, when their signature changed.
 - `_hover` on an element that is no scope means the nearest scope's
-  hover, where Marbre web means the element's own (`<Text _hover>`);
-  inside a Pressable the two agree (DF-29).
+  hover, as on Marbre web and native: in
+  `<Pressable><Text _hover={{ color: "red" }} /></Pressable>` the text
+  turns red with the pointer on the Pressable's padding. A state key
+  with no scope above is a logged error here and a dev-time error in
+  Marbre.
 - Layout values apply per key: one per property, axis and side. With
   `padding` 16/12, `_narrow: { padding: { left: 4, right: 4 } }` and
   `_compact: { padding: { top: 6, bottom: 6 } }`, a compact window gets

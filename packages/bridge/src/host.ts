@@ -639,7 +639,7 @@ function flattenVariants(
     const bit = stateBit(name)
     if (bit !== undefined) {
       if (!scope) {
-        warnOnce(`${key} needs a scope: a Pressable or a View with group above`)
+        warnOnce(`${key} needs a scope: a Pressable or a View with group above, inside any Portal or Layer`)
         continue
       }
       t = new Map(terms)

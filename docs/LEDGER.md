@@ -475,17 +475,17 @@ Reviewer minors and nitpicks not fixed yet.
   variant is logged once and left out, as is every other key a variant
   does not apply.
 - Also: `_hover` on an element that is no scope means the nearest
-  scope's hover in Craie, the element's own on Marbre web (`<Text
-  _hover>` in questions.tsx, Icon `_hover` in tool-run.tsx). Inside a
-  Pressable they agree; a bare `<Text _hover>` outside one logs "needs
-  a scope" and does nothing.
+  scope's hover, as on Marbre web and native (an earlier note here said
+  Marbre web used the element's own hover; it does not). A bare `<Text
+  _hover>` outside a scope logs "needs a scope" and does nothing;
+  Marbre makes the same case a dev-time error. A `Portal` or `Layer`
+  starts a new scope chain, as on web, and a `TextInput` is its own
+  scope.
 - Why deferred: each needs its own native value in the table (z
   re-sorts the parent, pointer events and visibility change hit
   testing, the focus ring and elevation are paint sources), and none
-  is on a screen the kit ports first. An implicit scope per `_hover`
-  element would make every such node a scope.
-- Resolves in: when a ported component needs one; the Marbre port
-  flags the `_hover` difference.
+  is on a screen the kit ports first.
+- Resolves in: when a ported component needs one.
 ### DF-30: images are decoded per node, and fetched per mount
 
 - Source: images (work item 8) implementation (own finding).
