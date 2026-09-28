@@ -21,7 +21,7 @@ class FakeTransport implements Transport {
   }
 }
 
-const CREATE = 0x01, DETACH = 0x03, REMOVE = 0x04, ANIMATION = 0xa3, KEYFRAMES = 0xa2
+const CREATE = 0x01, DETACH = 0x03, REMOVE = 0x04, END_EXIT = 0x05, ANIMATION = 0xa3, KEYFRAMES = 0xa2
 const tick = () => new Promise(r => setTimeout(r, 0))
 const ev = (kind: number, node: number, key: number, generation = 0): UiEvent =>
   ({ kind, node, generation, revision: 0, x: 0, y: 0, a: 0, b: 0, key, text: "" })
@@ -164,7 +164,12 @@ test("unmounting the root ends every exit at once", async () => {
   // short.
   expect(ops.filter(o => o.tag === ANIMATION)).toEqual([])
   expect(ids(ops, DETACH)).toEqual([aView])
-  expect(ids(ops, REMOVE).sort()).toEqual([aView!, aText!, bView!].sort())
+  expect(ids(ops, REMOVE).sort()).toEqual([aView!, aText!].sort())
+  expect(ids(ops, END_EXIT)).toEqual([bView])
+  // Again: nothing more.
+  root.unmount()
+  await tick()
+  expect(t.take()).toEqual([])
   // Native answers `removed` for b: its ids recycle.
   exitEnd(t, bView!, 3)
   render(["c", "d"])
@@ -172,6 +177,35 @@ test("unmounting the root ends every exit at once", async () => {
   const fresh = ids(t.take(), CREATE)
   expect(fresh).toContain(bView!)
   expect(fresh).toContain(bText!)
+})
+
+test("an exit that ends as unmount cuts it recycles once", async () => {
+  const t = new FakeTransport()
+  const root = createRoot(t)
+  const render = (toasts: string[]) => root.renderSync(toasts.map(id =>
+    createElement(View, { key: id, exit: fadeCollapse }, createElement(Text, null, id))))
+  render(["a"])
+  await tick()
+  const [aView, aText] = ids(t.take(), CREATE)
+  render([])
+  await tick()
+  t.take()
+  // Native finishes the exit and frees the subtree; its end is still on
+  // its way when the app unmounts. `END_EXIT` (not `REMOVE`, which
+  // native would reject for the freed id) is safe.
+  root.unmount()
+  await tick()
+  const ops = t.take()
+  expect(ids(ops, REMOVE)).toEqual([])
+  expect(ids(ops, END_EXIT)).toEqual([aView])
+  exitEnd(t, aView!, 0)
+  // The later answer to END_EXIT never comes (native had nothing to
+  // end); a stray repeat of the end is ignored. The ids recycle once.
+  exitEnd(t, aView!, 0)
+  render(["b", "c"])
+  await tick()
+  const fresh = ids(t.take(), CREATE)
+  expect(fresh.filter(id => id === aView || id === aText).sort()).toEqual([aView!, aText!].sort())
 })
 
 test("an exit must end; only an exit sets a size", () => {

@@ -817,6 +817,8 @@ interface Exit {
   gen: number
   parked: number[]
   ended: boolean
+  /** Unmount cut it short: its end is on its way. */
+  cut?: boolean
   /** The layer container it was removed from: open until the end. */
   layer?: HostNode
 }
@@ -1535,13 +1537,21 @@ export class CraieHost {
   }
 
   /** Ends every running exit at once: native frees their subtrees now
-   * (reason `removed`), and says so. */
+   * (reason `removed`), and says so. An exit native has just finished
+   * (its end not seen yet) is no longer there: `endExit`, unlike
+   * `remove`, then does nothing. Each exit is cut once. */
   private endExits() {
-    for (const exit of this.exits.values()) {
-      if (this.ready()) this.encoder.remove(exit.node.id)
+    const cut = [...this.exits.values()].filter(e => !e.cut)
+    for (const exit of cut) {
+      exit.cut = true
+      if (this.ready()) this.encoder.endExit(exit.node.id)
       exit.layer?.layer!.kids.delete(exit.node)
     }
-    for (const exit of this.exits.values()) if (exit.layer) this.closeIdle(exit.layer)
+    for (const exit of cut) {
+      const layer = exit.layer
+      exit.layer = undefined
+      if (layer) this.closeIdle(layer)
+    }
   }
 
   /** React deleted `n` for good: free the native slot and recycle the

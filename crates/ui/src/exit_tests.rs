@@ -6,14 +6,14 @@
 use std::sync::Arc;
 
 use crate::a11y::aid;
-use crate::animation::end_reason;
-use crate::events::{UiEvent, mask, out_kind};
+use crate::animation::{Prop, Timing, Transition, end_reason};
+use crate::events::{Event, UiEvent, mask, out_kind};
 use crate::geom::Size;
 use crate::host::NodeId;
 use crate::keyframes::{Animation, Easing, Frame, Keyframes, Sample, Trigger, frame_field};
 use crate::mutation::{Command, NodeKind, Transaction, trap_flag};
 use crate::scene::Resolved;
-use crate::states::value_field;
+use crate::states::{TermDecl, VariantDecl, state_bit, value_field};
 use crate::ui::Ui;
 use crate::wire;
 
@@ -218,6 +218,16 @@ fn a_new_sibling_places_by_the_named_one() {
     });
     let kids: Vec<u32> = ui.host.children(NodeId(0)).iter().map(|n| n.0).collect();
     assert_eq!(kids, [1, 2, 4, 3]);
+
+    // In the transaction of the detach too.
+    let mut ui = toasts();
+    apply(&mut ui, |t| {
+        t.animation(3, Trigger::Exit, false, &[fade_and_collapse()])
+            .detach(3)
+            .create(4, NodeKind::View)
+            .place(0, 4, 3);
+    });
+    assert_eq!(ui.host.children(NodeId(0)), [1, 2, 4, 3].map(NodeId));
 }
 
 /// The parent going, removed or detached, ends the exit at once.
@@ -246,7 +256,8 @@ fn a_parent_gone_frees_at_once() {
 }
 
 /// A remove of the root cuts the exit short; a node with an exit that
-/// is out of the tree skips it. Both free and report.
+/// is out of the tree skips it, or is cut short when removed in the
+/// same transaction. All free and report.
 #[test]
 fn removes_and_skips_end_at_once() {
     let mut ui = toasts();
@@ -266,6 +277,179 @@ fn removes_and_skips_end_at_once() {
     });
     assert!(!ui.host.is_live(NodeId(7)) && !ui.host.is_live(NodeId(8)));
     assert_eq!(exit_ends(&ui.take_events())[0].2, end_reason::SKIPPED);
+
+    apply(&mut ui, |t| {
+        t.create(7, NodeKind::View)
+            .create(8, NodeKind::View)
+            .append(7, 8)
+            .animation(7, Trigger::Exit, false, &[fade_and_collapse()])
+            .detach(7)
+            .remove(7);
+    });
+    assert!(!ui.host.is_live(NodeId(7)) && !ui.host.is_live(NodeId(8)));
+    let ends = exit_ends(&ui.take_events());
+    assert_eq!(ends.len(), 1);
+    assert_eq!(ends[0].2, end_reason::REMOVED);
+}
+
+/// `END_EXIT` cuts a running exit short (`removed`) and does nothing
+/// once it has ended: JS may send it before it sees the `EXIT_END`. A
+/// plain `REMOVE` of the freed id stays an error, and only an exit's
+/// root takes an `END_EXIT`.
+#[test]
+fn end_exit_is_idempotent() {
+    let mut ui = toasts();
+    detach(&mut ui, 2);
+    at(&mut ui, 0.05);
+    apply(&mut ui, |t| {
+        t.end_exit(2).end_exit(2);
+    });
+    assert!(!ui.host.is_live(NodeId(2)) && !ui.host.is_live(NodeId(20)));
+    let ends = exit_ends(&ui.take_events());
+    assert_eq!(ends.len(), 1);
+    assert_eq!(ends[0].2, end_reason::REMOVED);
+
+    // Finished, its end on its way to JS.
+    let mut ui = toasts();
+    detach(&mut ui, 2);
+    at(&mut ui, 0.25);
+    assert_eq!(exit_ends(&ui.take_events())[0].2, end_reason::FINISHED);
+    apply(&mut ui, |t| {
+        t.end_exit(2);
+    });
+    assert!(exit_ends(&ui.take_events()).is_empty());
+    assert!(rejects(&mut ui, |t| {
+        t.remove(2);
+    }));
+    assert!(rejects(&mut ui, |t| {
+        t.end_exit(1);
+    }));
+}
+
+/// Validation frees an exit's subtree with its root, as execution does:
+/// nothing later in the batch may name a node inside. A node moved out
+/// first stays.
+#[test]
+fn a_cut_exit_frees_its_subtree_in_validation() {
+    let mut ui = toasts();
+    detach(&mut ui, 2);
+    assert!(rejects(&mut ui, |t| {
+        t.remove(2).place(NIL, 20, NIL);
+    }));
+    assert!(rejects(&mut ui, |t| {
+        t.end_exit(2).place(NIL, 20, NIL);
+    }));
+    // A child the batch placed goes too.
+    assert!(rejects(&mut ui, |t| {
+        t.create(9, NodeKind::View)
+            .append(1, 9)
+            .animation(1, Trigger::Exit, false, &[fade_and_collapse()])
+            .detach(1)
+            .remove(1)
+            .place(0, 9, NIL);
+    }));
+    apply(&mut ui, |t| {
+        t.place(0, 20, NIL).remove(2);
+    });
+    assert!(ui.host.is_live(NodeId(20)));
+    assert_eq!(ui.host.children(NodeId(0)), [1, 3, 20].map(NodeId));
+}
+
+/// Fades out over 0.5 s: only an end frame.
+fn fade_out() -> Animation {
+    let k = Keyframes::new(vec![frame(1.0, value_field::OPACITY, |s| s.opacity = 0.0)]);
+    Animation {
+        fill: crate::keyframes::Fill::Forwards,
+        ..Animation::new(Arc::new(k), 0.5, Easing::LINEAR)
+    }
+}
+
+fn opacity(ui: &Ui, id: u32) -> f32 {
+    ui.host.spatial[NodeId(id).index()].opacity
+}
+
+fn near(a: f32, b: f32) -> bool {
+    (a - b).abs() < 1e-4
+}
+
+/// An exit's omitted start is what showed at the detach, held while what
+/// runs under it moves on unseen (Framer's `AnimatePresence`). Detached
+/// at 0.2 s, a fade out over 0.5 s shows 80% of it at 0.3 s, whether an
+/// enter fading in, a transition or a hover animation showed it.
+#[test]
+fn an_exit_starts_from_what_showed() {
+    // From 0 to what lies under (1) over 1 s.
+    let fade_in = Animation::new(
+        Arc::new(Keyframes::new(vec![frame(
+            0.0,
+            value_field::OPACITY,
+            |s| s.opacity = 0.0,
+        )])),
+        1.0,
+        Easing::LINEAR,
+    );
+
+    // An interrupted enter: 0.2 at the detach (not the 0.3 it would
+    // reach by 0.3 s).
+    let mut ui = toasts();
+    apply(&mut ui, |t| {
+        t.create(5, NodeKind::View)
+            .layout(5, &sized(100.0, 40.0))
+            .append(0, 5)
+            .animation(5, Trigger::Enter, false, std::slice::from_ref(&fade_in))
+            .animation(5, Trigger::Exit, false, &[fade_out()]);
+    });
+    at(&mut ui, 0.2);
+    assert!(near(opacity(&ui, 5), 0.2));
+    detach(&mut ui, 5);
+    at(&mut ui, 0.3);
+    assert!(near(opacity(&ui, 5), 0.16), "{}", opacity(&ui, 5));
+
+    // A transition from 1 to 0 over 1 s: 0.8 at the detach.
+    let mut ui = toasts();
+    apply(&mut ui, |t| {
+        t.transition(
+            1,
+            &[Transition {
+                prop: Prop::Opacity,
+                timing: Timing::curve(1.0, [0.0, 0.0, 1.0, 1.0]),
+            }],
+        )
+        .animation(1, Trigger::Exit, false, &[fade_out()]);
+    });
+    apply(&mut ui, |t| {
+        t.opacity(1, 0.0);
+    });
+    at(&mut ui, 0.2);
+    assert!(near(opacity(&ui, 1), 0.8));
+    detach(&mut ui, 1);
+    at(&mut ui, 0.3);
+    assert!(near(opacity(&ui, 1), 0.64), "{}", opacity(&ui, 1));
+
+    // A hover animation: 0.2 at the detach, which also ends the hover
+    // (and the animation under the exit with it).
+    let mut ui = toasts();
+    let hovered = VariantDecl {
+        terms: vec![TermDecl {
+            scope: 1,
+            mask: state_bit::HOVER,
+        }],
+        animations: vec![fade_in],
+        ..Default::default()
+    };
+    apply(&mut ui, |t| {
+        t.interaction(1, mask::POINTER_ENTER_LEAVE, true)
+            .states(1, 0)
+            .variants(1, &[hovered])
+            .animation(1, Trigger::Exit, false, &[fade_out()]);
+    });
+    ui.dispatch(&Event::PointerMove { x: 50.0, y: 20.0 });
+    assert!(ui.state_bits(NodeId(1)) & state_bit::HOVER != 0);
+    at(&mut ui, 0.2);
+    assert!(near(opacity(&ui, 1), 0.2));
+    detach(&mut ui, 1);
+    at(&mut ui, 0.3);
+    assert!(near(opacity(&ui, 1), 0.16), "{}", opacity(&ui, 1));
 }
 
 /// An exiting subtree counts as drawn: a loop inside keeps running with
@@ -292,8 +476,9 @@ fn loops_inside_run_through_the_exit() {
 }
 
 /// A hidden exit (`display: none` on an ancestor) cannot run: it ends as
-/// skipped, whether hidden before its detach or while it runs, rather
-/// than wait parked with its ids held.
+/// skipped on the next frame, whether hidden before its detach or while
+/// it runs, rather than wait parked with its ids held. Until then it
+/// keeps its place, as validation expects.
 #[test]
 fn a_hidden_exit_is_skipped() {
     let hide = |ui: &mut Ui| {
@@ -310,9 +495,14 @@ fn a_hidden_exit_is_skipped() {
     let mut ui = toasts();
     hide(&mut ui);
     at(&mut ui, 0.05);
-    detach(&mut ui, 2);
+    apply(&mut ui, |t| {
+        t.detach(2).create(4, NodeKind::View).place(0, 4, 2);
+    });
+    assert!(ui.host.is_live(NodeId(2)));
+    at(&mut ui, 0.1);
     assert!(!ui.host.is_live(NodeId(2)));
     assert_eq!(exit_ends(&ui.take_events())[0].2, end_reason::SKIPPED);
+    assert_eq!(ui.host.children(NodeId(0)), [1, 4, 3].map(NodeId));
 
     let mut ui = toasts();
     detach(&mut ui, 2);
@@ -426,7 +616,7 @@ fn validation_keeps_exits_one_way() {
     }));
 }
 
-/// The exit trigger and the size channels round-trip.
+/// The exit trigger, the size channels and `END_EXIT` round-trip.
 #[test]
 fn exit_ops_round_trip() {
     let width = Keyframes::new(vec![frame(0.5, frame_field::SIZE, |s| {
@@ -450,4 +640,10 @@ fn exit_ops_round_trip() {
     let mut ui = Ui::new(1.0);
     ui.apply(&buf).unwrap();
     assert_eq!(ui.host.exits[&1].len(), 2);
+    let mut end = Transaction::new(2);
+    end.end_exit(1);
+    assert_eq!(
+        wire::decode(&wire::encode(&end)).unwrap().mutations,
+        end.mutations
+    );
 }

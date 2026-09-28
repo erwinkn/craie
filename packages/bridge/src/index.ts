@@ -288,6 +288,8 @@ export interface MotionProps {
    *       </View>
    *     ))}
    *
+   * Omitted start and end frames hold what showed at the removal (an
+   * enter cut short included), whatever runs under the exit since.
    * Only the removed root's exit runs (not those of nodes inside it);
    * it ends early when an ancestor goes, and the app's unmount ends all
    * exits at once. A node in a `List` row does not exit. It must end:
@@ -1174,7 +1176,7 @@ export class Root {
     reconciler.flushSyncFromReconciler(() => this.render(node))
   }
   /** Unmounts the app: its nodes go at once, exits included (those
-   * running end now). */
+   * running end now). Again, it does nothing more. */
   unmount() {
     this.host.unmount(() => this.renderSync(null))
   }

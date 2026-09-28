@@ -96,7 +96,7 @@ export function readFrame(buf: Uint8Array): Frame {
     switch (tag) {
       case 0x01: op.f.push(u8()); break // create kind
       case 0x02: op.f.push(u32(), u32(), u32()); op.id = op.f[1]!; break // place
-      case 0x03: case 0x04: break // detach, remove
+      case 0x03: case 0x04: case 0x05: break // detach, remove, end exit
       case 0x10: op.f.push(u32()); break // layout style ref
       case 0x20: { // spatial
         const m = u8(); op.f.push(m)

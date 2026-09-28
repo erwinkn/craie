@@ -23,6 +23,7 @@ const enum Op {
   Place = 0x02,
   Detach = 0x03,
   Remove = 0x04,
+  EndExit = 0x05,
   // layout
   Layout = 0x10,
   // spatial
@@ -1370,6 +1371,12 @@ export class Encoder {
   }
   remove(id: number) {
     this.ops.u8(Op.Remove)
+    this.ops.u32(id)
+  }
+  /** Ends `id`'s exit if it still runs; nothing once it has ended (its
+   * `EXIT_END` may be on its way). */
+  endExit(id: number) {
+    this.ops.u8(Op.EndExit)
     this.ops.u32(id)
   }
   /** Sets a node's layout inputs; `undefined` restores the defaults.

@@ -204,10 +204,17 @@ struct Overlay<'h> {
     removed: HashMap<u32, usize>,
     /// Creates validated so far in the batch.
     created: u32,
-    /// Exits declared (or cleared) by the batch.
-    exits: HashMap<u32, bool>,
-    /// Exits the batch starts (a detach of a node with one).
-    exiting: std::collections::HashSet<u32>,
+    /// Exits the batch declares, clears or starts (one map: a batch
+    /// with an exit allocates it once).
+    exits: HashMap<u32, Exit>,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum Exit {
+    Declared,
+    Cleared,
+    /// A detach of a node with an exit: its node never comes back.
+    Started,
 }
 
 impl Overlay<'_> {
@@ -224,15 +231,77 @@ impl Overlay<'_> {
 
     fn has_exit(&self, id: u32) -> bool {
         match self.exits.get(&id) {
-            Some(&e) => e,
+            Some(e) => *e == Exit::Declared,
             None => self.host.exits.contains_key(&id),
         }
     }
 
     /// An exit's root: its node never comes back.
     fn exiting(&self, id: u32) -> bool {
-        self.exiting.contains(&id)
-            || !self.removed.contains_key(&id) && self.host.exiting.contains(&NodeId(id))
+        match self.exits.get(&id) {
+            Some(e) => *e == Exit::Started,
+            None => self.host.exiting.contains(&NodeId(id)),
+        }
+    }
+
+    /// Declares or clears `id`'s exit; one started stays started.
+    fn declare_exit(&mut self, id: u32, declared: bool) {
+        if !self.exiting(id) {
+            let e = if declared {
+                Exit::Declared
+            } else {
+                Exit::Cleared
+            };
+            self.exits.insert(id, e);
+        }
+    }
+
+    /// Whether `id`'s ancestors reach the root level (native's test for
+    /// an exit that can run).
+    fn attached(&self, id: u32) -> Result<bool, WireError> {
+        let mut cur = id;
+        for _ in 0..self.host.slot_count() + self.kinds.len() + 1 {
+            match self.parent(cur) {
+                NIL => return Ok(true),
+                p if p == NodeId::DETACHED.0 => return Ok(false),
+                p => cur = p,
+            }
+        }
+        Err(invalid("corrupt parent chain"))
+    }
+
+    /// `root` and the nodes under it, as the batch left them: the host's
+    /// links it kept and its own.
+    fn subtree(&self, root: u32) -> Vec<u32> {
+        let mut placed: HashMap<u32, Vec<u32>> = HashMap::new();
+        for &k in self.parents.keys() {
+            placed.entry(self.parent(k)).or_default().push(k);
+        }
+        let mut nodes = vec![root];
+        let mut k = 0;
+        while k < nodes.len() {
+            let n = nodes[k];
+            k += 1;
+            for &c in self.host.children(NodeId(n)) {
+                if !self.parents.contains_key(&c.0) && self.parent(c.0) == n {
+                    nodes.push(c.0);
+                }
+            }
+            if let Some(cs) = placed.get(&n) {
+                nodes.extend(cs);
+            }
+        }
+        nodes
+    }
+
+    /// Marks `id` removed at `step`: its links are gone, and a list it
+    /// was holds no items.
+    fn free(&mut self, id: u32, step: usize, lists: &mut HashMap<u32, Touch>) {
+        self.kinds.insert(id, None);
+        self.parents.insert(id, (NodeId::DETACHED.0, step));
+        self.removed.insert(id, step);
+        self.exits.insert(id, Exit::Cleared);
+        lists.insert(id, Touch::empty());
     }
 
     fn parent(&self, id: u32) -> u32 {
@@ -283,7 +352,6 @@ pub fn validate(host: &Host, txn: &Transaction<'_>) -> Result<Validated, WireErr
         removed: HashMap::new(),
         created: 0,
         exits: HashMap::new(),
-        exiting: Default::default(),
     };
     // Lists the batch splices, as the batch leaves them (item counts and
     // identities).
@@ -326,7 +394,7 @@ pub fn validate(host: &Host, txn: &Transaction<'_>) -> Result<Validated, WireErr
                 before,
             } => {
                 need_live(&o, *child, "place of an absent child")?;
-                let exits = !o.exiting.is_empty() || !host.exiting.is_empty();
+                let exits = !o.exits.is_empty() || !host.exiting.is_empty();
                 if exits && o.exiting(*child) {
                     return Err(invalid("place of an exiting node"));
                 }
@@ -362,20 +430,39 @@ pub fn validate(host: &Host, txn: &Transaction<'_>) -> Result<Validated, WireErr
                 if o.exiting(*id) {
                     return Err(invalid("detach of an exiting node"));
                 }
+                // An exit that runs keeps its node in its parent's list
+                // (one that cannot is detached, and ends with the
+                // transaction); either way the node never comes back.
+                let mut stays = false;
                 if o.has_exit(*id) {
-                    o.exits.insert(*id, false);
-                    o.exiting.insert(*id);
+                    o.exits.insert(*id, Exit::Started);
+                    stays = o.kind(o.parent(*id)) != Some(NodeKind::List) && o.attached(*id)?;
                 }
-                o.parents.insert(*id, (NodeId::DETACHED.0, step));
+                if !stays {
+                    o.parents.insert(*id, (NodeId::DETACHED.0, step));
+                }
             }
             Mutation::Remove { id } => {
                 need_live(&o, *id, "remove of an absent node")?;
-                o.kinds.insert(*id, None);
-                o.parents.insert(*id, (NodeId::DETACHED.0, step));
-                o.removed.insert(*id, step);
-                o.exits.insert(*id, false);
-                o.exiting.remove(id);
-                lists.insert(*id, Touch::empty());
+                if o.exiting(*id) {
+                    // An exit's root goes with its subtree.
+                    for n in o.subtree(*id) {
+                        o.free(n, step, &mut lists);
+                    }
+                } else {
+                    o.free(*id, step, &mut lists);
+                }
+            }
+            // Idempotent: an exit that has ended left its id free.
+            Mutation::EndExit { id } => {
+                if o.live(*id) {
+                    if !o.exiting(*id) {
+                        return Err(invalid("end of an exit that never started"));
+                    }
+                    for n in o.subtree(*id) {
+                        o.free(n, step, &mut lists);
+                    }
+                }
             }
             Mutation::Layout { id, style } => {
                 need_live(&o, *id, "layout on an absent node")?;
@@ -616,7 +703,7 @@ pub fn validate(host: &Host, txn: &Transaction<'_>) -> Result<Validated, WireErr
                 let exit = *trigger == Trigger::Exit;
                 valid_animations(animations, boxed, exit)?;
                 if exit {
-                    o.exits.insert(*id, !animations.is_empty());
+                    o.declare_exit(*id, !animations.is_empty());
                 }
             }
             Mutation::States { id, bits } => {
@@ -795,12 +882,12 @@ impl Ui {
             }
             Mutation::Detach { id } => self.detach_node(NodeId(*id)),
             Mutation::Remove { id } => {
-                let node = NodeId(*id);
-                if self.exiting(node) {
-                    self.cut_exit(node);
-                } else {
-                    self.remove_node(node);
+                if !self.cut_exit(NodeId(*id)) {
+                    self.remove_node(NodeId(*id));
                 }
+            }
+            Mutation::EndExit { id } => {
+                self.cut_exit(NodeId(*id));
             }
             // A node with a variant table: its own ops set the base, and
             // the restyle at the end of the transaction declares.

@@ -54,6 +54,8 @@ pub mod op {
     pub const PLACE: u8 = 0x02;
     pub const DETACH: u8 = 0x03;
     pub const REMOVE: u8 = 0x04;
+    /// u32 id: ends the node's exit if it still runs (exits, topic 7).
+    pub const END_EXIT: u8 = 0x05;
     // layout
     pub const LAYOUT: u8 = 0x10;
     // spatial
@@ -451,6 +453,10 @@ pub fn encode(txn: &Transaction<'_>) -> Vec<u8> {
             }
             Mutation::Remove { id } => {
                 ops.push(op::REMOVE);
+                u32le(&mut ops, *id);
+            }
+            Mutation::EndExit { id } => {
+                ops.push(op::END_EXIT);
                 u32le(&mut ops, *id);
             }
             Mutation::Layout { id, style } => {
@@ -1107,6 +1113,7 @@ pub fn decode(buf: &[u8]) -> Result<Transaction<'_>, WireError> {
             },
             op::DETACH => Mutation::Detach { id: r.u32()? },
             op::REMOVE => Mutation::Remove { id: r.u32()? },
+            op::END_EXIT => Mutation::EndExit { id: r.u32()? },
             op::LAYOUT => {
                 let id = r.u32()?;
                 let style = r.u32()?;

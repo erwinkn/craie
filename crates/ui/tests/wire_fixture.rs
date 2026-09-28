@@ -42,8 +42,17 @@ fn js_fixture_decodes_and_executes() {
     assert_eq!(ui.apply(&buf).unwrap(), 99);
     let host = &ui.host;
 
-    // remove(1): view + input + surface + list + row + two vectors + an
-    // image + layer remain.
+    // remove(1), then end_exit(1): nothing, its exit being none.
+    let at = txn
+        .mutations
+        .iter()
+        .position(|m| *m == Mutation::Remove { id: 1 });
+    assert_eq!(
+        txn.mutations.get(at.unwrap() + 1),
+        Some(&Mutation::EndExit { id: 1 })
+    );
+    // view + input + surface + list + row + two vectors + an image +
+    // layer remain.
     assert_eq!(host.len(), 9);
     assert_eq!(host.kind(NodeId(0)), Some(NodeKind::View));
     let paint = host.paint[0];

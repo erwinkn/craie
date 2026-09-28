@@ -16,13 +16,16 @@
 //! 200 ms     R and its subtree freed; EXIT_END (R, finished)
 //! ```
 //!
-//! An exit ends early and frees at once when its root is removed
-//! (`removed`, JS cutting it short) or an ancestor leaves the tree,
-//! detached or removed (`parent gone`, at the end of that transaction).
-//! One that cannot run, its root out of the tree, hidden (`display:
-//! none` on it or above) or a list's row, ends at the end of its
-//! transaction (`skipped`), and so does one hidden while it runs, on the
-//! next frame. An exiting node never comes
+//! An exit ends early and frees at once when JS cuts it short
+//! (`removed`): a `REMOVE` of its root, or an `END_EXIT`, which does
+//! nothing once the exit has ended (JS may send it before it sees the
+//! `EXIT_END`). It also ends when an ancestor leaves the tree, detached
+//! or removed (`parent gone`, at the end of that transaction). One that
+//! cannot run, its root out of the tree or a list's row, ends at the end
+//! of its transaction (`skipped`); one hidden (`display: none` on it or
+//! above), at the detach or while it runs, on the next frame. Structure
+//! alone decides at the detach, so validation can tell whether the node
+//! keeps its place. An exiting node never comes
 //! back: validation rejects placing it, or anything under it. While an
 //! exit runs, events of its subtree's nodes are dropped.
 
@@ -37,21 +40,26 @@ impl Ui {
     /// ends it at the end of the transaction, when it cannot run); any
     /// other unlinks.
     pub(crate) fn detach_node(&mut self, node: NodeId) {
+        let exit = self.host.exits.remove(&node.0);
+        // An exit starts from what shows, before the hover leaves.
+        let from = exit.is_some().then(|| self.row_sample(node));
         self.unhover(node);
         self.unpress(node);
-        let Some(anims) = self.host.exits.remove(&node.0) else {
+        let (Some(anims), Some(from)) = (exit, from) else {
             self.host.detach(node);
             return;
         };
+        // Structure alone decides, as validation models it: a hidden
+        // exit starts, and ends on the next frame.
         let parent = self.host.parent(node);
-        if !self.drawn(node) || self.host.kind(parent) == Some(NodeKind::List) {
+        if !self.attached(node) || self.host.kind(parent) == Some(NodeKind::List) {
             self.host.detach(node);
             self.skipped_exits.push(node);
             return;
         }
         self.host.exiting.push(node);
         self.set_inert(node, true);
-        self.start_exit_keyframes(node, anims);
+        self.start_exit_keyframes(node, anims, from);
     }
 
     /// Whether `node` is live and in the tree: its ancestors reach the
@@ -78,10 +86,18 @@ impl Ui {
         self.host.exiting.contains(&node)
     }
 
-    /// Applies a `REMOVE` of an exit's root: the exit ends now.
-    pub(crate) fn cut_exit(&mut self, root: NodeId) {
+    /// Applies a `REMOVE` or `END_EXIT` of an exit's root, running or
+    /// about to be skipped: the exit ends now (`removed`). False when
+    /// `root` roots no exit.
+    pub(crate) fn cut_exit(&mut self, root: NodeId) -> bool {
+        let exits = self.host.exiting.len() + self.skipped_exits.len();
         self.host.exiting.retain(|&n| n != root);
+        self.skipped_exits.retain(|&n| n != root);
+        if self.host.exiting.len() + self.skipped_exits.len() == exits {
+            return false;
+        }
         self.free_exit(root, end_reason::REMOVED);
+        true
     }
 
     /// At the end of a transaction: exits that could not run end, and so

@@ -223,14 +223,15 @@ fn steady_frames_do_not_allocate() {
     assert_eq!(ui.motion().live(), 3);
 }
 
-/// Exits (topic 7): the exit's own bookkeeping allocates at most once
-/// per exit (its animation record, at the detach). Its frames cost what
+/// Exits (topic 7): the bridge's transaction (the exit's `ANIMATION`,
+/// then the `DETACH`) allocates twice: validation's overlay, as any
+/// detach does, and the declaration's copy. Its frames cost what
 /// its channels cost in any animation (a fade's opacity layer on its
 /// first frame; size frames relayout, as a size tween does), so a fade
 /// allocates nothing between its first frame and its end; the end costs
 /// no more than removing the subtree does.
 #[test]
-fn exits_allocate_at_most_once() {
+fn exit_transactions_allocate_twice() {
     let sized = |h: f32| taffy::Style {
         flex_shrink: 0.0,
         size: taffy::Size {
@@ -277,20 +278,16 @@ fn exits_allocate_at_most_once() {
             .text(10 + i, format!("toast {i}"), 14.0, 0xFFFF_FFFF)
             .append(i, 10 + i);
     }
-    t.animation(
-        2,
-        Trigger::Exit,
-        false,
-        &[exit(&fade, 0), exit(&collapse, 1)],
-    )
-    .animation(4, Trigger::Exit, false, &[exit(&fade, 0)]);
     ui.apply_txn(&t).unwrap();
     ui.render(VIEW);
-    // Detaches `id` at `from` and runs a third of a second: the
-    // allocations of the detach's transaction and of its render, each
-    // frame's, and the events.
-    let run = |ui: &mut Ui, seq: u64, id: u32, from: f64| {
+    // Detaches `id` at `from`, declaring `exit` right before as the
+    // bridge does, and runs a third of a second: the allocations of the
+    // transaction and of its render, each frame's, and the events.
+    let run = |ui: &mut Ui, seq: u64, id: u32, exit: &[Animation], from: f64| {
         let mut t = Transaction::new(seq);
+        if !exit.is_empty() {
+            t.animation(id, Trigger::Exit, false, exit);
+        }
         t.detach(id);
         ui.set_time(from);
         let apply = allocs(|| {
@@ -310,13 +307,13 @@ fn exits_allocate_at_most_once() {
         ((apply, render), frames, ui.take_events())
     };
     // One exit, one plain detach and one remove size the reused buffers.
-    run(&mut ui, 2, 2, 0.0);
-    run(&mut ui, 3, 1, 1.0);
+    run(&mut ui, 2, 2, &[exit(&fade, 0), exit(&collapse, 1)], 0.0);
+    run(&mut ui, 3, 1, &[], 1.0);
     let mut t = Transaction::new(4);
     t.remove(1).remove(11);
     ui.apply_txn(&t).unwrap();
-    let (exit, frames, events) = run(&mut ui, 5, 4, 2.0);
-    let (plain, _, _) = run(&mut ui, 6, 3, 3.0);
+    let (exit, frames, events) = run(&mut ui, 5, 4, &[exit(&fade, 0)], 2.0);
+    let (plain, _, _) = run(&mut ui, 6, 3, &[], 3.0);
     let mut t = Transaction::new(7);
     t.remove(3).remove(13);
     let remove = allocs(|| {
@@ -325,11 +322,13 @@ fn exits_allocate_at_most_once() {
     });
     assert_eq!(events.len(), 1, "one exit end: {events:?}");
     assert!(!ui.host.is_live(NodeId(4)) && !ui.host.is_live(NodeId(14)));
-    // The exit's record; in the render, the fade's opacity layer (pinned
-    // while it runs).
+    // The transaction: validation's overlay entry, as for any detach,
+    // and the declaration's copy (the record's list is a spare one). A
+    // plain detach also moves its parent's child list (2 here). The
+    // render: the fade's opacity layer (pinned while it runs).
     assert!(
-        exit.0 <= plain.0 + 1 && exit.1 <= plain.1 + 1,
-        "an exit's detach allocated {exit:?} times (transaction, render), a plain one {plain:?}"
+        exit.0 <= 2 && exit.1 <= plain.1 + 1,
+        "an exit allocated {exit:?} times (transaction, render), a plain detach {plain:?}"
     );
     // Frames 1 to 3 run; 4 ends (0.25 s).
     assert_eq!(frames[..3], [0, 0, 0], "exit frames allocated: {frames:?}");

@@ -83,6 +83,7 @@ enc.claims(NIL, 3, [{ ...parseChord("shift+?", false)!, flags: CHORD_FLAG.inInpu
 enc.detach(1)
 enc.place(0, 1, NIL)
 enc.remove(1)
+enc.endExit(1)                                      // no exit: nothing
 enc.create(4, 4)                                    // list
 enc.listConfig(4, 250, 36, [{ base: 12, inset: 16, fontSize: 14 }, { base: 48 }])
 enc.listSplice(4, 0, 0, [{ template: 0, textLength: 42, id: 5 }, { template: 1, id: 6 }, { textLength: 70000, id: 7 }])
