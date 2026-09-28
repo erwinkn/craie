@@ -853,6 +853,46 @@ Reviewer minors and nitpicks not fixed yet.
 - Resolves in: with DF-5 (retargeting restarts the full duration),
   which touches the same path.
 
+### DF-61: List rows don't exit
+
+- Source: work item 6 (exits).
+- Where: crates/ui/src/exit.rs (`detach_node`).
+- Claim: a List's row removed with an `exit` goes at once, and native
+  answers `skipped`. A chat list whose messages fade out when deleted
+  just drops them.
+- Why deferred: a List windows its rows itself (topic 12). An exiting
+  row would need a slot in the list's measure and anchor, which the
+  list rework (work item 11) redesigns anyway.
+- Resolves in: work item 11, if a ported list animates removals.
+
+### DF-62: a collapse stops at padding, border, min size and gap
+
+- Source: work item 6 (exits).
+- Where: crates/ui/src/keyframes.rs (size channels), layout.
+- Claim: a `height: 0` frame sets the border-box height, and layout
+  floors it at the padding and border (and a `minHeight`). A toast with
+  `padding: 12` collapses to 24, then vanishes at the end, and its
+  parent's `gap` stays until then. The app puts the padding on an inner
+  View to collapse fully.
+- Why deferred: collapsing padding and gap too means tweening more
+  layout values per exit, for a jump of a few points at the end.
+- Resolves in: when a ported component shows the jump; tween the
+  padding (and the gap share) along with the size.
+
+### DF-63: size frames are exit-only, in points
+
+- Source: work item 6 (exits).
+- Where: crates/ui/src/executor.rs (validation), packages/bridge/src/motion.ts
+  (`frameValues`).
+- Claim: `width` and `height` frames exist in `exit` only, and only as
+  points. An `enter` that grows a row from 0 to its natural height, or
+  a frame at `50%`, is rejected. The implicit end of an exit is the
+  laid-out size, which covers the collapse.
+- Why deferred: growing from 0 needs the natural size (`auto`) as an
+  endpoint, a measure before the frame, which layout transitions (out
+  of scope) will bring.
+- Resolves in: layout transitions.
+
 ## Closed
 
 - DF-57 (work item 6, review #21 M1): end indices were wire indices

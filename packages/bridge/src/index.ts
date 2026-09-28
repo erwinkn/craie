@@ -273,6 +273,27 @@ export interface MotionProps {
    * (`hidden`, under a hidden ancestor) nothing runs, and everything
    * starts over when it is drawn again, as CSS does. */
   animation?: Animations
+  /** Runs when React removes the node: it stays where it was, laid out
+   * and drawn, but out of hit testing, focus and accessibility (a focus
+   * inside moves on at once, a trap or group inside stops counting),
+   * and goes when the exit ends. Fill defaults to `forwards`. Frames may
+   * also set `width` and `height` (border-box points; set `overflow:
+   * "hidden"` to clip what the collapse leaves out):
+   *
+   *     {toasts.map((t) => (
+   *       <View key={t.id} style={{ overflow: "hidden" }}
+   *         enter={{ keyframes: [{ at: 0, opacity: 0, translateY: 8 }], duration: 200 }}
+   *         exit={{ keyframes: [{ at: 1, opacity: 0, height: 0 }], duration: 200, reducedMotion: "fade" }}>
+   *         <Text>{t.text}</Text>
+   *       </View>
+   *     ))}
+   *
+   * Only the removed root's exit runs (not those of nodes inside it);
+   * it ends early when an ancestor goes, and the app's unmount ends all
+   * exits at once. A node in a `List` row does not exit. It must end:
+   * no `"infinite"`. Under reduced motion, `skip` (the default) removes
+   * at once, `fade` keeps only the opacity frames, `keep` runs it. */
+  exit?: Animations
   /** A finite `enter` or `animation` ended. */
   onAnimationEnd?: (e: AnimationEndEvt) => void
 }
@@ -1151,6 +1172,11 @@ export class Root {
   }
   renderSync(node: ReactNode) {
     reconciler.flushSyncFromReconciler(() => this.render(node))
+  }
+  /** Unmounts the app: its nodes go at once, exits included (those
+   * running end now). */
+  unmount() {
+    this.host.unmount(() => this.renderSync(null))
   }
   /** Sends pending ops; resolves when native acks the transaction. */
   flush(): Promise<void> {

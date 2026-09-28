@@ -190,7 +190,7 @@ export function readFrame(buf: Uint8Array): Frame {
           for (const bit of [1, 2, 8]) if (mask & bit) values.push(u32())
           if (mask & 16) values.push(f32())
           for (const bit of [256, 512]) if (mask & bit) values.push(f32(), f32())
-          for (const bit of [1024, 2048, 4096]) if (mask & bit) values.push(f32())
+          for (const bit of [1024, 2048, 4096, 8192, 16384]) if (mask & bit) values.push(f32())
           op.frames.push({ at, easing, mask, values })
         }
         break

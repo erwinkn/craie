@@ -1270,16 +1270,17 @@ event loop, the window, the device, or the render target.
 **Current.** As targeted. One process; React runs in a Node
 `worker_thread` and submits CRW2 bytes through `NativeClient.submit`.
 One threadsafe function delivers `ack | events` frames. JS recycles
-ids at once and mirrors each slot's generation; events carry the
-generation and JS drops stale ones; the ack resolves `flush()`.
-Payload ops copy typed-array bytes once. Protocol version 11 (36-byte
+ids at once (an exiting subtree's when its exit ends) and mirrors each
+slot's generation; events carry the generation and JS drops stale ones;
+the ack resolves `flush()`.
+Payload ops copy typed-array bytes once. Protocol version 12 (36-byte
 event records and claims since 4; inherited color in drawings and
 inputs since 5; the `switch`, `radio` and `radiogroup` roles and the
 ROLE op's reported states since 6; press flags, pressable spans, and
 `PRESS`/`ACTIVATE` since 7; focus traps, inert, auto-focus and the
 `dialog` and `alertdialog` roles since 8; transform parts since 9;
 focus groups and the `tab` and `tablist` roles since 10; keyframe
-animations and the `ENVIRONMENT` event since 11). The session hands
+animations and the `ENVIRONMENT` event since 11; exits since 12). The session hands
 JS its output in native order: acks sit between event frames where they happened, so the ack
 of a transaction never overtakes an event raised before it applied,
 and the facade retires a claim set's old handlers on that ack.

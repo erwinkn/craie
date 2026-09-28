@@ -14,7 +14,7 @@
 // across transactions.
 
 const MAGIC = 0x3257_5243 // "CRW2" little-endian
-export const VERSION = 11
+export const VERSION = 12
 export const NIL = 0xffff_ffff // no node / append / default style
 
 const enum Op {
@@ -178,6 +178,11 @@ export interface Keyframe {
   borderColor?: string | number
   /** The inherited color (text, inputs, `currentColor` drawings). */
   color?: string | number
+  /** Border-box size in points, `exit` only: a frame without one
+   * starts or ends at the laid-out size. `height: 0` collapses the node
+   * (its padding and border stay, unless clipped). */
+  width?: number
+  height?: number
 }
 
 /** A keyframe animation (CSS `@keyframes` plus `animation-*`), timed
@@ -200,9 +205,9 @@ export interface KeyframeAnimation {
   reducedMotion?: ReducedMotion
 }
 
-/** What started a keyframe animation (`animationEnd` key bits 16+,
- * minus one). */
-export const ANIMATION_TRIGGER = { enter: 0, animation: 1 } as const
+/** What starts a keyframe animation (`animationEnd` key bits 16+,
+ * minus one). An exit starts with the node's detach. */
+export const ANIMATION_TRIGGER = { enter: 0, animation: 1, exit: 3 } as const
 
 /** A keyframe animation's easing on the wire: [kind, ...params] —
  * 1 bezier (x1, y1, x2, y2), 2 steps (n, jump), 3 linear (output,
@@ -222,6 +227,9 @@ export interface FrameValues {
   rotate?: number
   scaleX?: number
   scaleY?: number
+  /** Border-box points (exits only). */
+  width?: number
+  height?: number
 }
 
 /** A keyframe animation in wire form: seconds, `EasingIn`s, and the
@@ -366,6 +374,10 @@ export const EVENT_KIND = {
   /** The environment changed (node NIL): key = `ENV_BIT`s. Sent when
    * the reduced-motion setting changes. */
   environment: 21,
+  /** A node's exit ended (native freed its subtree): node = the exit's
+   * root, key = the reason (`END_REASON`: finished, removed, parent
+   * gone, skipped). Sent once per exit that started. */
+  exitEnd: 22,
 } as const
 
 /** A press event's phase — mirror events.rs `press_phase`. */
@@ -460,7 +472,7 @@ export function parseChord(chord: string, apple: boolean): Claim | null {
 }
 
 /** Why a tween ended — mirror animation.rs `end_reason`. */
-export const END_REASON = ["finished", "cancelled", "retargeted", "removed"] as const
+export const END_REASON = ["finished", "cancelled", "retargeted", "removed", "parentGone", "skipped"] as const
 export type EndReason = (typeof END_REASON)[number]
 
 /** What `node.animate` resolves with: `finished` when it reached its
@@ -954,6 +966,8 @@ const VALUE_FIELD = {
   TRANSLATE_X: 1 << 8, TRANSLATE_Y: 1 << 9, ROTATE: 1 << 10, SCALE_X: 1 << 11, SCALE_Y: 1 << 12,
   TRANSITIONS: 1 << 13, ANIMATIONS: 1 << 14,
 } as const
+// Keyframe-only bits (keyframes.rs `frame_field`; exits only).
+const FRAME_FIELD = { WIDTH: 1 << 13, HEIGHT: 1 << 14 } as const
 
 /** The most animations one list holds (keyframes.rs `MAX_ANIMATIONS`). */
 export const MAX_ANIMATIONS = 16
@@ -998,6 +1012,9 @@ function checkAnimation(a: AnimationIn) {
     const nums = [v.rotate, v.scaleX, v.scaleY, ...(v.translateX ?? []), ...(v.translateY ?? [])]
     if (!nums.every(n => n === undefined || Number.isFinite(n))) throw Error("keyframe values must be finite")
     if (v.opacity !== undefined && !(v.opacity >= 0 && v.opacity <= 1)) throw Error(`bad keyframe opacity ${v.opacity}`)
+    for (const d of [v.width, v.height]) {
+      if (d !== undefined && !(d >= 0 && d <= 1e6)) throw Error(`bad keyframe size ${d}`)
+    }
   })
 }
 
@@ -1270,12 +1287,14 @@ export class Encoder {
           (has("translateY") ? VALUE_FIELD.TRANSLATE_Y : 0) |
           (has("rotate") ? VALUE_FIELD.ROTATE : 0) |
           (has("scaleX") ? VALUE_FIELD.SCALE_X : 0) |
-          (has("scaleY") ? VALUE_FIELD.SCALE_Y : 0),
+          (has("scaleY") ? VALUE_FIELD.SCALE_Y : 0) |
+          (has("width") ? FRAME_FIELD.WIDTH : 0) |
+          (has("height") ? FRAME_FIELD.HEIGHT : 0),
       )
       for (const c of [v.fill, v.borderColor, v.color]) if (c !== undefined) b.u32(c >>> 0)
       if (v.opacity !== undefined) b.f32(v.opacity)
       for (const x of [...(v.translateX ?? []), ...(v.translateY ?? [])]) b.f32(x)
-      for (const x of [v.rotate, v.scaleX, v.scaleY]) if (x !== undefined) b.f32(x)
+      for (const x of [v.rotate, v.scaleX, v.scaleY, v.width, v.height]) if (x !== undefined) b.f32(x)
     }
     return ix
   }
@@ -1692,8 +1711,10 @@ export class Encoder {
 
   /** Replaces a node's keyframe animations of `trigger`
    * (`ANIMATION_TRIGGER`; an empty list stops them). `enter` applies
-   * only in the transaction that creates the node. With `notify`, a
-   * finite animation's end comes back as `animationEnd`. */
+   * only in the transaction that creates the node; `exit` is declared
+   * ahead and starts with the node's next detach (finite, and the only
+   * one with size frames; its end comes back as `exitEnd`). With
+   * `notify`, a finite animation's end comes back as `animationEnd`. */
   animation(id: number, trigger: number, notify: boolean, list: readonly AnimationIn[]) {
     const refs = this.animationRefs(list)
     this.ops.u8(Op.Animation)

@@ -40,6 +40,7 @@ import {
   type AnimationEnd,
   type ImageFit,
   ANIM_PROP,
+  ANIMATION_TRIGGER,
   END_REASON,
   type Timing,
   type Transitions,
@@ -331,6 +332,11 @@ export interface HostNode {
   /** The `animation` list last sent, after the policy, and whether it
    * reports ends ("": none). */
   sentAnimation?: string
+  /** The native parent it was last placed under (null: the root level
+   * or a layer's; unset once detached without an exit). */
+  parent?: HostNode | null
+  /** An exit's root: its exit, running or ended. */
+  exit?: Exit
   /** `animate` calls not ended yet, oldest first (native keeps one tween
    * per property, so ends arrive in call order per property). */
   pendingAnims?: { prop: number; resolve: (end: AnimationEnd) => void }[]
@@ -801,6 +807,20 @@ function variantMotion(n: HostNode, block: Record<string, any>, reduced: boolean
   return out
 }
 
+/** A running or ended exit (`exit` prop): React has deleted its root,
+ * native still draws the subtree. Each id React releases meanwhile is
+ * parked (kept out of `freeIds`, its generation unchanged) until native
+ * frees the subtree and says so (`exitEnd`); after that, a release
+ * recycles at once. */
+interface Exit {
+  node: HostNode
+  gen: number
+  parked: number[]
+  ended: boolean
+  /** The layer container it was removed from: open until the end. */
+  layer?: HostNode
+}
+
 export class CraieHost {
   /** The user asked for reduced motion (the environment event): the
    * motion props' policies (`reducedMotion`) apply. */
@@ -809,6 +829,10 @@ export class CraieHost {
   private freeIds: number[] = []
   /** Generation per id; bumped when native frees the slot. */
   private gens: number[] = []
+  /** Running exits by root id. */
+  private exits = new Map<number, Exit>()
+  /** In `unmount`: removals start no exit. */
+  private unmounting = false
   private seq = 0
   private encoder = new Encoder()
   private scheduled = false
@@ -1144,6 +1168,10 @@ export class CraieHost {
       for (const listener of frameStatsListeners) listener(stats)
       return
     }
+    if (ev.kind === EVENT_KIND.exitEnd) {
+      this.exitEnded(ev.node, ev.generation)
+      return
+    }
     const root = this.nodes.get(ev.node)
     if (!root || root.gen !== ev.generation) return
     // A pointer event on a text root carries the span under the pointer
@@ -1313,6 +1341,8 @@ export class CraieHost {
     n.variantBlocks = undefined
     n.sentTransitions = undefined
     n.sentAnimation = undefined
+    n.exit = undefined
+    n.parent = parent
     this.nodes.set(n.id, n)
     if (!this.ready()) return
     const enc = this.encoder
@@ -1344,6 +1374,11 @@ export class CraieHost {
    * the layer (it opens again, on top, with its next child). */
   removeFromLayer(layer: HostNode, child: HostNode) {
     this.detach(child)
+    // An exiting child keeps the layer open until its exit ends.
+    if (child.exit) {
+      child.exit.layer = layer
+      return
+    }
     layer.layer!.kids.delete(child)
     this.closeIdle(layer)
   }
@@ -1402,6 +1437,7 @@ export class CraieHost {
       this.materialize(child, parent, before)
       return
     }
+    child.parent = parent
     if (this.ready()) {
       this.encoder.place(parent ? parent.id : NIL, child.id, before ? before.id : NIL)
     }
@@ -1436,14 +1472,76 @@ export class CraieHost {
   }
 
   /** Unlinks `n` without freeing its slot — removal unmounts it; the
-   * node's own `release` (via detachDeletedInstance) frees it. */
+   * node's own `release` (via detachDeletedInstance) frees it. With an
+   * exit sent, native runs it and frees the subtree at its end. */
   detach(n: HostNode) {
     if (n.textParent) {
       this.unlinkVirtual(n)
       return
     }
-    if (!n.mounted) return
-    if (this.ready()) this.encoder.detach(n.id)
+    if (!n.mounted || !this.ready()) return
+    // The exit goes with the detach, under the policy of the moment.
+    const exit = n.props.exit && !this.unmounting
+      ? animationList(n.props.exit, FILL.forwards, this.reducedMotion, n.kind !== 1, true)
+      : []
+    if (exit.length) {
+      this.encoder.animation(n.id, ANIMATION_TRIGGER.exit, false, exit)
+      n.exit = { node: n, gen: n.gen, parked: [], ended: false }
+      this.exits.set(n.id, n.exit)
+    } else {
+      n.parent = null
+    }
+    this.encoder.detach(n.id)
+  }
+
+  /** The exit `n` is part of (its own or an ancestor's), if any. */
+  private exitOf(n: HostNode): Exit | undefined {
+    for (let m: HostNode | null | undefined = n; m; m = m.parent) if (m.exit) return m.exit
+    return undefined
+  }
+
+  /** Recycles an id native has freed. */
+  private recycle(id: number) {
+    this.gens[id] = (this.gens[id]! + 1) & 0xffff
+    this.freeIds.push(id)
+  }
+
+  /** Native ended the exit of `id` and freed its subtree: the ids
+   * released so far recycle, the rest as React releases them. */
+  private exitEnded(id: number, gen: number) {
+    const exit = this.exits.get(id)
+    if (!exit || exit.gen !== gen) return
+    this.exits.delete(id)
+    exit.ended = true
+    for (const p of exit.parked) this.recycle(p)
+    exit.parked = []
+    const layer = exit.layer
+    if (layer) {
+      layer.layer!.kids.delete(exit.node)
+      this.closeIdle(layer)
+    }
+  }
+
+  /** Unmounts the app: `clear` renders nothing, its removals starting
+   * no exit, then every running exit ends at once. */
+  unmount(clear: () => void) {
+    this.unmounting = true
+    try {
+      clear()
+    } finally {
+      this.unmounting = false
+    }
+    this.endExits()
+  }
+
+  /** Ends every running exit at once: native frees their subtrees now
+   * (reason `removed`), and says so. */
+  private endExits() {
+    for (const exit of this.exits.values()) {
+      if (this.ready()) this.encoder.remove(exit.node.id)
+      exit.layer?.layer!.kids.delete(exit.node)
+    }
+    for (const exit of this.exits.values()) if (exit.layer) this.closeIdle(exit.layer)
   }
 
   /** React deleted `n` for good: free the native slot and recycle the
@@ -1460,10 +1558,15 @@ export class CraieHost {
     n.claims = undefined
     // Its native end events will not reach it (the generation moves).
     for (const p of n.pendingAnims?.splice(0) ?? []) p.resolve({ finished: false, reason: "removed" })
-    if (this.ready()) this.encoder.remove(n.id)
-    this.gens[n.id] = (this.gens[n.id]! + 1) & 0xffff
-    this.freeIds.push(n.id)
     n.mounted = false
+    // Inside an exit: native frees it with the subtree.
+    const exit = this.exitOf(n)
+    if (exit && !exit.ended) exit.parked.push(n.id)
+    else if (exit) this.recycle(n.id)
+    else {
+      if (this.ready()) this.encoder.remove(n.id)
+      this.recycle(n.id)
+    }
   }
 
   /** React (Suspense) hides or reveals a node: `display: none`. */
@@ -1781,6 +1884,10 @@ export class CraieHost {
     // running).
     if (!mounted && props.enter) this.sendAnimations(n, 0)
     this.sendAnimations(n, 1)
+    // `exit` goes with the removal (`detach`); it is checked here.
+    if (props.exit && props.exit !== oldProps.exit) {
+      animationList(props.exit, FILL.forwards, false, n.kind !== 1, true)
+    }
   }
 
   /** Sends the node's transitions under the reduced-motion policy when
