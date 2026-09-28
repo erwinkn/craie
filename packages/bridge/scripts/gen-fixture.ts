@@ -7,7 +7,7 @@ import {
 } from "../src/wire.js"
 
 const enc = new Encoder()
-// Keyframe animations: every channel, every easing kind, both triggers.
+// Keyframe animations: every channel, every easing kind, every trigger.
 const pulse = {
   index: 0,
   frames: [
@@ -83,6 +83,7 @@ enc.claims(NIL, 3, [{ ...parseChord("shift+?", false)!, flags: CHORD_FLAG.inInpu
 enc.detach(1)
 enc.place(0, 1, NIL)
 enc.remove(1)
+enc.endExit(1)                                      // no exit: nothing
 enc.create(4, 4)                                    // list
 enc.listConfig(4, 250, 36, [{ base: 12, inset: 16, fontSize: 14 }, { base: 48 }])
 enc.listSplice(4, 0, 0, [{ template: 0, textLength: 42, id: 5 }, { template: 1, id: 6 }, { textLength: 70000, id: 7 }])
@@ -183,6 +184,11 @@ enc.animation(0, 1, false, [pulse, {                // the list: pulse shared, t
   index: 2,                                         // the third entry (the second is falsy)
   frames: [{ at: 1, easing: [1, 0.42, 0, 1, 1], values: { rotate: Math.PI } }],
   delay: 0, duration: 1, easing: [1, 0, 0, 1, 1], iterations: 2.5, direction: 3, fill: 3,
+}])
+enc.animation(9, 3, false, [{                       // its exit: fade, resize
+  index: 0,
+  frames: [{ at: 1, values: { opacity: 0, width: 40, height: 0 } }],
+  delay: 0, duration: 0.2, easing: [1, 0, 0, 1, 1], iterations: 1, direction: 0, fill: 1,
 }])
 enc.place(0, 9, NIL)
 

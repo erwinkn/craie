@@ -42,8 +42,17 @@ fn js_fixture_decodes_and_executes() {
     assert_eq!(ui.apply(&buf).unwrap(), 99);
     let host = &ui.host;
 
-    // remove(1): view + input + surface + list + row + two vectors + an
-    // image + layer remain.
+    // remove(1), then end_exit(1): nothing, its exit being none.
+    let at = txn
+        .mutations
+        .iter()
+        .position(|m| *m == Mutation::Remove { id: 1 });
+    assert_eq!(
+        txn.mutations.get(at.unwrap() + 1),
+        Some(&Mutation::EndExit { id: 1 })
+    );
+    // view + input + surface + list + row + two vectors + an image +
+    // layer remain.
     assert_eq!(host.len(), 9);
     assert_eq!(host.kind(NodeId(0)), Some(NodeKind::View));
     let paint = host.paint[0];
@@ -298,8 +307,8 @@ fn js_fixture_decodes_and_executes() {
     assert!(!host.colors.contains_key(&2));
 
     // Keyframe animations: the selected variant's timing and loop, the
-    // image's enter (a spring, which sets the duration), and the root's
-    // list, whose first entry shares the variant's keyframes.
+    // image's enter (a spring, which sets the duration) and exit, and the
+    // root's list, whose first entry shares the variant's keyframes.
     assert_eq!(
         (
             v[0].transitions.as_ref().map(Vec::len),
@@ -326,8 +335,17 @@ fn js_fixture_decodes_and_executes() {
             .iter()
             .map(|l| (l.0, l.1, l.2, l.3.len()))
             .collect::<Vec<_>>(),
-        [(9, Trigger::Enter, true, 1), (0, Trigger::Base, false, 2)]
+        [
+            (9, Trigger::Enter, true, 1),
+            (0, Trigger::Base, false, 2),
+            (9, Trigger::Exit, false, 1)
+        ]
     );
+    // The exit, declared: opacity and both sizes (frame_field bits).
+    let exit = &host.exits[&9][0];
+    let frame = &exit.keyframes.frames()[0];
+    assert_eq!((frame.mask, frame.values.size), (0x6010, [40.0, 0.0]));
+    assert_eq!(exit.fill, Fill::Forwards);
     let (enter, list) = (&lists[0].3[0], &lists[1].3);
     assert_eq!((enter.index, list[0].index, list[1].index), (0, 0, 2));
     assert!(matches!(enter.easing, Easing::Spring { .. }) && enter.duration > 0.0);

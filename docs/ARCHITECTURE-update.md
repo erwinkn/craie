@@ -1328,7 +1328,8 @@ JS.
   a duration; native names what is wrong ("keyframe offsets out of
   order", "keyframe offset outside [0, 1]", "keyframes without a
   frame", "keyframe value not finite", ...). Ops 0xA4 to 0xAF stay
-  free for exits and timelines.
+  free for timelines (exits reuse `ANIMATION`, and add `END_EXIT` next
+  to `REMOVE`, below).
 - **`animate` stays** for one-off tweens to a target (a drawer's
   offset, a retargeted spring). It resolves a promise, and a keyframe
   animation covering the property plays over it.
@@ -1361,12 +1362,150 @@ JS.
   takes 0.09 to 0.19 ms, 1,000 loops 0.53 to 1.28 ms, and a still
   frame nothing. Loops allocate 0 per frame. The enters allocate about
   13 times over their 22 frames (0.6 a frame), then nothing.
-- Not yet: exits and id parking, scroll timelines and named keyframes
-  (the rest of item 6). Also blur and shimmer frames (work item 7), a
+- Not yet: scroll timelines and named keyframes (the rest of item 6;
+  exits and id parking are built, below). Also blur and shimmer frames (work item 7), a
   dash offset channel (DF-55), end events for variant animations
   (DF-56), an `enter` fill that can't be let go (DF-58), a running
   enter under reduced motion (DF-59), and CSS's shortened reversals
   (DF-60).
+
+**Built (work item 6, exits).** `exit`, id parking and the size
+channels, as targeted, except that the exit travels in the `ANIMATION`
+op just before the `DETACH`, not inside it. The example:
+
+```tsx
+{toasts.map((t) => (
+  <View key={t.id} style={{ overflow: "hidden" }}
+    enter={{ keyframes: [{ at: 0, opacity: 0, translateY: 8 }], duration: 200 }}
+    exit={{ keyframes: [{ at: 1, opacity: 0, height: 0 }], duration: 200, reducedMotion: "fade" }}>
+    <Text>{t.text}</Text>
+  </View>
+))}
+```
+
+Dropping toast B from `[A, B, C]` sends, in one transaction,
+`ANIMATION(B, exit, [fade and collapse])` then `DETACH(B)`. For the app
+B is gone. Natively it stays between A and C, drawn, and fades while its
+height goes from 40 to 0, so C slides up through ordinary layout: when
+B is 20 high, C sits 20 higher. At 200 ms native frees B and
+its text and sends one `exitEnd` (B, finished). Only then does the
+facade reuse B's two ids.
+
+- **Wire.** Protocol 12. `ANIMATION` trigger 3 declares an exit,
+  which starts on the node's next `DETACH`. The facade resolves
+  `exit` under the reduced-motion setting of the moment and sends it
+  right before the detach, so nothing is declared ahead and an exit
+  never goes stale. Its entries carry their index in the prop, like
+  any list's. `EXIT_END` is out kind 22: node = the exit's root,
+  generation = the one it had, key = the reason (finished, removed,
+  parent gone or skipped; the animation reasons' codes 0, 3, 4 and 5).
+  The session never drops one, since a lost end would leak ids. Frames
+  gain `width` (bit 13) and `height` (bit 14), border-box points, for
+  exits only, and a size frame anywhere else, or an infinite exit, is
+  rejected by both sides. One new op, `END_EXIT` (0x05, a node id),
+  ends an exit if it still runs, and does nothing once it has ended:
+  see Ids.
+- **From what shows.** An exit's omitted frames hold what showed at the
+  detach, for each channel it animates (Framer's `AnimatePresence`
+  does the same): the laid-out size, and an enter, a transition or a
+  hover animation cut short where it stood. What ran under the exit
+  moves on unseen. Toast B, fading in over 1 s and removed at 200 ms
+  with the fade out above (500 ms here), shows 0.2 → 0.16 at 300 ms,
+  where following the enter would have shown 0.24.
+- **Inert, not gone.** The root stays in its parent's child list with
+  `inert` set (topic 3), so the subtree has no hit testing, focus or
+  AccessKit node. A focus inside moves on as for a removal, and a trap
+  or focus group inside stops counting. Only the removed root's exit
+  runs: its descendants are not detached, so theirs never start, and an
+  exit already running inside (removed earlier) ends with the outer one
+  as parent gone.
+- **One end per exit detach, always.** Native answers every exit
+  detach with exactly one `EXIT_END`: when its animations' active
+  phases end (then it frees the subtree); at once when JS cuts it
+  short with `REMOVE` or `END_EXIT` of the root (removed); at the end
+  of the transaction when an ancestor was detached or removed (parent
+  gone), or when the exit couldn't run, its root being out of the tree
+  or a List row (skipped). So does one hidden (`display: none` on it or
+  above), at the detach or by a later transaction, whether frames are
+  drawn or not (a minimized window draws none): #21 parks the
+  animations of undrawn nodes, and a parked exit would hold its ids for
+  good. A variant that hides it between transactions (hover, focus)
+  ends it on the next frame. A visible exit in a window that draws no
+  frames (minimized, occluded) waits, as tweens do: it ends on the
+  first frame after the window shows again. An exiting subtree counts
+  as drawn (its root stays in its parent's list), so loops inside keep
+  running through the exit. An exiting node never comes back:
+  validation rejects placing it, placing under it, or detaching it
+  again.
+- **Validation models it.** Structure alone decides at the detach
+  whether an exit runs (out of the tree or a List row: skipped), so
+  validation knows the root keeps its parent and position: a sibling
+  placed before it later in the same transaction is accepted, as it is
+  in the next one. A `REMOVE` or `END_EXIT` of an exit's root frees its
+  whole subtree in validation as in execution, so a later op naming a
+  node inside (`REMOVE(B), PLACE(root, B's text)`) is rejected before
+  anything applies. Each cut walks only its subtree: the host's
+  children and the batch's own placements, indexed by parent at the
+  batch's first cut and kept as it places. Unmounting 1,000 exiting
+  toasts looks at 3,000 nodes and links, not half a million.
+- **Ids.** React detaches the removed root, then releases every node of
+  the subtree. With an exit running, the facade parks each released id
+  on the exit instead of sending `remove`, and recycles them all on the
+  end event (a stale generation is ignored). A release that comes after
+  the end recycles at once, with no op. A layer whose last child is
+  exiting stays open until the end. Unmounting the root sends no new
+  exits, and sends `END_EXIT` for each running one so they end at
+  once. Not `REMOVE`: native may have finished the exit and freed its
+  ids with the end event still on its way, and a `REMOVE` of a freed id
+  is an error that closes the session. `END_EXIT` then does nothing,
+  and a second unmount sends nothing.
+- **Layout.** The node keeps its child position and z. A new sibling
+  placed before C lands between B and C (`[A, B, D, C]`). There is no
+  implicit clip: the app sets `overflow: "hidden"` for content not to
+  spill while the box shrinks. Padding, border and a min size floor the
+  collapse, and a parent's gap stays until the end (DF-62). List rows
+  skip their exit (DF-61): the list windows its rows itself.
+- **Events.** While an exit runs, native drops the events of its
+  subtree's nodes, and at the free it drops their queued ones (tween
+  and animation ends, a blur). The facade also forgets the subtree's
+  nodes as React releases them (the same commit), so a late event finds
+  no handler.
+- **Reduced motion** at the moment of removal: `skip` sends no exit and
+  the subtree goes at once, `fade` keeps the opacity frames only (no
+  collapse: the gap closes at the end), and `keep` runs it as declared.
+- **Cost** (`harness/invariants`, `exit_transactions_allocate_twice`,
+  measuring the bridge's whole transaction, `ANIMATION` then `DETACH`).
+  The transaction allocates twice: validation's overlay entry, which
+  any detach pays, and the declaration's copy. The animation record
+  reuses an emptied record's list (keyframes keep up to 64). A plain
+  detach allocates 3 here: the overlay entry, plus 2 as its parent's
+  child list moves, which an exit's root, staying, skips. The render
+  allocates once more than a plain detach's: the fade's opacity layer,
+  which #21's pin builds up front. Its frames then allocate nothing. A
+  size frame relayouts each frame and allocates in layout, as a
+  `height` tween does (not asserted). The end allocates no more than
+  removing the same subtree plainly (7 against 9).
+- Tests: `crates/ui/src/exit_tests.rs` covers the subtree drawn, laid
+  out and inert; a collapse moving the next sibling up, then the free
+  with one event; placement beside an exiting node, in the detach's
+  transaction too; parent gone, removed (a skipped one too) and
+  skipped; `END_EXIT` cutting a running exit and doing nothing after
+  its end; a hidden exit skipped (before and during) with no frame
+  drawn; the start from
+  what showed (an interrupted enter, a transition, a hover animation);
+  loops inside running through it; a descendant's exit not running and
+  an inner exit ending with the outer; focus leaving at detach; a trap
+  inside releasing; validation, a cut exit's subtree freed in it (a
+  node placed after an earlier cut too), a bulk cut's work (1,000
+  cuts, each subtree walked once), and the wire round trip.
+  `packages/bridge/test/exits.test.ts` covers the example's ops, ids
+  parked until the end then recycled, removes not freeing early,
+  dropped events, the three policies, unmount (twice, and with an end
+  still on its way), a layer held open, and a release after the end.
+  The cross-language fixture carries an exit with width and height
+  frames, and an `END_EXIT` of a node with none.
+- Not yet: exits of List rows (DF-61); sizes from `auto` or in
+  percent, and size frames in `enter` (DF-63).
 
 ## 8. Paint and text styling
 
@@ -1927,7 +2066,8 @@ The order follows the dependencies:
    inherited color, hover at rest (topic 5). Item 6 needs it, because
    animations live in variants, and item 9 needs it for placement states.
 6. Motion: the animation op, exits, transform parts, scroll timelines
-   (topic 7).
+   (topic 7). Done except scroll timelines: #19 (transform parts), #21
+   (animations), exits.
 7. Paint and text styling, paint sources, layer effects (topic 8).
 8. Runtime vectors with dashes; images (topic 10).
 9. Geometry expressions: placement, sticky (topic 6, second half).

@@ -260,12 +260,15 @@ fn thread_cpu() -> Duration {
 fn flush_events(ui: &mut Ui, session: &Session) {
     let out = ui.take_events();
     if !out.is_empty() {
-        // Animation ends resolve JS promises, and an image loads or
-        // fails once: those frames never drop.
+        // Animation ends resolve JS promises, an image loads or fails
+        // once, and an exit's end frees JS's parked ids: those frames
+        // never drop.
         let reliable = out.iter().any(|e| {
             matches!(
                 e.kind,
-                events::out_kind::ANIMATION_END | events::out_kind::IMAGE
+                events::out_kind::ANIMATION_END
+                    | events::out_kind::IMAGE
+                    | events::out_kind::EXIT_END
             )
         });
         session.post_events(events::encode_events(&out), reliable);

@@ -21,7 +21,9 @@
 //! serves both. Op tags group by family (high nibble).
 
 use crate::animation::{Prop, Timing, Transition, Value};
-use crate::keyframes::{Animation, Direction, Easing, Fill, Frame, Keyframes, Sample, Trigger};
+use crate::keyframes::{
+    Animation, Direction, Easing, Fill, Frame, Keyframes, Sample, Trigger, frame_field,
+};
 use std::sync::Arc;
 use taffy::{
     AlignContent, AlignItems, Dimension, Display, ExpandedDimension, ExpandedLengthPercentage,
@@ -44,7 +46,7 @@ use crate::mutation::{
 pub use crate::mutation::{group_flag, interaction_flag, trap_flag};
 
 pub const MAGIC: u32 = 0x3257_5243; // "CRW2"
-pub const VERSION: u16 = 11;
+pub const VERSION: u16 = 12;
 
 pub mod op {
     // structure
@@ -52,6 +54,8 @@ pub mod op {
     pub const PLACE: u8 = 0x02;
     pub const DETACH: u8 = 0x03;
     pub const REMOVE: u8 = 0x04;
+    /// u32 id: ends the node's exit if it still runs (exits, topic 7).
+    pub const END_EXIT: u8 = 0x05;
     // layout
     pub const LAYOUT: u8 = 0x10;
     // spatial
@@ -107,10 +111,11 @@ pub mod op {
     /// ops and VARIANTS refer to it by index): count u16 | count × (at
     /// f32 | easing | mask u16 | values by mask, `put_sample`).
     pub const KEYFRAMES: u8 = 0xA2;
-    /// id u32 | trigger u8 (0 enter, 1 the node's list) | flags u8 (bit
-    /// 0: report ends) | count u8 | count × animation (`put_animation`).
-    /// Replaces that list; `enter` applies only in the transaction that
-    /// creates the node.
+    /// id u32 | trigger u8 (0 enter, 1 the node's list, 3 exit) | flags
+    /// u8 (bit 0: report ends; ignored for an exit) | count u8 | count ×
+    /// animation (`put_animation`). Replaces that list; `enter` applies
+    /// only in the transaction that creates the node; an exit starts
+    /// with the node's next DETACH (`exit.rs`).
     pub const ANIMATION: u8 = 0xA3;
     // state styles
     /// id u32 | bits u64 (app bits; input bits reject)
@@ -448,6 +453,10 @@ pub fn encode(txn: &Transaction<'_>) -> Vec<u8> {
             }
             Mutation::Remove { id } => {
                 ops.push(op::REMOVE);
+                u32le(&mut ops, *id);
+            }
+            Mutation::EndExit { id } => {
+                ops.push(op::END_EXIT);
                 u32le(&mut ops, *id);
             }
             Mutation::Layout { id, style } => {
@@ -1104,6 +1113,7 @@ pub fn decode(buf: &[u8]) -> Result<Transaction<'_>, WireError> {
             },
             op::DETACH => Mutation::Detach { id: r.u32()? },
             op::REMOVE => Mutation::Remove { id: r.u32()? },
+            op::END_EXIT => Mutation::EndExit { id: r.u32()? },
             op::LAYOUT => {
                 let id = r.u32()?;
                 let style = r.u32()?;
@@ -1663,7 +1673,8 @@ fn put_easing(out: &mut Vec<u8>, e: Option<&Easing>) {
 
 /// A frame's channels: mask u16, then by bit FILL u32, BORDER_COLOR
 /// u32, COLOR u32, OPACITY f32, TRANSLATE_X 2 f32 (points, fraction),
-/// TRANSLATE_Y 2 f32, ROTATE f32, SCALE_X f32, SCALE_Y f32.
+/// TRANSLATE_Y 2 f32, ROTATE f32, SCALE_X f32, SCALE_Y f32, WIDTH f32,
+/// HEIGHT f32 (`keyframes::frame_field`).
 fn put_sample(out: &mut Vec<u8>, mask: u16, s: &Sample) {
     use value_field::*;
     out.extend_from_slice(&mask.to_le_bytes());
@@ -1684,6 +1695,8 @@ fn put_sample(out: &mut Vec<u8>, mask: u16, s: &Sample) {
         (ROTATE, &[s.rotate]),
         (SCALE_X, &[s.scale[0]]),
         (SCALE_Y, &[s.scale[1]]),
+        (frame_field::WIDTH, &[s.size[0]]),
+        (frame_field::HEIGHT, &[s.size[1]]),
     ] {
         if mask & bit != 0 {
             x.iter().for_each(|&x| f32le(out, x));
@@ -1805,6 +1818,12 @@ impl Reader<'_> {
         }
         if has(SCALE_Y) {
             s.scale[1] = self.f32()?;
+        }
+        if has(frame_field::WIDTH) {
+            s.size[0] = self.f32()?;
+        }
+        if has(frame_field::HEIGHT) {
+            s.size[1] = self.f32()?;
         }
         Ok((mask, s))
     }
