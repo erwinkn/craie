@@ -22,12 +22,14 @@
 //! `EXIT_END`). It also ends when an ancestor leaves the tree, detached
 //! or removed (`parent gone`, at the end of that transaction). One that
 //! cannot run, its root out of the tree or a list's row, ends at the end
-//! of its transaction (`skipped`); one hidden (`display: none` on it or
-//! above), at the detach or while it runs, on the next frame. Structure
+//! of its transaction (`skipped`); so does one hidden (`display: none`
+//! on it or above), at the detach or by a later transaction, frames or
+//! not (a minimized window draws none). A variant that hides it between
+//! transactions (hover, focus) ends it on the next frame. Structure
 //! alone decides at the detach, so validation can tell whether the node
-//! keeps its place. An exiting node never comes
-//! back: validation rejects placing it, or anything under it. While an
-//! exit runs, events of its subtree's nodes are dropped.
+//! keeps its place until the transaction ends. An exiting node never
+//! comes back: validation rejects placing it, or anything under it.
+//! While an exit runs, events of its subtree's nodes are dropped.
 
 use crate::animation::end_reason;
 use crate::events::{UiEvent, out_kind};
@@ -50,7 +52,7 @@ impl Ui {
             return;
         };
         // Structure alone decides, as validation models it: a hidden
-        // exit starts, and ends on the next frame.
+        // exit starts, and ends with the transaction (`end_hidden_exits`).
         let parent = self.host.parent(node);
         if !self.attached(node) || self.host.kind(parent) == Some(NodeKind::List) {
             self.host.detach(node);
@@ -109,13 +111,20 @@ impl Ui {
         self.end_exits_where(end_reason::PARENT_GONE, |ui, root| !ui.attached(root));
     }
 
-    /// After a frame's keyframes: exits under a node hidden since
-    /// (`display: none`) end, and so do those whose animations are over.
-    pub(crate) fn finish_exits(&mut self) {
-        if self.host.exiting.is_empty() {
-            return;
+    /// After a transaction's styles, and each frame's: exits under a
+    /// node hidden (`display: none`) end, skipped. Hidden, one would
+    /// park with its ids held, so it must not wait for a frame: a
+    /// minimized window draws none.
+    pub(crate) fn end_hidden_exits(&mut self) {
+        if !self.host.exiting.is_empty() {
+            self.end_exits_where(end_reason::SKIPPED, |ui, root| !ui.drawn(root));
         }
-        self.end_exits_where(end_reason::SKIPPED, |ui, root| !ui.drawn(root));
+    }
+
+    /// After a frame's keyframes: exits under a node a variant hid since
+    /// end, and so do those whose animations are over.
+    pub(crate) fn finish_exits(&mut self) {
+        self.end_hidden_exits();
         self.end_exits_where(end_reason::FINISHED, |ui, root| !ui.exit_running(root));
     }
 

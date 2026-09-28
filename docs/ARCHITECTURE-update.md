@@ -1425,13 +1425,18 @@ facade reuse B's two ids.
   short with `REMOVE` or `END_EXIT` of the root (removed); at the end
   of the transaction when an ancestor was detached or removed (parent
   gone), or when the exit couldn't run, its root being out of the tree
-  or a List row (skipped). One hidden (`display: none` on it or above),
-  at the detach or while it runs, ends on the next frame (skipped): #21
-  parks the animations of undrawn nodes, and a parked exit would hold
-  its ids for good. An exiting subtree counts as drawn (its root stays
-  in its parent's list), so loops inside keep running through the
-  exit. An exiting node never comes back: validation rejects placing
-  it, placing under it, or detaching it again.
+  or a List row (skipped). So does one hidden (`display: none` on it or
+  above), at the detach or by a later transaction, whether frames are
+  drawn or not (a minimized window draws none): #21 parks the
+  animations of undrawn nodes, and a parked exit would hold its ids for
+  good. A variant that hides it between transactions (hover, focus)
+  ends it on the next frame. A visible exit in a window that draws no
+  frames (minimized, occluded) waits, as tweens do: it ends on the
+  first frame after the window shows again. An exiting subtree counts
+  as drawn (its root stays in its parent's list), so loops inside keep
+  running through the exit. An exiting node never comes back:
+  validation rejects placing it, placing under it, or detaching it
+  again.
 - **Validation models it.** Structure alone decides at the detach
   whether an exit runs (out of the tree or a List row: skipped), so
   validation knows the root keeps its parent and position: a sibling
@@ -1439,7 +1444,10 @@ facade reuse B's two ids.
   in the next one. A `REMOVE` or `END_EXIT` of an exit's root frees its
   whole subtree in validation as in execution, so a later op naming a
   node inside (`REMOVE(B), PLACE(root, B's text)`) is rejected before
-  anything applies.
+  anything applies. Each cut walks only its subtree: the host's
+  children and the batch's own placements, indexed by parent at the
+  batch's first cut and kept as it places. Unmounting 1,000 exiting
+  toasts looks at 3,000 nodes and links, not half a million.
 - **Ids.** React detaches the removed root, then releases every node of
   the subtree. With an exit running, the facade parks each released id
   on the exit instead of sending `remove`, and recycles them all on the
@@ -1482,12 +1490,14 @@ facade reuse B's two ids.
   with one event; placement beside an exiting node, in the detach's
   transaction too; parent gone, removed (a skipped one too) and
   skipped; `END_EXIT` cutting a running exit and doing nothing after
-  its end; a hidden exit skipped (before and during); the start from
+  its end; a hidden exit skipped (before and during) with no frame
+  drawn; the start from
   what showed (an interrupted enter, a transition, a hover animation);
   loops inside running through it; a descendant's exit not running and
   an inner exit ending with the outer; focus leaving at detach; a trap
-  inside releasing; validation, a cut exit's subtree freed in it, and
-  the wire round trip.
+  inside releasing; validation, a cut exit's subtree freed in it (a
+  node placed after an earlier cut too), a bulk cut's work (1,000
+  cuts, each subtree walked once), and the wire round trip.
   `packages/bridge/test/exits.test.ts` covers the example's ops, ids
   parked until the end then recycled, removes not freeing early,
   dropped events, the three policies, unmount (twice, and with an end

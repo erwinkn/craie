@@ -348,11 +348,60 @@ fn a_cut_exit_frees_its_subtree_in_validation() {
             .remove(1)
             .place(0, 9, NIL);
     }));
+    // So does one placed after an earlier cut of the batch.
+    assert!(rejects(&mut ui, |t| {
+        t.end_exit(2)
+            .create(9, NodeKind::View)
+            .append(1, 9)
+            .animation(1, Trigger::Exit, false, &[fade_and_collapse()])
+            .detach(1)
+            .end_exit(1)
+            .place(0, 9, NIL);
+    }));
     apply(&mut ui, |t| {
         t.place(0, 20, NIL).remove(2);
     });
     assert!(ui.host.is_live(NodeId(20)));
     assert_eq!(ui.host.children(NodeId(0)), [1, 3, 20].map(NodeId));
+}
+
+/// Unmounting 1,000 exiting toasts (each holding a button) walks each
+/// toast's subtree once: validation's work grows with the nodes cut,
+/// not with the cuts before them in the batch.
+#[test]
+fn a_bulk_cut_walks_each_subtree_once() {
+    const N: u32 = 1000;
+    let mut ui = toasts();
+    apply(&mut ui, |t| {
+        for i in 0..N {
+            let (toast, button) = (30 + 2 * i, 31 + 2 * i);
+            t.create(toast, NodeKind::View)
+                .append(0, toast)
+                .create(button, NodeKind::View)
+                .append(toast, button)
+                .animation(toast, Trigger::Exit, false, &[fade_and_collapse()]);
+        }
+    });
+    apply(&mut ui, |t| {
+        for i in 0..N {
+            t.detach(30 + 2 * i);
+        }
+    });
+    assert_eq!(ui.host.exiting.len(), N as usize);
+    crate::executor::WALKED.with(|w| w.set(0));
+    let started = std::time::Instant::now();
+    apply(&mut ui, |t| {
+        for i in 0..N {
+            t.end_exit(30 + 2 * i);
+        }
+    });
+    let spent = started.elapsed();
+    let walked = crate::executor::WALKED.with(|w| w.get());
+    eprintln!("{N} exit cuts: {spent:?}, {walked} nodes and links looked at");
+    // Per toast: itself and its button, and the link between them.
+    assert_eq!(walked, 3 * N as usize);
+    assert!(ui.host.exiting.is_empty() && !ui.host.is_live(NodeId(31)));
+    assert_eq!(exit_ends(&ui.take_events()).len(), N as usize);
 }
 
 /// Fades out over 0.5 s: only an end frame.
@@ -476,9 +525,10 @@ fn loops_inside_run_through_the_exit() {
 }
 
 /// A hidden exit (`display: none` on an ancestor) cannot run: it ends as
-/// skipped on the next frame, whether hidden before its detach or while
-/// it runs, rather than wait parked with its ids held. Until then it
-/// keeps its place, as validation expects.
+/// skipped with its transaction, whether hidden before its detach or
+/// while it runs, rather than wait parked with its ids held. No frame is
+/// drawn meanwhile, as in a minimized window. Until the transaction ends
+/// it keeps its place, as validation expects.
 #[test]
 fn a_hidden_exit_is_skipped() {
     let hide = |ui: &mut Ui| {
@@ -494,21 +544,22 @@ fn a_hidden_exit_is_skipped() {
     };
     let mut ui = toasts();
     hide(&mut ui);
-    at(&mut ui, 0.05);
+    ui.set_time(100.0);
     apply(&mut ui, |t| {
         t.detach(2).create(4, NodeKind::View).place(0, 4, 2);
     });
-    assert!(ui.host.is_live(NodeId(2)));
-    at(&mut ui, 0.1);
-    assert!(!ui.host.is_live(NodeId(2)));
-    assert_eq!(exit_ends(&ui.take_events())[0].2, end_reason::SKIPPED);
+    assert!(!ui.host.is_live(NodeId(2)) && !ui.host.is_live(NodeId(20)));
+    let ends = exit_ends(&ui.take_events());
+    assert_eq!(
+        ends.iter().map(|e| (e.0, e.2)).collect::<Vec<_>>(),
+        [(2, end_reason::SKIPPED)]
+    );
     assert_eq!(ui.host.children(NodeId(0)), [1, 4, 3].map(NodeId));
 
     let mut ui = toasts();
     detach(&mut ui, 2);
     at(&mut ui, 0.05);
     hide(&mut ui);
-    at(&mut ui, 0.1);
     assert!(!ui.host.is_live(NodeId(2)) && !ui.host.is_live(NodeId(20)));
     let ends = exit_ends(&ui.take_events());
     assert_eq!(ends.len(), 1);

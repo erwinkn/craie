@@ -207,6 +207,20 @@ struct Overlay<'h> {
     /// Exits the batch declares, clears or starts (one map: a batch
     /// with an exit allocates it once).
     exits: HashMap<u32, Exit>,
+    /// The batch's placements by parent, with their steps: built at its
+    /// first exit cut, then kept as it places, so each cut walks only
+    /// its subtree. Stale entries stay (a node placed again, or freed);
+    /// `parents` tells which link is current.
+    placed: Option<HashMap<u32, Vec<(u32, usize)>>>,
+    /// A cut's subtree, reused.
+    scratch: Vec<u32>,
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Nodes and links the cuts' subtree walks looked at, for the
+    /// bulk-cut test.
+    pub(crate) static WALKED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -270,28 +284,52 @@ impl Overlay<'_> {
         Err(invalid("corrupt parent chain"))
     }
 
-    /// `root` and the nodes under it, as the batch left them: the host's
-    /// links it kept and its own.
-    fn subtree(&self, root: u32) -> Vec<u32> {
-        let mut placed: HashMap<u32, Vec<u32>> = HashMap::new();
-        for &k in self.parents.keys() {
-            placed.entry(self.parent(k)).or_default().push(k);
+    /// Places `child` under `parent` at `step`.
+    fn link(&mut self, child: u32, parent: u32, step: usize) {
+        self.parents.insert(child, (parent, step));
+        if let Some(placed) = &mut self.placed {
+            placed.entry(parent).or_default().push((child, step));
         }
-        let mut nodes = vec![root];
+    }
+
+    /// Frees `root` and the nodes under it, as the batch left them: the
+    /// host's links it kept and its own.
+    fn free_subtree(&mut self, root: u32, step: usize, lists: &mut HashMap<u32, Touch>) {
+        if self.placed.is_none() {
+            #[cfg(test)]
+            WALKED.with(|w| w.set(w.get() + self.parents.len()));
+            let mut placed: HashMap<u32, Vec<(u32, usize)>> = HashMap::new();
+            for (&c, &(p, at)) in &self.parents {
+                placed.entry(p).or_default().push((c, at));
+            }
+            self.placed = Some(placed);
+        }
+        let mut nodes = std::mem::take(&mut self.scratch);
+        nodes.clear();
+        nodes.push(root);
         let mut k = 0;
         while k < nodes.len() {
             let n = nodes[k];
             k += 1;
-            for &c in self.host.children(NodeId(n)) {
+            let kids = self.host.children(NodeId(n));
+            let placed = self.placed.as_ref().and_then(|p| p.get(&n));
+            #[cfg(test)]
+            WALKED.with(|w| w.set(w.get() + 1 + kids.len() + placed.map_or(0, Vec::len)));
+            for &c in kids {
                 if !self.parents.contains_key(&c.0) && self.parent(c.0) == n {
                     nodes.push(c.0);
                 }
             }
-            if let Some(cs) = placed.get(&n) {
-                nodes.extend(cs);
+            for &(c, at) in placed.into_iter().flatten() {
+                if self.parents.get(&c) == Some(&(n, at)) && self.parent(c) == n {
+                    nodes.push(c);
+                }
             }
         }
-        nodes
+        for &n in &nodes {
+            self.free(n, step, lists);
+        }
+        self.scratch = nodes;
     }
 
     /// Marks `id` removed at `step`: its links are gone, and a list it
@@ -352,6 +390,8 @@ pub fn validate(host: &Host, txn: &Transaction<'_>) -> Result<Validated, WireErr
         removed: HashMap::new(),
         created: 0,
         exits: HashMap::new(),
+        placed: None,
+        scratch: Vec::new(),
     };
     // Lists the batch splices, as the batch leaves them (item counts and
     // identities).
@@ -423,7 +463,7 @@ pub fn validate(host: &Host, txn: &Transaction<'_>) -> Result<Validated, WireErr
                         return Err(invalid("corrupt parent chain"));
                     }
                 }
-                o.parents.insert(*child, (*parent, step));
+                o.link(*child, *parent, step);
             }
             Mutation::Detach { id } => {
                 need_live(&o, *id, "detach of an absent node")?;
@@ -446,9 +486,7 @@ pub fn validate(host: &Host, txn: &Transaction<'_>) -> Result<Validated, WireErr
                 need_live(&o, *id, "remove of an absent node")?;
                 if o.exiting(*id) {
                     // An exit's root goes with its subtree.
-                    for n in o.subtree(*id) {
-                        o.free(n, step, &mut lists);
-                    }
+                    o.free_subtree(*id, step, &mut lists);
                 } else {
                     o.free(*id, step, &mut lists);
                 }
@@ -459,9 +497,7 @@ pub fn validate(host: &Host, txn: &Transaction<'_>) -> Result<Validated, WireErr
                     if !o.exiting(*id) {
                         return Err(invalid("end of an exit that never started"));
                     }
-                    for n in o.subtree(*id) {
-                        o.free(n, step, &mut lists);
-                    }
+                    o.free_subtree(*id, step, &mut lists);
                 }
             }
             Mutation::Layout { id, style } => {
@@ -841,6 +877,7 @@ impl Ui {
         self.settle_exits();
         self.seq = txn.seq;
         self.restyle();
+        self.end_hidden_exits();
         self.settle_traps();
         self.cancel_blocked_presses();
         // The focus and the presses settling moved (a key compare when
