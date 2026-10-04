@@ -994,9 +994,27 @@ Reviewer minors and nitpicks not fixed yet.
   equal widths, and with unequal ones a rounder, slightly heavier inner
   corner than CSS's elliptical one (radius less each adjacent width per
   axis), never a gap.
+  Two consequences: a pill (radius at least half the height) has corner
+  zones that meet, so its left and right colors don't show; and with the
+  top unpainted, the side strips stop square at the corner, where CSS
+  draws a sub-pixel crescent.
 - Why deferred: the kit uses one color and one width per box (dividers,
   cards); diagonal joins and elliptical inner corners need per-corner
   radii in the shadow shader.
+
+### DF-72: a rounded border's outer antialiasing is lighter than the uniform border's
+
+- Source: #34 re-check.
+- Where: crates/ui/src/scene_sync.rs (sides over the fill),
+  crates/render/src/shaders/scene.wgsl (`shadow_coverage`).
+- Claim: borders per side draw as a ring over the box's fill, so on a
+  rounded corner the ring's antialiased edge composites over the fill's
+  own antialiased edge, and the outermost pixels come out lighter than
+  the uniform border's, which shades fill and border in one pass. It
+  shows on any rounded box with sides, one color or mixed.
+- Why deferred: a fraction of one pixel on corner arcs; the fix is to
+  draw the fill inside the ring's hole (or in the same pass) when sides
+  exist.
 
 ## Closed
 
