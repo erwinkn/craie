@@ -1,7 +1,7 @@
 {
   "format": "craie-list-trace/1",
-  "id": "I3",
-  "name": "a partial answer leaves a short run on screen; the next request starts there, a screen long, the topmost visible loaded row holding and the loaded part held",
+  "id": "L3",
+  "name": "as L2, but the rest fails: the hold releases, and failed rows show as placeholders and are not asked again",
   "viewport": {
     "width": 400,
     "height": 600
@@ -16,24 +16,10 @@
   "templates": [],
   "items": [
     {
-      "count": 100,
-      "key": "m{i}",
-      "loaded": true,
-      "estimate": 40,
-      "height": 40
-    },
-    {
-      "count": 30,
+      "count": 1000,
       "key": "m{i}",
       "loaded": false,
       "estimate": 40
-    },
-    {
-      "count": 870,
-      "key": "m{i}",
-      "loaded": true,
-      "estimate": 40,
-      "height": 40
     }
   ],
   "steps": [
@@ -44,22 +30,91 @@
           0,
           14
         ],
-        "load": null
+        "load": [
+          0,
+          14
+        ]
       }
     },
     {
       "do": "scrollToIndex",
-      "index": 95,
+      "index": 500,
       "align": "start",
       "expect": {
         "visible": [
-          95,
-          109
+          500,
+          514
+        ],
+        "held": null,
+        "load": [
+          500,
+          514
+        ]
+      }
+    },
+    {
+      "do": "changes",
+      "changes": [
+        {
+          "kind": "update",
+          "at": 500,
+          "items": [
+            {
+              "count": 8,
+              "key": "m{i}",
+              "loaded": true,
+              "estimate": 40,
+              "height": 60,
+              "version": 1
+            }
+          ]
+        }
+      ],
+      "expect": {
+        "visible": [
+          500,
+          514
+        ],
+        "held": [
+          500,
+          507
         ],
         "load": [
-          100,
-          129
+          508,
+          522
         ]
+      }
+    },
+    {
+      "do": "changes",
+      "changes": [
+        {
+          "kind": "update",
+          "at": 508,
+          "items": [
+            {
+              "count": 15,
+              "key": "m{i}",
+              "loaded": false,
+              "estimate": 40,
+              "version": 1,
+              "failed": true
+            }
+          ]
+        }
+      ],
+      "expect": {
+        "visible": [
+          500,
+          510
+        ],
+        "anchor": {
+          "key": "m500",
+          "offset": 0
+        },
+        "offset": 20000,
+        "held": null,
+        "load": null
       }
     },
     {
@@ -67,72 +122,9 @@
       "delta": 20,
       "expect": {
         "visible": [
-          95,
-          110
+          500,
+          511
         ],
-        "anchor": {
-          "key": "m95",
-          "offset": -20
-        },
-        "offset": 3820,
-        "load": null
-      }
-    },
-    {
-      "do": "changes",
-      "changes": [
-        {
-          "kind": "update",
-          "at": 100,
-          "items": [
-            {
-              "count": 7,
-              "key": "m{i}",
-              "loaded": true,
-              "estimate": 40,
-              "height": 40
-            }
-          ]
-        }
-      ],
-      "expect": {
-        "visible": [
-          95,
-          110
-        ],
-        "anchor": {
-          "key": "m95",
-          "offset": -20
-        },
-        "offset": 3820,
-        "load": [
-          107,
-          129
-        ],
-        "held": [
-          100,
-          106
-        ]
-      }
-    },
-    {
-      "do": "changes",
-      "changes": [
-        {
-          "kind": "update",
-          "at": 107,
-          "items": [
-            {
-              "count": 4,
-              "key": "m{i}",
-              "loaded": true,
-              "estimate": 40,
-              "height": 40
-            }
-          ]
-        }
-      ],
-      "expect": {
         "held": null,
         "load": null
       }

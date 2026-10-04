@@ -18,8 +18,8 @@ A callback ref is **(owner node, slot)**. It is not a fresh id per function.
   callbacks (window hotkeys today).
 - **Slot.** A u8 that names which prop it is. Slots 0–31 are typed: today's
   listener mask bits (pointer, key, focus, input, scroll, press, activate,
-  layout), plus slots each component defines (a list's `onRangeChange`,
-  `onViewportChange`, `loadItems`; see the list note).
+  layout), plus slots each component defines (a list's `updateItems` and
+  `onViewportChange`; see the list note).
 - **Declaring.** JS serializes props by stripping each function and setting
   its slot's bit in a u32 mask (`INTERACTION`'s listener mask, widened to mean
   "live slots"). Only the presence of a function crosses the wire, never the
@@ -69,22 +69,23 @@ moment.
   acks as today. A call raised before a transaction applied comes before
   that transaction's ack.
 - **Delivery.** Every slot's spec names its delivery class:
-  - **Reliable:** never dropped, delivered in order. Used for `loadItems`
-    and for claims.
+  - **Reliable:** never dropped, delivered in order. Used for a list's
+    `updateItems` and for claims.
   - **Every call:** each call is delivered and none is merged, but they may
-    drop under queue pressure, like pointer events. Used for
-    `onRangeChange` and the typed input events.
+    drop under queue pressure, like pointer events. Used for the typed
+    input events.
   - **Latest wins:** calls coalesce per frame, and only the latest
     arguments are delivered. Used for `onViewportChange` and frame
     statistics.
 
   A slot spec states its class next to its arguments. The lists contract
-  lists its four slots.
+  lists its two slots.
 
 ## Answers (JS → native)
 
-A slot whose spec asks for an answer (for example, a list's `loadItems`
-answering with descriptors) gets it through an op in a later transaction:
+A slot whose spec asks for an answer gets it through an op in a later
+transaction. No slot does today: a list's `updateItems` is answered with
+data, by `update` ops.
 
 - `ANSWER (call id u24, status u8: 0 ok / 1 error)` followed by the slot's
   answer payload, which has its own typed op.

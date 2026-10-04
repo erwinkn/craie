@@ -1,7 +1,7 @@
 {
   "format": "craie-list-trace/1",
   "id": "I3j",
-  "name": "after a jump, a partial answer: the jump holds and the next request is exactly the rest",
+  "name": "after a jump, a partial answer: the jump holds, the loaded part is held, and the next request starts at the rest",
   "viewport": {
     "width": 400,
     "height": 600
@@ -44,7 +44,7 @@
           0,
           14
         ],
-        "loadItems": null
+        "load": null
       }
     },
     {
@@ -56,9 +56,9 @@
           95,
           109
         ],
-        "loadItems": [
+        "load": [
           100,
-          109
+          129
         ]
       }
     },
@@ -88,9 +88,13 @@
           "key": "m95",
           "offset": 0
         },
-        "loadItems": [
+        "load": [
           107,
-          109
+          129
+        ],
+        "held": [
+          100,
+          106
         ]
       }
     },
@@ -112,7 +116,8 @@
         }
       ],
       "expect": {
-        "loadItems": null
+        "held": null,
+        "load": null
       }
     }
   ]
