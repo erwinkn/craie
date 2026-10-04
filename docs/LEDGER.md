@@ -916,6 +916,16 @@ Reviewer minors and nitpicks not fixed yet.
   the box grown by the offset, so it can reuse this path once the bridge
   takes the prop.
 
+### DF-66: no justified text, no alignment in inputs
+
+- Source: milestone 3 (text alignment, protocol 15).
+- Where: crates/text/src/paragraph.rs (`rewrap_with`), crates/ui/src/input.rs.
+- Claim: `textAlign: 'justify'` draws as `auto`, and a `TextInput` aligns
+  to the start whatever it declares.
+- Why deferred: the kit uses left, center and right on Text only
+  (`textAlign`, 6 uses); justification needs space distribution in the
+  line placement and carets that follow it.
+
 ### DF-69: boxes with shadows draw one call each
 
 - Source: #26 review (1,024 boxes with eight shadows: 1,024 draw commands,
@@ -1308,3 +1318,4 @@ Reviewer minors and nitpicks not fixed yet.
 - PR26-07 (same review, P3): `color` rejected `" RGB(1, 2, 3) "`; it now trims and takes the function name in any case, as CSS does.
 - PR26-08 (GPT-6.1 Sol re-check at 55a61ad, P2): the outset coverage took 2r over the box's shorter side; CSS's 2 × min(r/w, r/h) is 2r over the longer one for one radius. A 100 × 40 box, radius 20, spread 40, cast radius 60 (Chrome 55.32). Tests: `outset_radii_keep_the_shape`, harness `a_long_box_takes_the_css_outset_radius`.
 - PR26-09 (same re-check, P2): antialiasing and the box's knockout used the smaller axis scale, so under a scale of 2 in x a snapped 1-point ring spread over four columns ([0, 64, 191, 191, 64, 0], Chrome [0, 0, 255, 255, 0, 0]) and the knockout dimmed the blur next to the box (0.357 against 0.475). Edges are now measured in device px per axis (two f16 scales in the shadow's varyings). Tests: `a_stretched_ring_stays_crisp`, `a_stretched_blur_keeps_its_edge`.
+- PR27-01 (GPT-6.1 Sol review at d837eab, P2): alignment read the first bidi paragraph's direction for every line, so after a newline into the other direction the trailing space hung on the wrong side and the line shifted by its width ("abc\nשלום " left-aligned put the second line at 4.16 instead of 0). The trailing space now hangs on each line's own paragraph's side, as `push_line` lays the line out; `Start` still follows the first paragraph for every line, as Parley does (the E01 oracle holds it). Test: `lines_align_by_their_own_direction`.

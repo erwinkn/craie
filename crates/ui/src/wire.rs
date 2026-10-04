@@ -8,7 +8,8 @@
 //! strings: string_count × (u32 byte_len + utf8 bytes)
 //! styles:  style_count × (u64 presence mask + fields in schema order)
 //! spans:   span_count × 28 bytes (start u32, font_size f32, color u32,
-//!          weight u16, flags u8, reserved u8, family u32 string ref or
+//!          weight u16, flags u8, features u8 (`span_feature`: tabular,
+//!          span zero's alignment), family u32 string ref or
 //!          NIL, letter_spacing f32, line_height f32)
 //! ops:     u8-tagged records to the end of the buffer
 //! ```
@@ -46,7 +47,7 @@ use crate::mutation::{
 pub use crate::mutation::{group_flag, interaction_flag, trap_flag};
 
 pub const MAGIC: u32 = 0x3257_5243; // "CRW2"
-pub const VERSION: u16 = 14;
+pub const VERSION: u16 = 15;
 
 pub mod op {
     // structure
@@ -226,6 +227,16 @@ pub mod span_flag {
     /// The span continues the pressable before it (`TextSpan::press_joins`).
     pub const PRESS_JOINS: u8 = 1 << 5;
     pub const ALL: u8 = ITALIC | UNDERLINE | LINE_THROUGH | INHERIT_COLOR | PRESSABLE | PRESS_JOINS;
+}
+
+/// A span row's second flag byte (protocol 15; reserved, 0, before).
+pub mod span_feature {
+    /// Tabular digits (OpenType `tnum`).
+    pub const TABULAR: u8 = 1 << 0;
+    /// Bits 1 and 2: the paragraph's alignment (span zero's applies):
+    /// 0 start, 1 left, 2 center, 3 right.
+    pub const ALIGN_SHIFT: u8 = 1;
+    pub const ALL: u8 = TABULAR | 3 << ALIGN_SHIFT;
 }
 
 /// Bytes per span row.
@@ -901,7 +912,14 @@ pub fn encode(txn: &Transaction<'_>) -> Vec<u8> {
             flags |= span_flag::PRESS_JOINS;
         }
         out.push(flags);
-        out.push(0);
+        use craie_text::paragraph::Align;
+        let align = match sp.align {
+            Align::Start => 0,
+            Align::Left => 1,
+            Align::Center => 2,
+            Align::Right => 3,
+        };
+        out.push((sp.tabular as u8 * span_feature::TABULAR) | (align << span_feature::ALIGN_SHIFT));
         let family = family_refs.get(sp.family as usize).copied().unwrap_or(NIL);
         out.extend_from_slice(&family.to_le_bytes());
         out.extend_from_slice(&sp.letter_spacing.to_le_bytes());
@@ -1071,10 +1089,17 @@ pub fn decode(buf: &[u8]) -> Result<Transaction<'_>, WireError> {
         let color = r.u32()?;
         let weight = r.u16()?;
         let flags = r.u8()?;
-        let _reserved = r.u8()?;
-        if flags & !span_flag::ALL != 0 {
+        let features = r.u8()?;
+        if flags & !span_flag::ALL != 0 || features & !span_feature::ALL != 0 {
             return Err(WireError::BadRef("span flags"));
         }
+        use craie_text::paragraph::Align;
+        let align = match features >> span_feature::ALIGN_SHIFT & 3 {
+            0 => Align::Start,
+            1 => Align::Left,
+            2 => Align::Center,
+            _ => Align::Right,
+        };
         let family_ref = r.u32()?;
         let letter_spacing = r.f32()?;
         let line_height = r.f32()?;
@@ -1103,6 +1128,8 @@ pub fn decode(buf: &[u8]) -> Result<Transaction<'_>, WireError> {
             letter_spacing,
             line_height,
             family,
+            tabular: features & span_feature::TABULAR != 0,
+            align,
         });
     }
     let string = |i: u32| -> Result<&str, WireError> {

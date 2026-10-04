@@ -3047,3 +3047,57 @@ fn selection_survives_a_shrinking_paragraph() {
     drag(&mut ui, a, b);
     assert_eq!(ui.selected_text(), "Hé");
 }
+
+/// Span zero's alignment places the lines in the text node's content
+/// box; changing it alone lays the paragraph out again. Tabular and the
+/// alignment cross the wire in the span row's second flag byte, which
+/// is strict.
+#[test]
+fn text_aligns_in_its_box() {
+    use craie_text::paragraph::Align;
+    let mut ui = Ui::new(1.0);
+    ui.text = craie_text::TextEngine::with_source(Box::new(craie_text::fonts::pinned()));
+    let span = |align| TextSpan {
+        font_size: 16.0,
+        align,
+        tabular: true,
+        ..TextSpan::default()
+    };
+    let mut style = taffy::Style::default();
+    style.size.width = taffy::Dimension::length(200.0);
+    let mut t = Transaction::new(1);
+    t.create(1, NodeKind::Text)
+        .layout(1, &style)
+        .paragraph(1, "Hi", &[span(Align::Center)])
+        .append(u32::MAX, 1);
+    let buf = wire::encode(&t);
+    assert_eq!(wire::decode(&buf).unwrap().mutations, t.mutations);
+    assert_eq!(wire::decode(&buf).unwrap().spans[0], span(Align::Center));
+    ui.apply(&buf).unwrap();
+    ui.render(Size::new(400.0, 300.0));
+    let line = |ui: &Ui| {
+        let p = ui.text_layout(NodeId(1)).unwrap();
+        let l = &p.lines[0];
+        (l.x, l.advance - l.trailing)
+    };
+    let (x, w) = line(&ui);
+    assert!(
+        (x - (200.0 - w) / 2.0).abs() < 1e-3,
+        "centered: {x} for {w}"
+    );
+    let mut t = Transaction::new(2);
+    t.paragraph(1, "Hi", &[span(Align::Right)]);
+    ui.apply_txn(&t).unwrap();
+    ui.render(Size::new(400.0, 300.0));
+    let (x, w) = line(&ui);
+    assert!((x + w - 200.0).abs() < 1e-3, "right: {x} + {w}");
+    // The feature byte's unknown bits are rejected.
+    let mut bad = buf.clone();
+    let row = bad
+        .windows(4)
+        .position(|w| w == 16.0f32.to_le_bytes())
+        .unwrap();
+    // font_size f32, color u32, weight u16, flags u8, then features.
+    bad[row + 4 + 4 + 2 + 1] = 1 << 3;
+    assert!(wire::decode(&bad).is_err());
+}
