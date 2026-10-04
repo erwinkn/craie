@@ -14,6 +14,7 @@ use craie_render::{Gpu, Renderer, WindowSurface};
 use craie_ui::a11y::A11yShared;
 use craie_ui::bridge::Session;
 use craie_ui::events::{self, Event};
+use craie_ui::observe::WindowState;
 use craie_ui::surface::SurfacePainter;
 use craie_ui::ui::Ui;
 
@@ -38,6 +39,8 @@ pub struct HostApp {
     probe: Option<Probe>,
     /// Zero of the UI clock (`Ui::set_time`).
     start: Instant,
+    /// The window is fully covered (`App::occluded`).
+    occluded: bool,
 }
 
 struct Inner {
@@ -179,6 +182,7 @@ impl HostApp {
             capture_due: None,
             probe: Probe::from_env(),
             start: Instant::now(),
+            occluded: false,
         }
     }
 
@@ -218,6 +222,13 @@ impl HostApp {
         }
     }
 
+    /// Tells the UI (and so JS) the window's current state.
+    fn window_changed(&mut self, window: &Window) {
+        let Some(inner) = &mut self.inner else { return };
+        inner.ui.set_window(window_state(window, self.occluded));
+        Inner::flush_out(&mut inner.ui, &self.session);
+    }
+
     /// Borrows the retained UI (for boot content applied before `run`).
     pub fn ui_mut(&mut self) -> Option<&mut Ui> {
         self.inner.as_mut().map(|i| &mut i.ui)
@@ -244,6 +255,48 @@ pub fn prepare_frame(
     ui.render(Size::new(w as f32 / scale, h as f32 / scale));
     renderer.prepare(gpu, ui.scene_mut());
     true
+}
+
+/// The window as the UI reports it to JS.
+fn window_state(window: &Window, occluded: bool) -> WindowState {
+    let (w, h) = window.size();
+    WindowState {
+        size: window.logical_size(),
+        scale: window.scale_factor() as f32,
+        focused: window.focused(),
+        visible: !occluded && w > 0 && h > 0,
+        dark: window.dark(),
+    }
+}
+
+/// Answers the `Present` requests a presented frame satisfies, writing
+/// the captures asked for: the scene drawn again, offscreen, as the
+/// frame showed it (`size` in pixels, `format` the window's).
+pub(crate) fn answer_presents(
+    ui: &mut Ui,
+    renderer: &mut Renderer,
+    gpu: &Gpu,
+    format: wgpu::TextureFormat,
+    size: (u32, u32),
+) {
+    let (frame, due) = ui.frame_presented();
+    for p in due {
+        let error = p.path.and_then(|path| {
+            crate::capture::capture_png(gpu, renderer, format, ui, size, path.as_ref())
+                .err()
+                .map(|e| format!("{path}: {e}"))
+        });
+        ui.presented(p.request, frame, size, error);
+    }
+}
+
+/// Posts UI events to JS as one frame; a frame holding any event that
+/// must not drop (`events::reliable`) never drops.
+pub(crate) fn post_events(session: &Session, out: &[events::UiEvent]) {
+    if !out.is_empty() {
+        let reliable = out.iter().any(|e| events::reliable(e.kind));
+        session.post_events(events::encode_events(out), reliable);
+    }
 }
 
 /// Applies the session's pending commits to `ui` (no layout, no frame).
@@ -297,22 +350,7 @@ impl Inner {
     /// Pushes queued UI events to the JS side. Associated fn so the
     /// caller can pass `&mut inner.ui` while `inner` is borrowed.
     fn flush_out(ui: &mut Ui, session: &Session) {
-        let events = ui.take_events();
-        if !events.is_empty() {
-            // Animation ends resolve JS promises, claims are user actions
-            // only JS carries out, an image loads or fails once, and an
-            // exit's end frees JS's parked ids: those frames never drop.
-            let reliable = events.iter().any(|e| {
-                matches!(
-                    e.kind,
-                    events::out_kind::ANIMATION_END
-                        | events::out_kind::CLAIM
-                        | events::out_kind::IMAGE
-                        | events::out_kind::EXIT_END
-                )
-            });
-            session.post_events(events::encode_events(&events), reliable);
-        }
+        post_events(session, &ui.take_events());
     }
 
     /// Publishes geometry-dependent platform state (accessibility bounds,
@@ -342,8 +380,9 @@ impl App for HostApp {
         let renderer = Renderer::new(&gpu, surface.config.format);
         let scale = window.scale_factor() as f32;
         let mut ui = Ui::new(scale);
-        // Breakpoints hold from the first transaction.
-        ui.set_window_size(Size::new(w as f32 / scale, h as f32 / scale));
+        // Breakpoints hold from the first transaction, and JS hears the
+        // window's state first.
+        ui.set_window(window_state(window, self.occluded));
         // TODO(macOS): `set_reduced_motion` from
         // NSWorkspace.accessibilityDisplayShouldReduceMotion (and its
         // change notification); `set_touch` stays false on desktop.
@@ -431,6 +470,7 @@ impl App for HostApp {
         let Some(inner) = &mut self.inner else { return };
         let (w, h) = window.size();
         inner.surface.resize(&inner.gpu, w, h);
+        inner.ui.set_window(window_state(window, self.occluded));
         // Size change invalidates wrap widths: every cache goes.
         inner.ui.invalidate_layout();
         inner.sync(window, &self.session, false);
@@ -438,6 +478,8 @@ impl App for HostApp {
     }
 
     fn occluded(&mut self, window: &Window, occluded: bool) {
+        self.occluded = occluded;
+        self.window_changed(window);
         // Becoming visible again needs a repaint: acquires while
         // occluded were skipped, so the last presented frame is stale.
         if !occluded {
@@ -445,10 +487,17 @@ impl App for HostApp {
         }
     }
 
+    fn appearance(&mut self, window: &Window) {
+        self.window_changed(window);
+    }
+
     fn event(&mut self, window: &Window, event: &Event) {
         self.tick();
         let Some(inner) = &mut self.inner else { return };
         inner.ui.dispatch(event);
+        if let Event::Focus(_) = event {
+            inner.ui.set_window(window_state(window, self.occluded));
+        }
         Inner::flush_out(&mut inner.ui, &self.session);
         Inner::publish_frame_state(&mut inner.ui, window, &self.a11y);
     }
@@ -538,6 +587,15 @@ impl App for HostApp {
             p.presented(&inner.ui);
             p.finish(&self.session);
         }
+        let format = inner.surface.config.format;
+        answer_presents(
+            &mut inner.ui,
+            &mut inner.renderer,
+            &inner.gpu,
+            format,
+            (w, h),
+        );
+        Inner::flush_out(&mut inner.ui, &self.session);
         // Running animations advance every frame: ask for the next one
         // (presentation paces it). So does a restyle after the frame
         // (hover at rest). Idle requests none.

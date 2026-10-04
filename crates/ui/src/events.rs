@@ -297,6 +297,51 @@ pub mod out_kind {
     /// finished, removed (cut short by a remove), parent gone, skipped).
     /// Native has freed the subtree: its ids may be reused.
     pub const EXIT_END: u8 = 22;
+    /// A node with a layout listener has a new border box (`observe.rs`,
+    /// always sent): x/y relative to its parent's border box (no scroll
+    /// offset, no transform), a/b = width and height. Once after the
+    /// listener is set and the node laid out, then on each change.
+    pub const LAYOUT: u8 = 23;
+    /// The answer to a `Measure` command (always sent): key = the
+    /// request, revision = 1 when measured (x/y/a/b = the window-space
+    /// bounding box, logical, scroll offsets and transforms applied), 0
+    /// when the node is gone, not laid out, or not displayed.
+    pub const MEASURE: u8 = 24;
+    /// The window's state changed (node NIL, always sent): x/y = the
+    /// logical size, a = the scale factor, key = `window_bit`s.
+    pub const WINDOW: u8 = 25;
+    /// The answer to a `Present` command (node NIL, always sent): key =
+    /// the request, revision = the presented frame's number, x/y = its
+    /// size in pixels, `text` = why its capture failed ("": none).
+    pub const PRESENTED: u8 = 26;
+}
+
+/// Whether events of `kind` must never drop from the session's queue:
+/// a promise waits on them (animation ends, measures, presentations),
+/// a user action does (claims), or they happen once or carry state JS
+/// keeps (an image's load, an exit's end, a layout, the window).
+pub fn reliable(kind: u8) -> bool {
+    matches!(
+        kind,
+        out_kind::ANIMATION_END
+            | out_kind::CLAIM
+            | out_kind::IMAGE
+            | out_kind::EXIT_END
+            | out_kind::LAYOUT
+            | out_kind::MEASURE
+            | out_kind::WINDOW
+            | out_kind::PRESENTED
+    )
+}
+
+/// `WINDOW` key bits.
+pub mod window_bit {
+    /// The window has keyboard focus.
+    pub const FOCUSED: u32 = 1 << 0;
+    /// The window shows: not minimized, not fully covered.
+    pub const VISIBLE: u32 = 1 << 1;
+    /// The system appearance is dark.
+    pub const DARK: u32 = 1 << 2;
 }
 
 /// `PRESS` phases (key bits 4 and 5).
@@ -383,6 +428,7 @@ pub mod mask {
     pub const SCROLL: u32 = 1 << 8;
     pub const PRESS: u32 = 1 << 9;
     pub const ACTIVATE: u32 = 1 << 10;
+    pub const LAYOUT: u32 = 1 << 11;
 }
 
 /// Maps an outbound event kind to its listener mask bit.
@@ -399,6 +445,7 @@ pub fn mask_for(kind: u8) -> u32 {
         out_kind::SCROLL => mask::SCROLL,
         out_kind::PRESS => mask::PRESS,
         out_kind::ACTIVATE => mask::ACTIVATE,
+        out_kind::LAYOUT => mask::LAYOUT,
         _ => 0,
     }
 }

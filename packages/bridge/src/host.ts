@@ -15,6 +15,7 @@ import {
   STATE_BIT,
   Encoder,
   EVENT_KIND,
+  WINDOW_BIT,
   EVENT_MASK,
   FIT,
   INTERACTION,
@@ -83,6 +84,44 @@ export interface UiEvent {
   key: number
   /** Text payload (change/submit). */
   text: string
+}
+
+/** A box in logical points. */
+export interface LayoutRect {
+  x: number
+  y: number
+  width: number
+  height: number
+}
+
+/** `onLayout`: the node's border box after layout, relative to its
+ * parent's border box (no scroll offset, no transform), as React
+ * Native's. */
+export interface LayoutEvt extends LayoutRect {
+  target: HostNode
+}
+
+/** The window, as native reports it. */
+export interface WindowState {
+  /** Logical points. */
+  width: number
+  height: number
+  /** Physical pixels per logical point. */
+  scale: number
+  /** The window has keyboard focus. */
+  focused: boolean
+  /** Shown: not minimized and not fully covered. */
+  visible: boolean
+  /** The system appearance is dark. */
+  dark: boolean
+}
+
+/** A presented frame (`presented`, `capture`): its number since start
+ * and its size in pixels. */
+export interface Presented {
+  frame: number
+  width: number
+  height: number
 }
 
 /** A key a node claims (`keymap`): native skips its own handling of the
@@ -358,6 +397,10 @@ export interface HostNode {
    * retargeted (another tween replaced it), or removed (with its
    * node). */
   animate(prop: AnimProp, to: unknown, timing: Timing): Promise<AnimationEnd>
+  /** The node's window-space bounding box (logical points, scroll
+   * offsets and transforms applied), from the layout that follows the
+   * commits made so far; `null` when it is gone or not displayed. */
+  measure(): Promise<LayoutRect | null>
 }
 
 export interface Transport {
@@ -519,6 +562,7 @@ const LISTENERS: Record<string, number> = {
   onPress: EVENT_MASK.activate,
   onPressIn: EVENT_MASK.press,
   onPressOut: EVENT_MASK.press,
+  onLayout: EVENT_MASK.layout,
 }
 
 /** A node that owns presses: a Pressable (`__pressable`), or anything
@@ -854,6 +898,12 @@ export class CraieHost {
   private windowClaims: ClaimState = { sig: "", version: 0, handlers: new Map() }
   /** The window list may have changed: the seal sends it (once). */
   private windowDirty = false
+  /** Measures and presentations waiting for native, by request. */
+  private requests = new Map<number, (ev: UiEvent) => void>()
+  private nextRequest = 0
+  /** The window's state, once native reported it, and who listens. */
+  private windowState: WindowState | null = null
+  private windowListeners = new Set<(w: WindowState) => void>()
 
   /** `inEvent` runs each event's dispatch; the root sets React's
    * update priority for its kind around it. */
@@ -955,6 +1005,52 @@ export class CraieHost {
     const d: Declared = { claims: [], handlers: [] }
     for (const list of [...this.hotkeys.values()].reverse()) keyClaims(list, d, true)
     return d
+  }
+
+  /** A request id for a native answer, and the promise it resolves. */
+  private request<T>(answer: (ev: UiEvent) => T): [number, Promise<T>] {
+    const id = this.nextRequest
+    this.nextRequest = (this.nextRequest + 1) >>> 0
+    const done = new Promise<T>(resolve => this.requests.set(id, ev => resolve(answer(ev))))
+    return [id, done]
+  }
+
+  /** The window's state (`null` until native reports it). */
+  window(): WindowState | null {
+    return this.windowState
+  }
+
+  /** Calls `listener` on each change of the window's state; returns the
+   * unsubscribe function. */
+  onWindow(listener: (w: WindowState) => void): () => void {
+    this.windowListeners.add(listener)
+    return () => {
+      this.windowListeners.delete(listener)
+    }
+  }
+
+  /** Resolves once a frame that includes every commit made so far is on
+   * screen; with `rest`, the first such frame with nothing moving or
+   * loading (no animation, no scroll settling, no image decoding).
+   * Never resolves while an animation loops. */
+  presented(options: { rest?: boolean } = {}): Promise<Presented> {
+    return this.present(null, options.rest ?? false)
+  }
+
+  /** `presented`, writing that frame to a PNG at `path` (device
+   * pixels). Rejects when the capture fails. */
+  capture(path: string, options: { rest?: boolean } = {}): Promise<Presented> {
+    return this.present(path, options.rest ?? false)
+  }
+
+  private present(path: string | null, rest: boolean): Promise<Presented> {
+    const [id, done] = this.request(ev => ev)
+    this.ready()
+    this.encoder.cmdPresent(id, rest, path)
+    return done.then(ev => {
+      if (ev.text) throw Error(`capture failed: ${ev.text}`)
+      return { frame: ev.revision, width: ev.x, height: ev.y }
+    })
   }
 
   /** Writes plain text to the system clipboard. */
@@ -1137,6 +1233,13 @@ export class CraieHost {
         ;(this.pendingAnims ??= []).push({ prop: ANIM_PROP[prop], resolve })
         return done
       },
+      measure() {
+        if (!this.mounted) return Promise.resolve(null)
+        const [id, done] = this.root.request((ev): LayoutRect | null =>
+          ev.revision ? { x: ev.x, y: ev.y, width: ev.a, height: ev.b } : null)
+        this.root.cmd(this, (e, node) => e.cmdMeasure(node, id))
+        return done
+      },
     }
     return n
   }
@@ -1172,6 +1275,25 @@ export class CraieHost {
     }
     if (ev.kind === EVENT_KIND.exitEnd) {
       this.exitEnded(ev.node, ev.generation)
+      return
+    }
+    // Answers go by request, whatever became of the node.
+    if (ev.kind === EVENT_KIND.measure || ev.kind === EVENT_KIND.presented) {
+      this.requests.get(ev.key)?.(ev)
+      this.requests.delete(ev.key)
+      return
+    }
+    if (ev.kind === EVENT_KIND.window) {
+      const w = {
+        width: ev.x,
+        height: ev.y,
+        scale: ev.a,
+        focused: (ev.key & WINDOW_BIT.focused) !== 0,
+        visible: (ev.key & WINDOW_BIT.visible) !== 0,
+        dark: (ev.key & WINDOW_BIT.dark) !== 0,
+      }
+      this.windowState = w
+      for (const listener of this.windowListeners) listener(w)
       return
     }
     const root = this.nodes.get(ev.node)
@@ -1217,6 +1339,7 @@ export class CraieHost {
       case EVENT_KIND.change: p.onChangeText?.(ev.text); break
       case EVENT_KIND.submit: p.onSubmit?.(ev.text); break
       case EVENT_KIND.scroll: p.onScroll?.({ target: n, x: ev.a, y: ev.b }); break
+      case EVENT_KIND.layout: p.onLayout?.({ target: n, x: ev.x, y: ev.y, width: ev.a, height: ev.b }); break
       case EVENT_KIND.animationEnd: {
         const prop = ev.key & 0xff
         const reason = END_REASON[(ev.key >>> 8) & 0xff] ?? "cancelled"

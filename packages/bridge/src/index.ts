@@ -13,6 +13,7 @@ import React, {
   useMemo,
   useRef,
   useState,
+  useSyncExternalStore,
   type ReactNode,
   type Ref,
 } from "react"
@@ -36,11 +37,13 @@ import {
   type ImageErrorEvt,
   type ImageLoadEvt,
   type KeyClaim,
+  type LayoutEvt,
   type OwnerRef,
   type ScopeChain,
   type ScopeRef,
   type SurfaceParam,
   type Transport,
+  type WindowState,
 } from "./host.js"
 import { flattenShapes, type ShapeProps } from "./shapes.js"
 import type { Animations } from "./motion.js"
@@ -104,6 +107,10 @@ export type {
   Hotkey,
   HostNode,
   KeyClaim,
+  LayoutEvt,
+  LayoutRect,
+  Presented,
+  WindowState,
   SurfaceParam,
   Transport,
   UiEvent,
@@ -205,6 +212,10 @@ export interface ListenerProps {
   onFocus?: (e: { target: HostNode }) => void
   onBlur?: (e: { target: HostNode }) => void
   onScroll?: (e: ScrollEvt) => void
+  /** The node's border box after layout, relative to its parent's (no
+   * scroll offset, no transform): once it is first laid out, then on
+   * each change. Moving an ancestor or scrolling does not call it. */
+  onLayout?: (e: LayoutEvt) => void
   /** Keys this node claims while it or a descendant has focus: native
    * skips its own handling and runs the first matching claim. */
   keymap?: KeyClaim[]
@@ -554,6 +565,17 @@ export function useHotkeys(bindings: readonly Hotkey[]) {
 export function useClipboard(): { write(text: string): void } {
   const host = useContext(HostContext)
   return { write: (text: string) => host?.writeClipboard(text) }
+}
+
+/** The window's size, scale, focus, visibility and appearance, kept
+ * current (`null` until native reports it, before the first commit
+ * lands). */
+export function useWindow(): WindowState | null {
+  const host = useContext(HostContext)
+  return useSyncExternalStore(
+    useCallback((onChange: () => void) => host?.onWindow(onChange) ?? (() => {}), [host]),
+    () => host?.window() ?? null,
+  )
 }
 
 /** The latest native frame statistics (`null` until the first report).

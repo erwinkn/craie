@@ -153,6 +153,12 @@ export function readFrame(buf: Uint8Array): Frame {
         const c = u8(); op.f.push(c)
         if (c === 2 || c === 4 || c === 5) op.s = strings[u32()]
         else if (c === 3) op.f.push(f32(), f32())
+        else if (c === 6) op.f.push(u32()) // measure: request
+        else if (c === 7) { // present: request, flags, path or NIL
+          op.f.push(u32(), u8())
+          const p = u32()
+          if (p !== 0xffff_ffff) op.s = strings[p]
+        }
         break
       }
       case 0x90: { // list config: overscan, fallback, templates

@@ -36,6 +36,9 @@ mod keyframes_tests;
 pub mod layout;
 pub mod list;
 pub mod mutation;
+pub mod observe;
+#[cfg(test)]
+mod observe_tests;
 mod order;
 #[cfg(test)]
 mod order_tests;

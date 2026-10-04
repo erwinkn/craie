@@ -8,7 +8,9 @@ use craie_ui::events::{Key, Mods};
 use craie_ui::host::{NodeFlags, NodeId};
 use craie_ui::input::SubmitKey;
 use craie_ui::keyframes::{Direction, Easing, Fill, Trigger};
-use craie_ui::mutation::{Mutation, NodeKind, Role, group_flag, press, reported, trap_flag};
+use craie_ui::mutation::{
+    Command, Mutation, NodeKind, Role, group_flag, press, reported, trap_flag,
+};
 use craie_ui::states::layout_key;
 use craie_ui::surface;
 use craie_ui::ui::Ui;
@@ -81,7 +83,7 @@ fn js_fixture_decodes_and_executes() {
     // Input: listeners, focusable, explicit role, config.
     assert_eq!(host.kind(NodeId(2)), Some(NodeKind::Input));
     let i = host.interaction(NodeId(2));
-    assert_eq!(i.listeners, 0x7ff);
+    assert_eq!(i.listeners, 0xfff);
     assert!(i.focusable && i.auto_focus && !i.selectable);
     // The vector 8 is inert; the layer 7 a modal focus trap and a
     // focus group.
@@ -417,4 +419,28 @@ fn js_fixture_decodes_and_executes() {
 
     // WriteClipboard, addressed to no node.
     assert_eq!(ui.inputs.clipboard.get().as_deref(), Some("copied"));
+
+    // A measure of the input, and the window's present: at rest, with
+    // a capture path. It owes a frame.
+    let commands: Vec<_> = txn
+        .mutations
+        .iter()
+        .filter_map(|m| match m {
+            Mutation::Command { id, cmd } => Some((*id, cmd.clone())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(commands[commands.len() - 2], (2, Command::Measure(5)));
+    assert_eq!(
+        commands[commands.len() - 1],
+        (
+            craie_ui::mutation::NIL,
+            Command::Present {
+                request: 6,
+                rest: true,
+                path: Some("shot.png".into()),
+            }
+        )
+    );
+    assert!(ui.needs_paint());
 }

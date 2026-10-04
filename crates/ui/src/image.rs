@@ -393,6 +393,12 @@ impl Images {
         }
     }
 
+    /// Decode work is queued or with the platform: a frame drawn now
+    /// is not the image's last.
+    pub(crate) fn busy(&self) -> bool {
+        !self.requests.is_empty() || self.states.values().any(|s| s.pending)
+    }
+
     /// Bytes of CPU copies held (the atlas holds its own while
     /// resident).
     pub(crate) fn bytes(&self) -> usize {
