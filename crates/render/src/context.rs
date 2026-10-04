@@ -18,16 +18,24 @@ impl Gpu {
         Gpu::try_headless().expect("no wgpu adapter")
     }
 
-    /// Headless device, or `None` when the machine has no adapter (CI
-    /// without a GPU).
+    /// Headless device, or `None` when the machine has no adapter.
+    /// GPU tests skip on `None`; with `CRAIE_REQUIRE_GPU` set (CI) a
+    /// missing adapter panics instead, so a runner that lost its driver
+    /// fails rather than skipping every GPU test.
     pub fn try_headless() -> Option<Gpu> {
         let instance = instance();
         let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
             power_preference: wgpu::PowerPreference::default(),
             compatible_surface: None,
             ..Default::default()
-        }))
-        .ok()?;
+        }));
+        let adapter = match adapter {
+            Ok(adapter) => adapter,
+            Err(e) if std::env::var_os("CRAIE_REQUIRE_GPU").is_some() => {
+                panic!("CRAIE_REQUIRE_GPU is set and there is no wgpu adapter: {e}")
+            }
+            Err(_) => return None,
+        };
         let (device, queue) = request_device(&adapter);
         Some(Gpu {
             instance,
