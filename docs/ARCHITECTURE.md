@@ -761,15 +761,21 @@ chunk-local to gradient affine, then offset and color per stop), so
 meshes need no second paint table. A box shadow (protocol 14,
 `shadow.rs`) is a `RectInstance` in shadow mode: its rect and radius
 are the shadow's shape (the box moved by the offset and grown by the
-spread, CSS's radius rule included), its border width the Gaussian's σ
-(half the CSS blur), its fill the color, and its border slot a paint
-record of the box it is cut against (the border box for an outer
-shadow, the padding box for an inset one). The shader takes a rounded
-rect convolved with the Gaussian analytically (erf along x, four
-samples along y, as Zed's GPUI; a hard antialiased edge under a
-quarter pixel of σ), then keeps what lies outside the box (outer) or
-inside it less the shape (inset); shape and box snap like the box's
-fill, so a 1-point ring lands on its edge. A node's shadows draw in its
+spread; an outer shadow's radius is CSS's outset-adjusted radius of the
+box's used radius, so a circle stays a circle and a square corner
+square), its border width the Gaussian's σ (half the CSS blur), its
+fill the color, and its border slot a paint record of the box it is cut
+against (the border box for an outer shadow, the box inside the painted
+border for an inset one). The shader works in the shape's own units,
+where σ is isotropic, so a scaled or rotated box carries its blur as
+CSS's transform does: a rounded rect convolved with the Gaussian
+analytically (erf along x, four samples along y, as Zed's GPUI), then
+what lies outside the box (outer) or inside it less the shape (inset).
+Under a quarter pixel of σ the shadow is hard: the antialiased
+difference of shape and box, so a shadow coincident with its box casts
+nothing, and an empty shape casts nothing either. Shape and box snap
+like the box's fill, so a 1-point ring lands on its edge. Chunk
+admission (`near`) widens a box by its shadows' reach. A node's shadows draw in its
 own chunk: outer ones before its fill, the last listed lowest, inset
 ones after it, under its content. Their rects are reserved in paint
 order and written after the kind's own paint slots, which keep their
