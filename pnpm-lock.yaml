@@ -88,6 +88,9 @@ importers:
 
   packages/bridge:
     dependencies:
+      '@types/react-reconciler':
+        specifier: ^0.28.0
+        version: 0.28.9(@types/react@19.3.0)
       react:
         specifier: ^19.2.0
         version: 19.3.0
@@ -101,9 +104,6 @@ importers:
       '@types/react':
         specifier: ^19.2.0
         version: 19.3.0
-      '@types/react-reconciler':
-        specifier: ^0.28.0
-        version: 0.28.9(@types/react@19.3.0)
       typescript:
         specifier: ^5.3.0
         version: 5.9.3
