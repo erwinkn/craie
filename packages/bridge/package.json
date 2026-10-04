@@ -6,7 +6,8 @@
   "description": "React -> Craie binary wire encoder, reconciler, and native transport",
   "exports": {
     ".": "./src/index.ts",
-    "./wire": "./src/wire.ts"
+    "./wire": "./src/wire.ts",
+    "./react": "./src/react.ts"
   },
   "scripts": {
     "test": "bun test"
