@@ -11,21 +11,25 @@ both sides. It builds on the list co-design study (contract C) and on
   paint: key, version, loaded, and an estimate. With it, layout (extents,
   scroll size, jump targets, anchoring) is computable before any row renders,
   on web, React Native and Craie alike.
-- **Changes are ops against a revision:** `splice`, `move` and `update`. The
-  kit's JS virtualizer and Craie's native one consume the same table and the
-  same ops. Each runs its own copy of the algorithm, and both are held to the
-  same JSON traces.
+- **The app passes the table as a plain array** (`items`), a new array
+  for each edit. Edits reach the virtualizer as ops: `splice`, `move` and
+  `update`. The app may pass them with the array as a fast path
+  (`changes`); otherwise the list diffs keys. The kit's JS virtualizer and
+  Craie's native one consume the same table and the same ops. Each runs its
+  own copy of the algorithm, and both are held to the same JSON traces.
 - **Two callbacks, for data and notification only:** `updateItems` (load
   these rows, these may go) and the optional `onVisibleChange`. They are
   never for layout.
-- **Rows stay ordinary React** (`renderItem`), mounted for a range the
-  virtualizer keeps to itself: the kit renders its own on web and React
-  Native, and on Craie native tells the bridge which rows to mount. Craie's
-  React wrapper reshapes the table into wire records and sends it; native
-  owns sizes, measurement and correction, so no sizes cross to JS.
-- **The public surface** is `renderItem`, `updateItems`,
-  `onVisibleChange` and the handle (`scrollToIndex`, `scrollToKey`,
-  `scrollToEnd`, `scrollToOffset`, `readViewport`).
+- **Rows stay ordinary React,** from a render function passed as the
+  list's child, mounted for a range the virtualizer keeps to itself: the
+  kit renders its own on web and React Native, and on Craie native tells
+  the bridge which rows to mount. Craie's React wrapper reshapes the table
+  into wire records and sends it; native owns sizes, measurement and
+  correction, so no sizes cross to JS.
+- **The public surface** is plain props (`items`, `changes`, `templates`,
+  `updateItems`, `onVisibleChange`, the row function as `children`) and
+  the handle (`scrollToIndex`, `scrollToKey`, `scrollToEnd`,
+  `scrollToOffset`, `readViewport`).
 
 ## The table (JS)
 
@@ -50,30 +54,44 @@ type ListChange =
   | { kind: "splice"; at: number; remove: number; items: readonly ListItem[] }
   | { kind: "move"; from: number; count: number; to: number }     // `to` after removal
   | { kind: "update"; at: number; items: readonly ListItem[] }    // same keys, new version/loaded/estimate
-interface ListSource {
-  revision: number                       // increases for the list's life
-  count: number
-  get(index: number): ListItem           // pure, cheap: metadata, not message bodies
-  indexOfKey?(key: string): number       // -1 when absent; else the kit scans get()
-  changesSince?(revision: number): { base: number; revision: number; changes: readonly ListChange[] } | null
+interface ListChanges {
+  from: readonly ListItem[]   // the items array these ops edit, by identity
+  ops: readonly ListChange[]  // applied in order, each against the result of the last
 }
 ```
 
-- **Edits.** A source that keeps a change journal makes edits O(k) on the
-  wire. `changesSince` returning null (no journal, or history lost) means a
-  full keyed reconciliation, so correctness never depends on seeing every
-  render.
-- **Arrays.** Plain arrays wrap into a source:
-  `List<T>({ data, keyOf, versionOf?, describeItem? })`, as today. The
-  wrapper diffs keys, and object identity is the default version.
+- **Items are immutable.** An edit is a new array; the list compares
+  arrays by identity, so an array changed in place goes unseen. Rendering
+  the same array again changes nothing.
+- **Changes are a fast path.** When `items` is a new array and
+  `changes.from` is the array of the last render, the list applies
+  `changes.ops`, O(k) on the wire. Otherwise (no `changes`, or ones
+  computed from another array, as after a skipped render) it diffs keys
+  between the two arrays and derives the ops itself, O(n). Correctness
+  never depends on `changes`; a store that already knows its edits (a
+  journal, a streaming reply) saves the diff.
+- **The keyed diff.** Removed keys are removed, new keys inserted, kept
+  keys that changed order moved, and kept keys whose `version`, `loaded`,
+  `failed` or `estimate` changed updated. Descriptor objects are compared
+  by these fields, not by identity.
+- **Keys.** `scrollToKey` and pinned rows need a key's index; the binding
+  derives it from `items` (a map kept current through each batch). No
+  `indexOfKey` prop.
+- **No revision.** Revisions are internal: Craie's bridge numbers the
+  patches it sends, and indices in `updateItems`, `onVisibleChange` and
+  `readViewport` refer to the `items` of the last committed render.
+- **Size.** A plain array of descriptor objects is fine at 50,000 rows:
+  the diff is a key scan when there is no fast path, and a first mount
+  sends the table once.
 
 ## Props and handle (one API on both renderers)
 
 ```ts
 interface VirtualListProps {
-  source: ListSource
+  items: readonly ListItem[]
+  changes?: ListChanges                 // the edits from the last render's items, as a fast path
   templates?: readonly EstimateTemplate[]
-  renderItem(index: number, row: { placeholder: boolean }): ReactNode  // placeholder: unloaded, or held (below)
+  children(index: number, row: { placeholder: boolean }): ReactNode  // placeholder: unloaded, or held (below)
   anchor?: "start" | "end"              // initial placement and follow mode
   anchorPolicy?: "reading" | "focus"    // default reading (study §3)
   endThreshold?: number                 // default 80
@@ -103,7 +121,6 @@ interface ListVisible {                     // what onVisibleChange reports
   following: boolean
 }
 interface ListViewport {                    // on demand, through readViewport
-  revision: number
   visible: { first: number; last: number }
   anchor: { key: string; index: number; offset: number } | null
   pinnedKeys: readonly string[]             // rows kept mounted for focus
@@ -129,10 +146,12 @@ interface ListViewport {                    // on demand, through readViewport
   - The list asks for content, and offers to drop it, only through
     `updateItems`: loads by the islet rule, unloads by the retain window
     (below).
-  - JS answers by changing the data, not by returning a value. Once the
-    content arrives, an `update` marks the items loaded with a new version
-    and better estimates; rows already mounted render the placeholder
-    meanwhile. A source may also keep rows cached and change nothing.
+  - The app's data layer (the *source*, below) answers by rendering new
+    `items`, not by returning a value. Once the content arrives, the new
+    descriptors mark the items loaded with a new version and better
+    estimates (an `update`, through `changes` or the diff); rows already
+    mounted render the placeholder meanwhile. A source may also keep rows
+    cached and change nothing.
   - So `updateItems` needs no reply channel. It is reliable (never
     dropped), and a newer `load` supersedes an older one.
 - **Mount order.** The mounted range is internal. On Craie, native sends
@@ -187,7 +206,7 @@ it decides on both sides, and the source only answers.
   scroll into placeholders, the anchor is the topmost visible loaded row
   (L1: m200, 100 points down).
 
-Named traces I1–I4 (`harness/traces/lists/`):
+Named traces I1–I4 (`packages/bridge/traces/lists/`):
 
 - **I1.** Rows 0–399 and 420–999 loaded, rows 400–419 not, reader at row 380:
   the request covers 400–419 whole.
@@ -375,6 +394,10 @@ stays the one source of truth, and the list never flips `loaded` itself.
 - B's kit review agreed: the kit's JS virtualizer consumes this table and
   these ops, with the changes folded in above (`indexOfKey`, text
   template metrics, `pinnedKeys`, delivery classes, islets).
+- The props follow Erwin's call of 2026-10-04 (D149): plain props, with
+  `items` as the table and an optional `changes` fast path, instead of a
+  source object with a change journal, and rows from a render function
+  passed as the child, which each binding converts for its backend.
 - Loading and unloading follow Erwin's answers of 2026-10-04 (no layout
   shifts and at least a screen per load, D135; unloading with a retain
   window, D136), and his simplification to one data callback and one

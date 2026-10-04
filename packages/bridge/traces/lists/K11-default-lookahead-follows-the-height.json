@@ -1,0 +1,49 @@
+{
+  "format": "craie-list-trace/1",
+  "id": "K11",
+  "name": "without a lookahead set, loads reach one current viewport height past the viewport: a taller list asks for more",
+  "viewport": {
+    "width": 400,
+    "height": 200
+  },
+  "config": {
+    "overscan": 600,
+    "endThreshold": 80,
+    "anchor": "start",
+    "anchorPolicy": "reading"
+  },
+  "templates": [],
+  "items": [
+    {
+      "count": 10,
+      "key": "m{i}",
+      "estimate": 40,
+      "height": 40
+    },
+    {
+      "count": 30,
+      "key": "m{i}",
+      "loaded": false,
+      "estimate": 40
+    }
+  ],
+  "steps": [
+    {
+      "do": "mount",
+      "expect": {
+        "load": null
+      }
+    },
+    {
+      "do": "resize",
+      "width": 400,
+      "height": 400,
+      "expect": {
+        "load": [
+          10,
+          19
+        ]
+      }
+    }
+  ]
+}

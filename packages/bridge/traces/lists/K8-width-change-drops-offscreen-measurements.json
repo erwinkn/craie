@@ -1,0 +1,66 @@
+{
+  "format": "craie-list-trace/1",
+  "id": "K8",
+  "name": "a narrower column drops a measurement taken offscreen at the old width: the row above takes its estimate again",
+  "viewport": {
+    "width": 400,
+    "height": 600
+  },
+  "config": {
+    "overscan": 600,
+    "lookahead": 600,
+    "endThreshold": 80,
+    "anchor": "start",
+    "anchorPolicy": "reading"
+  },
+  "templates": [],
+  "items": [
+    {
+      "count": 1,
+      "key": "m{i}",
+      "estimate": 40,
+      "height": 100
+    },
+    {
+      "count": 199,
+      "key": "m{i}",
+      "estimate": 40,
+      "height": 40
+    }
+  ],
+  "steps": [
+    {
+      "do": "mount",
+      "expect": {
+        "visible": [
+          0,
+          13
+        ]
+      }
+    },
+    {
+      "do": "scrollToIndex",
+      "index": 100,
+      "align": "start",
+      "expect": {
+        "anchor": {
+          "key": "m100",
+          "offset": 0
+        },
+        "offset": 4060
+      }
+    },
+    {
+      "do": "resize",
+      "width": 300,
+      "height": 600,
+      "expect": {
+        "anchor": {
+          "key": "m100",
+          "offset": 0
+        },
+        "offset": 4000
+      }
+    }
+  ]
+}

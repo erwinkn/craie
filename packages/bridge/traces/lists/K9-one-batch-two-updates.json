@@ -1,0 +1,82 @@
+{
+  "format": "craie-list-trace/1",
+  "id": "K9",
+  "name": "two updates in one batch move the anchor once, off both rows they change, as one update of both would",
+  "viewport": {
+    "width": 400,
+    "height": 600
+  },
+  "config": {
+    "overscan": 600,
+    "lookahead": 600,
+    "endThreshold": 80,
+    "anchor": "start",
+    "anchorPolicy": "reading"
+  },
+  "templates": [],
+  "items": [
+    {
+      "count": 100,
+      "key": "m{i}",
+      "estimate": 40,
+      "height": 40
+    }
+  ],
+  "steps": [
+    {
+      "do": "mount"
+    },
+    {
+      "do": "scroll",
+      "offset": 1000,
+      "expect": {
+        "anchor": {
+          "key": "m25",
+          "offset": 0
+        }
+      }
+    },
+    {
+      "do": "changes",
+      "changes": [
+        {
+          "kind": "update",
+          "at": 25,
+          "items": [
+            {
+              "count": 1,
+              "key": "m{i}",
+              "version": 1,
+              "estimate": 40,
+              "height": 80
+            }
+          ]
+        },
+        {
+          "kind": "update",
+          "at": 26,
+          "items": [
+            {
+              "count": 1,
+              "key": "m{i}",
+              "version": 1,
+              "estimate": 40,
+              "height": 80
+            }
+          ]
+        }
+      ],
+      "expect": {
+        "anchor": {
+          "key": "m27",
+          "offset": 80
+        },
+        "offset": 1080,
+        "visible": [
+          26,
+          39
+        ]
+      }
+    }
+  ]
+}
