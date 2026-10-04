@@ -1,3 +1,5 @@
 [toolchain]
 channel = "1.97.1"
 components = ["rustfmt", "clippy"]
+# scripts/ci.sh checks the portable crates for wasm32.
+targets = ["wasm32-unknown-unknown"]
