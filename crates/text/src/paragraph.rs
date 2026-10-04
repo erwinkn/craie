@@ -107,6 +107,8 @@ pub struct Ellipsis {
     /// Glyph ids and advances, left to right.
     pub glyphs: Vec<(u16, f32)>,
     pub width: f32,
+    /// Its font's metrics: the line it ends is at least as tall.
+    pub metrics: RunMetrics,
     /// The line it ends (None: nothing was cut), its pen x and baseline.
     pub line: Option<u32>,
     pub x: f32,
@@ -249,6 +251,24 @@ pub struct Paragraph {
     /// per byte, `L1_WS` and `L1_SEP` on a character's first byte, and
     /// the cluster flags (`CL_*`) on a cluster's first byte.
     pub analysis: Vec<u8>,
+}
+
+/// A line's advance and its trailing whitespace's (newlines included):
+/// the line's width is the difference.
+fn advances(cl: &[Cluster]) -> (f32, f32) {
+    let content = cl.iter().rposition(|c| !c.space && !c.newline);
+    let advance: f32 = cl.iter().map(|c| c.advance).sum();
+    let trailing: f32 = match content {
+        Some(k) => cl[k + 1..].iter().map(|c| c.advance).sum(),
+        None => advance,
+    };
+    (advance, trailing)
+}
+
+/// The width clusters take as a line: hanging whitespace excluded.
+fn line_width(cl: &[Cluster]) -> f32 {
+    let (advance, trailing) = advances(cl);
+    advance - trailing
 }
 
 /// UAX #14 allows a line break before this byte.
@@ -592,7 +612,12 @@ impl Paragraph {
                 opportunity = Some(i);
             }
             let last = clamp > 0 && lines + 1 == clamp;
-            if c.newline && last && i + 1 < clusters.len() {
+            // The limit's last line ends here: cut when text remains, or
+            // when its content overflows (a final newline included).
+            if c.newline
+                && last
+                && (i + 1 < clusters.len() || line_width(&clusters[start..i]) > limit)
+            {
                 self.cut_line(clusters, start..i, limit, &mut y, &mut width);
                 clamped = true;
                 break;
@@ -641,23 +666,36 @@ impl Paragraph {
         if clamped || full {
             // Every line is laid out (a final newline's empty line is past
             // the limit).
-        } else if clamp > 0
-            && start < n
-            && clusters[start..n].iter().map(|c| c.advance).sum::<f32>() > limit
-        {
+        } else if clamp > 0 && start < n && line_width(&clusters[start..n]) > limit {
             self.cut_line(clusters, start..n, limit, &mut y, &mut width);
         } else if start < n || lines == 0 || ends_in_newline {
             self.push_line(clusters, start..n, &mut y, &mut width);
         }
-        // An empty last line adds no height.
+        // An empty last line adds no height, unless it shows the ellipsis.
+        let shows_ellipsis =
+            |k: usize| self.ellipsis.as_ref().and_then(|e| e.line) == Some(k as u32);
+        let k = self.lines.len().saturating_sub(1);
         if let Some(last) = self.lines.last()
             && last.segs.is_empty()
             && self.lines.len() > 1
+            && !shows_ellipsis(k)
         {
             y -= last.height;
         }
-        if self.lines.len() == 1 && self.lines[0].segs.is_empty() {
+        if self.lines.len() == 1 && self.lines[0].segs.is_empty() && !shows_ellipsis(0) {
             y = 0.0;
+        }
+        // Intrinsic width (no wrap width) is the content's, whatever the
+        // limit hides: the widest hard line, as without a limit.
+        if max_width.is_none() && self.visible_end < self.text_len {
+            let mut from = 0;
+            for (k, c) in clusters.iter().enumerate() {
+                if c.newline || k + 1 == clusters.len() {
+                    let end = if c.newline { k } else { k + 1 };
+                    width = width.max(line_width(&clusters[from..end]));
+                    from = k + 1;
+                }
+            }
         }
         self.width = width;
         self.height = y;
@@ -769,6 +807,16 @@ impl Paragraph {
             self.lines[line].caret_end = at;
         }
         self.visible_end = at;
+        // The ellipsis is on the line: its font's metrics count.
+        if let Some(e) = &self.ellipsis {
+            let l = &mut self.lines[line];
+            let m = e.metrics;
+            let (ascent, descent) = (l.ascent.max(m.ascent), l.descent.max(m.descent));
+            let height = l.height.max(m.line_height);
+            l.baseline = l.top + ascent + (height - (ascent + descent)) * 0.5;
+            (l.ascent, l.descent, l.height) = (ascent, descent, height);
+            *y = l.top + height;
+        }
         let content = self.lines[line].advance - self.lines[line].trailing;
         *width = width.max(content + ellipsis);
         if let Some(e) = &mut self.ellipsis {
@@ -797,11 +845,7 @@ impl Paragraph {
         };
         let cl = &mut clusters[range];
         let content = cl.iter().rposition(|c| !c.space && !c.newline);
-        let advance: f32 = cl.iter().map(|c| c.advance).sum();
-        let trailing: f32 = match content {
-            Some(k) => cl[k + 1..].iter().map(|c| c.advance).sum(),
-            None => advance,
-        };
+        let (advance, trailing) = advances(cl);
         // Metrics: height from every run on the line; ascent and descent
         // from runs with content before trailing whitespace.
         let mut height = 0.0f32;
@@ -1566,6 +1610,7 @@ impl Shaper {
         Some(Ellipsis {
             font: run.font,
             size: run.size,
+            metrics: run.metrics,
             width: glyphs.iter().map(|g| g.1).sum(),
             glyphs,
             line: None,

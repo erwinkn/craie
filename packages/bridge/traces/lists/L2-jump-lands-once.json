@@ -1,7 +1,7 @@
 {
   "format": "craie-list-trace/1",
-  "id": "I3",
-  "name": "a partial answer leaves a short run on screen; the next request is exactly that run, the topmost visible loaded row holding",
+  "id": "L2",
+  "name": "a jump into unloaded rows: the visible content arrives in two parts and applies once, the loaded part held until then",
   "viewport": {
     "width": 400,
     "height": 600
@@ -16,24 +16,10 @@
   "templates": [],
   "items": [
     {
-      "count": 100,
-      "key": "m{i}",
-      "loaded": true,
-      "estimate": 40,
-      "height": 40
-    },
-    {
-      "count": 30,
+      "count": 1000,
       "key": "m{i}",
       "loaded": false,
       "estimate": 40
-    },
-    {
-      "count": 870,
-      "key": "m{i}",
-      "loaded": true,
-      "estimate": 40,
-      "height": 40
     }
   ],
   "steps": [
@@ -44,40 +30,30 @@
           0,
           14
         ],
-        "loadItems": null
+        "load": [
+          0,
+          14
+        ]
       }
     },
     {
       "do": "scrollToIndex",
-      "index": 95,
+      "index": 500,
       "align": "start",
       "expect": {
         "visible": [
-          95,
-          109
-        ],
-        "loadItems": [
-          100,
-          109
-        ]
-      }
-    },
-    {
-      "do": "scrollBy",
-      "delta": 20,
-      "expect": {
-        "visible": [
-          95,
-          110
+          500,
+          514
         ],
         "anchor": {
-          "key": "m95",
-          "offset": -20
+          "key": "m500",
+          "offset": 0
         },
-        "offset": 3820,
-        "loadItems": [
-          100,
-          110
+        "offset": 20000,
+        "held": null,
+        "load": [
+          500,
+          514
         ]
       }
     },
@@ -86,31 +62,36 @@
       "changes": [
         {
           "kind": "update",
-          "at": 100,
+          "at": 500,
           "items": [
             {
-              "count": 7,
+              "count": 8,
               "key": "m{i}",
               "loaded": true,
               "estimate": 40,
-              "height": 40
+              "height": 60,
+              "version": 1
             }
           ]
         }
       ],
       "expect": {
         "visible": [
-          95,
-          110
+          500,
+          514
         ],
         "anchor": {
-          "key": "m95",
-          "offset": -20
+          "key": "m500",
+          "offset": 0
         },
-        "offset": 3820,
-        "loadItems": [
-          107,
-          110
+        "offset": 20000,
+        "held": [
+          500,
+          507
+        ],
+        "load": [
+          508,
+          522
         ]
       }
     },
@@ -119,20 +100,31 @@
       "changes": [
         {
           "kind": "update",
-          "at": 107,
+          "at": 508,
           "items": [
             {
-              "count": 4,
+              "count": 15,
               "key": "m{i}",
               "loaded": true,
               "estimate": 40,
-              "height": 40
+              "height": 60,
+              "version": 1
             }
           ]
         }
       ],
       "expect": {
-        "loadItems": null
+        "visible": [
+          500,
+          509
+        ],
+        "anchor": {
+          "key": "m500",
+          "offset": 0
+        },
+        "offset": 20000,
+        "held": null,
+        "load": null
       }
     }
   ]

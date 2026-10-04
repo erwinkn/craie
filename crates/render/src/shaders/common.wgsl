@@ -11,7 +11,9 @@ struct Viewport {
     page: f32,
     // Composite: layer opacity.
     opacity: f32,
-    _pad0: f32,
+    // 1: blend in linear light (an *-srgb target encodes on store); 0:
+    // blend sRGB-encoded values, as browsers do (a plain target).
+    linear: f32,
     // Composite: layer bounds in device px (x0, y0, x1, y1).
     rect: vec4<f32>,
     // Composite: uv extent of the used texture region.

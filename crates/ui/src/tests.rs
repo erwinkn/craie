@@ -2684,6 +2684,58 @@ fn selection_spans_paragraphs_in_tree_order() {
     assert_eq!((rects(&ui, 1), rects(&ui, 3)), (0, 0), "highlight gone");
 }
 
+/// #28 review: a selection running past a clamped paragraph stops at
+/// its ellipsis's cut: hidden text is neither highlighted nor copied
+/// (PR28-06).
+#[test]
+fn selection_stops_at_the_line_limit() {
+    use crate::selection::{TextPoint, TextSelection};
+    let mut ui = Ui::new(1.0);
+    ui.text = craie_text::TextEngine::with_source(Box::new(craie_text::fonts::pinned()));
+    let column = taffy::Style {
+        flex_direction: taffy::FlexDirection::Column,
+        size: taffy::Size {
+            width: taffy::Dimension::length(100.0),
+            height: taffy::Dimension::auto(),
+        },
+        ..Default::default()
+    };
+    let mut t = Transaction::new(1);
+    t.create(0, NodeKind::View)
+        .layout(0, &column)
+        .interaction_flags(0, 0, false, true)
+        .append(NIL, 0);
+    let text = "The quick brown fox jumps over the lazy dog";
+    t.create(1, NodeKind::Text)
+        .layout(1, &column)
+        .text(1, text, 16.0, 0xffff_ffff)
+        .lines(1, 1)
+        .append(0, 1);
+    t.create(2, NodeKind::Text)
+        .text(2, "Next paragraph", 16.0, 0xffff_ffff)
+        .append(0, 2);
+    ui.apply_txn(&t).unwrap();
+    ui.render(Size::new(300.0, 200.0));
+    let cut = ui.text_layout(NodeId(1)).unwrap().visible_end;
+    assert!(cut < text.len() as u32);
+    ui.set_text_selection(Some(TextSelection {
+        domain: NodeId(0),
+        anchor: TextPoint {
+            node: NodeId(1),
+            offset: 0,
+        },
+        focus: TextPoint {
+            node: NodeId(2),
+            offset: 4,
+        },
+    }));
+    assert_eq!(ui.selection_ranges()[0], (NodeId(1), 0..cut));
+    assert_eq!(
+        ui.selected_text(),
+        format!("{}\nNext", &text[..cut as usize])
+    );
+}
+
 /// The highlight follows the tree and the text (S3C-01): a paragraph
 /// inserted between the endpoints is highlighted whole; one that grows
 /// is highlighted to its new end.
