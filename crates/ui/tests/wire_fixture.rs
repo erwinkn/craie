@@ -120,14 +120,15 @@ fn js_fixture_decodes_and_executes() {
     let i = host.interaction(NodeId(2));
     assert_eq!(i.listeners, 0xfff);
     assert!(i.focusable && i.auto_focus && !i.selectable);
-    // The vector 8 is inert; the layer 7 a modal focus trap and a
-    // focus group.
+    // The vector 8 is inert and hidden from accessibility; the layer 7
+    // a modal focus trap and a focus group.
     assert!(
         host.node(NodeId(8))
             .unwrap()
             .flags
             .contains(NodeFlags::INERT)
     );
+    assert!(host.interaction(NodeId(8)).a11y_hidden);
     assert!(txn.mutations.iter().any(|m| matches!(
         m,
         Mutation::Trap {

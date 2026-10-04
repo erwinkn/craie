@@ -163,8 +163,16 @@ pub mod interaction_flag {
     pub const AUTO_FOCUS: u8 = 1 << 3;
     /// Bits 4 to 6: the press flags (`press`), shifted.
     pub const PRESS_SHIFT: u8 = 4;
-    pub const ALL: u8 =
-        FOCUSABLE | SELECTABLE | INERT | AUTO_FOCUS | super::press::ALL << PRESS_SHIFT;
+    /// Out of the accessibility tree with its subtree (layers it owns
+    /// excepted), input untouched: web `aria-hidden`, React Native's
+    /// `accessibilityElementsHidden` (protocol 19).
+    pub const A11Y_HIDDEN: u8 = 1 << 7;
+    pub const ALL: u8 = FOCUSABLE
+        | SELECTABLE
+        | INERT
+        | AUTO_FOCUS
+        | super::press::ALL << PRESS_SHIFT
+        | A11Y_HIDDEN;
 }
 
 /// Focus trap flag bits (`Mutation::Trap`).
@@ -1106,7 +1114,7 @@ impl<'a> Transaction<'a> {
     }
 
     /// Interaction with raw `interaction_flag` bits (`INERT`,
-    /// `AUTO_FOCUS`, the shifted press flags).
+    /// `AUTO_FOCUS`, the shifted press flags, `A11Y_HIDDEN`).
     pub fn interaction_bits(&mut self, id: u32, listeners: u32, flags: u8) -> &mut Self {
         self.push(Mutation::Interaction {
             id,

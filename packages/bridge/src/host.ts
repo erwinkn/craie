@@ -642,7 +642,14 @@ function interactionFlags(props: Record<string, any>): number {
     (props.selectable ? INTERACTION.selectable : 0) |
     (props.inert ? INTERACTION.inert : 0) |
     (props.autoFocus ? INTERACTION.autoFocus : 0) |
-    pressFlags(props) << INTERACTION.pressShift
+    pressFlags(props) << INTERACTION.pressShift |
+    (a11yHidden(props) ? INTERACTION.a11yHidden : 0)
+}
+
+/** Hidden from accessibility: web `aria-hidden` or React Native's two. */
+function a11yHidden(props: Record<string, any>): boolean {
+  return !!props["aria-hidden"] || !!props.accessibilityElementsHidden ||
+    props.importantForAccessibility === "no-hide-descendants"
 }
 
 function listenerMask(props: Record<string, any>): number {

@@ -350,6 +350,9 @@ pub struct Interaction {
     pub press: u8,
     /// A trap's first pick for focus (`trap.rs`).
     pub auto_focus: bool,
+    /// Out of the accessibility tree with its subtree
+    /// (`interaction_flag::A11Y_HIDDEN`).
+    pub a11y_hidden: bool,
     pub role: Role,
     /// States reported while clear (`mutation::reported`).
     pub reported: u8,

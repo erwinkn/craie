@@ -150,7 +150,13 @@ impl Ui {
                 n.set_modal();
             }
         }
-        let focus = self.focused().map(aid).unwrap_or(ROOT_AID);
+        // Focus inside a hidden subtree is reported on the window: the
+        // focused node must be in the tree.
+        let focus = self
+            .focused()
+            .map(aid)
+            .filter(|f| nodes.iter().any(|(a, _)| a == f))
+            .unwrap_or(ROOT_AID);
         TreeUpdate {
             nodes,
             tree: Some(TreeInfo::new(ROOT_AID)),
@@ -186,8 +192,10 @@ impl Ui {
         match self.traps.gate.class(id) {
             Class::Root => self.a11y_node(id, out),
             Class::Out => None,
-            // Never hidden or inert: a trap under such a node is
-            // inactive.
+            // Never `display: none` or inert: a trap under such a node
+            // is inactive. Hidden from accessibility alone, it hides the
+            // modal too, as `aria-hidden` does on the web.
+            Class::Path if self.host.interaction(id).a11y_hidden => None,
             Class::Path => {
                 let mut an = Node::new(Role::GenericContainer);
                 let kids: Vec<A11yId> = self
@@ -209,7 +217,7 @@ impl Ui {
 
     /// One retained node -> one semantic node (plus recursed children).
     /// Returns the node's a11y id, or `None` when the subtree is hidden
-    /// or inert.
+    /// (`display: none` or `A11Y_HIDDEN`) or inert.
     ///
     /// The role comes from the node's role field only; the facade sets
     /// defaults (Pressable, TextInput, ScrollView, Text). Content (text,
@@ -218,10 +226,13 @@ impl Ui {
     fn a11y_node(&self, id: NodeId, out: &mut Vec<(A11yId, Node)>) -> Option<A11yId> {
         let node = self.host.node(id)?;
         let style = self.host.style(id);
-        if style.display() == taffy::Display::None || node.flags.contains(NodeFlags::INERT) {
+        let props = self.host.interaction(id);
+        if style.display() == taffy::Display::None
+            || node.flags.contains(NodeFlags::INERT)
+            || props.a11y_hidden
+        {
             return None;
         }
-        let props = self.host.interaction(id);
         let kind = node.kind;
 
         let overflow = style.overflow();

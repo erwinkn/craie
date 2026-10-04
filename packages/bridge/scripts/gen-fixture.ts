@@ -176,7 +176,7 @@ enc.drawing(8, "0 0 24 24", [
   { ...shape, kind: 2, geometry: "4,4 20,4 12,20", transform: "rotate(90 12 12)", dashes: "", fill: 0xffff_ff80, current: CURRENT.fill, fillRule: 1, stroke: 0, opacity: 0.5 },
 ])
 enc.place(0, 8, NIL)
-enc.interaction(8, 0, INTERACTION.inert)
+enc.interaction(8, 0, INTERACTION.inert | INTERACTION.a11yHidden)
 enc.trap(7, TRAP.active | TRAP.modal | TRAP.autoFocus | TRAP.restoreFocus) // a modal layer
 enc.group(7, GROUP.horizontal | GROUP.vertical | GROUP.loop | GROUP.selectOnFocus) // and a focus group
 // An image node: encoded bytes (native decodes them later, off the UI

@@ -181,7 +181,10 @@ line height; span zero is the base, and a paragraph has no family of
 its own). The interaction op's flag byte carries focusable,
 selectable, inert and auto-focus (bits 0 to 3, the last two since
 protocol 8), then pressable, disabled and keep-focus (bits 4 to 6,
-protocol 7); unknown bits fail decoding. The trap op (0x62, protocol
+protocol 7), and accessibility-hidden (bit 7, protocol 19: the node and
+its subtree leave the accessibility tree, layers it owns excepted, and
+input is untouched; focus inside is reported on the window). Every bit
+is defined. The trap op (0x62, protocol
 8) sets a node's focus-trap flags: active, modal, auto-focus and
 restore-focus (ARCHITECTURE-update topic 3). The group op (0x63,
 protocol 10) makes a node a focus group: horizontal, vertical, loop and

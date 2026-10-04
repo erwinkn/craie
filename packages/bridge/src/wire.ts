@@ -15,7 +15,7 @@
 // across transactions.
 
 const MAGIC = 0x3257_5243 // "CRW2" little-endian
-export const VERSION = 18
+export const VERSION = 19
 export const NIL = 0xffff_ffff // no node / append / default style
 
 const enum Op {
@@ -484,8 +484,10 @@ export const CHORD_FLAG = { named: 1, noRepeat: 2, inInput: 4 } as const
  * `inert`: no hit testing, focus or accessibility for the node and its
  * subtree. `autoFocus`: the node a focus trap focuses on activation,
  * or on its mount into an active trap the focus is outside of.
- * Bits 4 to 6 are the `PRESS_FLAG` bits, shifted by `pressShift`. */
-export const INTERACTION = { focusable: 1, selectable: 2, inert: 4, autoFocus: 8, pressShift: 4 } as const
+ * Bits 4 to 6 are the `PRESS_FLAG` bits, shifted by `pressShift`.
+ * `a11yHidden`: out of the accessibility tree with its subtree, input
+ * untouched (protocol 19). */
+export const INTERACTION = { focusable: 1, selectable: 2, inert: 4, autoFocus: 8, pressShift: 4, a11yHidden: 128 } as const
 /** Trap op flag bits — mirror mutation.rs `trap_flag`. */
 export const TRAP = { active: 1, modal: 2, autoFocus: 4, restoreFocus: 8 } as const
 /** Focus group op flag bits — mirror mutation.rs `group_flag`. No bits:

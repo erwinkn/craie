@@ -10,10 +10,10 @@ use crate::events::{
 };
 use crate::geom::Size;
 use crate::host::NodeId;
-use crate::mutation::{Command, NodeKind, TextSpan, Transaction, press};
+use crate::mutation::{Command, NodeKind, TextSpan, Transaction, interaction_flag, press};
 use crate::states::state_bit::{FOCUS_VISIBLE, PRESSED};
 use crate::ui::Ui;
-use crate::wire::{self, WireError};
+use crate::wire;
 
 const NIL: u32 = u32::MAX;
 const LISTEN: u32 = mask::PRESS | mask::ACTIVATE | mask::POINTER_UP;
@@ -663,15 +663,13 @@ fn press_flags_round_trip() {
         .windows(9)
         .position(|w| w[0] == wire::op::INTERACTION && w[1..5] == 0u32.to_le_bytes())
         .expect("the interaction op");
-    for bad in [1u8 << 7, 0xff] {
+    // Every flags byte is defined (bit 7 hides from accessibility):
+    // each decodes and round-trips.
+    assert_eq!(interaction_flag::ALL, 0xff);
+    for flags in 0..=0xffu8 {
         let mut b = buf.clone();
-        b[i + 9] = bad;
-        assert!(
-            matches!(
-                wire::decode(&b),
-                Err(WireError::BadRef("interaction flags"))
-            ),
-            "{bad:#x}"
-        );
+        b[i + 9] = flags;
+        let back = wire::decode(&b).unwrap();
+        assert_eq!(wire::encode(&back), b, "{flags:#x}");
     }
 }

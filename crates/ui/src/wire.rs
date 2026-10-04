@@ -47,7 +47,7 @@ use crate::mutation::{
 pub use crate::mutation::{group_flag, interaction_flag, trap_flag};
 
 pub const MAGIC: u32 = 0x3257_5243; // "CRW2"
-pub const VERSION: u16 = 18;
+pub const VERSION: u16 = 19;
 
 pub mod op {
     // structure
@@ -1366,10 +1366,9 @@ pub fn decode(buf: &[u8]) -> Result<Transaction<'_>, WireError> {
                 text: string(r.u32()?)?.into(),
             },
             op::INTERACTION => {
+                // Every bit is defined (`interaction_flag::ALL` is 0xff
+                // since protocol 19).
                 let (id, listeners, flags) = (r.u32()?, r.u32()?, r.u8()?);
-                if flags & !interaction_flag::ALL != 0 {
-                    return Err(WireError::BadRef("interaction flags"));
-                }
                 Mutation::Interaction {
                     id,
                     listeners,

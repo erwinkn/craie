@@ -14,7 +14,7 @@ test("encoder emits the documented byte layout", () => {
   const dv = new DataView(buf.buffer, buf.byteOffset, buf.byteLength)
   let at = 0
   expect(dv.getUint32(at, true)).toBe(0x3257_5243); at += 4 // "CRW2"
-  expect(dv.getUint16(at, true)).toBe(18); at += 2            // version
+  expect(dv.getUint16(at, true)).toBe(19); at += 2            // version
   expect(dv.getUint16(at, true)).toBe(0); at += 2            // flags
   expect(dv.getBigUint64(at, true)).toBe(7n); at += 8        // seq
   expect(dv.getUint32(at, true)).toBe(1); at += 4            // 1 string
@@ -161,7 +161,7 @@ test("bad timings leave the encoder unchanged", () => {
 // the fixture: its header must be this VERSION, and Rust's
 // wire_fixture test decodes it only at the Rust VERSION.
 test("registered fonts bumped the protocol to 17 (line limits took 16)", () => {
-  expect(VERSION).toBe(18)
+  expect(VERSION).toBe(19)
   expect([ROLE.dialog, ROLE.alertdialog, ROLE.tab, ROLE.tablist]).toEqual([17, 18, 19, 20])
 })
 
