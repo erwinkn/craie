@@ -17,6 +17,7 @@ All files are from the Noto project under the SIL Open Font License 1.1
 | NotoSansSymbols2-Regular.ttf | `fonts/NotoSansSymbols2/hinted/ttf/` (has U+2715 ✕) |
 | NotoSansJP-Subset-Regular.otf | noto-cjk `Sans/SubsetOTF/JP/NotoSansJP-Regular.otf`, subset below |
 | NotoEmoji-Var-Test.ttf | the same variable Noto Emoji, subset to 🙂 with its wght axis (300 to 700) kept: the rasterizer's variation test only, not a pinned face |
+| NotoEmoji-Var-Swapped.ttf | NotoEmoji-Var-Test.ttf with its wght axis malformed (min 700, max 300), patched below: the registration test's bad axis |
 | NotoEmoji-Subset-Regular.ttf | google/fonts `ofl/notoemoji/NotoEmoji[wght].ttf` (monochrome), instanced at wght 400 and subset below |
 
 The Japanese face is subset to keep the repository small (234 KB from
@@ -49,6 +50,28 @@ The variable test face (1.9 KB):
 ```
 pyftsubset "NotoEmoji[wght].ttf" --text="🙂" --layout-features='*' \
   --output-file=NotoEmoji-Var-Test.ttf
+```
+
+The swapped-axis face swaps the wght axis record's minimum and maximum
+(16.16 fixed) in `fvar`, leaving every other byte, and the table's
+stale checksum, as they were:
+
+```
+python3 - <<'PY'
+import struct
+b = bytearray(open('NotoEmoji-Var-Test.ttf', 'rb').read())
+for i in range(struct.unpack('>H', b[4:6])[0]):
+    rec = 12 + 16 * i
+    if b[rec:rec + 4] == b'fvar':
+        off = struct.unpack('>I', b[rec + 8:rec + 12])[0]
+        axes, count, size = struct.unpack('>H2xHH', b[off + 4:off + 12])
+        for a in range(count):
+            at = off + axes + a * size
+            if b[at:at + 4] == b'wght':
+                lo, default, hi = struct.unpack('>iii', b[at + 4:at + 16])
+                struct.pack_into('>iii', b, at + 4, hi, default, lo)
+open('NotoEmoji-Var-Swapped.ttf', 'wb').write(b)
+PY
 ```
 
 `Inter-Subset-Regular.ttf` is Inter 4.001 (rsms, SIL OFL 1.1,

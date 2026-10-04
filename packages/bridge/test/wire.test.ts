@@ -160,7 +160,7 @@ test("bad timings leave the encoder unchanged", () => {
 // The handshake compares each side's wire VERSION. They agree through
 // the fixture: its header must be this VERSION, and Rust's
 // wire_fixture test decodes it only at the Rust VERSION.
-test("the lists contract bumped the protocol to 20 (fonts, border sides, a11y hiding took 17-19)", () => {
+test("the lists contract bumped the protocol to 20 (hiding from accessibility alone took 19)", () => {
   expect(VERSION).toBe(20)
   expect([ROLE.dialog, ROLE.alertdialog, ROLE.tab, ROLE.tablist]).toEqual([17, 18, 19, 20])
 })

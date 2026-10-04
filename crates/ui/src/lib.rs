@@ -13,6 +13,7 @@ mod a11y_tests;
 pub mod animation;
 #[cfg(test)]
 mod animation_tests;
+pub mod border;
 pub mod bridge;
 pub mod claims;
 #[cfg(test)]

@@ -101,6 +101,9 @@ pub mod op {
     /// An image node's configuration: id u32 | fit u8 (0 cover, 1
     /// contain, 2 fill). Its bytes come as a PAYLOAD.
     pub const IMAGE_CONFIG: u8 = 0x73;
+    /// A font file to register: family string u32 (NIL: the file's own
+    /// names) | byte length u32 | the bytes (TTF, OTF, a collection).
+    pub const FONT: u8 = 0x74;
     // command
     pub const COMMAND: u8 = 0x80;
     // lists
@@ -172,6 +175,10 @@ pub mod paint_field {
     /// count u8 (at most `shadow::MAX_SHADOWS`) | count × shadow
     /// (`put_shadows`): replaces the box shadows.
     pub const SHADOWS: u8 = 1 << 3;
+    /// Borders per side: 4 widths f32, 4 colors u32 (top, right,
+    /// bottom, left), then a fallback u8 (bits 0-3: that side's width is
+    /// the uniform border's, bits 4-7: its color; 0xFF: no sides).
+    pub const SIDES: u8 = 1 << 4;
 }
 
 /// Box shadows: count u8, then per shadow x, y, blur, spread f32,
@@ -550,6 +557,7 @@ pub fn encode(txn: &Transaction<'_>) -> Vec<u8> {
                 radius,
                 border,
                 shadows,
+                sides,
             } => {
                 ops.push(op::PAINT);
                 u32le(&mut ops, *id);
@@ -566,6 +574,9 @@ pub fn encode(txn: &Transaction<'_>) -> Vec<u8> {
                 if shadows.is_some() {
                     mask |= paint_field::SHADOWS;
                 }
+                if sides.is_some() {
+                    mask |= paint_field::SIDES;
+                }
                 ops.push(mask);
                 if let Some(c) = fill {
                     u32le(&mut ops, *c);
@@ -579,6 +590,11 @@ pub fn encode(txn: &Transaction<'_>) -> Vec<u8> {
                 }
                 if let Some(s) = shadows {
                     put_shadows(&mut ops, s);
+                }
+                if let Some(s) = sides {
+                    s.widths.iter().for_each(|&w| f32le(&mut ops, w));
+                    s.colors.iter().for_each(|&c| u32le(&mut ops, c));
+                    ops.push(s.fallback);
                 }
             }
             Mutation::Paragraph { id, text, spans } => {
@@ -661,6 +677,13 @@ pub fn encode(txn: &Transaction<'_>) -> Vec<u8> {
                 for p in params {
                     u32le(&mut ops, *p);
                 }
+            }
+            Mutation::Font { family, bytes } => {
+                let s = family.as_ref().map_or(NIL, |f| strings.get(f));
+                ops.push(op::FONT);
+                u32le(&mut ops, s);
+                u32le(&mut ops, bytes.len() as u32);
+                ops.extend_from_slice(bytes);
             }
             Mutation::Payload { id, bytes } => {
                 ops.push(op::PAYLOAD);
@@ -1329,7 +1352,8 @@ pub fn decode(buf: &[u8]) -> Result<Transaction<'_>, WireError> {
                     & !(paint_field::FILL
                         | paint_field::RADIUS
                         | paint_field::BORDER
-                        | paint_field::SHADOWS)
+                        | paint_field::SHADOWS
+                        | paint_field::SIDES)
                     != 0
                 {
                     return Err(WireError::BadRef("paint mask"));
@@ -1354,12 +1378,22 @@ pub fn decode(buf: &[u8]) -> Result<Transaction<'_>, WireError> {
                 } else {
                     None
                 };
+                let sides = if mask & paint_field::SIDES != 0 {
+                    Some(crate::border::BorderSides {
+                        widths: r.f32s()?,
+                        colors: [r.u32()?, r.u32()?, r.u32()?, r.u32()?],
+                        fallback: r.u8()?,
+                    })
+                } else {
+                    None
+                };
                 Mutation::Paint {
                     id,
                     fill,
                     radius,
                     border,
                     shadows,
+                    sides,
                 }
             }
             op::PARAGRAPH => {
@@ -1409,10 +1443,9 @@ pub fn decode(buf: &[u8]) -> Result<Transaction<'_>, WireError> {
                 text: string(r.u32()?)?.into(),
             },
             op::INTERACTION => {
+                // Every bit is defined (`interaction_flag::ALL` is 0xff
+                // since protocol 19).
                 let (id, listeners, flags) = (r.u32()?, r.u32()?, r.u8()?);
-                if flags & !interaction_flag::ALL != 0 {
-                    return Err(WireError::BadRef("interaction flags"));
-                }
                 Mutation::Interaction {
                     id,
                     listeners,
@@ -1461,6 +1494,17 @@ pub fn decode(buf: &[u8]) -> Result<Transaction<'_>, WireError> {
                 kind: r.u32()?,
                 params: [r.u32()?, r.u32()?, r.u32()?, r.u32()?],
             },
+            op::FONT => {
+                let family = match r.u32()? {
+                    NIL => None,
+                    s => Some(string(s)?.into()),
+                };
+                let len = r.u32()? as usize;
+                Mutation::Font {
+                    family,
+                    bytes: r.take(len)?.into(),
+                }
+            }
             op::PAYLOAD => {
                 let id = r.u32()?;
                 let len = r.u32()? as usize;

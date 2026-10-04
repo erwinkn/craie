@@ -938,6 +938,23 @@ Reviewer minors and nitpicks not fixed yet.
 - Why deferred: the kit truncates labels, titles and paths in one
   direction; CSS's own bidi truncation is loosely specified.
 
+### DF-68: registered fonts: no WOFF2, no family lists, 2 MiB per file
+
+- Source: milestone 3 (registered fonts, protocol 17).
+- Where: crates/text/src/fonts.rs (`RawFonts`), crates/ui/src/bridge.rs
+  (`MAX_BYTES`), packages/bridge/src/host.ts (`registerFont`).
+- Claim: `registerFont` takes TTF, OTF and collections; it rejects WOFF
+  and WOFF2 with a `TypeError`. A span names one family, so the kit's
+  family lists (`Inter Variable, Inter, ...`) are resolved by its adapter
+  to the first registered one. Each font goes alone, once everything sent
+  before it is acked, so it has the session's 4 MiB commit queue to
+  itself; a file over `MAX_FONT_BYTES` (2 MiB, half the queue, so commits
+  made while a font drains still fit; a full CJK font) rejects with a
+  `RangeError`, since no op splits a font. Only
+  `wght` is followed among variation axes (not `wdth`, `slnt`, `opsz`).
+- Why deferred: Marbre ships Inter and JetBrains Mono as TTF, each well
+  under 1 MiB; the rest waits for a font that needs it.
+
 ### DF-69: boxes with shadows draw one call each
 
 - Source: #26 review (1,024 boxes with eight shadows: 1,024 draw commands,
@@ -950,6 +967,75 @@ Reviewer minors and nitpicks not fixed yet.
 - Why deferred: merging across a block's unused slots needs them zeroed
   (degenerate quads) or an indirect draw list; it is a renderer-wide
   change, to measure on the Mac against a screen of real buttons.
+
+### DF-70: variants don't carry borders per side
+
+- Source: milestone 3 (borders per side, protocol 18).
+- Where: crates/ui/src/variants.rs (`Values`), packages/bridge/src/host.ts
+  (`variantValues`).
+- Claim: `_hover: { borderBottomColor }` is ignored with a warning: a
+  variant can't set a side's own width or color. Sides that fall back
+  to the uniform border follow a variant (or an animation) of
+  `borderColor` and `borderWidth`, as in React Native, so
+  `_focus: { borderColor }` on an underlined input works. `Values`' mask
+  is full (16 bits), so own sides need a wider mask or a second record.
+- Why deferred: the kit's dividers and cards don't change a side on hover
+  or press; widen the mask when one does.
+
+### DF-71: mixed-color sides meet square; unequal widths round their inner corners alike
+
+- Source: milestone 3 (borders per side, protocol 18).
+- Where: crates/ui/src/border.rs (`draw`).
+- Claim: with different colors, the corners take the top's and the
+  bottom's colors, joining the left and right sides horizontally where
+  the corner zone (the radius, or the top or bottom width) ends, not on
+  CSS's diagonal. Sides of one color draw one ring whose
+  inner corners all take the radius less the narrowest width: CSS's for
+  equal widths, and with unequal ones a rounder, slightly heavier inner
+  corner than CSS's elliptical one (radius less each adjacent width per
+  axis), never a gap.
+  Two consequences: a pill (radius at least half the height) has corner
+  zones that meet, so its left and right colors don't show; and with the
+  top unpainted, the side strips stop square at the corner, where CSS
+  draws a sub-pixel crescent.
+- Why deferred: the kit uses one color and one width per box (dividers,
+  cards); diagonal joins and elliptical inner corners need per-corner
+  radii in the shadow shader.
+
+### DF-72: a rounded border's outer antialiasing is lighter than the uniform border's
+
+- Source: #34 re-check.
+- Where: crates/ui/src/scene_sync.rs (sides over the fill),
+  crates/render/src/shaders/scene.wgsl (`shadow_coverage`).
+- Claim: borders per side draw as a ring over the box's fill, so on a
+  rounded corner the ring's antialiased edge composites over the fill's
+  own antialiased edge, and the outermost pixels come out lighter than
+  the uniform border's, which shades fill and border in one pass. It
+  shows on any rounded box with sides, one color or mixed.
+- Why deferred: a fraction of one pixel on corner arcs; the fix is to
+  draw the fill inside the ring's hole (or in the same pass) when sides
+  exist.
+
+### DF-73: `aria-hidden` on a nested Text doesn't hide its span
+
+- Source: #35 review.
+- Where: packages/bridge/src/host.ts (nested Text becomes a span),
+  crates/ui/src/a11y.rs.
+- Claim: a Text nested in a Text is a span of its parent's paragraph,
+  not a node, so `aria-hidden` on it has no node to set: VoiceOver still
+  reads a decorative "*" (a "Required" star) with the label around it.
+- Why deferred: needs a per-span accessibility flag in the paragraph's
+  text (or a label override); the kit puts decorations in Views.
+
+### DF-74: `importantForAccessibility="no"` does nothing
+
+- Source: #35 review.
+- Where: packages/bridge/src/host.ts (`a11yHidden`).
+- Claim: React Native's "no" (the node itself ignored, its children
+  still read) has no Craie equivalent: only "no-hide-descendants" acts,
+  as `aria-hidden`. "auto" and "yes" are the default anyway.
+- Why deferred: needs a "flatten this node" mode in the projection; no
+  kit component uses "no".
 
 ## Closed
 

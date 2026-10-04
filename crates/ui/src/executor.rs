@@ -650,6 +650,7 @@ pub fn validate(host: &Host, txn: &Transaction<'_>) -> Result<Validated, WireErr
                 radius,
                 border,
                 shadows,
+                sides,
                 ..
             } => {
                 if !o.kind(*id).is_some_and(NodeKind::has_box) {
@@ -660,6 +661,9 @@ pub fn validate(host: &Host, txn: &Transaction<'_>) -> Result<Validated, WireErr
                 }
                 if shadows.is_some_and(|s| !s.valid()) {
                     return Err(invalid("shadow out of range"));
+                }
+                if sides.is_some_and(|s| !s.valid()) {
+                    return Err(invalid("border width out of range"));
                 }
             }
             Mutation::Paragraph { id, text, spans } => {
@@ -985,6 +989,11 @@ pub fn validate(host: &Host, txn: &Transaction<'_>) -> Result<Validated, WireErr
                     }
                 }
             }
+            Mutation::Font { family, bytes } => {
+                if crate::text::fonts::RawFonts::faces_in(bytes, family.as_deref()) == 0 {
+                    return Err(invalid("a font with no face"));
+                }
+            }
             Mutation::Environment {
                 narrow_max,
                 compact_max,
@@ -1173,24 +1182,38 @@ impl Ui {
                 radius,
                 border,
                 shadows,
-            } => match self.base_mut(*id) {
-                Some(b) => {
-                    b.fill = fill.unwrap_or(b.fill);
-                    b.radius = radius.map_or(b.radius, |r| r.max(0.0));
-                    b.border = border.map_or(b.border, |(c, w)| (c, w.max(0.0)));
-                    b.shadows = shadows.unwrap_or(b.shadows);
+                sides,
+            } => {
+                // Variants carry no sides (DF-70): they set the node itself.
+                if let Some(s) = sides {
+                    self.set_border_sides(NodeId(*id), *s);
                 }
-                None => {
-                    self.declare_paint(NodeId(*id), *fill, *radius, *border);
-                    if let Some(s) = shadows {
-                        self.set_shadows(NodeId(*id), *s);
+                match self.base_mut(*id) {
+                    Some(b) => {
+                        b.fill = fill.unwrap_or(b.fill);
+                        b.radius = radius.map_or(b.radius, |r| r.max(0.0));
+                        b.border = border.map_or(b.border, |(c, w)| (c, w.max(0.0)));
+                        b.shadows = shadows.unwrap_or(b.shadows);
+                    }
+                    None => {
+                        self.declare_paint(NodeId(*id), *fill, *radius, *border);
+                        if let Some(s) = shadows {
+                            self.set_shadows(NodeId(*id), *s);
+                        }
                     }
                 }
-            },
+            }
             Mutation::Color { id, color } => match self.base_mut(*id) {
                 Some(b) => b.color = *color,
                 None => self.declare_color(NodeId(*id), *color),
             },
+            Mutation::Font { family, bytes } => {
+                // Copied once: the font store keeps the bytes.
+                self.host.copied_bytes += bytes.len() as u64;
+                let bytes: crate::text::fonts::FaceBytes = std::sync::Arc::new(bytes.to_vec());
+                let added = self.text.fonts.register(bytes, family.as_deref());
+                self.refont(&added);
+            }
             Mutation::States { id, bits } => self.set_app_bits(*id, *bits),
             Mutation::Variants { id, variants } => self.set_variants(*id, variants),
             Mutation::Environment {
@@ -1375,7 +1398,8 @@ impl Ui {
                 let focusable = flags & interaction_flag::FOCUSABLE != 0;
                 let selectable = flags & interaction_flag::SELECTABLE != 0;
                 let auto_focus = flags & interaction_flag::AUTO_FOCUS != 0;
-                let press = flags >> interaction_flag::PRESS_SHIFT;
+                let press = flags >> interaction_flag::PRESS_SHIFT & crate::mutation::press::ALL;
+                let a11y_hidden = flags & interaction_flag::A11Y_HIDDEN != 0;
                 // An exiting node stays inert whatever it declares.
                 let inert = flags & interaction_flag::INERT != 0 || self.exiting(NodeId(*id));
                 let inert = self.set_inert(NodeId(*id), inert);
@@ -1388,6 +1412,7 @@ impl Ui {
                     || i.selectable != selectable
                     || i.press != press
                     || i.auto_focus != auto_focus
+                    || i.a11y_hidden != a11y_hidden
                     || inert
                 {
                     self.observe.listeners(*id, i.listeners, *listeners);
@@ -1396,6 +1421,7 @@ impl Ui {
                     i.selectable = selectable;
                     i.press = press;
                     i.auto_focus = auto_focus;
+                    i.a11y_hidden = a11y_hidden;
                     self.host.set_listeners(*id as usize, *listeners);
                     // A new hover listener: the hover at rest may be
                     // stale (it was not tracked without one).
@@ -1584,6 +1610,45 @@ impl Ui {
                     self.host.lists.policies.insert(*id, *anchor);
                 }
             }
+        }
+    }
+
+    /// Fonts registered after text resolved: every paragraph with a span
+    /// naming one of `families` (lowercase) resolves its spans again and
+    /// reflows, as a web font that loads late.
+    fn refont(&mut self, families: &[String]) {
+        if families.is_empty() {
+            return;
+        }
+        let mut any = false;
+        for i in 0..self.host.paragraphs.len() {
+            let node = NodeId(i as u32);
+            if !self.host.is_live(node) {
+                continue;
+            }
+            let names = |s: &crate::mutation::TextSpan| {
+                (self.host.families.get(s.family as usize)).map_or("", String::as_str)
+            };
+            let p = &self.host.paragraphs[i];
+            let named = p.spans.iter().any(|s| {
+                let n = names(s).trim().to_lowercase();
+                families.contains(&n)
+            });
+            if !named {
+                continue;
+            }
+            let fonts: Vec<_> = (p.spans.iter())
+                .map(|s| (names(s).to_string(), s.weight, s.italic))
+                .collect();
+            let fonts: Vec<_> = (fonts.into_iter())
+                .map(|(name, weight, italic)| self.text.font(&name, weight, italic))
+                .collect();
+            self.host.paragraphs[i].fonts = fonts;
+            self.host.mark_text(node);
+            any = true;
+        }
+        if any {
+            self.host.revs.text_metrics.bump();
         }
     }
 
@@ -2006,6 +2071,23 @@ impl Ui {
 }
 
 impl Ui {
+    /// Replaces a node's borders per side: its chunk rebuilds. Sides that
+    /// all fall back are none (the uniform border paints); explicit zero
+    /// or transparent sides are kept, and paint nothing.
+    pub(crate) fn set_border_sides(&mut self, node: NodeId, sides: crate::border::BorderSides) {
+        let before = self.host.border_sides.get(&node.0).copied();
+        let after = (sides.fallback != crate::border::BorderSides::ALL_FALLBACK).then_some(sides);
+        if before == after {
+            return;
+        }
+        match after {
+            Some(s) => self.host.border_sides.insert(node.0, s),
+            None => self.host.border_sides.remove(&node.0),
+        };
+        self.host.dirty.content.push(node.0);
+        self.host.revs.paint.bump();
+    }
+
     /// Replaces a node's box shadows: its chunk rebuilds (shadows are
     /// geometry in it). Shadows don't tween: a transition snaps them.
     pub(crate) fn set_shadows(&mut self, node: NodeId, shadows: crate::shadow::Shadows) {

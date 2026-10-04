@@ -1,0 +1,69 @@
+{
+  "format": "craie-list-trace/1",
+  "id": "K16",
+  "name": "replacing every visible row holds the first visible place, whatever the new rows above it measure",
+  "viewport": {
+    "width": 400,
+    "height": 200
+  },
+  "config": {
+    "overscan": 200,
+    "lookahead": 200,
+    "endThreshold": 80,
+    "anchor": "start",
+    "anchorPolicy": "reading"
+  },
+  "templates": [],
+  "items": [
+    {
+      "count": 100,
+      "key": "m{i}",
+      "estimate": 40,
+      "height": 40
+    }
+  ],
+  "steps": [
+    {
+      "do": "mount"
+    },
+    {
+      "do": "scroll",
+      "offset": 1000,
+      "expect": {
+        "anchor": {
+          "key": "m25",
+          "offset": 0
+        }
+      }
+    },
+    {
+      "do": "changes",
+      "changes": [
+        {
+          "kind": "splice",
+          "at": 20,
+          "remove": 10,
+          "items": [
+            {
+              "count": 10,
+              "key": "n{i}",
+              "estimate": 40,
+              "height": 80
+            }
+          ]
+        }
+      ],
+      "expect": {
+        "anchor": {
+          "key": "n25",
+          "offset": 0
+        },
+        "offset": 1200,
+        "visible": [
+          25,
+          27
+        ]
+      }
+    }
+  ]
+}

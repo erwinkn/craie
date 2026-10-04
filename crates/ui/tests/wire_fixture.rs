@@ -87,6 +87,17 @@ fn js_fixture_decodes_and_executes() {
         ]
     );
 
+    // Borders per side, top, right, bottom, left.
+    assert_eq!(
+        host.border_sides[&3],
+        craie_ui::border::BorderSides {
+            widths: [0.0, 0.5, 1.0, 2.0],
+            colors: [0, 0x2020_20ff, 0x3030_30ff, 0x4040_40ff],
+            fallback: 0x81,
+        }
+    );
+    assert!(!host.border_sides.contains_key(&0));
+
     // Spatial: the matrix translateX(3) · scale(2), the parts, opacity
     // 0.75, z -2.
     let s = host.spatial[0];
@@ -110,14 +121,15 @@ fn js_fixture_decodes_and_executes() {
     let i = host.interaction(NodeId(2));
     assert_eq!(i.listeners, 0xfff);
     assert!(i.focusable && i.auto_focus && !i.selectable);
-    // The vector 8 is inert; the layer 7 a modal focus trap and a
-    // focus group.
+    // The vector 8 is inert and hidden from accessibility; the layer 7
+    // a modal focus trap and a focus group.
     assert!(
         host.node(NodeId(8))
             .unwrap()
             .flags
             .contains(NodeFlags::INERT)
     );
+    assert!(host.interaction(NodeId(8)).a11y_hidden);
     assert!(txn.mutations.iter().any(|m| matches!(
         m,
         Mutation::Trap {
@@ -490,6 +502,18 @@ fn js_fixture_decodes_and_executes() {
         ui.take_image_requests()[..],
         [craie_ui::image::ImageRequest::Probe { .. }]
     ));
+
+    // A font op: its family and bytes, registered.
+    let font = include_bytes!("../../../assets/fonts/NotoEmoji-Var-Test.ttf");
+    assert!(txn.mutations.iter().any(|m| matches!(
+        m,
+        Mutation::Font { family: Some(f), bytes } if f == "Fixture Var" && bytes[..] == font[..]
+    )));
+    assert!(ui.text.font("Fixture Var", 400, false).is_some());
+    assert_ne!(
+        ui.text.font("Fixture Var", 400, false),
+        ui.text.font("", 400, false)
+    );
 
     // WriteClipboard, addressed to no node.
     assert_eq!(ui.inputs.clipboard.get().as_deref(), Some("copied"));

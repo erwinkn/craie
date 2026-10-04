@@ -16,6 +16,8 @@ import {
   MAX_SHADOWS,
   shadowsIn,
   type ShadowIn,
+  type BorderSidesIn,
+  SIDES_NONE,
   STATE_BIT,
   Encoder,
   EVENT_KIND,
@@ -421,6 +423,10 @@ export interface Transport {
 /** Native bounds node ids (they index dense stores): mirror host.rs
  * `MAX_NODES`. */
 const MAX_ID = 1 << 24
+/** The largest font file `registerFont` sends: half the session's 4 MiB
+ * commit queue, so commits React submits while the UI thread drains a
+ * font still fit. */
+export const MAX_FONT_BYTES = 2 * 1024 * 1024
 
 /** "#rgb" / "#rrggbb" / "#rrggbbaa" / "rgb(r, g, b)" / "rgba(r, g,
  * b, a)" (the kit's formats; also space-separated with "/ a",
@@ -641,7 +647,18 @@ function interactionFlags(props: Record<string, any>): number {
     (props.selectable ? INTERACTION.selectable : 0) |
     (props.inert ? INTERACTION.inert : 0) |
     (props.autoFocus ? INTERACTION.autoFocus : 0) |
-    pressFlags(props) << INTERACTION.pressShift
+    pressFlags(props) << INTERACTION.pressShift |
+    (a11yHidden(props) ? INTERACTION.a11yHidden : 0)
+}
+
+/** Hidden from accessibility: web `aria-hidden` (a Booleanish: `"false"`
+ * doesn't hide) or React Native's two, with React Native's precedence:
+ * `aria-hidden`, when set, wins over both. */
+function a11yHidden(props: Record<string, any>): boolean {
+  const v = props["aria-hidden"]
+  const aria = v === true || v === "true" ? true : v === false || v === "false" ? false : undefined
+  if (aria !== undefined) return aria
+  return !!props.accessibilityElementsHidden || props.importantForAccessibility === "no-hide-descendants"
 }
 
 function listenerMask(props: Record<string, any>): number {
@@ -882,6 +899,27 @@ function shadowList(list: readonly BoxShadow[] | undefined): ShadowIn[] {
   })))
 }
 
+const SIDE_NAMES = ["Top", "Right", "Bottom", "Left"] as const
+
+/** React Native's per-side borders (`borderTopWidth`... `borderLeftColor`):
+ * a side's unset width or color falls back to the uniform border's,
+ * resolved natively as it draws (`fallback`); `undefined` when no
+ * per-side prop is set (the uniform border paints). */
+function sidesOf(props: Record<string, any>): BorderSidesIn | undefined {
+  let fallback = 0
+  SIDE_NAMES.forEach((s, i) => {
+    if (props[`border${s}Width`] === undefined) fallback |= 1 << i
+    if (props[`border${s}Color`] === undefined) fallback |= 1 << (4 + i)
+  })
+  if (fallback === SIDES_NONE) return undefined
+  const widths = SIDE_NAMES.map(s => props[`border${s}Width`] ?? 0)
+  const colors = SIDE_NAMES.map(s => color(props[`border${s}Color`]))
+  return { widths: widths as unknown as BorderSidesIn["widths"], colors: colors as unknown as BorderSidesIn["colors"], fallback }
+}
+
+const sidesKey = (s: BorderSidesIn | undefined) =>
+  (s ? `${s.widths.join(",")};${s.colors.join(",")};${s.fallback}` : "")
+
 const shadowKey = (list: readonly ShadowIn[]) =>
   list.map(s => `${s.x},${s.y},${s.blur},${s.spread},${s.color},${+s.inset}`).join(";")
 
@@ -967,6 +1005,8 @@ export class CraieHost {
   private encoder = new Encoder()
   private scheduled = false
   private flushWaiters = new Map<number, () => void>()
+  /** The last font's ack: the next font waits for it (`registerFont`). */
+  private fontChain: Promise<void> = Promise.resolve()
   /** Live nodes by native id — the event-dispatch target table. */
   private nodes = new Map<number, HostNode>()
   /** Open layer containers, in open order: the root level's tail. */
@@ -1114,7 +1154,8 @@ export class CraieHost {
   }
 
   /** Resolves once a frame that includes every commit made so far is on
-   * screen; with `rest`, the first such frame with nothing moving or
+   * screen (React's commits: after `renderSync`, or once an update has
+   * committed; a `render` call may not have yet); with `rest`, the first such frame with nothing moving or
    * loading (no animation, no scroll settling, no image decoding).
    * Never resolves while an animation loops. */
   presented(options: { rest?: boolean } = {}): Promise<Presented> {
@@ -1135,6 +1176,44 @@ export class CraieHost {
       if (ev.text) throw Error(`capture failed: ${ev.text}`)
       return { frame: ev.revision, width: ev.x, height: ev.y }
     })
+  }
+
+  /** Registers a font file the app ships (TTF, OTF or a collection;
+   * not WOFF or WOFF2) under `family`, else under the file's own family
+   * names. Registered families come before the system's for the spans
+   * that name them; text already showing in a family reflows when its
+   * font arrives. A variable font serves every weight its axis holds.
+   * The last registration of a face (family, weight, italic) wins.
+   *
+   * Resolves once native has the font. A font goes alone, once native
+   * has acked everything sent before it (the previous font included),
+   * so it has the session's 4 MiB commit queue to itself: text rendered
+   * meanwhile shows in a fallback face, then reflows. Rejects, sending
+   * nothing, for WOFF or WOFF2, for a file over `MAX_FONT_BYTES`, or
+   * when the transport fails; a file that holds no face closes the
+   * session. */
+  registerFont(data: ArrayBuffer | ArrayBufferView, family?: string): Promise<void> {
+    // Copied now: the font may go after earlier acks, and the caller may
+    // reuse, change or transfer its buffer meanwhile.
+    const view = data instanceof ArrayBuffer
+      ? new Uint8Array(data.slice(0))
+      : new Uint8Array(data.buffer, data.byteOffset, data.byteLength).slice()
+    const magic = String.fromCharCode(...view.subarray(0, 4))
+    if (magic === "wOFF" || magic === "wOF2") {
+      return Promise.reject(new TypeError(
+        "registerFont: WOFF and WOFF2 aren't supported; pass the TTF or OTF file"))
+    }
+    if (view.byteLength > MAX_FONT_BYTES) {
+      return Promise.reject(new RangeError(
+        `registerFont: the file is ${view.byteLength} bytes; at most ${MAX_FONT_BYTES} fit a transaction`))
+    }
+    const sent = this.fontChain.then(async () => {
+      await this.flush()
+      this.encoder.font(family ?? null, view)
+      await this.flush()
+    })
+    this.fontChain = sent.catch(() => {})
+    return sent
   }
 
   /** Writes plain text to the system clipboard. */
@@ -1875,17 +1954,22 @@ export class CraieHost {
       const oldR = oldProps.borderRadius ?? 0, newR = props.borderRadius ?? 0
       const oldBc = color(oldProps.borderColor), newBc = color(props.borderColor)
       const oldBw = oldProps.borderWidth ?? 0, newBw = props.borderWidth ?? 0
+      const sides = sidesOf(props), oldSides = sidesOf(oldProps)
+      const newSides = sidesKey(sides) !== sidesKey(oldSides)
+        ? sides ?? { widths: [0, 0, 0, 0], colors: [0, 0, 0, 0], fallback: SIDES_NONE } as BorderSidesIn
+        : undefined
       const shadows = oldProps.boxShadow === props.boxShadow ? undefined : shadowList(props.boxShadow)
       const newShadows = shadows && shadowKey(shadows) !== shadowKey(shadowList(oldProps.boxShadow))
         ? shadows
         : undefined
-      if (oldBg !== newBg || oldR !== newR || oldBc !== newBc || oldBw !== newBw || newShadows) {
+      if (oldBg !== newBg || oldR !== newR || oldBc !== newBc || oldBw !== newBw || newShadows || newSides) {
         enc.paint(
           id,
           oldBg !== newBg ? newBg : undefined,
           oldR !== newR ? newR : undefined,
           oldBc !== newBc || oldBw !== newBw ? { color: newBc, width: newBw } : undefined,
           newShadows,
+          newSides,
         )
       }
     }

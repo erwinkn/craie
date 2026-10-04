@@ -3194,3 +3194,83 @@ fn a_line_limit_truncates_text() {
     t.lines(2, 1);
     assert!(ui.apply_txn(&t).is_err());
 }
+
+/// A registered font serves the spans that name its family from then
+/// on; a font op crosses the wire, and bytes that hold no face fail
+/// validation.
+#[test]
+fn a_registered_font_serves_its_family() {
+    let mut ui = Ui::new(1.0);
+    ui.text = craie_text::TextEngine::with_source(Box::new(craie_text::fonts::pinned()));
+    let inter = include_bytes!("../../../assets/fonts/Inter-Subset-Regular.ttf");
+    let span = TextSpan {
+        font_size: 16.0,
+        family: 0,
+        ..TextSpan::default()
+    };
+    let mut t = Transaction::new(1);
+    t.font(None, &inter[..]);
+    let buf = wire::encode(&t);
+    assert_eq!(wire::decode(&buf).unwrap().mutations, t.mutations);
+    ui.apply(&buf).unwrap();
+    let mut t = Transaction::new(2);
+    t.families.push("Inter".into());
+    t.create(1, NodeKind::Text)
+        .paragraph(1, "Hi", &[span])
+        .append(u32::MAX, 1);
+    ui.apply_txn(&t).unwrap();
+    let inter_face = ui.text.font("Inter", 400, false);
+    assert!(inter_face.is_some() && inter_face != ui.text.font("", 400, false));
+    assert_eq!(ui.host.paragraphs[1].fonts, vec![inter_face]);
+    let mut t = Transaction::new(3);
+    t.font(Some("Brand"), &b"not a font"[..]);
+    assert!(ui.apply_txn(&t).is_err());
+}
+
+/// A font registered after text naming its family resolved: that text
+/// takes it and reflows, as a late web font; text naming other
+/// families keeps its font and its layout (#29 review).
+#[test]
+fn a_late_font_reflows_the_text_naming_it() {
+    let mut ui = Ui::new(1.0);
+    ui.text = craie_text::TextEngine::with_source(Box::new(craie_text::fonts::pinned()));
+    let view = Size::new(400.0, 200.0);
+    let span = |family| TextSpan {
+        font_size: 16.0,
+        family,
+        ..TextSpan::default()
+    };
+    let mut t = Transaction::new(1);
+    t.families.push("Brand Sans".into());
+    t.families.push("Other".into());
+    t.create(1, NodeKind::Text)
+        .paragraph(1, "Hello", &[span(0)])
+        .append(u32::MAX, 1);
+    t.create(2, NodeKind::Text)
+        .paragraph(2, "Hello", &[span(1)])
+        .append(u32::MAX, 2);
+    ui.apply_txn(&t).unwrap();
+    ui.render(view);
+    let system = ui.text.font("", 400, false);
+    assert_eq!(ui.host.paragraphs[1].fonts, vec![system]);
+    let width = |ui: &Ui, id| ui.layouts.data(NodeId(id)).rect.size.width;
+    let before = (width(&ui, 1), width(&ui, 2));
+    let mut t = Transaction::new(2);
+    let inter = include_bytes!("../../../assets/fonts/Inter-Subset-Regular.ttf");
+    t.font(Some("brand sans"), &inter[..]);
+    ui.apply_txn(&t).unwrap();
+    let brand = ui.text.font("Brand Sans", 400, false);
+    assert!(brand.is_some() && brand != system);
+    assert_eq!(ui.host.paragraphs[1].fonts, vec![brand]);
+    assert_eq!(ui.host.paragraphs[2].fonts, vec![system]);
+    ui.render(view);
+    assert_ne!(width(&ui, 1), before.0, "reflowed in the new font");
+    assert_eq!(width(&ui, 2), before.1);
+    // The same bytes again: nothing to resolve.
+    let shapes = ui.text.shapes;
+    let mut t = Transaction::new(3);
+    t.font(Some("Brand Sans"), &inter[..]);
+    ui.apply_txn(&t).unwrap();
+    ui.render(view);
+    assert_eq!(ui.text.shapes, shapes);
+}

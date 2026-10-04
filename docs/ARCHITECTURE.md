@@ -181,7 +181,10 @@ line height; span zero is the base, and a paragraph has no family of
 its own). The interaction op's flag byte carries focusable,
 selectable, inert and auto-focus (bits 0 to 3, the last two since
 protocol 8), then pressable, disabled and keep-focus (bits 4 to 6,
-protocol 7); unknown bits fail decoding. The trap op (0x62, protocol
+protocol 7), and accessibility-hidden (bit 7, protocol 19: the node and
+its subtree leave the accessibility tree, layers it owns excepted, and
+input is untouched). The byte is full: the next flag needs a wider
+field or a new op. The trap op (0x62, protocol
 8) sets a node's focus-trap flags: active, modal, auto-focus and
 restore-focus (ARCHITECTURE-update topic 3). The group op (0x63,
 protocol 10) makes a node a focus group: horizontal, vertical, loop and
@@ -202,7 +205,12 @@ carry the same list under bit 15. A span row's former reserved byte is
 its feature byte (protocol 15): tabular digits (bit 0) and, read from
 span zero, the paragraph's alignment (bits 1 and 2: start, left,
 center, right); unknown bits fail decoding. `LINES` (0x42, protocol 16:
-id, then a u16 count, 0 for none) sets a text node's line limit. The spatial op's mask carries z (bit 2, an
+id, then a u16 count, 0 for none) sets a text node's line limit. The
+paint op's mask gains bit 4 (protocol 18): borders per side, four widths
+(f32, top, right, bottom, left, in [0, 4096]), four colors (u32), then a
+fallback byte (bits 0-3: that side's width is the uniform border's; bits
+4-7: its color is); every bit set clears them, so explicit zero or
+transparent sides stay sides. The spatial op's mask carries z (bit 2, an
 i32; work item 4), and the layer op (0x22: id, then the owner or NIL)
 makes a node a layer container. The state family (0xB0, protocol 4, work
 item 5): `STATES` sets a scope's app bits (u64; the input bits are
@@ -603,7 +611,24 @@ A custom source takes byte ids from fontique's or `RawFonts`'s
 counter. `RawFonts` is the
 byte-only source (browser profiles, tests): family by name, nearest
 weight and italic with synthesis, fallback by coverage in registration
-order. The `pinned-fonts` feature embeds the harness fonts from
+order. A variable face (a `wght` axis) matches any weight its axis holds
+and is instanced there, clamped to the axis; bold is synthesized only
+past an axis that stops short of 600. A malformed axis (minimum above
+maximum, or not finite) makes the face static. Fonts the app ships
+(protocol 17, `FONT` op 0x74: a family string or NIL, then the file's
+bytes, copied once; `registerFont` in the bridge) register into a
+`RawFonts` of the engine's (`Fonts::register`), asked before the
+platform source for a family it holds; generic names stay the
+platform's. As with web fonts, a registered family draws only where a
+span names it: registered faces take fallback only for spans whose
+primary face is registered (after the platform's emoji face for emoji
+presentation), never for system spans. The last registration of a face
+(family, weight, italic) replaces it; the same bytes again change
+nothing. Registering drops the resolved-font caches, and every
+paragraph with a span naming a newly registered family resolves again
+and reflows, so a font that arrives after first render takes over, as a
+late web font. Validation rejects bytes that hold no face, judged with
+the family names registration uses. The `pinned-fonts` feature embeds the harness fonts from
 `assets/fonts` (Noto Sans regular, bold, and italic, Arabic, Hebrew,
 Devanagari, a JP subset, Symbols 2, and a monochrome emoji subset,
 under OFL). Tests and the harness lay text out on them. On desktop,
@@ -797,6 +822,25 @@ own chunk: outer ones before its fill, the last listed lowest, inset
 ones after it, under its content. Their rects are reserved in paint
 order and written after the kind's own paint slots, which keep their
 numbers. A shadow list rebuilds the chunk; it does not tween.
+Borders per side (protocol 18, `border.rs`) paint instead of the uniform
+border, inside the border box over the fill, after inset shadows. A side
+the app didn't set resolves from the uniform border as it draws: its
+width from the border width, its color as the border's own paint slot,
+so variants and animations of `borderColor` and `borderWidth` reach it
+without a rebuild. A transparent side of its own color paints nothing,
+and a side paints at least one device pixel. Every piece is a hard inset
+shadow whose box is the border box and whose shape is the hole; the
+shader snaps a shadow's box like the fill and its shape relative to it,
+so a side is round(width x scale) device pixels from the fill's edge
+wherever the box lands (outer and inset shadows keep their size the same
+way). Sides of one paint are one ring, its inner corners at the radius
+less the narrowest width (DF-71). Mixed paints cut that ring into
+horizontal bands (a shadow with `FLAG_BAND` draws between two y values,
+which snap relative to the box like the shape, and its quad covers only
+the band): the top zone, down to the radius or the top width, in the
+top's paint with both corners; the bottom zone likewise; the left and
+right sides between them. Pieces don't overlap, so translucent colors
+blend once; a side not painted leaves its zone to the left and right.
 A placement table (offset, transform record, clip) positions
 each chunk. Transform records exist for the window root, scroll
 content, and transformed subtrees; all other nodes draw in their
@@ -1251,7 +1295,10 @@ the prop was given, `selected` on list rows and tabs only
 (ARCHITECTURE-update §13). Under an active modal trap, AccessKit's `modal` goes on the
 trap's first `dialog` or `alertdialog` node, else on the trap. A list row reports its position among all items and the item
 count; rows appear in item order, and rows layout hides are not
-published.
+published. A node hidden from accessibility (`A11Y_HIDDEN`) leaves the
+tree with its subtree, layers it owns excepted, except while focus is
+on it or inside it: then it stays, so the focused node and its path are
+in the tree, as Chrome does with `aria-hidden`.
 Bounds are transform-aware. The whole tree still republishes on any
 a11y-observable change; the semantic dirty queue exists but does not
 drive incremental updates yet. Actions queue back onto the UI thread.
@@ -1362,7 +1409,8 @@ ROLE op's reported states since 6; press flags, pressable spans, and
 focus groups and the `tab` and `tablist` roles since 10; keyframe
 animations and the `ENVIRONMENT` event since 11; exits since 12;
 observations since 13; box shadows since 14; text alignment and
-tabular digits since 15; line limits since 16). The session hands
+tabular digits since 15; line limits since 16; registered fonts since
+17). The session hands
 JS its output in native order: acks sit between event frames where they happened, so the ack
 of a transaction never overtakes an event raised before it applied,
 and the facade retires a claim set's old handlers on that ack.

@@ -67,6 +67,10 @@ impl RectInstance {
     pub const FLAG_SHADOW: u32 = 1 << 1;
     /// An inset shadow: drawn inside the box, around the shape.
     pub const FLAG_INSET: u32 = 1 << 2;
+    /// A shadow drawn only between two y values (chunk-local), the box
+    /// record's sixth and seventh words: borders per side cut along a
+    /// rounded corner.
+    pub const FLAG_BAND: u32 = 1 << 3;
 }
 
 /// One glyph bitmap placed in a chunk. 20 bytes.

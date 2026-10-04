@@ -117,7 +117,7 @@ export type {
   Transport,
   UiEvent,
 } from "./host.js"
-export { defineStates, onFrameStats } from "./host.js"
+export { defineStates, MAX_FONT_BYTES, onFrameStats } from "./host.js"
 export { Circle, Ellipse, G, Line, Path, Polygon, Polyline, Rect } from "./shapes.js"
 export type {
   CircleProps, EllipseProps, GProps, LineProps, PathProps, PolyProps, RectProps, ShapeProps,
@@ -240,6 +240,16 @@ export interface ListenerProps {
    * below. Layers opened inside escape it, as portals do. A focus
    * inside moves out (to the enclosing trap's target, else nowhere). */
   inert?: boolean
+  /** Out of the accessibility tree with its subtree, input untouched:
+   * hover, press, focus and selection work as before. Layers opened
+   * inside stay in the tree, as portals do; so does the path to a focused
+   * node inside, as Chrome does. Any of the three hides; `aria-hidden`,
+   * when set, wins over the other two (`false` shows), as in React
+   * Native. */
+  "aria-hidden"?: boolean | "true" | "false"
+  accessibilityElementsHidden?: boolean
+  /** Only `"no-hide-descendants"` acts (it hides, as `aria-hidden`). */
+  importantForAccessibility?: "auto" | "yes" | "no" | "no-hide-descendants"
 }
 
 /** Which animation ended (`onAnimationEnd`): `enter` or `animation`,
@@ -394,6 +404,20 @@ export interface ViewProps extends ListenerProps, StateProps, Variants, MotionPr
   borderRadius?: number
   borderColor?: string | number
   borderWidth?: number
+  /** Borders per side, as React Native's: a side's width or color falls
+   * back to `borderWidth` and `borderColor` (variants and animations of
+   * those reach it). Any of these paints the sides instead of the
+   * uniform border, rounded with the box. Paint only: like
+   * `borderWidth`, they don't inset the content (the layout border is
+   * `style.borderWidth`). */
+  borderTopWidth?: number
+  borderRightWidth?: number
+  borderBottomWidth?: number
+  borderLeftWidth?: number
+  borderTopColor?: string | number
+  borderRightColor?: string | number
+  borderBottomColor?: string | number
+  borderLeftColor?: string | number
   /** Box shadows, first on top (React Native's structured
    * `boxShadow`): an outer one shows outside the box, an inset one
    * inside its border. At most 8; they don't tween (a transition
@@ -475,6 +499,18 @@ export interface SurfaceProps extends ListenerProps, Variants, MotionProps {
   borderRadius?: number
   borderColor?: string | number
   borderWidth?: number
+  /** Borders per side, as React Native's: a side's width or color falls
+   * back to `borderWidth` and `borderColor`. Any of these paints the
+   * sides instead of the uniform border (one color: rounded with the
+   * box; mixed colors: square-cornered for now). */
+  borderTopWidth?: number
+  borderRightWidth?: number
+  borderBottomWidth?: number
+  borderLeftWidth?: number
+  borderTopColor?: string | number
+  borderRightColor?: string | number
+  borderBottomColor?: string | number
+  borderLeftColor?: string | number
   /** Box shadows, first on top (React Native's structured
    * `boxShadow`): an outer one shows outside the box, an inset one
    * inside its border. At most 8; they don't tween (a transition
@@ -508,6 +544,18 @@ export interface TextInputProps extends ListenerProps, Omit<StateProps, "disable
   borderRadius?: number
   borderColor?: string | number
   borderWidth?: number
+  /** Borders per side, as React Native's: a side's width or color falls
+   * back to `borderWidth` and `borderColor`. Any of these paints the
+   * sides instead of the uniform border (one color: rounded with the
+   * box; mixed colors: square-cornered for now). */
+  borderTopWidth?: number
+  borderRightWidth?: number
+  borderBottomWidth?: number
+  borderLeftWidth?: number
+  borderTopColor?: string | number
+  borderRightColor?: string | number
+  borderBottomColor?: string | number
+  borderLeftColor?: string | number
   /** Box shadows, first on top (React Native's structured
    * `boxShadow`): an outer one shows outside the box, an inset one
    * inside its border. At most 8; they don't tween (a transition
@@ -657,6 +705,18 @@ interface VectorBase extends ListenerProps, Variants, MotionProps {
   borderRadius?: number
   borderColor?: string | number
   borderWidth?: number
+  /** Borders per side, as React Native's: a side's width or color falls
+   * back to `borderWidth` and `borderColor`. Any of these paints the
+   * sides instead of the uniform border (one color: rounded with the
+   * box; mixed colors: square-cornered for now). */
+  borderTopWidth?: number
+  borderRightWidth?: number
+  borderBottomWidth?: number
+  borderLeftWidth?: number
+  borderTopColor?: string | number
+  borderRightColor?: string | number
+  borderBottomColor?: string | number
+  borderLeftColor?: string | number
   /** Box shadows, first on top (React Native's structured
    * `boxShadow`): an outer one shows outside the box, an inset one
    * inside its border. At most 8; they don't tween (a transition
@@ -733,6 +793,18 @@ export interface ImageProps extends ListenerProps, Variants, MotionProps {
   borderRadius?: number
   borderColor?: string | number
   borderWidth?: number
+  /** Borders per side, as React Native's: a side's width or color falls
+   * back to `borderWidth` and `borderColor`. Any of these paints the
+   * sides instead of the uniform border (one color: rounded with the
+   * box; mixed colors: square-cornered for now). */
+  borderTopWidth?: number
+  borderRightWidth?: number
+  borderBottomWidth?: number
+  borderLeftWidth?: number
+  borderTopColor?: string | number
+  borderRightColor?: string | number
+  borderBottomColor?: string | number
+  borderLeftColor?: string | number
   /** Box shadows, first on top (React Native's structured
    * `boxShadow`): an outer one shows outside the box, an inset one
    * inside its border. At most 8; they don't tween (a transition

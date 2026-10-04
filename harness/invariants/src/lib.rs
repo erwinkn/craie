@@ -83,6 +83,14 @@ pub fn snapshot(ui: &Ui) -> Transaction<'static> {
                     Some((p.border_color, p.border_width)),
                 );
             }
+            if let Some(s) = host.shadows.get(&id.0)
+                && !s.is_empty()
+            {
+                t.shadows(id.0, s.as_slice());
+            }
+            if let Some(&s) = host.border_sides.get(&id.0) {
+                t.border_sides(id.0, s);
+            }
         }
         if let Some(p) = host.paragraph(id) {
             let spans = txn_spans(&mut t, host, &p.spans);
@@ -943,6 +951,16 @@ impl Gen {
                     let w = self.pick(&[0.0, 1.0, 2.0]);
                     let r = self.pick(&[0.0, 4.0, 12.0]);
                     t.paint(id, None, Some(r), Some((c, w)));
+                    // Sometimes borders per side over it: some own, some
+                    // falling back, or none again.
+                    if self.rng.chance(0.3) {
+                        let sides = craie_ui::border::BorderSides {
+                            widths: std::array::from_fn(|_| self.pick(&[0.0, 0.5, 1.0, 3.0])),
+                            colors: std::array::from_fn(|_| self.pick(&[0, c, 0x3366_99FF])),
+                            fallback: self.rng.below(256) as u8,
+                        };
+                        t.border_sides(id, sides);
+                    }
                 }
                 7 if kind == NodeKind::Text => {
                     let text = self.text();

@@ -350,6 +350,9 @@ pub struct Interaction {
     pub press: u8,
     /// A trap's first pick for focus (`trap.rs`).
     pub auto_focus: bool,
+    /// Out of the accessibility tree with its subtree
+    /// (`interaction_flag::A11Y_HIDDEN`).
+    pub a11y_hidden: bool,
     pub role: Role,
     /// States reported while clear (`mutation::reported`).
     pub reported: u8,
@@ -467,6 +470,8 @@ pub struct Host {
     pub colors: HashMap<u32, u32>,
     /// Box shadows (`shadow.rs`), id-keyed: most boxes have none.
     pub shadows: HashMap<u32, crate::shadow::Shadows>,
+    /// Borders per side (`border.rs`), id-keyed: few boxes have them.
+    pub border_sides: HashMap<u32, crate::border::BorderSides>,
     /// Item index of a list row (a child of a List node); NIL otherwise.
     pub list_index: Vec<u32>,
     /// List states and scroll anchors (§7).
@@ -540,6 +545,7 @@ impl Host {
             claims: HashMap::new(),
             colors: HashMap::new(),
             shadows: HashMap::new(),
+            border_sides: HashMap::new(),
             list_index: Vec::new(),
             lists: crate::list::Lists::default(),
             orders: HashMap::new(),
@@ -741,6 +747,7 @@ impl Host {
         self.claims.remove(&id.0);
         self.colors.remove(&id.0);
         self.shadows.remove(&id.0);
+        self.border_sides.remove(&id.0);
         self.orders.remove(&id.0);
         self.owners.remove(&id.0);
         self.list_index[i] = NIL;
@@ -862,6 +869,7 @@ impl Host {
         self.claims.remove(&id.0);
         self.colors.remove(&id.0);
         self.shadows.remove(&id.0);
+        self.border_sides.remove(&id.0);
         self.orders.remove(&id.0);
         self.owners.remove(&id.0);
         // Its layers lose their owner: a reuse of the id must not adopt

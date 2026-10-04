@@ -49,6 +49,7 @@ const enum Op {
   Payload = 0x71,
   Drawing = 0x72,
   ImageConfig = 0x73,
+  Font = 0x74,
   // command
   Command = 0x80,
   // lists
@@ -319,7 +320,19 @@ export interface ItemDesc {
 const SPATIAL_FIELD = {
   TRANSFORM: 1 << 0, OPACITY: 1 << 1, Z: 1 << 2, TRANSLATE: 1 << 3, ROTATE: 1 << 4, SCALE: 1 << 5,
 } as const
-const PAINT_FIELD = { FILL: 1 << 0, RADIUS: 1 << 1, BORDER: 1 << 2, SHADOWS: 1 << 3 } as const
+const PAINT_FIELD = { FILL: 1 << 0, RADIUS: 1 << 1, BORDER: 1 << 2, SHADOWS: 1 << 3, SIDES: 1 << 4 } as const
+
+/** Borders per side on the wire: widths and colors, top, right, bottom,
+ * left. `fallback` bits 0-3: side i's width is the uniform border's;
+ * bits 4-7: its color is (native resolves them as drawn, so variants and
+ * animations of `borderColor`/`borderWidth` reach them). Every bit set
+ * (`SIDES_NONE`): no sides. */
+export interface BorderSidesIn {
+  widths: readonly [number, number, number, number]
+  colors: readonly [number, number, number, number]
+  fallback: number
+}
+export const SIDES_NONE = 0xff
 
 /** Box shadows a node may hold (shadow.rs `MAX_SHADOWS`). */
 export const MAX_SHADOWS = 8
@@ -521,8 +534,10 @@ export const CHORD_FLAG = { named: 1, noRepeat: 2, inInput: 4 } as const
  * `inert`: no hit testing, focus or accessibility for the node and its
  * subtree. `autoFocus`: the node a focus trap focuses on activation,
  * or on its mount into an active trap the focus is outside of.
- * Bits 4 to 6 are the `PRESS_FLAG` bits, shifted by `pressShift`. */
-export const INTERACTION = { focusable: 1, selectable: 2, inert: 4, autoFocus: 8, pressShift: 4 } as const
+ * Bits 4 to 6 are the `PRESS_FLAG` bits, shifted by `pressShift`.
+ * `a11yHidden`: out of the accessibility tree with its subtree, input
+ * untouched (protocol 19). */
+export const INTERACTION = { focusable: 1, selectable: 2, inert: 4, autoFocus: 8, pressShift: 4, a11yHidden: 128 } as const
 /** Trap op flag bits — mirror mutation.rs `trap_flag`. */
 export const TRAP = { active: 1, modal: 2, autoFocus: 4, restoreFocus: 8 } as const
 /** Focus group op flag bits — mirror mutation.rs `group_flag`. No bits:
@@ -1542,15 +1557,16 @@ export class Encoder {
     this.ops.u32(id)
     this.ops.u32(owner)
   }
-  /** Masked paint update: fill, corner radius, border (color, width). */
   /** A box's paint; absent fields stay. `shadows` replaces the box
-   * shadows (`shadowsIn` first: native rejects what it doesn't). */
+   * shadows (`shadowsIn` first: native rejects what it doesn't); `sides`
+   * replaces the borders per side, which paint instead of `border`. */
   paint(
     id: number,
     fill?: number,
     radius?: number,
     border?: { color: number; width: number },
     shadows?: readonly ShadowIn[],
+    sides?: BorderSidesIn,
   ) {
     const b = this.ops
     b.u8(Op.Paint)
@@ -1559,12 +1575,18 @@ export class Encoder {
       (fill !== undefined ? PAINT_FIELD.FILL : 0) |
         (radius !== undefined ? PAINT_FIELD.RADIUS : 0) |
         (border !== undefined ? PAINT_FIELD.BORDER : 0) |
-        (shadows !== undefined ? PAINT_FIELD.SHADOWS : 0),
+        (shadows !== undefined ? PAINT_FIELD.SHADOWS : 0) |
+        (sides !== undefined ? PAINT_FIELD.SIDES : 0),
     )
     if (fill !== undefined) b.u32(fill >>> 0)
     if (radius !== undefined) b.f32(radius)
     if (border !== undefined) { b.u32(border.color >>> 0); b.f32(border.width) }
     if (shadows !== undefined) putShadows(b, shadows)
+    if (sides !== undefined) {
+      for (const w of sides.widths) b.f32(Number.isFinite(w) ? Math.min(4096, Math.max(0, w)) : 0)
+      for (const c of sides.colors) b.u32(c >>> 0)
+      b.u8(sides.fallback & 0xff)
+    }
   }
   /** A paragraph: UTF-8 text plus its style span list. Span starts are
    * UTF-8 byte offsets; span zero starts at 0. */
@@ -1695,12 +1717,22 @@ export class Encoder {
     this.ops.u32(kind >>> 0)
     for (let i = 0; i < 4; i++) this.ops.u32((params[i] ?? 0) >>> 0)
   }
+  /** Registers a font file (TTF, OTF, a collection) under `family`, or
+   * its own family names when null. */
+  font(family: string | null, bytes: ArrayBufferView) {
+    this.bytesOp(Op.Font, family === null ? NIL : this.strRef(family), bytes)
+  }
   /** Surface payload: the typed array's bytes, copied once. */
   payload(id: number, bytes: ArrayBufferView) {
+    this.bytesOp(Op.Payload, id, bytes)
+  }
+  /** An op of a u32 (a node, a string ref) and length-prefixed bytes,
+   * copied once. */
+  private bytesOp(op: Op, ref: number, bytes: ArrayBufferView) {
     const view = new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.byteLength)
     const b = this.ops
-    b.u8(Op.Payload)
-    b.u32(id)
+    b.u8(op)
+    b.u32(ref)
     b.u32(view.byteLength)
     b.reserve(view.byteLength)
     b.bytes.set(view, b.at)

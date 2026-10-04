@@ -163,8 +163,16 @@ pub mod interaction_flag {
     pub const AUTO_FOCUS: u8 = 1 << 3;
     /// Bits 4 to 6: the press flags (`press`), shifted.
     pub const PRESS_SHIFT: u8 = 4;
-    pub const ALL: u8 =
-        FOCUSABLE | SELECTABLE | INERT | AUTO_FOCUS | super::press::ALL << PRESS_SHIFT;
+    /// Out of the accessibility tree with its subtree (layers it owns
+    /// excepted), input untouched: web `aria-hidden`, React Native's
+    /// `accessibilityElementsHidden` (protocol 19).
+    pub const A11Y_HIDDEN: u8 = 1 << 7;
+    pub const ALL: u8 = FOCUSABLE
+        | SELECTABLE
+        | INERT
+        | AUTO_FOCUS
+        | super::press::ALL << PRESS_SHIFT
+        | A11Y_HIDDEN;
 }
 
 /// Focus trap flag bits (`Mutation::Trap`).
@@ -726,6 +734,8 @@ pub enum Mutation<'a> {
         border: Option<(u32, f32)>,
         /// Replaces the box shadows (`shadow.rs`); empty: none.
         shadows: Option<crate::shadow::Shadows>,
+        /// Replaces the borders per side (`border.rs`); empty: none.
+        sides: Option<crate::border::BorderSides>,
     },
     // text
     /// `spans` indexes the transaction's span table.
@@ -796,6 +806,12 @@ pub enum Mutation<'a> {
     },
     Payload {
         id: u32,
+        bytes: Cow<'a, [u8]>,
+    },
+    /// Registers a font file's faces (`Fonts::register`), under `family`
+    /// or the file's own names; the window's, no node.
+    Font {
+        family: Option<Cow<'a, str>>,
         bytes: Cow<'a, [u8]>,
     },
     /// A vector node's drawing from runtime shapes (SVG strings,
@@ -962,7 +978,7 @@ impl Mutation<'_> {
             | Mutation::Variants { id, .. }
             | Mutation::Color { id, .. } => id,
             Mutation::Place { child, .. } => child,
-            Mutation::Environment { .. } => NIL,
+            Mutation::Environment { .. } | Mutation::Font { .. } => NIL,
         }
     }
 }
@@ -1130,6 +1146,22 @@ impl<'a> Transaction<'a> {
             radius,
             border,
             shadows: None,
+            sides: None,
+        })
+    }
+
+    /// Replaces the node's borders per side (top, right, bottom, left).
+    /// Sides with `fallback` 0 are all explicit, and paint instead of the
+    /// uniform border even at zero width; `BorderSides::default()` (every
+    /// side fallen back) removes them.
+    pub fn border_sides(&mut self, id: u32, sides: crate::border::BorderSides) -> &mut Self {
+        self.push(Mutation::Paint {
+            id,
+            fill: None,
+            radius: None,
+            border: None,
+            shadows: None,
+            sides: Some(sides),
         })
     }
 
@@ -1147,6 +1179,7 @@ impl<'a> Transaction<'a> {
             radius: None,
             border: None,
             shadows: Some(shadows),
+            sides: None,
         })
     }
 
@@ -1392,7 +1425,7 @@ impl<'a> Transaction<'a> {
     }
 
     /// Interaction with raw `interaction_flag` bits (`INERT`,
-    /// `AUTO_FOCUS`, the shifted press flags).
+    /// `AUTO_FOCUS`, the shifted press flags, `A11Y_HIDDEN`).
     pub fn interaction_bits(&mut self, id: u32, listeners: u32, flags: u8) -> &mut Self {
         self.push(Mutation::Interaction {
             id,
@@ -1424,6 +1457,14 @@ impl<'a> Transaction<'a> {
 
     pub fn surface(&mut self, id: u32, kind: u32, params: [u32; 4]) -> &mut Self {
         self.push(Mutation::Surface { id, kind, params })
+    }
+
+    /// Registers a font file (TTF, OTF or a collection).
+    pub fn font(&mut self, family: Option<&'a str>, bytes: impl Into<Cow<'a, [u8]>>) -> &mut Self {
+        self.push(Mutation::Font {
+            family: family.map(Cow::Borrowed),
+            bytes: bytes.into(),
+        })
     }
 
     pub fn payload(&mut self, id: u32, bytes: impl Into<Cow<'a, [u8]>>) -> &mut Self {
