@@ -15,7 +15,7 @@
 // across transactions.
 
 const MAGIC = 0x3257_5243 // "CRW2" little-endian
-export const VERSION = 16
+export const VERSION = 17
 export const NIL = 0xffff_ffff // no node / append / default style
 
 const enum Op {
@@ -49,6 +49,7 @@ const enum Op {
   Payload = 0x71,
   Drawing = 0x72,
   ImageConfig = 0x73,
+  Font = 0x74,
   // command
   Command = 0x80,
   // lists
@@ -1651,6 +1652,19 @@ export class Encoder {
     for (let i = 0; i < 4; i++) this.ops.u32((params[i] ?? 0) >>> 0)
   }
   /** Surface payload: the typed array's bytes, copied once. */
+  /** Registers a font file (TTF, OTF, a collection) under `family`, or
+   * its own family names when null. */
+  font(family: string | null, bytes: ArrayBufferView) {
+    const view = new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.byteLength)
+    const s = family === null ? NIL : this.strRef(family)
+    const b = this.ops
+    b.u8(Op.Font)
+    b.u32(s)
+    b.u32(view.byteLength)
+    b.reserve(view.byteLength)
+    b.bytes.set(view, b.at)
+    b.at += view.byteLength
+  }
   payload(id: number, bytes: ArrayBufferView) {
     const view = new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.byteLength)
     const b = this.ops

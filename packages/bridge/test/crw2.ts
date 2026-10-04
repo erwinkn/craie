@@ -137,6 +137,13 @@ export function readFrame(buf: Uint8Array): Frame {
       case 0x40: op.s = strings[u32()]; op.f.push(u32(), u32()); break // paragraph
       case 0x41: op.f.push(f32()); op.s = strings[u32()]; op.f.push(u8()); break
       case 0x42: op.f.push(u16()); break // lines
+      case 0x74: { // font: the family ref (read as the id), then the bytes
+        if (op.id !== 0xffff_ffff) op.s = strings[op.id]
+        const n = u32()
+        op.bytes = buf.slice(at, at + n)
+        at += n
+        break
+      }
       case 0x50: op.f.push(u8(), u8()); break // role, reported
       case 0x51: op.s = strings[u32()]; break // label
       case 0x60: op.f.push(u32(), u8()); break // interaction

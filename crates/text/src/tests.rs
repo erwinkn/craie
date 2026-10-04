@@ -1156,3 +1156,85 @@ fn the_ellipsis_aligns_with_its_line() {
     );
     assert!((l.x + l.advance - 80.0).abs() < 1e-3, "start is right");
 }
+
+/// A variable face matches any weight its `wght` axis holds, instanced
+/// there (no faux bold); past the axis it clamps, and synthesizes bold
+/// only when the axis stops short of 600.
+#[test]
+fn variable_faces_take_the_requested_weight() {
+    use crate::fonts::{FontAttrs, FontSource, RawFonts};
+    let mut raw = RawFonts::new();
+    // Noto Emoji subset to one glyph with its wght axis (300 to 700).
+    raw.add_as(
+        std::sync::Arc::new(&include_bytes!("../../../assets/fonts/NotoEmoji-Var-Test.ttf")[..]),
+        Some("Var"),
+    );
+    let at = |raw: &mut RawFonts, weight| {
+        raw.select(
+            "Var",
+            FontAttrs {
+                weight,
+                italic: false,
+            },
+        )
+        .unwrap()
+    };
+    for (asked, got) in [
+        (300, 300.0),
+        (500, 500.0),
+        (700, 700.0),
+        (900, 700.0),
+        (100, 300.0),
+    ] {
+        let b = at(&mut raw, asked);
+        assert_eq!(b.variations, vec![(*b"wght", got)], "{asked}");
+        assert!(!b.synthesis.embolden, "{asked}: the axis has the weight");
+    }
+}
+
+/// Registered fonts come before the source for a family they hold, and
+/// first in fallback; generic names stay the source's, and a span
+/// resolved before the registration keeps its face.
+#[test]
+fn registered_fonts_come_first() {
+    let mut e = engine();
+    let noto = e.font("", 400, false);
+    let before = e.font("Inter", 400, false);
+    assert_eq!(before, noto, "unknown: the default family");
+    let added = e.fonts.register(
+        std::sync::Arc::new(&include_bytes!("../../../assets/fonts/Inter-Subset-Regular.ttf")[..]),
+        None,
+    );
+    assert_eq!(added, 1);
+    let inter = e.font("Inter", 400, false);
+    assert!(inter.is_some() && inter != noto, "the registered family");
+    assert_eq!(
+        e.font("system-ui", 400, false),
+        noto,
+        "generic names stay the source's"
+    );
+    // Under another name, a variable weight.
+    e.fonts.register(
+        std::sync::Arc::new(&include_bytes!("../../../assets/fonts/Inter-Subset-Regular.ttf")[..]),
+        Some("Brand Sans"),
+    );
+    assert!(e.font("brand sans", 400, false).is_some());
+    // A variable face: one instance per weight.
+    e.fonts.register(
+        std::sync::Arc::new(&include_bytes!("../../../assets/fonts/NotoEmoji-Var-Test.ttf")[..]),
+        Some("Var"),
+    );
+    let (light, bold) = (e.font("Var", 300, false), e.font("Var", 700, false));
+    assert!(light.is_some() && bold.is_some() && light != bold);
+    let store = &e.fonts.store;
+    assert_ne!(
+        store.instance_data(light.unwrap()).coords,
+        store.instance_data(bold.unwrap()).coords
+    );
+    // Not a font: nothing added.
+    assert_eq!(
+        e.fonts
+            .register(std::sync::Arc::new(&b"not a font"[..]), None),
+        0
+    );
+}

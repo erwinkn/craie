@@ -3142,3 +3142,35 @@ fn a_line_limit_truncates_text() {
     t.lines(2, 1);
     assert!(ui.apply_txn(&t).is_err());
 }
+
+/// A registered font serves the spans that name its family from then
+/// on; a font op crosses the wire, and bytes that hold no face fail
+/// validation.
+#[test]
+fn a_registered_font_serves_its_family() {
+    let mut ui = Ui::new(1.0);
+    ui.text = craie_text::TextEngine::with_source(Box::new(craie_text::fonts::pinned()));
+    let inter = include_bytes!("../../../assets/fonts/Inter-Subset-Regular.ttf");
+    let span = TextSpan {
+        font_size: 16.0,
+        family: 0,
+        ..TextSpan::default()
+    };
+    let mut t = Transaction::new(1);
+    t.font(None, &inter[..]);
+    let buf = wire::encode(&t);
+    assert_eq!(wire::decode(&buf).unwrap().mutations, t.mutations);
+    ui.apply(&buf).unwrap();
+    let mut t = Transaction::new(2);
+    t.families.push("Inter".into());
+    t.create(1, NodeKind::Text)
+        .paragraph(1, "Hi", &[span])
+        .append(u32::MAX, 1);
+    ui.apply_txn(&t).unwrap();
+    let inter_face = ui.text.font("Inter", 400, false);
+    assert!(inter_face.is_some() && inter_face != ui.text.font("", 400, false));
+    assert_eq!(ui.host.paragraphs[1].fonts, vec![inter_face]);
+    let mut t = Transaction::new(3);
+    t.font(Some("Brand"), &b"not a font"[..]);
+    assert!(ui.apply_txn(&t).is_err());
+}

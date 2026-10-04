@@ -1112,7 +1112,8 @@ export class CraieHost {
   }
 
   /** Resolves once a frame that includes every commit made so far is on
-   * screen; with `rest`, the first such frame with nothing moving or
+   * screen (React's commits: after `renderSync`, or once an update has
+   * committed; a `render` call may not have yet); with `rest`, the first such frame with nothing moving or
    * loading (no animation, no scroll settling, no image decoding).
    * Never resolves while an animation loops. */
   presented(options: { rest?: boolean } = {}): Promise<Presented> {
@@ -1133,6 +1134,19 @@ export class CraieHost {
       if (ev.text) throw Error(`capture failed: ${ev.text}`)
       return { frame: ev.revision, width: ev.x, height: ev.y }
     })
+  }
+
+  /** Registers a font file the app ships (TTF, OTF or a collection;
+   * not WOFF2) under `family`, else under the file's own family names.
+   * Registered families come before the system's for the spans that
+   * name them from then on, so register before rendering text in them.
+   * A variable font serves every weight its axis holds. Resolves once
+   * native has it; a file that holds no face closes the session. Each
+   * goes as its own transaction (at most 4 MiB). */
+  registerFont(data: ArrayBuffer | ArrayBufferView, family?: string): Promise<void> {
+    const view = data instanceof ArrayBuffer ? new Uint8Array(data) : data
+    this.encoder.font(family ?? null, view)
+    return this.flush()
   }
 
   /** Writes plain text to the system clipboard. */

@@ -96,6 +96,10 @@ fn emit_decorations(
 pub struct Fonts {
     pub store: FontStore,
     source: Box<dyn FontSource>,
+    /// Fonts the app registered (`register`): asked first for a family
+    /// they hold, and first for fallback; generic names stay the
+    /// source's.
+    registered: fonts::RawFonts,
     /// (family, attrs) -> primary instance. Few entries: a linear scan,
     /// no key allocation per lookup.
     primary: Vec<(String, FontAttrs, Option<FontInstanceId>)>,
@@ -114,6 +118,7 @@ impl Fonts {
         Fonts {
             store: FontStore::new(),
             source,
+            registered: fonts::RawFonts::new(),
             primary: Vec::new(),
             candidates: HashMap::new(),
             default_family: "system-ui".to_string(),
@@ -129,6 +134,19 @@ impl Fonts {
     pub fn set_default_family(&mut self, family: &str) {
         family.clone_into(&mut self.default_family);
         self.primary.retain(|(f, _, _)| !f.is_empty());
+    }
+
+    /// Registers a font file's faces (under `family`, else the file's
+    /// own family names) ahead of the source. Spans resolved before keep
+    /// their faces; later ones see the new family. Returns how many faces
+    /// it added (0: not a font).
+    pub fn register(&mut self, bytes: fonts::FaceBytes, family: Option<&str>) -> usize {
+        let added = self.registered.add_as(bytes, family);
+        if added > 0 {
+            self.primary.clear();
+            self.candidates.clear();
+        }
+        added
     }
 
     /// Replaces the source; faces already interned stay.
@@ -155,9 +173,13 @@ impl Resolve for Fonts {
         } else {
             family
         };
-        let blob = self
-            .source
-            .select(name, attrs)
+        let registered = if fonts::RawFonts::generic(&name.trim().to_lowercase()) {
+            None
+        } else {
+            self.registered.select(name, attrs)
+        };
+        let blob = registered
+            .or_else(|| self.source.select(name, attrs))
             .or_else(|| self.source.select("sans-serif", attrs));
         let font = blob.and_then(|b| self.store.instance_of(&b));
         self.primary.push((family.to_string(), attrs, font));
@@ -174,7 +196,8 @@ impl Resolve for Fonts {
         let emoji = fonts::emoji_presentation(cluster);
         let by_cluster = self.candidates.entry((script, attrs, emoji)).or_default();
         if !by_cluster.contains_key(cluster) {
-            let blobs = self.source.fallback(cluster, script, attrs, emoji);
+            let mut blobs = self.registered.fallback(cluster, script, attrs, emoji);
+            blobs.extend(self.source.fallback(cluster, script, attrs, emoji));
             let list = blobs
                 .iter()
                 .filter_map(|b| self.store.instance_of(b))

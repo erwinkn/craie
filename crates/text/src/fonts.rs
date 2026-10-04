@@ -330,6 +330,9 @@ struct RawFace {
     family: String,
     weight: u16,
     italic: bool,
+    /// A variable face's weight axis (`wght`): its range. It matches any
+    /// weight in it, instanced there.
+    wght: Option<(f32, f32)>,
 }
 
 /// A `FontSource` over font files handed over as bytes: browser profiles
@@ -359,6 +362,30 @@ impl RawFonts {
     /// Registers every face of a font file (a collection has several).
     /// Returns how many faces it added.
     pub fn add(&mut self, bytes: FaceBytes) -> usize {
+        self.add_as(bytes, None)
+    }
+
+    /// How many faces of `data` would register: 0 when it is not a font
+    /// file (or no face names a family).
+    pub fn faces_in(data: &[u8]) -> usize {
+        let count = match FileRef::new(data) {
+            Ok(FileRef::Collection(c)) => c.len(),
+            Ok(FileRef::Font(_)) => 1,
+            Err(_) => 0,
+        };
+        (0..count)
+            .filter(|&i| {
+                FontRef::from_index(data, i).is_ok_and(|f| {
+                    f.localized_strings(StringId::FAMILY_NAME)
+                        .english_or_first()
+                        .is_some()
+                })
+            })
+            .count()
+    }
+
+    /// `add`, under `family` instead of the file's own family name.
+    pub fn add_as(&mut self, bytes: FaceBytes, family: Option<&str>) -> usize {
         let data = bytes.as_ref().as_ref();
         let count = match FileRef::new(data) {
             Ok(FileRef::Collection(c)) => c.len(),
@@ -376,12 +403,17 @@ impl RawFonts {
                     .english_or_first()
                     .map(|s| s.chars().collect::<String>().to_lowercase())
             };
-            let Some(family) =
+            let Some(family) = family.map(str::to_lowercase).or_else(|| {
                 name(StringId::TYPOGRAPHIC_FAMILY_NAME).or_else(|| name(StringId::FAMILY_NAME))
-            else {
+            }) else {
                 continue;
             };
             let a = font.attributes();
+            let wght = font
+                .axes()
+                .iter()
+                .find(|x| x.tag() == skrifa::Tag::new(b"wght"))
+                .map(|x| (x.min_value(), x.max_value()));
             self.faces.push(RawFace {
                 blob: FontBlob {
                     id,
@@ -393,6 +425,7 @@ impl RawFonts {
                 family,
                 weight: a.weight.value().round().clamp(1.0, 1000.0) as u16,
                 italic: !matches!(a.style, Style::Normal),
+                wght,
             });
             added += 1;
         }
@@ -417,17 +450,32 @@ impl RawFonts {
             .filter(|f| f.family == family)
             .min_by_key(|f| {
                 let italic_miss = (f.italic != attrs.italic) as u32;
-                let distance = (f.weight as i32 - attrs.weight as i32).unsigned_abs();
+                // A variable face is at the requested weight anywhere in
+                // its axis.
+                let w = match f.wght {
+                    Some((lo, hi)) => (attrs.weight as f32).clamp(lo, hi).round() as i32,
+                    None => f.weight as i32,
+                };
+                let distance = (w - attrs.weight as i32).unsigned_abs();
                 let lighter = (attrs.weight >= 500 && f.weight < attrs.weight) as u32;
                 (italic_miss, distance, lighter)
             })
     }
 
-    /// `face` as a match for `attrs`, with synthesis for what it lacks.
+    /// `face` as a match for `attrs`: a variable face instanced at the
+    /// weight (clamped to its axis), with synthesis for what it lacks.
     fn matched(face: &RawFace, attrs: FontAttrs) -> FontBlob {
         let mut blob = face.blob.clone();
+        let weight = match face.wght {
+            Some((lo, hi)) => {
+                let w = (attrs.weight as f32).clamp(lo, hi);
+                blob.variations = vec![(*b"wght", w)];
+                w
+            }
+            None => face.weight as f32,
+        };
         blob.synthesis = Synthesis {
-            embolden: attrs.weight >= 600 && face.weight < 600,
+            embolden: attrs.weight >= 600 && weight < 600.0,
             skew: if attrs.italic && !face.italic {
                 14.0
             } else {
@@ -437,7 +485,9 @@ impl RawFonts {
         blob
     }
 
-    fn generic(name: &str) -> bool {
+    /// A generic family name (`sans-serif`, `system-ui`...), which a
+    /// source maps to a family of its own.
+    pub fn generic(name: &str) -> bool {
         matches!(
             name,
             "" | "sans-serif" | "serif" | "monospace" | "system-ui" | "ui-sans-serif" | "cursive"
