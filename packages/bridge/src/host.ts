@@ -421,13 +421,15 @@ export interface Transport {
 const MAX_ID = 1 << 24
 
 /** "#rgb" / "#rrggbb" / "#rrggbbaa" / "rgb(r, g, b)" / "rgba(r, g,
- * b, a)" (the kit's formats; also space-separated with "/ a", and
- * percentages) / number -> 0xRRGGBBAA. */
+ * b, a)" (the kit's formats; also space-separated with "/ a",
+ * percentages, any case and surrounding space, as CSS) / number ->
+ * 0xRRGGBBAA. */
 export function color(v: string | number | undefined, fallback = 0): number {
   if (v === undefined) return fallback
   if (typeof v === "number") return v >>> 0
-  if (v.startsWith("rgb")) return rgbFunction(v)
-  let s = v.startsWith("#") ? v.slice(1) : v
+  const t = v.trim()
+  if (/^rgba?\(/i.test(t)) return rgbFunction(t)
+  let s = t.startsWith("#") ? t.slice(1) : t
   if (s.length === 3) s = [...s].map(c => c + c).join("") + "ff"
   if (s.length === 6) s += "ff"
   if (s.length !== 8) throw Error(`bad color "${v}"`)
@@ -437,7 +439,7 @@ export function color(v: string | number | undefined, fallback = 0): number {
 }
 
 function rgbFunction(v: string): number {
-  const m = /^rgba?\(([^)]*)\)$/.exec(v.trim())
+  const m = /^rgba?\(([^)]*)\)$/i.exec(v.trim())
   const parts = m ? m[1]!.trim().split(/\s*[,/]\s*|\s+/) : []
   if (parts.length !== 3 && parts.length !== 4) throw Error(`bad color "${v}"`)
   const channel = (p: string, max: number) => {

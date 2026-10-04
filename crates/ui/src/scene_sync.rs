@@ -621,11 +621,17 @@ impl Ui {
     fn near(&self, id: NodeId, region: &Rect) -> bool {
         let p = self.scene.placement(id.0);
         let d = self.layouts.data(id);
+        // Its outer shadows draw past it: admit it when they may show.
+        let m = self
+            .host
+            .shadows
+            .get(&id.0)
+            .map_or(0.0, crate::shadow::reach);
         let local = Rect::new(
-            p.offset[0],
-            p.offset[1],
-            d.rect.size.width,
-            d.rect.size.height,
+            p.offset[0] - m,
+            p.offset[1] - m,
+            d.rect.size.width + 2.0 * m,
+            d.rect.size.height + 2.0 * m,
         );
         let b = self.scene.transforms.world(p.transform).map_rect(&local);
         // Overflowing content (text wider than its box) stays in range
@@ -754,10 +760,16 @@ impl Ui {
                 Rect::new(0.0, 0.0, data.rect.size.width, data.rect.size.height),
                 p.radius,
             );
-            let padding = (data.clip_box, (p.radius - p.border_width).max(0.0));
+            // An inset shadow is cut inside the painted border, which the
+            // fill rect draws (`border_width`), not the layout's.
+            let border_width = if p.border_color & 0xFF != 0 {
+                p.border_width
+            } else {
+                0.0
+            };
             for (i, s) in shadows.as_slice().iter().enumerate() {
                 if let Some(at) = placed[i]
-                    && let Some(b) = crate::shadow::box_shadow(s, border, padding)
+                    && let Some(b) = crate::shadow::box_shadow(s, border, border_width)
                 {
                     w.set_shadow(at, &b);
                 }
