@@ -307,6 +307,7 @@ impl<A: App> ApplicationHandler for Driver<A> {
                 self.app.resized(window);
             }
             WindowEvent::Occluded(occluded) => self.app.occluded(window, occluded),
+            WindowEvent::ThemeChanged(_) => self.app.appearance(window),
             WindowEvent::RedrawRequested => self.app.redraw(window),
             WindowEvent::Focused(gained) => self.app.event(window, &Event::Focus(gained)),
             WindowEvent::ModifiersChanged(m) => {

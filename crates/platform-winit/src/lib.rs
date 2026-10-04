@@ -116,6 +116,17 @@ impl Window {
         PlatformWindow::logical_size(self)
     }
 
+    /// The window has keyboard focus.
+    pub fn focused(&self) -> bool {
+        self.inner.has_focus()
+    }
+
+    /// The system appearance is dark (`false` where the platform does
+    /// not say).
+    pub fn dark(&self) -> bool {
+        self.inner.theme() == Some(::winit::window::Theme::Dark)
+    }
+
     /// Enables or disables the platform input method. While enabled the
     /// window delivers `Ime` events instead of plain key presses for
     /// composing text. `caret_area` (logical points, window-relative)
@@ -195,6 +206,9 @@ pub trait App: 'static {
 
     /// The OS or the app requested a frame.
     fn redraw(&mut self, window: &Window);
+
+    /// The system appearance (light or dark) changed.
+    fn appearance(&mut self, _window: &Window) {}
 
     /// A normalized input event. Positions are logical points. The
     /// implementation consumes what it handles natively (editing,

@@ -14,7 +14,7 @@
 // across transactions.
 
 const MAGIC = 0x3257_5243 // "CRW2" little-endian
-export const VERSION = 12
+export const VERSION = 13
 export const NIL = 0xffff_ffff // no node / append / default style
 
 const enum Op {
@@ -293,7 +293,14 @@ const enum Cmd {
   ScrollTo = 3,
   InsertText = 4,
   WriteClipboard = 5,
+  Measure = 6,
+  Present = 7,
 }
+
+/** A PRESENT command's flags — mirror wire.rs `present_flag`. */
+export const PRESENT_FLAG = { rest: 1 } as const
+/** A WINDOW event's key bits — mirror events.rs `window_bit`. */
+export const WINDOW_BIT = { focused: 1, visible: 2, dark: 4 } as const
 
 /** Accessibility roles — mirror mutation.rs `Role`. */
 export const ROLE = {
@@ -379,6 +386,20 @@ export const EVENT_KIND = {
    * root, key = the reason (`END_REASON`: finished, removed, parent
    * gone, skipped). Sent once per exit that started. */
   exitEnd: 22,
+  /** A layout listener's node has a new border box: x/y relative to its
+   * parent's border box (no scroll offset, no transform), a/b = width
+   * and height. Once at its first layout, then on each change. */
+  layout: 23,
+  /** A `measure` answer: key = the request, revision = 1 when measured
+   * (x/y/a/b = the window-space bounding box), 0 when the node is gone
+   * or not displayed. */
+  measure: 24,
+  /** The window's state (node NIL): x/y = logical size, a = scale, key
+   * = `WINDOW_BIT`s. Sent at start and on each change. */
+  window: 25,
+  /** A `presented` answer (node NIL): key = the request, revision = the
+   * frame's number, x/y = its pixel size, text = why a capture failed. */
+  presented: 26,
 } as const
 
 /** A press event's phase — mirror events.rs `press_phase`. */
@@ -495,6 +516,7 @@ export const EVENT_MASK = {
   scroll: 1 << 8,
   press: 1 << 9,
   activate: 1 << 10,
+  layout: 1 << 11,
 } as const
 
 // Style schema — mask bit order must match wire.rs `mod field`.
@@ -1628,6 +1650,26 @@ export class Encoder {
     this.ops.u8(Op.Command)
     this.ops.u32(id)
     this.ops.u8(Cmd.InsertText)
+    this.ops.u32(s)
+  }
+  /** Asks for `id`'s window-space box; native answers `request` with a
+   * MEASURE event. */
+  cmdMeasure(id: number, request: number) {
+    this.ops.u8(Op.Command)
+    this.ops.u32(id)
+    this.ops.u8(Cmd.Measure)
+    this.ops.u32(request)
+  }
+  /** Asks to hear (PRESENTED, `request`) once a frame including this
+   * transaction is presented, at rest when `rest`; with a `path`, that
+   * frame is written there as a PNG. */
+  cmdPresent(request: number, rest: boolean, path: string | null) {
+    const s = path === null ? NIL : this.strRef(path)
+    this.ops.u8(Op.Command)
+    this.ops.u32(NIL)
+    this.ops.u8(Cmd.Present)
+    this.ops.u32(request)
+    this.ops.u8(rest ? PRESENT_FLAG.rest : 0)
     this.ops.u32(s)
   }
   /** Writes plain text to the clipboard; `id` may be NIL. */

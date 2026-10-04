@@ -193,7 +193,9 @@ character). Decoding rejects unknown kinds and flags, modifiers past
 the four, and keys that name nothing. The input config's flag byte
 carries multiline (bit 0) and the submit key (bits 1 and 2). Commands
 add `InsertText` (a paste claim's answer) and `WriteClipboard` (copy
-and cut; NIL may send it). The spatial op's mask carries z (bit 2, an
+and cut; NIL may send it), then (protocol 13) `Measure` (a request
+u32) and `Present` (NIL only: a request u32, flags with rest in bit 0,
+and a path string or NIL). The spatial op's mask carries z (bit 2, an
 i32; work item 4), and the layer op (0x22: id, then the owner or NIL)
 makes a node a layer container. The state family (0xB0, protocol 4, work
 item 5): `STATES` sets a scope's app bits (u64; the input bits are
@@ -1280,17 +1282,42 @@ ROLE op's reported states since 6; press flags, pressable spans, and
 `PRESS`/`ACTIVATE` since 7; focus traps, inert, auto-focus and the
 `dialog` and `alertdialog` roles since 8; transform parts since 9;
 focus groups and the `tab` and `tablist` roles since 10; keyframe
-animations and the `ENVIRONMENT` event since 11; exits since 12). The session hands
+animations and the `ENVIRONMENT` event since 11; exits since 12;
+observations since 13). The session hands
 JS its output in native order: acks sit between event frames where they happened, so the ack
 of a transaction never overtakes an event raised before it applied,
 and the facade retires a claim set's old handlers on that ack.
-Delivery is lossless where a promise or a user gesture waits: frames
-carrying animation ends or claims never drop from the session's bounded queue
+Delivery is lossless where a promise, a user gesture or JS's copy of
+native state waits: frames carrying any event `events::reliable`
+names (animation ends, claims, image results, exit ends, layouts,
+measures, the window, presentations) never drop from the session's bounded queue
 (the oldest droppable frame goes instead), and a frame the threadsafe
 function's queue refuses waits in the session, in order, until the
 next pump (JS calls `resume` after each frame it takes, which always
 pumps: it waits for a pump that is storing a refused frame, then
 retries it); a closed receiver closes the session.
+Observations (`observe.rs`, ARCHITECTURE-update topic 14). A node
+with an `onLayout` listener (mask bit 11) gets a `LAYOUT` event with
+its border box relative to its parent's (React Native's `onLayout`:
+no scroll offset, no transform) once its first layout places it, then
+whenever a layout pass changes the box, while it is displayed (no
+`display: none` on it or above, not a row its list hides). The check reads the passes'
+`moved` and `resized` queues before the paint drains them, so its
+cost follows the boxes that changed, not the listeners. A listener set
+on a node already laid out reports at once, with no frame. `measure()`
+answers (`MEASURE`, keyed by request) with the window-space bounding
+box from current layout: at once when nothing is owed, else after the
+frame's layout; `null` when the node is gone or not displayed (the
+same rule). The
+window's state (logical size, scale, focus, visible meaning not
+minimized or occluded, dark appearance) goes out as `WINDOW` at start
+and on each change; `useWindow` reads it. `presented()` and
+`capture(path)` send `Present`: it owes a frame, and the frame that
+presents after it answers (`PRESENTED`: the frame's number, its size in
+pixels), at rest if asked (no paint owed, no animation, no moving
+space, no image decode in flight); with a path, that frame's scene is
+drawn again offscreen and written as a PNG first. Headless sessions
+answer after each drawn frame.
 `Layer` (work item 4) is a React portal into a layer container: a
 full-window view at the end of the root level, opened when its first
 child commits, owned by the enclosing `Layer`'s container. It closes
@@ -1395,7 +1422,9 @@ engine's font work). `prepare_frame` in
 platform-winit is the one frame path for commits and native input;
 accessibility bounds and the IME area publish only after it.
 The host sets the UI clock and wakes at `Ui::next_settle` to snap
-rested content. `CRAIE_CAPTURE=<png>` makes the host write one settled
+rested content. `capture(path, { rest: true })` writes the frame a
+commit produced, once at rest, windowed or headless.
+`CRAIE_CAPTURE=<png>` makes the host write one settled
 frame and exit
 (used to check the JS examples' layouts). Crate tests cover the span pool,
 scene, host, wire, executor, dispatch, editing, and a11y. `bun test`

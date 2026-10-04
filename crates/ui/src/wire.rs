@@ -46,7 +46,7 @@ use crate::mutation::{
 pub use crate::mutation::{group_flag, interaction_flag, trap_flag};
 
 pub const MAGIC: u32 = 0x3257_5243; // "CRW2"
-pub const VERSION: u16 = 12;
+pub const VERSION: u16 = 13;
 
 pub mod op {
     // structure
@@ -174,6 +174,17 @@ pub mod cmd {
     pub const INSERT_TEXT: u8 = 4;
     /// Followed by a string ref: put it on the clipboard.
     pub const WRITE_CLIPBOARD: u8 = 5;
+    /// Followed by a request u32: answer with the node's box.
+    pub const MEASURE: u8 = 6;
+    /// On NIL. Followed by a request u32, flags u8 (`present_flag`) and
+    /// a string ref (NIL: no capture): answer once presented.
+    pub const PRESENT: u8 = 7;
+}
+
+/// PRESENT flag bits.
+pub mod present_flag {
+    /// Wait for a frame at rest (`Ui::at_rest`).
+    pub const REST: u8 = 1 << 0;
 }
 
 /// INPUT_CONFIG flag bits.
@@ -667,6 +678,21 @@ pub fn encode(txn: &Transaction<'_>) -> Vec<u8> {
                     Command::WriteClipboard(t) => {
                         let s = strings.get(t);
                         ops.push(cmd::WRITE_CLIPBOARD);
+                        u32le(&mut ops, s);
+                    }
+                    Command::Measure(request) => {
+                        ops.push(cmd::MEASURE);
+                        u32le(&mut ops, *request);
+                    }
+                    Command::Present {
+                        request,
+                        rest,
+                        path,
+                    } => {
+                        let s = path.as_ref().map_or(NIL, |p| strings.get(p));
+                        ops.push(cmd::PRESENT);
+                        u32le(&mut ops, *request);
+                        ops.push(if *rest { present_flag::REST } else { 0 });
                         u32le(&mut ops, s);
                     }
                 }
@@ -1349,6 +1375,23 @@ pub fn decode(buf: &[u8]) -> Result<Transaction<'_>, WireError> {
                     cmd::SCROLL_TO => Command::ScrollTo(r.f32()?, r.f32()?),
                     cmd::INSERT_TEXT => Command::InsertText(string(r.u32()?)?.into()),
                     cmd::WRITE_CLIPBOARD => Command::WriteClipboard(string(r.u32()?)?.into()),
+                    cmd::MEASURE => Command::Measure(r.u32()?),
+                    cmd::PRESENT => {
+                        let request = r.u32()?;
+                        let flags = r.u8()?;
+                        if flags & !present_flag::REST != 0 {
+                            return Err(WireError::BadRef("present flags"));
+                        }
+                        let path = match r.u32()? {
+                            NIL => None,
+                            s => Some(string(s)?.into()),
+                        };
+                        Command::Present {
+                            request,
+                            rest: flags & present_flag::REST != 0,
+                            path,
+                        }
+                    }
                     other => return Err(WireError::BadOp(other)),
                 };
                 Mutation::Command { id, cmd }

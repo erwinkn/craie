@@ -55,7 +55,7 @@ enc.spatial(0, {                                    // every field
 enc.paint(0, 0x1122_33ff, 6.5, { color: 0xff00_00ff, width: 2 })
 enc.create(2, 2)                                    // input
 enc.inputConfig(2, 15, "type here", true, SUBMIT_KEY["mod+enter"])
-enc.interaction(2, 0x7ff, INTERACTION.focusable | INTERACTION.autoFocus) // all listeners
+enc.interaction(2, 0xfff, INTERACTION.focusable | INTERACTION.autoFocus) // all listeners
 enc.role(2, ROLE.multilineTextInput)
 enc.create(3, 3)                                    // surface
 enc.surface(3, SURFACE.bars, [0x6dc7_c8ff, 0x6dc7_ffff, 0, 0])
@@ -74,6 +74,8 @@ enc.cmdFocus(2)
 enc.cmdInsertText(2, "!")                           // replaces the selection
 enc.cmdBlur(2)
 enc.cmdWriteClipboard(NIL, "copied")
+enc.cmdMeasure(2, 5)
+enc.cmdPresent(6, true, "shot.png")                 // the window's: rest, then capture
 enc.claims(2, 7, [                                  // claim sets
   parseChord("mod+shift+k", false)!,
   { ...parseChord("escape", false)!, flags: CHORD_FLAG.named | CHORD_FLAG.noRepeat },

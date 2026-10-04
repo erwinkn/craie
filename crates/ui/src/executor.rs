@@ -631,8 +631,14 @@ pub fn validate(host: &Host, txn: &Transaction<'_>) -> Result<Validated, WireErr
             }
             Mutation::Command { id, cmd } => {
                 // The clipboard is the window's: NIL may write it.
-                if !(*id == NIL && matches!(cmd, Command::WriteClipboard(_))) {
-                    need_live(&o, *id, "command on an absent node")?;
+                // Presentation is the window's alone.
+                match cmd {
+                    Command::Present { .. } if *id != NIL => {
+                        return Err(invalid("present on a node"));
+                    }
+                    Command::Present { .. } => {}
+                    Command::WriteClipboard(_) if *id == NIL => {}
+                    _ => need_live(&o, *id, "command on an absent node")?,
                 }
                 match cmd {
                     Command::SetText(_) if o.kind(*id) != Some(NodeKind::Input) => {
@@ -1165,6 +1171,7 @@ impl Ui {
                     || i.auto_focus != auto_focus
                     || inert
                 {
+                    self.observe.listeners(*id, i.listeners, *listeners);
                     let i = &mut self.host.interaction[*id as usize];
                     i.focusable = focusable;
                     i.selectable = selectable;
@@ -1411,6 +1418,7 @@ impl Ui {
         self.layouts.forget(node);
         self.forget_states(node);
         self.inheritors.remove(&node.0);
+        self.observe.forget(node.0);
     }
 
     /// Declares a node's layout (a full style): transitions intercept

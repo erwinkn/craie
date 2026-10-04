@@ -114,6 +114,9 @@ pub struct Ui {
     pub(crate) freed: Vec<(u32, u16)>,
     /// Events accumulated for the JS side since the last `take_events`.
     pub(crate) pending_events: Vec<UiEvent>,
+    /// Layout listeners, measures, the window, presentation
+    /// (`observe.rs`).
+    pub(crate) observe: crate::observe::Observe,
     /// Set when anything observable to assistive tech changed.
     pub(crate) a11y_stale: bool,
     /// A repaint is owed for reasons revisions do not record (focus,
@@ -191,6 +194,7 @@ impl Ui {
             vector_meshes: Default::default(),
             images: Default::default(),
             pending_events: Vec::new(),
+            observe: Default::default(),
             a11y_stale: true,
             force_paint: true,
             painted: None,
@@ -241,6 +245,7 @@ impl Ui {
         self.execute(&txn)?;
         self.refresh_selection();
         self.a11y_stale = true;
+        self.answer_if_current();
         Ok(txn.seq)
     }
 
@@ -250,6 +255,7 @@ impl Ui {
         self.execute(txn)?;
         self.refresh_selection();
         self.a11y_stale = true;
+        self.answer_if_current();
         Ok(())
     }
 
@@ -316,6 +322,16 @@ impl Ui {
                 }
             }
             Command::WriteClipboard(text) => self.inputs.clipboard.set(text),
+            Command::Measure(request) => self.measure(id, *request),
+            Command::Present {
+                request,
+                rest,
+                path,
+            } => self.request_present(crate::observe::PresentRequest {
+                request: *request,
+                rest: *rest,
+                path: path.as_ref().map(|p| p.to_string()),
+            }),
         }
     }
 
@@ -507,8 +523,13 @@ impl Ui {
     }
 
     /// True when applied mutations or native interaction can change
-    /// pixels.
+    /// pixels, or a `Present` waits for a frame.
     pub fn needs_paint(&self) -> bool {
+        self.observe.owed() || self.needs_paint_ignoring_presents()
+    }
+
+    /// `needs_paint` for what changes pixels alone.
+    pub(crate) fn needs_paint_ignoring_presents(&self) -> bool {
         // Queued work counts even when no revision moved (commands,
         // native edits).
         let d = &self.host.dirty;
@@ -551,6 +572,10 @@ impl Ui {
         self.finish_exits();
         self.layout(size);
         self.sync_lists(size);
+        // Geometry is final: observers hear of it before the paint
+        // drains what moved.
+        self.report_layouts();
+        self.answer_measures();
         // The frame's geometry is final: refresh the hit-test index here,
         // so the next event does not pay for it (`dispatch` still
         // refreshes whatever changed since).

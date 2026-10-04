@@ -2001,6 +2001,12 @@ Changes: §15, §16.
   (can hover or not), reduced motion, color scheme, increased contrast,
   font scale, and window focus. The same values drive the environment bits
   (topic 5).
+- Built (protocol 13, `observe.rs`): layout events (border box relative
+  to the parent, after layout, on change), `measure()`, and window state
+  with size, scale, focus, visibility and dark appearance; the pointer
+  kind, contrast and font scale wait for platform sources. Also
+  `presented()` and `capture(path)`: a promise on the frame that shows
+  the commits made so far, at rest if asked, written to a PNG on request.
 - Font registration from JS: font bytes into the font store (`RawFonts`
   exists natively). The desktop app ships TTF or OTF files; WOFF2 stays a
   web format.

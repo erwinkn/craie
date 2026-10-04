@@ -373,6 +373,17 @@ pub enum Command<'a> {
     InsertText(Cow<'a, str>),
     /// Put text on the clipboard: a copy or cut claim's answer.
     WriteClipboard(Cow<'a, str>),
+    /// Answer with the node's window-space box from current layout
+    /// (`events::out_kind::MEASURE`, keyed by the request).
+    Measure(u32),
+    /// The window's (node NIL): answer once a frame including this
+    /// transaction is presented (`events::out_kind::PRESENTED`), at
+    /// rest if asked; with a path, write that frame to a PNG there.
+    Present {
+        request: u32,
+        rest: bool,
+        path: Option<Cow<'a, str>>,
+    },
 }
 
 /// Strings and payload bytes borrow from a decoded buffer or are owned
