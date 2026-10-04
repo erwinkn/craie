@@ -442,6 +442,12 @@ pub struct Host {
     /// Declared transitions per node (`animation.rs`), id-keyed: few
     /// nodes have any.
     pub transitions: HashMap<u32, Vec<crate::animation::Transition>>,
+    /// Declared exits per node (`exit.rs`): what a detach starts.
+    pub exits: HashMap<u32, Box<[crate::keyframes::Animation]>>,
+    /// The roots whose exit runs (`exit.rs`): detached for the app,
+    /// still in the tree. Sorted: membership is a search, and a batch
+    /// that cuts thousands stays linear.
+    pub exiting: std::collections::BTreeSet<NodeId>,
     pub surfaces: HashMap<u32, SurfaceData>,
     /// Vector nodes' assets, id-keyed.
     pub vectors: HashMap<u32, VectorData>,
@@ -520,6 +526,8 @@ impl Host {
             hover_listeners: 0,
             labels: HashMap::new(),
             transitions: HashMap::new(),
+            exits: HashMap::new(),
+            exiting: Default::default(),
             surfaces: HashMap::new(),
             vectors: HashMap::new(),
             images: HashMap::new(),
@@ -604,6 +612,12 @@ impl Host {
             self.vector_sources_swept = self.vector_sources.len();
         }
         (key, Some(a))
+    }
+
+    /// The generation of slot `id`, live or free (a free slot's next
+    /// occupant takes it).
+    pub fn slot_generation(&self, id: NodeId) -> u16 {
+        self.nodes.get(id.index()).map_or(0, |n| n.generation)
     }
 
     pub fn kind(&self, id: NodeId) -> Option<NodeKind> {
@@ -714,6 +728,7 @@ impl Host {
         self.interaction[i] = Interaction::default();
         self.labels.remove(&id.0);
         self.transitions.remove(&id.0);
+        self.exits.remove(&id.0);
         self.surfaces.remove(&id.0);
         self.vectors.remove(&id.0);
         self.images.remove(&id.0);
@@ -833,6 +848,7 @@ impl Host {
         self.set_listeners(i, 0);
         self.labels.remove(&id.0);
         self.transitions.remove(&id.0);
+        self.exits.remove(&id.0);
         self.surfaces.remove(&id.0);
         self.vectors.remove(&id.0);
         self.images.remove(&id.0);

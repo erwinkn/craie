@@ -78,12 +78,18 @@ const KEYFRAME_KEYS = new Set([
   "at", "easing", "opacity", "translate", "translateX", "translateY", "rotate",
   "scale", "scaleX", "scaleY", "backgroundColor", "borderColor", "color",
 ])
+/** Keyframe keys an exit's frames alone may hold. */
+const SIZE_KEYS = new Set(["width", "height"])
 
 /** A keyframe's values in wire form; `boxed`: the node has a box (not
- * a Text), so background and border colors apply. An unknown key (a
- * typo, a property keyframes cannot animate) throws. */
-function frameValues(k: Keyframe, boxed: boolean): FrameValues {
-  for (const key in k) if (!KEYFRAME_KEYS.has(key)) throw Error(`keyframes cannot animate "${key}"`)
+ * a Text), so background and border colors apply; `exit`: an exit's,
+ * so sizes apply. An unknown key (a typo, a property keyframes cannot
+ * animate) throws. */
+function frameValues(k: Keyframe, boxed: boolean, exit: boolean): FrameValues {
+  for (const key in k) {
+    if (SIZE_KEYS.has(key) && !exit) throw Error(`only an exit animates "${key}"`)
+    if (!KEYFRAME_KEYS.has(key) && !SIZE_KEYS.has(key)) throw Error(`keyframes cannot animate "${key}"`)
+  }
   const v: FrameValues = {}
   if (k.backgroundColor !== undefined || k.borderColor !== undefined) {
     if (!boxed) throw Error("a Text animates no box paint: wrap it in a View")
@@ -101,6 +107,8 @@ function frameValues(k: Keyframe, boxed: boolean): FrameValues {
   if (p.rotate !== undefined) v.rotate = p.rotate
   if (p.scaleX !== undefined) v.scaleX = p.scaleX
   if (p.scaleY !== undefined) v.scaleY = p.scaleY
+  if (k.width !== undefined) v.width = k.width
+  if (k.height !== undefined) v.height = k.height
   return v
 }
 
@@ -108,7 +116,8 @@ function frameValues(k: Keyframe, boxed: boolean): FrameValues {
  * (`reduced`), `index` its position in the author's list, or null when
  * the policy drops it:
  * - `skip`: a loop does not start; a finite animation takes no time,
- *   so it ends at once and its fill (`forwards`) holds the end;
+ *   so it ends at once and its fill (`forwards`) holds the end; an
+ *   exit's does not run (the node goes at once);
  * - `fade`: only opacity frames go (none: as `skip`);
  * - `keep`: as declared. */
 export function animationIn(
@@ -117,11 +126,12 @@ export function animationIn(
   reduced: boolean,
   boxed = true,
   index = 0,
+  exit = false,
 ): AnimationIn | null {
   let frames = a.keyframes.map(k => ({
     at: k.at,
     ...(k.easing !== undefined && { easing: easingIn(k.easing) }),
-    values: frameValues(k, boxed),
+    values: frameValues(k, boxed, exit),
   }))
   let policy = reduced ? a.reducedMotion ?? "skip" : "keep"
   if (policy === "fade") {
@@ -131,6 +141,7 @@ export function animationIn(
     if (!frames.length) policy = "skip"
   }
   const iterations = a.iterations === "infinite" ? Infinity : a.iterations ?? 1
+  if (exit && iterations === Infinity) throw Error("an exit must end: no infinite iterations")
   const out: AnimationIn = {
     index,
     frames,
@@ -142,7 +153,7 @@ export function animationIn(
     fill: a.fill !== undefined ? FILL[a.fill] ?? -1 : defaultFill,
   }
   if (policy === "skip") {
-    if (iterations === Infinity) return null
+    if (iterations === Infinity || exit) return null
     // A spring would set its own duration: skip it too.
     return { ...out, delay: 0, duration: 0, easing: out.easing[0] === 4 ? LINEAR : out.easing }
   }
@@ -162,11 +173,12 @@ export function animationList(
   defaultFill: number,
   reduced: boolean,
   boxed = true,
+  exit = false,
 ): AnimationIn[] {
   const all = !v ? [] : Array.isArray(v) ? v : [v as KeyframeAnimation]
   const list: AnimationIn[] = []
   all.forEach((a, i) => {
-    const w = a ? animationIn(a, defaultFill, reduced, boxed, i) : null
+    const w = a ? animationIn(a, defaultFill, reduced, boxed, i, exit) : null
     if (w) list.push(w)
   })
   return list

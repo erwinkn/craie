@@ -21,6 +21,9 @@ pub mod clipboard;
 mod dispatch;
 pub mod events;
 mod executor;
+mod exit;
+#[cfg(test)]
+mod exit_tests;
 mod group;
 #[cfg(test)]
 mod group_tests;

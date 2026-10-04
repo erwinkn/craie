@@ -300,14 +300,15 @@ impl Inner {
         let events = ui.take_events();
         if !events.is_empty() {
             // Animation ends resolve JS promises, claims are user actions
-            // only JS carries out, and an image loads or fails once:
-            // those frames never drop.
+            // only JS carries out, an image loads or fails once, and an
+            // exit's end frees JS's parked ids: those frames never drop.
             let reliable = events.iter().any(|e| {
                 matches!(
                     e.kind,
                     events::out_kind::ANIMATION_END
                         | events::out_kind::CLAIM
                         | events::out_kind::IMAGE
+                        | events::out_kind::EXIT_END
                 )
             });
             session.post_events(events::encode_events(&events), reliable);

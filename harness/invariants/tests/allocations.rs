@@ -12,7 +12,10 @@ use std::f32::consts::TAU;
 use std::sync::Arc;
 
 use craie_ui::animation::{Prop, Timing, Value};
-use craie_ui::keyframes::{Animation, Easing, Frame as KeyFrame, Keyframes, Sample, Trigger};
+use craie_ui::host::NodeId;
+use craie_ui::keyframes::{
+    Animation, Easing, Fill, Frame as KeyFrame, Keyframes, Sample, Trigger, frame_field,
+};
 use craie_ui::mutation::{NIL, NodeKind, Transaction};
 use craie_ui::states::value_field;
 use craie_ui::ui::Ui;
@@ -218,6 +221,123 @@ fn steady_frames_do_not_allocate() {
     });
     assert_eq!(n, 0, "keyframe loop frames allocated {n} times");
     assert_eq!(ui.motion().live(), 3);
+}
+
+/// Exits (topic 7): the bridge's transaction (the exit's `ANIMATION`,
+/// then the `DETACH`) allocates twice: validation's overlay, as any
+/// detach does, and the declaration's copy. Its frames cost what
+/// its channels cost in any animation (a fade's opacity layer on its
+/// first frame; size frames relayout, as a size tween does), so a fade
+/// allocates nothing between its first frame and its end; the end costs
+/// no more than removing the subtree does.
+#[test]
+fn exit_transactions_allocate_twice() {
+    let sized = |h: f32| taffy::Style {
+        flex_shrink: 0.0,
+        size: taffy::Size {
+            width: taffy::Dimension::length(100.0),
+            height: taffy::Dimension::length(h),
+        },
+        ..taffy::Style::default()
+    };
+    let fade = Arc::new(Keyframes::new(vec![frame(
+        1.0,
+        value_field::OPACITY | value_field::TRANSLATE_Y,
+        |s| {
+            s.opacity = 0.0;
+            s.translate[1] = 8.0;
+        },
+    )]));
+    let collapse = Arc::new(Keyframes::new(vec![frame(1.0, frame_field::HEIGHT, |s| {
+        s.size[1] = 0.0;
+    })]));
+    // A quarter second: its end is exact in binary.
+    let exit = |k: &Arc<Keyframes>, index| Animation {
+        index,
+        fill: Fill::Forwards,
+        ..Animation::new(k.clone(), 0.25, Easing::LINEAR)
+    };
+    // Root 0, a column of toasts 1..=6 (40 high, a label in each).
+    let mut ui = Ui::new(2.0);
+    let mut t = Transaction::new(1);
+    t.create(0, NodeKind::View)
+        .layout(
+            0,
+            &taffy::Style {
+                flex_direction: taffy::FlexDirection::Column,
+                ..sized(300.0)
+            },
+        )
+        .append(NIL, 0);
+    for i in 1..=6u32 {
+        t.create(i, NodeKind::View)
+            .layout(i, &sized(40.0))
+            .fill(i, 0x2233_44FF)
+            .append(0, i);
+        t.create(10 + i, NodeKind::Text)
+            .text(10 + i, format!("toast {i}"), 14.0, 0xFFFF_FFFF)
+            .append(i, 10 + i);
+    }
+    ui.apply_txn(&t).unwrap();
+    ui.render(VIEW);
+    // Detaches `id` at `from`, declaring `exit` right before as the
+    // bridge does, and runs a third of a second: the allocations of the
+    // transaction and of its render, each frame's, and the events.
+    let run = |ui: &mut Ui, seq: u64, id: u32, exit: &[Animation], from: f64| {
+        let mut t = Transaction::new(seq);
+        if !exit.is_empty() {
+            t.animation(id, Trigger::Exit, false, exit);
+        }
+        t.detach(id);
+        ui.set_time(from);
+        let apply = allocs(|| {
+            ui.apply_txn(&t).unwrap();
+        });
+        let render = allocs(|| {
+            ui.render(VIEW);
+        });
+        let frames: Vec<usize> = (1..=6)
+            .map(|f| {
+                ui.set_time(from + f as f64 * 0.0625);
+                allocs(|| {
+                    ui.render(VIEW);
+                })
+            })
+            .collect();
+        ((apply, render), frames, ui.take_events())
+    };
+    // One exit, one plain detach and one remove size the reused buffers.
+    run(&mut ui, 2, 2, &[exit(&fade, 0), exit(&collapse, 1)], 0.0);
+    run(&mut ui, 3, 1, &[], 1.0);
+    let mut t = Transaction::new(4);
+    t.remove(1).remove(11);
+    ui.apply_txn(&t).unwrap();
+    let (exit, frames, events) = run(&mut ui, 5, 4, &[exit(&fade, 0)], 2.0);
+    let (plain, _, _) = run(&mut ui, 6, 3, &[], 3.0);
+    let mut t = Transaction::new(7);
+    t.remove(3).remove(13);
+    let remove = allocs(|| {
+        ui.apply_txn(&t).unwrap();
+        ui.render(VIEW);
+    });
+    assert_eq!(events.len(), 1, "one exit end: {events:?}");
+    assert!(!ui.host.is_live(NodeId(4)) && !ui.host.is_live(NodeId(14)));
+    // The transaction: validation's overlay entry, as for any detach,
+    // and the declaration's copy (the record's list is a spare one). A
+    // plain detach also moves its parent's child list (2 here). The
+    // render: the fade's opacity layer (pinned while it runs).
+    assert!(
+        exit.0 <= 2 && exit.1 <= plain.1 + 1,
+        "an exit allocated {exit:?} times (transaction, render), a plain detach {plain:?}"
+    );
+    // Frames 1 to 3 run; 4 ends (0.25 s).
+    assert_eq!(frames[..3], [0, 0, 0], "exit frames allocated: {frames:?}");
+    assert!(
+        frames[3] <= remove,
+        "the end allocated {} times, a remove {remove}",
+        frames[3]
+    );
+    assert_eq!(frames[4..], [0, 0], "after the end: {frames:?}");
 }
 
 fn frame(at: f32, mask: u16, f: impl FnOnce(&mut Sample)) -> KeyFrame {

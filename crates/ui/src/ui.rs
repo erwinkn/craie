@@ -104,6 +104,14 @@ pub struct Ui {
     pub(crate) animations: crate::animation::Animations,
     /// Keyframe animations (`keyframes.rs`).
     pub(crate) motion: crate::keyframes::Motion,
+    /// Exits that could not run, ended at the end of the transaction
+    /// (`exit.rs`).
+    pub(crate) skipped_exits: std::collections::BTreeSet<NodeId>,
+    /// Scratch for an exit's end: the exits it ends and why.
+    pub(crate) exit_scratch: Vec<(NodeId, u32)>,
+    /// Nodes exits freed since events were last taken, each with the
+    /// generation it had: their queued events go then, in one pass.
+    pub(crate) freed: Vec<(u32, u16)>,
     /// Events accumulated for the JS side since the last `take_events`.
     pub(crate) pending_events: Vec<UiEvent>,
     /// Set when anything observable to assistive tech changed.
@@ -177,6 +185,9 @@ impl Ui {
             selection_revs: Default::default(),
             animations: Default::default(),
             motion: Default::default(),
+            skipped_exits: Default::default(),
+            freed: Vec::new(),
+            exit_scratch: Vec::new(),
             vector_meshes: Default::default(),
             images: Default::default(),
             pending_events: Vec::new(),
@@ -310,11 +321,13 @@ impl Ui {
 
     /// Events queued for the JS side since the last call.
     pub fn take_events(&mut self) -> Vec<UiEvent> {
+        self.drop_exiting_events();
         std::mem::take(&mut self.pending_events)
     }
 
     /// `take_events` into `out`: both buffers keep their capacity.
     pub fn drain_events(&mut self, out: &mut Vec<UiEvent>) {
+        self.drop_exiting_events();
         out.append(&mut self.pending_events);
     }
 
@@ -535,6 +548,7 @@ impl Ui {
         self.restyle();
         self.run_animations(size);
         self.run_keyframes();
+        self.finish_exits();
         self.layout(size);
         self.sync_lists(size);
         // The frame's geometry is final: refresh the hit-test index here,

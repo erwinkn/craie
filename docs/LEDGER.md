@@ -853,6 +853,46 @@ Reviewer minors and nitpicks not fixed yet.
 - Resolves in: with DF-5 (retargeting restarts the full duration),
   which touches the same path.
 
+### DF-61: List rows don't exit
+
+- Source: work item 6 (exits).
+- Where: crates/ui/src/exit.rs (`detach_node`).
+- Claim: a List's row removed with an `exit` goes at once, and native
+  answers `skipped`. A chat list whose messages fade out when deleted
+  just drops them.
+- Why deferred: a List windows its rows itself (topic 12). An exiting
+  row would need a slot in the list's measure and anchor, which the
+  list rework (work item 11) redesigns anyway.
+- Resolves in: work item 11, if a ported list animates removals.
+
+### DF-62: a collapse stops at padding, border, min size and gap
+
+- Source: work item 6 (exits).
+- Where: crates/ui/src/keyframes.rs (size channels), layout.
+- Claim: a `height: 0` frame sets the border-box height, and layout
+  floors it at the padding and border (and a `minHeight`). A toast with
+  `padding: 12` collapses to 24, then vanishes at the end, and its
+  parent's `gap` stays until then. The app puts the padding on an inner
+  View to collapse fully.
+- Why deferred: collapsing padding and gap too means tweening more
+  layout values per exit, for a jump of a few points at the end.
+- Resolves in: when a ported component shows the jump; tween the
+  padding (and the gap share) along with the size.
+
+### DF-63: size frames are exit-only, in points
+
+- Source: work item 6 (exits).
+- Where: crates/ui/src/executor.rs (validation), packages/bridge/src/motion.ts
+  (`frameValues`).
+- Claim: `width` and `height` frames exist in `exit` only, and only as
+  points. An `enter` that grows a row from 0 to its natural height, or
+  a frame at `50%`, is rejected. The implicit end of an exit is the
+  laid-out size, which covers the collapse.
+- Why deferred: growing from 0 needs the natural size (`auto`) as an
+  endpoint, a measure before the frame, which layout transitions (out
+  of scope) will bring.
+- Resolves in: layout transitions.
+
 ## Closed
 
 - DF-57 (work item 6, review #21 M1): end indices were wire indices
@@ -1212,3 +1252,13 @@ Reviewer minors and nitpicks not fixed yet.
 - PR21-09 (animations review, m7): delays in [-600, 600] s are accepted on both sides and start partway through, as CSS (`a_negative_delay_starts_partway`, and the facade's delay test).
 - PR21-10 (animations review, nits): steps take CSS's before flag (jump-start and jump-both show 0 during a backwards-filled delay); the `AnimationEndEvt` JSDoc drops `removed` (a removed node reports nothing; `animate` resolves `removed` in JS on release); the Rust encoder checks its keyframes table index (`the_encoder_checks_its_keyframes_table`); `the_more_specific_variant_animation_wins` ranks two variants animating one property; topic 7 says a changed entry's keyframes restart it, not its position; DF-59 records a running `enter` continuing after reduced motion turns on.
 - PR21-11 (lead, after review #21): variant animations were keyed by the block's position among the node's flattened blocks, so a falsy block (`_pressed: busy && {...}`), which flattening skips, still shifted the blocks after it and restarted their loops. The host now gives each animated `_` path (`_selected._hover`) a block number when it first sees it and keeps it for the node's life (`HostNode.variantBlocks`, reset with the id); no wire change. The `Variants` type takes falsy blocks. The bun test puts a conditional animated block before two animated ones and checks theirs stay 0 and 1 as it comes and goes (numbering by position fails it).
+- PR22-01 (GPT-6 Astra review, P1): unmount cut running exits with `REMOVE`, but native may have finished one and freed its ids with the `EXIT_END` still on its way; the `REMOVE` of the freed id then failed validation and closed the session, and a second unmount repeated it. New op `END_EXIT` (0x05, protocol 12): it ends the exit if it still runs (removed) and does nothing once it has ended; a live node without an exit is rejected, and plain `REMOVE` stays strict. The facade's `endExits` sends it once per exit (`Exit.cut`), so a second unmount sends nothing. Tests: `end_exit_is_idempotent`; bun "an exit that ends as unmount cuts it recycles once" and the unmount test run twice; the fixture carries an `END_EXIT`.
+- PR22-02 (GPT-6 Astra review, P2): an exit's omitted frames sampled what ran under it each frame, so an interrupted linear enter (0 → 1 over 1 s, removed at 200 ms, fade out over 500 ms) rose to 0.24 at 300 ms instead of falling to 0.16. The detach now captures what shows (`row_sample`, before the hover leaves) and the exit's records sample from it for the channels they animate (`Running.from`), as Framer's `AnimatePresence` does. `an_exit_starts_from_what_showed` covers an interrupted enter, an opacity transition and a hover animation (each fails without the capture: 0.24, 0.56, and 0.8 against 0.16).
+- PR22-03 (GPT-6 Astra review, P2): validation modelled a `REMOVE` of an exit's root as freeing that node only, while execution frees the subtree: `REMOVE(0), PLACE(root, 1)` with 1 inside exiting 0 passed and put the dead id 1 in the root list. The overlay now frees the root's subtree as the batch left it (host links it kept and its own placements), and `END_EXIT` does the same. Execution also cuts an exit started in the same transaction that could not run (skipped) when its root is removed, rather than freeing the root twice. Tests: `a_cut_exit_frees_its_subtree_in_validation`, and a same-transaction detach and remove in `removes_and_skips_end_at_once`.
+- PR22-04 (GPT-6 Astra review, P2): the overlay marked a detached exit root as detached, while execution keeps it in its parent's list, so `ANIMATION(B, exit), DETACH(B), CREATE(D), PLACE(P, D, before=B)` failed in one transaction but passed across two. The overlay now keeps the parent when the exit will run, and records exit state in one map (declared, cleared, started). For validation to know whether it runs, native decides by structure alone at the detach (in the tree, not a List row); an exit hidden at its detach starts and ends skipped on the next frame, like one hidden while it runs. Tests: `a_new_sibling_places_by_the_named_one` (same transaction) and `a_hidden_exit_is_skipped` (a sibling placed by the hidden root in its detach's transaction).
+- PR22-05 (GPT-6 Astra review, P2): the allocation test declared exits outside its measurement; with the bridge's real transaction (`ANIMATION` then `DETACH`) the exit's transaction allocated 5 times (the review), 4 once the overlay stopped writing the root's parent link (PR22-04). Keyframes now keep emptied records' lists (up to 64) for new records, and the overlay keeps exit state in one map; the transaction allocates twice (validation's overlay entry, as any detach, and the declaration's copy), against a plain detach's 3 (overlay entry, and 2 as the parent's child list moves). The test (`exit_transactions_allocate_twice`) measures the whole transaction and asserts at most 2; the render stays one above a plain detach's (the fade's pinned layer).
+- PR22-06 (GPT-6 Astra re-check, P2): since PR22-04 an exit hidden at its detach started and ended skipped only in `finish_exits`, inside `render`; a minimized window (zero-sized surface, `app.rs` returns before rendering) held the subtree natively and its parked ids in JS until restored. The parent is still kept through validation and apply, but exits under `display: none` now end (skipped) at the end of the transaction, after its styles (`end_hidden_exits`), frames or not; a variant hiding one between transactions still ends it on the next frame. A visible exit in a window drawing no frames waits for the first frame after it shows again, as tweens do (the Built paragraph says so). Test: `a_hidden_exit_is_skipped` now draws no frame around the commits under test (fails without the call).
+- PR22-07 (GPT-6 Astra re-check, P2): each exit cut in validation rebuilt a parent index from every link the batch had set, freed nodes included: 1,000 cuts in one unmount looked at 499,500 entries (about 120 ms; 2.2 s for 5,000). The overlay now builds the index once, at the batch's first cut, keeps it as the batch places (`Overlay::link`), and walks only the cut's subtree (host children plus current placements; `parents` tells stale entries apart), reusing one list. Tests: `a_bulk_cut_walks_each_subtree_once` (1,000 `END_EXIT`s, asserts 3,000 nodes and links looked at, and prints the time; 1,002,000 with a rebuild per cut), and `a_cut_exit_frees_its_subtree_in_validation` gains a node placed after an earlier cut (fails if placing skips the index).
+- PR22-08 (GPT-6 Astra review at 41ea552, P2): hidden exits ended before the transaction's last restyle. A subtree shown only by `_focusWithin` (base `display: none`) lost the focus at its detach, the final restyle hid it, and the transaction returned with the exit live and no `EXIT_END`, holding its ids until a frame. `end_hidden_exits` now runs after that restyle. Test: `an_exit_hidden_by_losing_its_focus_is_skipped` (fails with the old order).
+- PR22-09 (same review, P2): beyond validation's subtree walks (PR22-07), ending exits in bulk scanned: each cut looked an exit up in a list (validation and execution), removed it with a `retain` over all exits, searched the others for ones inside, and filtered every queued event; 1,000 cuts made about 2,000,000 visits (4.6 ms), 5,000 about 50,000,000 (69 ms). Running and skipped exits are now sorted sets (`BTreeSet`), an exit inside is found by looking up each freed node, ends found in a frame are collected in one pass, and the events of freed nodes are filtered once, when events are taken (`Ui::freed`). Test: `a_bulk_cut_is_linear` (was `a_bulk_cut_walks_each_subtree_once`) counts validation's walk (3 per toast) and every visit of the ending path, cuts, freed nodes and queued events (4 per toast), for `END_EXIT` and `REMOVE`.
+- PR22-10 (same review, P2): text inside an exit stayed selectable: the subtree is attached while it exits, so a selection inside survived (Copy still copied the removed text), and one around it kept copying an exiting paragraph. Selection validation now treats an exiting ancestor as detached, and the domain's texts skip exiting subtrees. Test: `an_exiting_text_leaves_the_selection` (domain, endpoint and middle paragraph exiting; fails without either check).

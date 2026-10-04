@@ -15,7 +15,7 @@ use craie_layout::LayoutRow;
 use crate::animation::{Prop, Transition, Value};
 use crate::claims::{Claim, claim_kind};
 use crate::host::{Host, MAX_NODES, NodeId, SpatialPatch};
-use crate::keyframes::Animation;
+use crate::keyframes::{Animation, Trigger, frame_field};
 use crate::list::{IdIndex, MAX_ITEMS};
 use crate::mutation::{
     Command, ItemDesc, Mutation, NIL, NodeKind, TextSpan, Transaction, interaction_flag,
@@ -204,6 +204,31 @@ struct Overlay<'h> {
     removed: HashMap<u32, usize>,
     /// Creates validated so far in the batch.
     created: u32,
+    /// Exits the batch declares, clears or starts (one map: a batch
+    /// with an exit allocates it once).
+    exits: HashMap<u32, Exit>,
+    /// The batch's placements by parent, with their steps: built at its
+    /// first exit cut, then kept as it places, so each cut walks only
+    /// its subtree. Stale entries stay (a node placed again, or freed);
+    /// `parents` tells which link is current.
+    placed: Option<HashMap<u32, Vec<(u32, usize)>>>,
+    /// A cut's subtree, reused.
+    scratch: Vec<u32>,
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Nodes and links the cuts' subtree walks looked at, for the
+    /// bulk-cut test.
+    pub(crate) static WALKED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum Exit {
+    Declared,
+    Cleared,
+    /// A detach of a node with an exit: its node never comes back.
+    Started,
 }
 
 impl Overlay<'_> {
@@ -216,6 +241,105 @@ impl Overlay<'_> {
 
     fn live(&self, id: u32) -> bool {
         self.kind(id).is_some()
+    }
+
+    fn has_exit(&self, id: u32) -> bool {
+        match self.exits.get(&id) {
+            Some(e) => *e == Exit::Declared,
+            None => self.host.exits.contains_key(&id),
+        }
+    }
+
+    /// An exit's root: its node never comes back.
+    fn exiting(&self, id: u32) -> bool {
+        match self.exits.get(&id) {
+            Some(e) => *e == Exit::Started,
+            None => self.host.exiting.contains(&NodeId(id)),
+        }
+    }
+
+    /// Declares or clears `id`'s exit; one started stays started.
+    fn declare_exit(&mut self, id: u32, declared: bool) {
+        if !self.exiting(id) {
+            let e = if declared {
+                Exit::Declared
+            } else {
+                Exit::Cleared
+            };
+            self.exits.insert(id, e);
+        }
+    }
+
+    /// Whether `id`'s ancestors reach the root level (native's test for
+    /// an exit that can run).
+    fn attached(&self, id: u32) -> Result<bool, WireError> {
+        let mut cur = id;
+        for _ in 0..self.host.slot_count() + self.kinds.len() + 1 {
+            match self.parent(cur) {
+                NIL => return Ok(true),
+                p if p == NodeId::DETACHED.0 => return Ok(false),
+                p => cur = p,
+            }
+        }
+        Err(invalid("corrupt parent chain"))
+    }
+
+    /// Places `child` under `parent` at `step`.
+    fn link(&mut self, child: u32, parent: u32, step: usize) {
+        self.parents.insert(child, (parent, step));
+        if let Some(placed) = &mut self.placed {
+            placed.entry(parent).or_default().push((child, step));
+        }
+    }
+
+    /// Frees `root` and the nodes under it, as the batch left them: the
+    /// host's links it kept and its own.
+    fn free_subtree(&mut self, root: u32, step: usize, lists: &mut HashMap<u32, Touch>) {
+        if self.placed.is_none() {
+            #[cfg(test)]
+            WALKED.with(|w| w.set(w.get() + self.parents.len()));
+            let mut placed: HashMap<u32, Vec<(u32, usize)>> = HashMap::new();
+            for (&c, &(p, at)) in &self.parents {
+                placed.entry(p).or_default().push((c, at));
+            }
+            self.placed = Some(placed);
+        }
+        let mut nodes = std::mem::take(&mut self.scratch);
+        nodes.clear();
+        nodes.push(root);
+        let mut k = 0;
+        while k < nodes.len() {
+            let n = nodes[k];
+            k += 1;
+            let kids = self.host.children(NodeId(n));
+            let placed = self.placed.as_ref().and_then(|p| p.get(&n));
+            #[cfg(test)]
+            WALKED.with(|w| w.set(w.get() + 1 + kids.len() + placed.map_or(0, Vec::len)));
+            for &c in kids {
+                if !self.parents.contains_key(&c.0) && self.parent(c.0) == n {
+                    nodes.push(c.0);
+                }
+            }
+            for &(c, at) in placed.into_iter().flatten() {
+                if self.parents.get(&c) == Some(&(n, at)) && self.parent(c) == n {
+                    nodes.push(c);
+                }
+            }
+        }
+        for &n in &nodes {
+            self.free(n, step, lists);
+        }
+        self.scratch = nodes;
+    }
+
+    /// Marks `id` removed at `step`: its links are gone, and a list it
+    /// was holds no items.
+    fn free(&mut self, id: u32, step: usize, lists: &mut HashMap<u32, Touch>) {
+        self.kinds.insert(id, None);
+        self.parents.insert(id, (NodeId::DETACHED.0, step));
+        self.removed.insert(id, step);
+        self.exits.insert(id, Exit::Cleared);
+        lists.insert(id, Touch::empty());
     }
 
     fn parent(&self, id: u32) -> u32 {
@@ -265,6 +389,9 @@ pub fn validate(host: &Host, txn: &Transaction<'_>) -> Result<Validated, WireErr
         parents: HashMap::new(),
         removed: HashMap::new(),
         created: 0,
+        exits: HashMap::new(),
+        placed: None,
+        scratch: Vec::new(),
     };
     // Lists the batch splices, as the batch leaves them (item counts and
     // identities).
@@ -307,6 +434,10 @@ pub fn validate(host: &Host, txn: &Transaction<'_>) -> Result<Validated, WireErr
                 before,
             } => {
                 need_live(&o, *child, "place of an absent child")?;
+                let exits = !o.exits.is_empty() || !host.exiting.is_empty();
+                if exits && o.exiting(*child) {
+                    return Err(invalid("place of an exiting node"));
+                }
                 if *parent != NIL {
                     need_live(&o, *parent, "place under an absent parent")?;
                 }
@@ -323,24 +454,51 @@ pub fn validate(host: &Host, txn: &Transaction<'_>) -> Result<Validated, WireErr
                     if cur == *child {
                         return Err(invalid("place would create a cycle"));
                     }
+                    if exits && o.exiting(cur) {
+                        return Err(invalid("place under an exiting node"));
+                    }
                     cur = o.parent(cur);
                     hops += 1;
                     if hops > host.slot_count() + o.kinds.len() + 1 {
                         return Err(invalid("corrupt parent chain"));
                     }
                 }
-                o.parents.insert(*child, (*parent, step));
+                o.link(*child, *parent, step);
             }
             Mutation::Detach { id } => {
                 need_live(&o, *id, "detach of an absent node")?;
-                o.parents.insert(*id, (NodeId::DETACHED.0, step));
+                if o.exiting(*id) {
+                    return Err(invalid("detach of an exiting node"));
+                }
+                // An exit that runs keeps its node in its parent's list
+                // (one that cannot is detached, and ends with the
+                // transaction); either way the node never comes back.
+                let mut stays = false;
+                if o.has_exit(*id) {
+                    o.exits.insert(*id, Exit::Started);
+                    stays = o.kind(o.parent(*id)) != Some(NodeKind::List) && o.attached(*id)?;
+                }
+                if !stays {
+                    o.parents.insert(*id, (NodeId::DETACHED.0, step));
+                }
             }
             Mutation::Remove { id } => {
                 need_live(&o, *id, "remove of an absent node")?;
-                o.kinds.insert(*id, None);
-                o.parents.insert(*id, (NodeId::DETACHED.0, step));
-                o.removed.insert(*id, step);
-                lists.insert(*id, Touch::empty());
+                if o.exiting(*id) {
+                    // An exit's root goes with its subtree.
+                    o.free_subtree(*id, step, &mut lists);
+                } else {
+                    o.free(*id, step, &mut lists);
+                }
+            }
+            // Idempotent: an exit that has ended left its id free.
+            Mutation::EndExit { id } => {
+                if o.live(*id) {
+                    if !o.exiting(*id) {
+                        return Err(invalid("end of an exit that never started"));
+                    }
+                    o.free_subtree(*id, step, &mut lists);
+                }
             }
             Mutation::Layout { id, style } => {
                 need_live(&o, *id, "layout on an absent node")?;
@@ -570,10 +728,19 @@ pub fn validate(host: &Host, txn: &Transaction<'_>) -> Result<Validated, WireErr
                     return Err(invalid("animation target out of range"));
                 }
             }
-            Mutation::Animation { id, animations, .. } => {
+            Mutation::Animation {
+                id,
+                trigger,
+                animations,
+                ..
+            } => {
                 need_live(&o, *id, "animation on an absent node")?;
                 let boxed = o.kind(*id).is_some_and(NodeKind::has_box);
-                valid_animations(animations, boxed)?;
+                let exit = *trigger == Trigger::Exit;
+                valid_animations(animations, boxed, exit)?;
+                if exit {
+                    o.declare_exit(*id, !animations.is_empty());
+                }
             }
             Mutation::States { id, bits } => {
                 need_live(&o, *id, "states on an absent node")?;
@@ -601,7 +768,7 @@ pub fn validate(host: &Host, txn: &Transaction<'_>) -> Result<Validated, WireErr
                         need_live(&o, t.scope, "variant on an absent scope")?;
                     }
                     valid_transitions(v.transitions.as_deref().unwrap_or_default())?;
-                    valid_animations(&v.animations, boxed)?;
+                    valid_animations(&v.animations, boxed, false)?;
                 }
                 let blocks = variants.iter().filter(|v| !v.animations.is_empty());
                 for (k, v) in blocks.clone().enumerate() {
@@ -643,8 +810,9 @@ fn valid_transitions(transitions: &[Transition]) -> Result<(), WireError> {
 }
 
 /// Keyframe animations: a bounded list, in range, indices ascending, box
-/// colors only on a node with a box.
-fn valid_animations(animations: &[Animation], boxed: bool) -> Result<(), WireError> {
+/// colors only on a node with a box. An exit's (`exit`) end, and only an
+/// exit's may set the size.
+fn valid_animations(animations: &[Animation], boxed: bool, exit: bool) -> Result<(), WireError> {
     if animations.len() > crate::keyframes::MAX_ANIMATIONS {
         return Err(invalid("too many animations in one list"));
     }
@@ -655,6 +823,12 @@ fn valid_animations(animations: &[Animation], boxed: bool) -> Result<(), WireErr
         }
         if !boxed && a.keyframes.mask() & value_field::BOX != 0 {
             return Err(invalid("paint animation on a node without a box"));
+        }
+        if exit && a.infinite() {
+            return Err(invalid("an exit that never ends"));
+        }
+        if !exit && a.keyframes.mask() & frame_field::SIZE != 0 {
+            return Err(invalid("size keyframes outside an exit"));
         }
     }
     Ok(())
@@ -700,6 +874,7 @@ impl Ui {
         for (step, m) in txn.mutations.iter().enumerate() {
             self.apply_mutation(txn, step, m, &mut done);
         }
+        self.settle_exits();
         self.seq = txn.seq;
         self.restyle();
         self.settle_traps();
@@ -707,6 +882,9 @@ impl Ui {
         // The focus and the presses settling moved (a key compare when
         // none did).
         self.restyle();
+        // Last: what hides an exit may be a variant on the state the
+        // steps above moved (`_focusWithin` losing the focus).
+        self.end_hidden_exits();
         Ok(())
     }
 
@@ -741,30 +919,14 @@ impl Ui {
                     self.repaint_inheritors(child, None);
                 }
             }
-            Mutation::Detach { id } => {
-                self.unhover(NodeId(*id));
-                self.unpress(NodeId(*id));
-                self.host.detach(NodeId(*id));
-            }
+            Mutation::Detach { id } => self.detach_node(NodeId(*id)),
             Mutation::Remove { id } => {
-                let node = NodeId(*id);
-                // Its tweens end before the slot's generation moves.
-                self.end_animations_of(node, crate::animation::end_reason::REMOVED);
-                self.end_keyframes_of(node);
-                self.unhover(node);
-                self.unpress(node);
-                self.focus_leaves(node);
-                self.set_inert(node, false);
-                if self.traps.declared.remove(id).is_some() {
-                    self.traps.dirty = true;
+                if !self.cut_exit(NodeId(*id)) {
+                    self.remove_node(NodeId(*id));
                 }
-                self.groups.remove(id);
-                self.host.remove(node);
-                self.forget_node_state(node);
-                if self.pressed == Some(node) {
-                    self.pressed = None;
-                }
-                self.pending_scrolls.retain(|(n, _, _)| *n != node);
+            }
+            Mutation::EndExit { id } => {
+                self.cut_exit(NodeId(*id));
             }
             // A node with a variant table: its own ops set the base, and
             // the restyle at the end of the transaction declares.
@@ -989,7 +1151,9 @@ impl Ui {
                 let selectable = flags & interaction_flag::SELECTABLE != 0;
                 let auto_focus = flags & interaction_flag::AUTO_FOCUS != 0;
                 let press = flags >> interaction_flag::PRESS_SHIFT;
-                let inert = self.set_inert(NodeId(*id), flags & interaction_flag::INERT != 0);
+                // An exiting node stays inert whatever it declares.
+                let inert = flags & interaction_flag::INERT != 0 || self.exiting(NodeId(*id));
+                let inert = self.set_inert(NodeId(*id), inert);
                 if auto_focus && !i.auto_focus && !self.traps.stack.is_empty() {
                     // It may take the focus of the trap it mounts into.
                     self.traps.auto_focused.push(NodeId(*id));
@@ -1140,7 +1304,7 @@ impl Ui {
     /// inside it, the hover falls back to its parent. Its ancestors stay
     /// hovered (no second enter on the next move); the subtree gets no
     /// leave, as a removed DOM element gets no `mouseleave`.
-    fn unhover(&mut self, node: NodeId) {
+    pub(crate) fn unhover(&mut self, node: NodeId) {
         if let Some(h) = self.hover
             && self.ancestors(h).any(|n| n == node)
         {
@@ -1214,6 +1378,27 @@ impl Ui {
 
     /// Drops per-node state held outside the host when a slot is created
     /// or freed: a recycled id must start clean.
+    /// Removes `node` for good; its children stay, detached.
+    pub(crate) fn remove_node(&mut self, node: NodeId) {
+        // Its tweens end before the slot's generation moves.
+        self.end_animations_of(node, crate::animation::end_reason::REMOVED);
+        self.end_keyframes_of(node);
+        self.unhover(node);
+        self.unpress(node);
+        self.focus_leaves(node);
+        self.set_inert(node, false);
+        if self.traps.declared.remove(&node.0).is_some() {
+            self.traps.dirty = true;
+        }
+        self.groups.remove(&node.0);
+        self.host.remove(node);
+        self.forget_node_state(node);
+        if self.pressed == Some(node) {
+            self.pressed = None;
+        }
+        self.pending_scrolls.retain(|(n, _, _)| *n != node);
+    }
+
     fn forget_node_state(&mut self, node: NodeId) {
         if let Some(t) = self.texts.get_mut(node.index()) {
             *t = None;
@@ -1235,6 +1420,18 @@ impl Ui {
         // row keeps the value on screen.
         for prop in [Prop::Width, Prop::Height, Prop::Padding, Prop::Gap] {
             let next = layout_field(&new, prop);
+            // Under an exit's size: the value goes under, the row keeps
+            // the sample.
+            if self.absorb(node, prop, Some(next)) {
+                let row = self.host.layout[node.index()].size();
+                let d = if prop == Prop::Width {
+                    row.width
+                } else {
+                    row.height
+                };
+                set_layout_field(&mut new, prop, Value::Size(d));
+                continue;
+            }
             if !self.intercept(node, prop, next) {
                 let current = self.row_value(node, prop);
                 set_layout_field(&mut new, prop, current);

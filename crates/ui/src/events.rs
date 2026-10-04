@@ -292,6 +292,11 @@ pub mod out_kind {
     /// The reduced-motion setting changed (node NIL, always sent): key =
     /// the environment bits (`states::env_bit`).
     pub const ENVIRONMENT: u8 = 21;
+    /// A detached node's exit ended (`exit.rs`), always sent: node =
+    /// the exit's root, key = the reason (`animation::end_reason`:
+    /// finished, removed (cut short by a remove), parent gone, skipped).
+    /// Native has freed the subtree: its ids may be reused.
+    pub const EXIT_END: u8 = 22;
 }
 
 /// `PRESS` phases (key bits 4 and 5).

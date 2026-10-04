@@ -396,6 +396,11 @@ pub enum Mutation<'a> {
     Remove {
         id: u32,
     },
+    /// Ends `id`'s exit if it still runs (`removed`); nothing when it has
+    /// ended (its id is free until JS sees the `EXIT_END`).
+    EndExit {
+        id: u32,
+    },
     // layout
     /// `style` indexes the transaction's style table; NIL = default.
     Layout {
@@ -591,6 +596,7 @@ impl Mutation<'_> {
             Mutation::Create { id, .. }
             | Mutation::Detach { id }
             | Mutation::Remove { id }
+            | Mutation::EndExit { id }
             | Mutation::Layout { id, .. }
             | Mutation::Spatial { id, .. }
             | Mutation::Layer { id, .. }
@@ -692,6 +698,10 @@ impl<'a> Transaction<'a> {
 
     pub fn remove(&mut self, id: u32) -> &mut Self {
         self.push(Mutation::Remove { id })
+    }
+
+    pub fn end_exit(&mut self, id: u32) -> &mut Self {
+        self.push(Mutation::EndExit { id })
     }
 
     pub fn layout(&mut self, id: u32, style: &Style) -> &mut Self {

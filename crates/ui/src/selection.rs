@@ -43,12 +43,16 @@ impl Ui {
             .find(|&n| self.host.interaction(n).selectable)
     }
 
-    /// The domain's text nodes in tree order (displayed ones only).
+    /// The domain's text nodes in tree order (displayed ones only, and
+    /// none an exit removed: for the app they are gone).
     pub(crate) fn domain_texts(&self, domain: NodeId) -> Vec<NodeId> {
         let mut out = Vec::new();
         let mut stack = vec![domain];
+        let exits = !self.host.exiting.is_empty();
         while let Some(id) = stack.pop() {
-            if self.host.node(id).is_none() || self.host.style(id).display() == taffy::Display::None
+            if self.host.node(id).is_none()
+                || self.host.style(id).display() == taffy::Display::None
+                || exits && self.exiting(id)
             {
                 continue;
             }
@@ -258,8 +262,8 @@ impl Ui {
 
     /// The selection's nodes are the ones it was made on (same
     /// generation), its domain is selectable and shown (attached, no
-    /// hidden ancestor), and both endpoints are displayed texts of the
-    /// domain.
+    /// hidden or exiting ancestor), and both endpoints are displayed
+    /// texts of the domain.
     fn selection_valid(&self, sel: TextSelection) -> bool {
         let nodes = [sel.domain, sel.anchor.node, sel.focus.node];
         let same = nodes
@@ -270,10 +274,10 @@ impl Ui {
             return false;
         }
         // The domain reaches the root level through displayed ancestors
-        // (not detached, not under `display: none`).
+        // (not detached, not under `display: none`, not exiting).
         let mut cur = sel.domain;
         loop {
-            if self.host.display_none(cur) {
+            if self.host.display_none(cur) || self.exiting(cur) {
                 return false;
             }
             let parent = self.host.parent(cur);
