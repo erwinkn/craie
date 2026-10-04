@@ -1664,25 +1664,22 @@ export class Encoder {
     this.ops.u32(kind >>> 0)
     for (let i = 0; i < 4; i++) this.ops.u32((params[i] ?? 0) >>> 0)
   }
-  /** Surface payload: the typed array's bytes, copied once. */
   /** Registers a font file (TTF, OTF, a collection) under `family`, or
    * its own family names when null. */
   font(family: string | null, bytes: ArrayBufferView) {
-    const view = new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.byteLength)
-    const s = family === null ? NIL : this.strRef(family)
-    const b = this.ops
-    b.u8(Op.Font)
-    b.u32(s)
-    b.u32(view.byteLength)
-    b.reserve(view.byteLength)
-    b.bytes.set(view, b.at)
-    b.at += view.byteLength
+    this.bytesOp(Op.Font, family === null ? NIL : this.strRef(family), bytes)
   }
+  /** Surface payload: the typed array's bytes, copied once. */
   payload(id: number, bytes: ArrayBufferView) {
+    this.bytesOp(Op.Payload, id, bytes)
+  }
+  /** An op of a u32 (a node, a string ref) and length-prefixed bytes,
+   * copied once. */
+  private bytesOp(op: Op, ref: number, bytes: ArrayBufferView) {
     const view = new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.byteLength)
     const b = this.ops
-    b.u8(Op.Payload)
-    b.u32(id)
+    b.u8(op)
+    b.u32(ref)
     b.u32(view.byteLength)
     b.reserve(view.byteLength)
     b.bytes.set(view, b.at)

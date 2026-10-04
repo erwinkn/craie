@@ -13,7 +13,8 @@ bridge package, so both sides run the same bytes and a new trace lands
 through a bridge PR. The first eight (`I1` to `I4bj`) are the islet
 traces of `lists.md`; `L1` to `L3` and `U1` to `U4` are its loading and
 unloading traces. `K1` to `K13` are the kit's, from Marbre PR #69
-(9c98021), with `loadItems` renamed `load`.
+(9c98021), with `loadItems` renamed `load`; `K14` to `K16` are from
+Marbre PR #71 (d9de855), verbatim, and `K17` from its re-check (db0fe5f).
 
 ## A trace
 

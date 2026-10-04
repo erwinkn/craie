@@ -97,17 +97,21 @@ pub struct Fonts {
     pub store: FontStore,
     source: Box<dyn FontSource>,
     /// Fonts the app registered (`register`): asked first for a family
-    /// they hold, and first for fallback; generic names stay the
-    /// source's.
+    /// they hold; generic names stay the source's.
     registered: fonts::RawFonts,
+    /// Primary instances resolved from registered fonts: their spans ask
+    /// registered fonts first in fallback, as an app's bundled fallback
+    /// faces. Other spans never fall back to a registered font, as a web
+    /// font no `font-family` names never draws.
+    registered_primaries: Vec<FontInstanceId>,
     /// (family, attrs) -> primary instance. Few entries: a linear scan,
     /// no key allocation per lookup.
     primary: Vec<(String, FontAttrs, Option<FontInstanceId>)>,
-    /// The source's fallback candidates per (script, attrs, emoji) and
-    /// cluster, in its priority order. A cluster picks the first candidate
+    /// Fallback candidates per (script, attrs, emoji, registered primary)
+    /// and cluster, in priority order. A cluster picks the first candidate
     /// covering all of it, so the answer depends on the cluster alone,
     /// never on text laid out before.
-    candidates: HashMap<(ScriptTag, FontAttrs, bool), ClusterCandidates>,
+    candidates: HashMap<(ScriptTag, FontAttrs, bool, bool), ClusterCandidates>,
     /// The family an empty family name means: `system-ui`, React Native's
     /// default (ARCHITECTURE.md §5, Decisions).
     default_family: String,
@@ -119,6 +123,7 @@ impl Fonts {
             store: FontStore::new(),
             source,
             registered: fonts::RawFonts::new(),
+            registered_primaries: Vec::new(),
             primary: Vec::new(),
             candidates: HashMap::new(),
             default_family: "system-ui".to_string(),
@@ -137,12 +142,14 @@ impl Fonts {
     }
 
     /// Registers a font file's faces (under `family`, else the file's
-    /// own family names) ahead of the source. Spans resolved before keep
-    /// their faces; later ones see the new family. Returns how many faces
-    /// it added (0: not a font).
-    pub fn register(&mut self, bytes: fonts::FaceBytes, family: Option<&str>) -> usize {
+    /// own family names) ahead of the source; the last registration of a
+    /// face wins. Spans resolved before keep their faces until resolved
+    /// again: the caller re-resolves those naming a returned family.
+    /// Returns the family of each face added (lowercase; none: not a
+    /// font, or the same bytes again).
+    pub fn register(&mut self, bytes: fonts::FaceBytes, family: Option<&str>) -> Vec<String> {
         let added = self.registered.add_as(bytes, family);
-        if added > 0 {
+        if !added.is_empty() {
             self.primary.clear();
             self.candidates.clear();
         }
@@ -178,10 +185,14 @@ impl Resolve for Fonts {
         } else {
             self.registered.select(name, attrs)
         };
+        let own = registered.is_some();
         let blob = registered
             .or_else(|| self.source.select(name, attrs))
             .or_else(|| self.source.select("sans-serif", attrs));
         let font = blob.and_then(|b| self.store.instance_of(&b));
+        if let Some(f) = font.filter(|f| own && !self.registered_primaries.contains(f)) {
+            self.registered_primaries.push(f);
+        }
         self.primary.push((family.to_string(), attrs, font));
         font
     }
@@ -191,13 +202,32 @@ impl Resolve for Fonts {
         cluster: &str,
         script: ScriptTag,
         attrs: FontAttrs,
+        primary: Option<FontInstanceId>,
     ) -> Option<FontInstanceId> {
         cluster.chars().find(|&c| !fonts::ignorable(c))?;
         let emoji = fonts::emoji_presentation(cluster);
-        let by_cluster = self.candidates.entry((script, attrs, emoji)).or_default();
+        let own = primary.is_some_and(|p| self.registered_primaries.contains(&p));
+        let by_cluster = self
+            .candidates
+            .entry((script, attrs, emoji, own))
+            .or_default();
         if !by_cluster.contains_key(cluster) {
-            let mut blobs = self.registered.fallback(cluster, script, attrs, emoji);
+            // A registered span asks registered fonts first, except for
+            // emoji presentation, where the system's color emoji font
+            // comes first.
+            let mut blobs = Vec::new();
+            let mut registered = |blobs: &mut Vec<_>| {
+                if own {
+                    blobs.extend(self.registered.fallback(cluster, script, attrs, emoji));
+                }
+            };
+            if !emoji {
+                registered(&mut blobs);
+            }
             blobs.extend(self.source.fallback(cluster, script, attrs, emoji));
+            if emoji {
+                registered(&mut blobs);
+            }
             let list = blobs
                 .iter()
                 .filter_map(|b| self.store.instance_of(b))

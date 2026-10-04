@@ -1,0 +1,103 @@
+{
+  "format": "craie-list-trace/1",
+  "id": "K14",
+  "name": "rows taken out and put back, or moved and moved back, in one batch leave the reader where it was",
+  "viewport": {
+    "width": 400,
+    "height": 200
+  },
+  "config": {
+    "overscan": 600,
+    "lookahead": 200,
+    "endThreshold": 80,
+    "anchor": "start",
+    "anchorPolicy": "reading"
+  },
+  "templates": [],
+  "items": [
+    {
+      "count": 100,
+      "key": "m{i}",
+      "estimate": 40,
+      "height": 40
+    }
+  ],
+  "steps": [
+    {
+      "do": "mount"
+    },
+    {
+      "do": "scroll",
+      "offset": 1000,
+      "expect": {
+        "anchor": {
+          "key": "m25",
+          "offset": 0
+        }
+      }
+    },
+    {
+      "do": "changes",
+      "changes": [
+        {
+          "kind": "splice",
+          "at": 0,
+          "remove": 30,
+          "items": []
+        },
+        {
+          "kind": "splice",
+          "at": 0,
+          "remove": 0,
+          "items": [
+            {
+              "count": 30,
+              "key": "m{i}",
+              "estimate": 40,
+              "height": 40
+            }
+          ]
+        }
+      ],
+      "expect": {
+        "anchor": {
+          "key": "m25",
+          "offset": 0
+        },
+        "offset": 1000,
+        "visible": [
+          25,
+          29
+        ]
+      }
+    },
+    {
+      "do": "changes",
+      "changes": [
+        {
+          "kind": "move",
+          "from": 25,
+          "count": 3,
+          "to": 0
+        },
+        {
+          "kind": "move",
+          "from": 0,
+          "count": 3,
+          "to": 25
+        }
+      ],
+      "expect": {
+        "anchor": {
+          "key": "m25",
+          "offset": 0
+        },
+        "offset": 1000,
+        "visible": [
+          25,
+          29
+        ]
+      }
+    }
+  ]
+}
