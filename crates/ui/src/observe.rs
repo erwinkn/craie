@@ -99,12 +99,13 @@ impl Ui {
             self.report_layout(id);
         }
         let mut fresh = std::mem::take(&mut self.observe.fresh);
-        // Not laid out yet (detached, or created after the pass): later.
+        // Not laid out or not displayed yet (detached, created after the
+        // pass, hidden): later.
         fresh.retain(|&id| {
             if !self.observe.layout.contains_key(&id) {
                 return false;
             }
-            if !self.layouts.is_laid_out(NodeId(id)) {
+            if !self.layouts.is_laid_out(NodeId(id)) || !self.displayed(NodeId(id)) {
                 return true;
             }
             self.report_layout(id);
@@ -118,7 +119,9 @@ impl Ui {
         let Some(sent) = self.observe.layout.get(&id) else {
             return;
         };
-        if !self.host.is_live(node) || !self.layouts.is_laid_out(node) {
+        // A hidden node's box is not one JS sees: it hears the box
+        // again when the node shows and that box differs from the last.
+        if !self.layouts.is_laid_out(node) || !self.displayed(node) {
             return;
         }
         let rect = self.layouts.data(node).rect;
@@ -162,7 +165,9 @@ impl Ui {
         }
     }
 
-    /// In the tree, and neither it nor an ancestor is `display: none`.
+    /// In the tree, and neither it nor an ancestor is `display: none`
+    /// or a row its list hides (a retained row whose item went, a
+    /// duplicate of a shown one).
     fn displayed(&self, id: NodeId) -> bool {
         let mut cur = id;
         loop {
@@ -174,6 +179,11 @@ impl Ui {
                 return true;
             }
             if !p.is_node() {
+                return false;
+            }
+            if self.host.kind(p) == Some(crate::mutation::NodeKind::List)
+                && !self.host.list_row_shown(p, cur)
+            {
                 return false;
             }
             cur = p;

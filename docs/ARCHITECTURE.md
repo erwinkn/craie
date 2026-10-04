@@ -1329,13 +1329,15 @@ Observations (`observe.rs`, ARCHITECTURE-update topic 14). A node
 with an `onLayout` listener (mask bit 11) gets a `LAYOUT` event with
 its border box relative to its parent's (React Native's `onLayout`:
 no scroll offset, no transform) once its first layout places it, then
-whenever a layout pass changes the box. The check reads the passes'
+whenever a layout pass changes the box, while it is displayed (no
+`display: none` on it or above, not a row its list hides). The check reads the passes'
 `moved` and `resized` queues before the paint drains them, so its
 cost follows the boxes that changed, not the listeners. A listener set
 on a node already laid out reports at once, with no frame. `measure()`
 answers (`MEASURE`, keyed by request) with the window-space bounding
 box from current layout: at once when nothing is owed, else after the
-frame's layout; `null` when the node is gone or not displayed. The
+frame's layout; `null` when the node is gone or not displayed (the
+same rule). The
 window's state (logical size, scale, focus, visible meaning not
 minimized or occluded, dark appearance) goes out as `WINDOW` at start
 and on each change; `useWindow` reads it. `presented()` and
