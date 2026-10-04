@@ -15,7 +15,7 @@
 // across transactions.
 
 const MAGIC = 0x3257_5243 // "CRW2" little-endian
-export const VERSION = 15
+export const VERSION = 16
 export const NIL = 0xffff_ffff // no node / append / default style
 
 const enum Op {
@@ -35,6 +35,7 @@ const enum Op {
   // text
   Paragraph = 0x40,
   InputConfig = 0x41,
+  Lines = 0x42,
   // semantics
   Role = 0x50,
   Label = 0x51,
@@ -1565,6 +1566,14 @@ export class Encoder {
     this.ops.u32(spans.length)
   }
   /** `submit`: a `SUBMIT_KEY` value. */
+  /** A text node's line limit (React Native's `numberOfLines`): 0
+   * none; 1 also no wrapping; the last line kept ends in an ellipsis
+   * when text remains. */
+  lines(id: number, max: number) {
+    this.ops.u8(Op.Lines)
+    this.ops.u32(id)
+    this.ops.u16(max)
+  }
   inputConfig(
     id: number,
     fontSize: number,

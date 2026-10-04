@@ -96,6 +96,44 @@ fn request_device(adapter: &Adapter) -> (Device, Queue) {
     (device, queue)
 }
 
+/// How translucent colors and antialiased edges composite. Browsers blend
+/// sRGB-encoded values, so a 16 % tint over a dark canvas reads as on the
+/// web; linear light is physically right and reads stronger. The
+/// renderer follows its target's format (`Renderer::new`): this picks it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Blending {
+    /// sRGB-encoded, as browsers: a plain (non-sRGB) target.
+    #[default]
+    Srgb,
+    /// Linear light: an *-srgb target, which encodes on store.
+    Linear,
+}
+
+impl Blending {
+    /// A target format for this blending among `formats` (a surface's
+    /// capabilities, preferred first), else the first.
+    pub fn pick(self, formats: &[wgpu::TextureFormat]) -> wgpu::TextureFormat {
+        use wgpu::TextureFormat as F;
+        let linear = self == Blending::Linear;
+        let eight_bit = |f: &F| matches!(f.remove_srgb_suffix(), F::Bgra8Unorm | F::Rgba8Unorm);
+        let fits = |f: &F| f.is_srgb() == linear;
+        formats
+            .iter()
+            .find(|f| eight_bit(f) && fits(f))
+            .or_else(|| formats.iter().find(|f| fits(f)))
+            .copied()
+            .unwrap_or(formats[0])
+    }
+
+    /// The offscreen target format for this blending (headless, tests).
+    pub fn offscreen(self) -> wgpu::TextureFormat {
+        match self {
+            Blending::Srgb => wgpu::TextureFormat::Bgra8Unorm,
+            Blending::Linear => wgpu::TextureFormat::Bgra8UnormSrgb,
+        }
+    }
+}
+
 /// A configured surface ready to present frames.
 pub struct WindowSurface {
     pub surface: Surface<'static>,
@@ -103,15 +141,17 @@ pub struct WindowSurface {
 }
 
 impl WindowSurface {
-    /// `size` is the surface size in physical pixels.
-    pub fn new(gpu: &Gpu, surface: Surface<'static>, width: u32, height: u32) -> WindowSurface {
+    /// `size` is the surface size in physical pixels; `blending` picks
+    /// its format (`Blending::pick`).
+    pub fn new(
+        gpu: &Gpu,
+        surface: Surface<'static>,
+        width: u32,
+        height: u32,
+        blending: Blending,
+    ) -> WindowSurface {
         let caps = surface.get_capabilities(&gpu.adapter);
-        let format = caps
-            .formats
-            .iter()
-            .copied()
-            .find(|f| f.is_srgb())
-            .unwrap_or(caps.formats[0]);
+        let format = blending.pick(&caps.formats);
         let config = SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
             format,

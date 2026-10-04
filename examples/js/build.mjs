@@ -4,7 +4,7 @@
 import { build } from "esbuild"
 
 await build({
-  entryPoints: ["host.ts", "demo.tsx", "smoke.ts", "smoke-worker.tsx", "elevation.ts", "elevation-worker.tsx"],
+  entryPoints: ["host.ts", "demo.tsx", "smoke.ts", "smoke-worker.tsx", "elevation.ts", "elevation-worker.tsx", "typography.ts", "typography-worker.tsx"],
   bundle: true,
   platform: "node",
   format: "esm",

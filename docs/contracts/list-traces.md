@@ -88,7 +88,7 @@ device pixel (1 at scale 1).
 | Field | Meaning |
 |---|---|
 | `visible` | `[first, last]` of the items intersecting the viewport, exactly; `[0, -1]` when empty |
-| `anchor` | `{ "key", "offset" }`: the anchor row and its top relative to the viewport's top, as the viewport event reports it |
+| `anchor` | `{ "key", "offset" }`: the anchor row and its top relative to the viewport's top, as `readViewport` reports it |
 | `offset` | The content offset of the viewport's top |
 | `atEnd`, `following` | As in `ListViewport` |
 | `pinnedKeys` | As in `ListViewport`, in any order |

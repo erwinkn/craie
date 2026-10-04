@@ -13,7 +13,7 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use craie_core::Size;
-use craie_render::{Gpu, Renderer};
+use craie_render::{Blending, Gpu, Renderer};
 use craie_ui::bridge::Session;
 use craie_ui::observe::WindowState;
 use craie_ui::ui::Ui;
@@ -29,23 +29,30 @@ const SPIN: Duration = Duration::from_millis(20);
 /// late (coalesced timers), which E19 measured as clicks waiting for
 /// native. Linux timers were not late, so its waits keep `SPIN`.
 const PROBE_SPINS: bool = cfg!(target_vendor = "apple");
-const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Bgra8UnormSrgb;
 
-/// Runs `session` headless at `logical` size and display `scale` until
-/// the session closes. Returns the close reason.
-pub fn run(session: Arc<Session>, logical: Size, scale: f32) -> String {
-    run_counted(session, logical, scale, &AtomicU64::new(0))
+/// Runs `session` headless at `logical` size and display `scale`,
+/// blending as `blending` says, until the session closes. Returns the
+/// close reason.
+pub fn run(session: Arc<Session>, logical: Size, scale: f32, blending: Blending) -> String {
+    run_counted(session, logical, scale, blending, &AtomicU64::new(0))
 }
 
 /// `run`, counting drawn frames in `frames` (tests).
-fn run_counted(session: Arc<Session>, logical: Size, scale: f32, frames: &AtomicU64) -> String {
+fn run_counted(
+    session: Arc<Session>,
+    logical: Size,
+    scale: f32,
+    blending: Blending,
+    frames: &AtomicU64,
+) -> String {
+    let format = blending.offscreen();
     interactive_thread();
     crate::fonts::install();
     let Some(gpu) = Gpu::try_headless() else {
         session.close("no GPU adapter");
         return "no GPU adapter".into();
     };
-    let mut renderer = Renderer::new(&gpu, FORMAT);
+    let mut renderer = Renderer::new(&gpu, format);
     let (w, h) = (
         (logical.width * scale).round() as u32,
         (logical.height * scale).round() as u32,
@@ -60,7 +67,7 @@ fn run_counted(session: Arc<Session>, logical: Size, scale: f32, frames: &Atomic
         mip_level_count: 1,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
-        format: FORMAT,
+        format,
         usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
         view_formats: &[],
     });
@@ -147,7 +154,7 @@ fn run_counted(session: Arc<Session>, logical: Size, scale: f32, frames: &Atomic
                 p.presented(&ui);
                 p.finish(&session);
             }
-            answer_presents(&mut ui, &mut renderer, &gpu, FORMAT, (w, h));
+            answer_presents(&mut ui, &mut renderer, &gpu, format, (w, h));
             flush_events(&mut ui, &session);
             let tweens = ui.animation_count();
             if let Some(e) = stats.frame(cpu_ms, prepare_ms, ui.host.len(), tweens) {
@@ -309,8 +316,15 @@ mod tests {
         let frames = Arc::new(AtomicU64::new(0));
         let host = session.clone();
         let counter = frames.clone();
-        let thread =
-            std::thread::spawn(move || run_counted(host, Size::new(100.0, 100.0), 1.0, &counter));
+        let thread = std::thread::spawn(move || {
+            run_counted(
+                host,
+                Size::new(100.0, 100.0),
+                1.0,
+                Blending::default(),
+                &counter,
+            )
+        });
         let submit = |t: &Transaction<'_>| session.submit(craie_ui::wire::encode(t)).unwrap();
         // A liveness bound, not a budget: llvmpipe's first frame took
         // over 5 s on exe1 at load 55.
@@ -412,7 +426,13 @@ mod tests {
         let session = Session::new();
         let host = session.clone();
         let thread = std::thread::spawn(move || {
-            run_counted(host, Size::new(64.0, 32.0), 2.0, &AtomicU64::new(0))
+            run_counted(
+                host,
+                Size::new(64.0, 32.0),
+                2.0,
+                Blending::default(),
+                &AtomicU64::new(0),
+            )
         });
         let mut half = taffy::Style::default();
         half.size.width = taffy::Dimension::length(32.0);

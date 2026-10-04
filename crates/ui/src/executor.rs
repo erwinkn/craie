@@ -555,6 +555,11 @@ pub fn validate(host: &Host, txn: &Transaction<'_>) -> Result<Validated, WireErr
                 };
                 valid_spans(text, spans, txn.families.len())?;
             }
+            Mutation::Lines { id, .. } => {
+                if o.kind(*id) != Some(NodeKind::Text) {
+                    return Err(invalid("a line limit on a non-text node"));
+                }
+            }
             Mutation::InputConfig { id, font_size, .. } => {
                 if o.kind(*id) != Some(NodeKind::Input) {
                     return Err(invalid("input config on a non-input node"));
@@ -1114,6 +1119,16 @@ impl Ui {
                     // Color lives in the paint records: no reshape.
                     self.host.revs.paint.bump();
                     self.host.dirty.paint.push(*id);
+                }
+            }
+            Mutation::Lines { id, max } => {
+                let node = NodeId(*id);
+                let p = &mut self.host.paragraphs[node.index()];
+                if p.max_lines != *max {
+                    // The ellipsis is shaped with the paragraph.
+                    p.max_lines = *max;
+                    self.host.revs.text_metrics.bump();
+                    self.host.mark_text(node);
                 }
             }
             Mutation::InputConfig {

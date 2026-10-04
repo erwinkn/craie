@@ -743,6 +743,12 @@ pub enum Mutation<'a> {
         multiline: bool,
         submit: SubmitKey,
     },
+    /// A text node's line limit (`craie_text::paragraph::TextStyle::
+    /// max_lines`): 0 none; 1 also no wrapping.
+    Lines {
+        id: u32,
+        max: u16,
+    },
     // semantics
     /// The role, and the states it reports while clear (`reported`).
     Role {
@@ -930,6 +936,7 @@ impl Mutation<'_> {
             | Mutation::Paint { id, .. }
             | Mutation::Paragraph { id, .. }
             | Mutation::InputConfig { id, .. }
+            | Mutation::Lines { id, .. }
             | Mutation::Role { id, .. }
             | Mutation::Label { id, .. }
             | Mutation::Interaction { id, .. }
@@ -1286,6 +1293,11 @@ impl<'a> Transaction<'a> {
                 ..TextSpan::default()
             }],
         )
+    }
+
+    /// The text node's line limit (React Native's `numberOfLines`).
+    pub fn lines(&mut self, id: u32, max: u16) -> &mut Self {
+        self.push(Mutation::Lines { id, max })
     }
 
     pub fn input_config(

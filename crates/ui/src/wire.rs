@@ -68,6 +68,9 @@ pub mod op {
     // text
     pub const PARAGRAPH: u8 = 0x40;
     pub const INPUT_CONFIG: u8 = 0x41;
+    /// id u32 | max u16: a text node's line limit (0: none; 1: no
+    /// wrapping either), the last line kept ending in an ellipsis.
+    pub const LINES: u8 = 0x42;
     // semantics
     /// id u32 | role u8 | reported u8 (`mutation::reported`)
     pub const ROLE: u8 = 0x50;
@@ -599,6 +602,11 @@ pub fn encode(txn: &Transaction<'_>) -> Vec<u8> {
                 f32le(&mut ops, *font_size);
                 u32le(&mut ops, s);
                 ops.push(*multiline as u8 | (*submit as u8) << input_flag::SUBMIT_SHIFT);
+            }
+            Mutation::Lines { id, max } => {
+                ops.push(op::LINES);
+                u32le(&mut ops, *id);
+                ops.extend_from_slice(&max.to_le_bytes());
             }
             Mutation::Role { id, role, reported } => {
                 ops.push(op::ROLE);
@@ -1369,6 +1377,10 @@ pub fn decode(buf: &[u8]) -> Result<Transaction<'_>, WireError> {
                     spans: start..end,
                 }
             }
+            op::LINES => Mutation::Lines {
+                id: r.u32()?,
+                max: r.u16()?,
+            },
             op::INPUT_CONFIG => {
                 let (id, font_size) = (r.u32()?, r.f32()?);
                 let placeholder = string(r.u32()?)?.into();

@@ -668,7 +668,9 @@ impl Ui {
     /// layout. `viewport` is logical, for culling.
     pub fn paint(&mut self, viewport: Size) {
         let layout_ran = std::mem::take(&mut self.relayout);
-        if self.selection_revs != self.host.revs {
+        // After a layout too: a line limit's cut, which ends the selected
+        // text, moves with the text's width.
+        if self.selection_revs != self.host.revs || (layout_ran && self.text_selection.is_some()) {
             self.refresh_selection();
         }
         self.sync_scene(viewport, layout_ran);

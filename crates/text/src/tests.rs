@@ -1045,6 +1045,118 @@ fn tabular_digits_share_one_advance() {
     );
 }
 
+fn clamped(e: &mut TextEngine, text: &str, width: Option<f32>, max_lines: u16) -> Paragraph {
+    styled(
+        e,
+        text,
+        width,
+        TextStyle {
+            max_lines,
+            ..TextStyle::default()
+        },
+    )
+}
+
+/// One line (`numberOfLines = 1`, the kit's truncate): no wrapping; at
+/// a width, the text is cut at a cluster so that it and the ellipsis
+/// fit, trailing space dropped; unbounded, nothing is cut.
+#[test]
+fn one_line_truncates_with_an_ellipsis() {
+    let mut e = engine();
+    let text = "The quick brown fox jumps over the lazy dog";
+    let p = clamped(&mut e, text, Some(100.0), 1);
+    assert_eq!(p.lines.len(), 1, "no wrapping");
+    let l = &p.lines[0];
+    let el = p.ellipsis.as_ref().unwrap();
+    assert_eq!(el.line, Some(0));
+    assert!(p.visible_end < text.len() as u32 && l.text.end == p.visible_end);
+    assert!(
+        !text[..p.visible_end as usize].ends_with(' '),
+        "no trailing space before it"
+    );
+    let content = l.advance - l.trailing;
+    assert!(
+        (el.x - (l.x + content)).abs() < 1e-3,
+        "right after the content"
+    );
+    assert!(el.x + el.width <= 100.0 + 1e-3, "fits: {}", el.x + el.width);
+    assert!(
+        el.x + el.width > 100.0 - 20.0,
+        "uses the width: {}",
+        el.x + el.width
+    );
+    assert!((p.width - (content + el.width)).abs() < 1e-3);
+    // Unbounded (intrinsic size): the whole text on one line.
+    let p = clamped(&mut e, text, None, 1);
+    assert_eq!((p.lines.len(), p.visible_end), (1, text.len() as u32));
+    assert_eq!(p.ellipsis.as_ref().unwrap().line, None);
+    // Short enough: nothing cut.
+    let p = clamped(&mut e, "fox", Some(100.0), 1);
+    assert_eq!(p.ellipsis.as_ref().unwrap().line, None);
+}
+
+/// `n` lines (the kit's `lines`): wraps, keeps `n`, and ends the last in
+/// the ellipsis when text remains, a hard break included; a final
+/// newline's empty line is past the limit and cuts nothing.
+#[test]
+fn n_lines_clamp_the_paragraph() {
+    let mut e = engine();
+    let text = "The quick brown fox jumps over the lazy dog and keeps on running";
+    let free = styled(&mut e, text, Some(120.0), TextStyle::default());
+    assert!(free.lines.len() > 2);
+    let p = clamped(&mut e, text, Some(120.0), 2);
+    assert_eq!(p.lines.len(), 2);
+    assert_eq!(p.ellipsis.as_ref().unwrap().line, Some(1));
+    assert_eq!(p.lines[0], free.lines[0], "the first line is as unclamped");
+    assert!(p.height < free.height);
+    let el = p.ellipsis.as_ref().unwrap();
+    assert!(el.x + el.width <= 120.0 + 1e-3);
+    // Hard breaks.
+    let p = clamped(&mut e, "one\ntwo\nthree", Some(120.0), 2);
+    assert_eq!(p.lines.len(), 2);
+    assert_eq!(p.ellipsis.as_ref().unwrap().line, Some(1));
+    assert_eq!(&"one\ntwo\nthree"[..p.visible_end as usize], "one\ntwo");
+    let p = clamped(&mut e, "one\n", Some(120.0), 1);
+    assert_eq!(
+        (p.lines.len(), p.ellipsis.as_ref().unwrap().line),
+        (1, None)
+    );
+}
+
+/// Alignment places the content and its ellipsis together; in a
+/// right-to-left paragraph the ellipsis is on the left of the content.
+#[test]
+fn the_ellipsis_aligns_with_its_line() {
+    use crate::paragraph::Align;
+    let mut e = engine();
+    let text = "The quick brown fox jumps over the lazy dog";
+    let p = styled(
+        &mut e,
+        text,
+        Some(100.0),
+        TextStyle {
+            max_lines: 1,
+            align: Align::Right,
+            ..TextStyle::default()
+        },
+    );
+    let el = p.ellipsis.as_ref().unwrap();
+    assert!(
+        (el.x + el.width - 100.0).abs() < 1e-3,
+        "right: {}",
+        el.x + el.width
+    );
+    let rtl = "שלום עולם שלום עולם שלום עולם";
+    let p = clamped(&mut e, rtl, Some(80.0), 1);
+    let (l, el) = (&p.lines[0], p.ellipsis.as_ref().unwrap());
+    assert!(p.base_rtl && el.line == Some(0));
+    assert!(
+        (el.x + el.width - (l.x + l.trailing)).abs() < 1e-3,
+        "left of the content"
+    );
+    assert!((l.x + l.advance - 80.0).abs() < 1e-3, "start is right");
+}
+
 /// After a newline the text may run the other way: its trailing space
 /// hangs on its own paragraph's side, so left, center and right place
 /// the visible content (#27 review). `Start` follows the first
@@ -1101,4 +1213,96 @@ fn lines_align_by_their_own_direction() {
             );
         }
     }
+}
+
+/// The ellipsis follows its own line's direction: a cut line after a
+/// newline into right-to-left text ends on the left, though the first
+/// paragraph runs left to right (#27 review on the clamp).
+#[test]
+fn the_ellipsis_follows_its_lines_direction() {
+    let mut e = engine();
+    let text = "abc\nשלום עולם שלום עולם שלום עולם";
+    let p = clamped(&mut e, text, Some(80.0), 2);
+    let (l, el) = (&p.lines[1], p.ellipsis.as_ref().unwrap());
+    assert!(!p.base_rtl && el.line == Some(1));
+    assert!(
+        (el.x + el.width - (l.x + l.trailing)).abs() < 1e-3,
+        "left of the content: {} against {}",
+        el.x + el.width,
+        l.x + l.trailing
+    );
+    assert!(el.x.abs() < 1e-3, "start is left: {}", el.x);
+}
+
+/// #28 review: a line that only shows the ellipsis keeps its height,
+/// alone or last (PR28-02).
+#[test]
+fn an_ellipsis_only_line_has_height() {
+    let mut e = engine();
+    let p = clamped(&mut e, "abcdefghijk", Some(1.0), 1);
+    assert_eq!(p.ellipsis.as_ref().unwrap().line, Some(0));
+    assert!(p.height > 0.0, "alone: {}", p.height);
+    let p = clamped(&mut e, "a\nabcdefghijk", Some(20.0), 2);
+    assert_eq!(p.ellipsis.as_ref().unwrap().line, Some(1));
+    assert!(p.height > p.lines[0].height, "last: {}", p.height);
+}
+
+/// #28 review: the ellipsis is in span zero's font, which may be taller
+/// than the cut line's text: the line takes its metrics (PR28-03).
+#[test]
+fn the_ellipsis_metrics_enter_its_line() {
+    let mut e = engine();
+    let text = "A\nabcdefghijabcdefghijabcdefghij";
+    let style = |size, max_lines| TextStyle {
+        size,
+        max_lines,
+        ..TextStyle::default()
+    };
+    let spans = [
+        SpanStyle {
+            start: 0,
+            style: style(64.0, 2),
+        },
+        SpanStyle {
+            start: 2,
+            style: style(8.0, 0),
+        },
+    ];
+    let p = e.layout_text(
+        &TextSpec {
+            text,
+            spans: &spans,
+        },
+        Some(100.0),
+    );
+    assert_eq!(p.ellipsis.as_ref().unwrap().line, Some(1));
+    let l = &p.lines[1];
+    assert!(l.height >= p.empty_metrics.line_height, "{}", l.height);
+    assert!(l.ascent >= p.empty_metrics.ascent);
+    assert!((p.height - (l.top + l.height)).abs() < 1e-3);
+}
+
+/// #28 review: a final newline doesn't let an overflowing last line
+/// through uncut, and hanging spaces alone don't cut (PR28-04, PR28-07).
+#[test]
+fn the_limit_cuts_overflow_not_hanging_spaces() {
+    let mut e = engine();
+    let p = clamped(&mut e, "abcdefghijk\n", Some(30.0), 1);
+    assert_eq!(p.ellipsis.as_ref().unwrap().line, Some(0));
+    assert!(p.visible_end < 11);
+    let p = clamped(&mut e, "a               ", Some(30.0), 1);
+    assert_eq!(p.ellipsis.as_ref().unwrap().line, None);
+    assert_eq!(p.visible_end, 16);
+}
+
+/// #28 review: the intrinsic width (no wrap width) is the content's,
+/// lines past the limit included, as without a limit (PR28-05).
+#[test]
+fn intrinsic_width_ignores_the_limit() {
+    let mut e = engine();
+    let text = "a\nthis is the much wider second line";
+    let p = clamped(&mut e, text, None, 1);
+    let free = clamped(&mut e, text, None, 0);
+    assert_eq!(p.lines.len(), 1);
+    assert_eq!(p.width, free.width);
 }

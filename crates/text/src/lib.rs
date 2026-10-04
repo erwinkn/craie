@@ -295,9 +295,10 @@ impl TextEngine {
         } = self;
         for run in &p.runs {
             stats.glyph_runs += 1;
+            // Glyphs past a line limit's cut are not on any line.
             let glyphs = p.glyphs[run.glyphs.start as usize..run.glyphs.end as usize]
                 .iter()
-                .filter(|g| g.id != HIDDEN)
+                .filter(|g| g.id != HIDDEN && g.cluster < p.visible_end)
                 .map(|g| {
                     (
                         g.id,
@@ -312,6 +313,32 @@ impl TextEngine {
                 &fonts.store,
                 run.font,
                 run.size * scale,
+                scale,
+                glyphs,
+                atlas,
+                out,
+                &mut stats,
+            );
+        }
+        if let Some(e) = p.ellipsis.as_ref().filter(|e| e.line.is_some()) {
+            // In span zero's paint.
+            let mut pen = e.x;
+            let glyphs = e.glyphs.iter().map(|&(id, advance)| {
+                let x = pen;
+                pen += advance;
+                (
+                    id,
+                    (origin.x + x) * scale,
+                    (origin.y + e.y) * scale,
+                    brush.unwrap_or(PaintSlot(0)),
+                )
+            });
+            emit_glyphs(
+                raster,
+                cache,
+                &fonts.store,
+                e.font,
+                e.size * scale,
                 scale,
                 glyphs,
                 atlas,

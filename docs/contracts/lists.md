@@ -16,7 +16,7 @@ both sides. It builds on the list co-design study (contract C) and on
   same ops. Each runs its own copy of the algorithm, and both are held to the
   same JSON traces.
 - **Two callbacks, for data and notification only:** `updateItems` (load
-  these rows, these may go) and the optional `onViewportChange`. They are
+  these rows, these may go) and the optional `onVisibleChange`. They are
   never for layout.
 - **Rows stay ordinary React** (`renderItem`), mounted for a range the
   virtualizer keeps to itself: the kit renders its own on web and React
@@ -24,7 +24,7 @@ both sides. It builds on the list co-design study (contract C) and on
   React wrapper reshapes the table into wire records and sends it; native
   owns sizes, measurement and correction, so no sizes cross to JS.
 - **The public surface** is `renderItem`, `updateItems`,
-  `onViewportChange` and the handle (`scrollToIndex`, `scrollToKey`,
+  `onVisibleChange` and the handle (`scrollToIndex`, `scrollToKey`,
   `scrollToEnd`, `scrollToOffset`, `readViewport`).
 
 ## The table (JS)
@@ -84,7 +84,7 @@ interface VirtualListProps {
   startInset?: number; paddingEnd?: number; restoreKey?: string
   // callbacks (callback-ref slots on the list node)
   updateItems?(ask: ListAsk): void          // data: load near the viewport, unload far from it
-  onViewportChange?(v: ListViewport): void  // optional; latest wins, at most once per frame
+  onVisibleChange?(v: ListVisible): void    // optional; latest wins, at most once per frame
 }
 interface ListAsk {                         // what changed since the last ask
   load?: { first: number; last: number }               // at most one range; replaces the last
@@ -97,12 +97,18 @@ interface ListHandle {
   scrollToOffset(offset: number): void
   readViewport(): Promise<ListViewport | null>   // after preceding commits' layout; null once removed
 }
-interface ListViewport {
+interface ListVisible {                     // what onVisibleChange reports
+  first: number; last: number               // visible items; the Inbox's mark-seen reads these
+  atEnd: boolean                            // "jump to latest" reads this
+  following: boolean
+}
+interface ListViewport {                    // on demand, through readViewport
   revision: number
-  visible: { first: number; last: number }  // the Inbox's mark-seen reads this
+  visible: { first: number; last: number }
   anchor: { key: string; index: number; offset: number } | null
   pinnedKeys: readonly string[]             // rows kept mounted for focus
-  atEnd: boolean                            // "jump to latest" reads this
+  offset: number                            // content offset of the viewport's top
+  atEnd: boolean
   following: boolean
 }
 ```
@@ -117,7 +123,7 @@ interface ListViewport {
   | Slot | Arguments | Delivery |
   |---|---|---|
   | `updateItems` | `ListAsk` | Reliable; a newer `load` replaces an older one |
-  | `onViewportChange` | `ListViewport` | Latest wins, at most once per frame |
+  | `onVisibleChange` | `ListVisible` | Latest wins, at most once per frame; nothing is sent without a listener |
 
 - **Lazy content.**
   - The list asks for content, and offers to drop it, only through
@@ -341,10 +347,11 @@ stays the one source of truth, and the list never flips `loaded` itself.
     first/end, held first/end, pinned ids, anchor id, index and offset,
     flags (at end, following). Coalesced per frame. The mounted range and
     holds are for the bridge (which rows to mount, which render as
-    placeholders); the rest makes `onViewportChange` and `readViewport`.
+    placeholders); the rest makes `onVisibleChange` (its four fields) and
+    `readViewport`.
   - Callback slots (`CALL`, callbacks note): `updateItems` (a flags byte,
     bit 0 load, bits 1 and 2 an unload range above and below, then each
-    present range as two u32) and `onViewportChange` on the list node.
+    present range as two u32) and `onVisibleChange` on the list node.
   - Descriptor flags gain `failed`.
 - **Old ops.** `LIST_CONFIG`, `LIST_SPLICE` and `LIST_INDEX` (0x90–0x92) stay
   for current callers until they migrate; then they go.
@@ -372,3 +379,6 @@ stays the one source of truth, and the list never flips `loaded` itself.
   shifts and at least a screen per load, D135; unloading with a retain
   window, D136), and his simplification to one data callback and one
   notification. They changed the expected requests of I3, I3j, I4 and I4j.
+- The notification is `onVisibleChange` (Erwin, 2026-10-04): only the
+  visible range and the end state are pushed; anchor, pinned keys and
+  offset are read on demand with `readViewport`.
