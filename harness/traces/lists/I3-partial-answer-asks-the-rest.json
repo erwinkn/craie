@@ -1,7 +1,7 @@
 {
   "format": "craie-list-trace/1",
   "id": "I3",
-  "name": "a partial answer leaves a short run on screen; the next request is exactly that run, the topmost visible loaded row holding",
+  "name": "a partial answer leaves a short run on screen; the next request starts there, a screen long, the topmost visible loaded row holding and the loaded part held",
   "viewport": {
     "width": 400,
     "height": 600
@@ -58,7 +58,7 @@
         ],
         "loadItems": [
           100,
-          109
+          129
         ]
       }
     },
@@ -75,10 +75,7 @@
           "offset": -20
         },
         "offset": 3820,
-        "loadItems": [
-          100,
-          110
-        ]
+        "loadItems": null
       }
     },
     {
@@ -110,7 +107,11 @@
         "offset": 3820,
         "loadItems": [
           107,
-          110
+          129
+        ],
+        "held": [
+          100,
+          106
         ]
       }
     },
@@ -132,6 +133,7 @@
         }
       ],
       "expect": {
+        "held": null,
         "loadItems": null
       }
     }

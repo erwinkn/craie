@@ -9,7 +9,8 @@ estimates or overscan heuristics, which may differ between the two.
 Files are named `<id>-<slug>.json`. Craie keeps its copy in
 `harness/traces/lists/` and the kit in its own tree. Each side copies the
 other's files verbatim, and the coordinator checks that both copies match.
-The first eight (`I1` to `I4bj`) are the islet traces of `lists.md`.
+The first eight (`I1` to `I4bj`) are the islet traces of `lists.md`;
+`L1` to `L3` and `U1` to `U4` are its loading and unloading traces.
 
 ## A trace
 
@@ -39,15 +40,16 @@ The first eight (`I1` to `I4bj`) are the islet traces of `lists.md`.
   and the visible height. Scale 1, no insets, unless `config` sets
   `startInset` or `paddingEnd`.
 - **`config`.** The list's props as the contract names them: `overscan`,
-  `lookahead`, `endThreshold`, `anchor`, `anchorPolicy`, `startInset` and
-  `paddingEnd`. A trace that depends on one sets it; the rest take the
-  contract's defaults.
+  `lookahead`, `retain`, `endThreshold`, `anchor`, `anchorPolicy`,
+  `startInset` and `paddingEnd`. A trace that depends on one sets it; the
+  rest take the contract's defaults.
 - **`templates`.** Estimate templates, as in `lists.md`.
 - **`items`.** Run-length blocks, in order:
   - `count` items each, with `key` a pattern where `{i}` is the item's
     index in the initial table;
-  - `version` (default 0), `loaded` (default true), and `estimate`, a
-    number or `{ "template": n, "textLength": k }` (default 48);
+  - `version` (default 0), `loaded` (default true), `failed` (default
+    false), and `estimate`, a number or `{ "template": n, "textLength": k }`
+    (default 48);
   - `height`, the height the row lays out at when mounted; it defaults to
     a numeric estimate, and is required with a template.
 
@@ -57,8 +59,9 @@ The first eight (`I1` to `I4bj`) are the islet traces of `lists.md`.
 ## Steps
 
 Each step does one thing, then the virtualizer settles: layout, then
-measurement corrections, then anchoring, then any `loadItems` call. Its
-`expect`, if present, is checked after that.
+measurement corrections, then anchoring, then any `loadItems` call, then
+any `unloadItems` calls (above, then below). Its `expect`, if present, is
+checked after that.
 
 | `do` | Fields | Meaning |
 |---|---|---|
@@ -89,8 +92,11 @@ device pixel (1 at scale 1).
 | `pinnedKeys` | As in `ListViewport`, in any order |
 | `mounted` | `{ "covers": [a, b] }`: the mounted range contains a..b (its exact extent is the implementation's) |
 | `loadItems` | `[first, last]`: exactly one call since the previous step, with this request. `null`: no call. `{ "covers": [a, b] }`: one call whose request contains a..b |
+| `unloadItems` | The ranges of the `unloadItems` calls since the previous step, in order: `[[a, b], ...]`; `[]` for none |
+| `held` | `[first, last]` of the held rows (`ListViewport.held`), or `null` |
 
-A step without `loadItems` in its `expect` doesn't check calls.
+A step without `loadItems` (or `unloadItems`) in its `expect` doesn't
+check those calls.
 Implementations record calls in order. A trace that expects a call
 consumes it.
 
@@ -98,7 +104,8 @@ consumes it.
 
 - **Craie** reads every file in `harness/traces/lists/` in a harness test
   (`list_traces.rs`). Mounted rows report the trace's heights, and
-  `loadItems` calls are recorded from the list's callback slot.
+  `loadItems` and `unloadItems` calls are recorded from the list's
+  callback slots.
 - **The kit** reads its copy with its core and records the same.
 - **Seeded traces** (generated changes, scrolls and loads) don't live in
   files. Each side checks its own against a clean rebuild, and only named

@@ -1,0 +1,93 @@
+{
+  "format": "craie-list-trace/1",
+  "id": "U4",
+  "name": "a focused row is never unloaded: the range stops before it, the rows past it are asked next, and the row itself after blur",
+  "viewport": {
+    "width": 400,
+    "height": 600
+  },
+  "config": {
+    "overscan": 600,
+    "lookahead": 0,
+    "endThreshold": 80,
+    "anchor": "start",
+    "anchorPolicy": "reading",
+    "retain": 3
+  },
+  "templates": [],
+  "items": [
+    {
+      "count": 1000,
+      "key": "m{i}",
+      "loaded": true,
+      "estimate": 40,
+      "height": 40
+    }
+  ],
+  "steps": [
+    {
+      "do": "mount",
+      "expect": {
+        "unloadItems": []
+      }
+    },
+    {
+      "do": "focus",
+      "key": "m10",
+      "expect": {
+        "pinnedKeys": [
+          "m10"
+        ],
+        "unloadItems": []
+      }
+    },
+    {
+      "do": "scroll",
+      "offset": 4000,
+      "expect": {
+        "visible": [
+          100,
+          114
+        ],
+        "pinnedKeys": [
+          "m10"
+        ],
+        "unloadItems": [
+          [
+            11,
+            39
+          ]
+        ]
+      }
+    },
+    {
+      "do": "scrollBy",
+      "delta": 20,
+      "expect": {
+        "visible": [
+          100,
+          115
+        ],
+        "unloadItems": [
+          [
+            0,
+            9
+          ]
+        ]
+      }
+    },
+    {
+      "do": "blur",
+      "key": "m10",
+      "expect": {
+        "pinnedKeys": [],
+        "unloadItems": [
+          [
+            10,
+            10
+          ]
+        ]
+      }
+    }
+  ]
+}

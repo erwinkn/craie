@@ -1,0 +1,88 @@
+{
+  "format": "craie-list-trace/1",
+  "id": "U2",
+  "name": "rows past the retain window but inside the band stay while the reader scrolls back and forth; one row past the band is asked",
+  "viewport": {
+    "width": 400,
+    "height": 600
+  },
+  "config": {
+    "overscan": 600,
+    "lookahead": 0,
+    "endThreshold": 80,
+    "anchor": "start",
+    "anchorPolicy": "reading",
+    "retain": 3
+  },
+  "templates": [],
+  "items": [
+    {
+      "count": 1000,
+      "key": "m{i}",
+      "loaded": true,
+      "estimate": 40,
+      "height": 40
+    }
+  ],
+  "steps": [
+    {
+      "do": "mount",
+      "expect": {
+        "visible": [
+          0,
+          14
+        ],
+        "unloadItems": []
+      }
+    },
+    {
+      "do": "scroll",
+      "offset": 2400,
+      "expect": {
+        "visible": [
+          60,
+          74
+        ],
+        "unloadItems": []
+      }
+    },
+    {
+      "do": "scrollBy",
+      "delta": -400,
+      "expect": {
+        "visible": [
+          50,
+          64
+        ],
+        "unloadItems": []
+      }
+    },
+    {
+      "do": "scrollBy",
+      "delta": 400,
+      "expect": {
+        "visible": [
+          60,
+          74
+        ],
+        "unloadItems": []
+      }
+    },
+    {
+      "do": "scrollBy",
+      "delta": 40,
+      "expect": {
+        "visible": [
+          61,
+          75
+        ],
+        "unloadItems": [
+          [
+            0,
+            0
+          ]
+        ]
+      }
+    }
+  ]
+}

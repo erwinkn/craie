@@ -30,6 +30,7 @@ interface ListItem {
   key: string
   version?: string | number   // changes when the row's layout may change; default 0
   loaded?: boolean            // default true; false: a placeholder row, content on demand
+  failed?: boolean            // with loaded false: the source gave up; shown as is, not asked again until the version changes
   estimate?: Estimate         // default 48
 }
 type EstimateTemplate =
@@ -67,18 +68,21 @@ interface ListSource {
 interface VirtualListProps {
   source: ListSource
   templates?: readonly EstimateTemplate[]
-  renderItem(index: number): ReactNode
+  renderItem(index: number, row: { placeholder: boolean }): ReactNode  // placeholder: unloaded, or held (below)
   anchor?: "start" | "end"              // initial placement and follow mode
   anchorPolicy?: "reading" | "focus"    // default reading (study §3)
   endThreshold?: number                 // default 80
   followKey?: string | number
   overscan?: number                     // default 600
+  lookahead?: number                    // default: one viewport height
+  retain?: number                       // viewport heights kept loaded each side; default 3
   startInset?: number; paddingEnd?: number; restoreKey?: string
   // callbacks (callback-ref slots on the list node)
   onRangeChange?(range: { first: number; last: number }): void   // mounted range, overscan included
   onViewportChange?(v: ListViewport): void                      // opt-in, coalesced per frame
   onAtEndChange?(atEnd: boolean): void
   loadItems?(range: { first: number; last: number }): void      // unloaded items near the viewport
+  unloadItems?(range: { first: number; last: number }): void    // loaded items far from it
 }
 interface ListHandle {
   scrollToIndex(i: number, o?: { align?: "start" | "center" | "end" }): void
@@ -92,6 +96,7 @@ interface ListViewport {
   range: { first: number; last: number }; visible: { first: number; last: number }
   anchor: { key: string; index: number; offset: number } | null
   pinnedKeys: readonly string[]          // rows kept mounted for focus
+  held: { first: number; last: number } | null  // visible rows loaded but still shown as placeholders
   offset: number; atEnd: boolean; following: boolean
 }
 ```
@@ -106,6 +111,7 @@ interface ListViewport {
   | Slot | Arguments | Delivery |
   |---|---|---|
   | `loadItems` | `{ first, last }` | Reliable |
+  | `unloadItems` | `{ first, last }` | Every call, coalesced per frame to one range per side |
   | `onRangeChange` | `{ first, last }` | Every call |
   | `onAtEndChange` | `atEnd` | Every call |
   | `onViewportChange` | `ListViewport` | Latest wins (per frame) |
@@ -131,7 +137,8 @@ runs on its two sides are judged separately, as below. The virtualizer prevents 
 the request it makes. It alone knows extents and the viewport height, so
 it decides on both sides, and the source only answers.
 
-- **Placeholder run.** A maximal run of consecutive `loaded: false` items.
+- **Placeholder run.** A maximal run of consecutive `loaded: false` items
+  that aren't `failed`. Below, *unloaded* means such an item.
 - **Window.** The viewport, extended by `lookahead` logical points above
   and below. The default is one viewport height; traces set it explicitly.
 - **Base request.** The unloaded items whose extents intersect the window.
@@ -144,12 +151,21 @@ it decides on both sides, and the source only answers.
   on one side, both, or neither.
 - **One request.** The request is one `{ first, last }` covering the base
   and every widening.
+- **At least a screen.** If the request's estimated extent (from its first
+  row to its last) is under one viewport height, it extends one unloaded
+  row at a time, before widening, until it reaches a viewport height. It
+  extends in the reader's last scroll direction, or, after a mount or a
+  jump, the way the placeholder run continues past the request (down if
+  both ways). It stops where the run ends.
 - **When to call.** After every change batch and every settled scroll, the
   request is computed again. `loadItems` is called when it is non-empty
-  and differs from the last request made since the last change batch.
+  and not contained in the last request made since the last change batch.
+  A smaller request inside a pending one would only cut it short.
 - **The source.** It loads the whole request, and may load more. It never
   loads less on purpose. A partial answer, an `update` that leaves part of
   the request unloaded, leads to the next request at the next evaluation.
+- **Failed rows** (`loaded: false, failed: true`) are never requested,
+  until an `update` changes them.
 - **At rest, no islet stays on screen.** Once the source has answered every
   request, no placeholder run intersects the viewport.
 - **Anchor while loads are pending.** The topmost visible loaded row holds
@@ -162,8 +178,8 @@ Named traces I1–I4 (`harness/traces/lists/`):
 - **I2.** A jump into 50,000 unloaded rows, 10 rows short of a loaded
   region: the request joins that region. Far from any loaded region, it
   doesn't widen.
-- **I3.** A partial answer leaves a 3-row placeholder run on screen: the next
-  `loadItems` asks for exactly that run.
+- **I3.** A partial answer leaves a 4-row placeholder run on screen: the next
+  `loadItems` starts at that run, extended to a screen and widened.
 - **I4.** Loads pending above the reader: the topmost visible loaded row
   holds its place. **I4b:** with none loaded, the topmost visible
   placeholder holds.
@@ -171,6 +187,90 @@ Named traces I1–I4 (`harness/traces/lists/`):
   jump holds through a partial answer and through loads landing above it.
   In I3, I4 and I4b, a reader scroll of 20 points after the jump makes the
   pending-load anchor rule decide.
+
+## Loading without layout shifts
+
+Erwin's rules (recorded decision): at most one range load on screen, loads
+of at least a screen, newer requests replacing older ones, and no layout
+shifts when content lands. The islet rules above give the first three:
+
+- **One placeholder run on screen.** The base request covers every
+  unloaded row intersecting the viewport, as one range.
+- **At least a screen,** in the scroll direction. Scrolling up half a
+  screen into placeholders asks for the whole screen above (trace L1).
+- **Newer requests replace older ones.** The source answers the latest. An
+  answer to an older request still applies, as data.
+
+No layout shifts is the hold:
+
+- **Held rows.** While a placeholder that isn't `failed` intersects the
+  viewport, rows that load inside the viewport are *held*. They keep their
+  estimated places, and `renderItem` gets `placeholder: true`.
+  `ListViewport.held` names them, from the first to the last.
+- **Release.** When the last such placeholder loads or fails, every held
+  row applies in that frame: native lays them out, measures them and
+  anchors once, with the anchor rule.
+- **Elsewhere.** Rows that load outside the viewport apply when their
+  `update` arrives, and a held row that scrolls out of the viewport
+  applies then.
+- **Partial answers.** The rest of the visible part stays requested (the
+  islet rule asks for it again), and the held rows wait.
+- **No timeout.** A source that cannot load a row marks it `failed`. The
+  hold then releases, and the failed row shows what `renderItem` gives a
+  placeholder.
+- **Jumps.** A jump into unloaded history shows placeholders at their
+  estimated places until the visible part has arrived, then applies it in
+  one frame. The jump target holds, as explicit jumps do (trace L2).
+
+## Unloading
+
+The list decides what to unload, as it decides what to load, and asks
+through a callback. The source answers with data. The descriptor table
+stays the one source of truth, and the list never flips `loaded` itself.
+
+- **Retain window.** The viewport extended by `retain` viewport heights
+  above and below (default 3).
+- **Visits.** A row is *visiting* from the first settled step where it
+  intersects the retain window until a call names it. A row that never
+  came near the reader, such as the rest of a long table loaded at mount,
+  is never asked.
+- **Candidates.** Loaded, visiting rows entirely outside the retain window
+  extended by one more viewport height. That band keeps a row from being
+  unloaded and reloaded while the reader scrolls back and forth. Pinned
+  (focused) rows are never candidates, and neither are rows inside a
+  pending load request (the last one, while one of its rows is still
+  unloaded and not failed).
+- **The call.** At most one per side, after every change batch, settled
+  scroll and change of pinned rows, after any `loadItems` call: above
+  first, then below. Each covers consecutive candidates, from the one
+  nearest the viewport outward. A row that isn't a candidate ends it, and
+  candidates past it wait for a later evaluation. Delivery is every call.
+- **The source.**
+  - It may drop the content: an `update` marks the rows `loaded: false`,
+    with new versions.
+  - Or it may keep them cached and change nothing. The call ended their
+    visit, so the list asks again only after they come back into the
+    retain window and leave it again.
+
+## Loading and unloading traces
+
+- **L1.** A half-screen scroll up into placeholders asks for the whole
+  screen above, then the answer lands taller in one frame, the reader's
+  row holding.
+- **L2.** A jump into unloaded rows; the visible content arrives in two
+  parts and applies once, in one frame. Until then the loaded part is
+  held.
+- **L3.** As L2, but the rest of the visible part fails: the hold
+  releases, and the failed rows show as placeholders and aren't asked
+  again.
+- **U1.** Scrolling far down unloads the far-above rows once; the source
+  drops them.
+- **U2.** Rows past the retain window but inside the band stay while the
+  reader scrolls back and forth; one row past the band is asked.
+- **U3.** A cached source ignores the calls: they aren't repeated until the
+  rows come back and leave again.
+- **U4.** A focused row is never unloaded: the range stops before it, the
+  rows past it are asked next, and the row itself after blur.
 
 ## Behavior both sides implement (shared traces)
 
@@ -203,7 +303,7 @@ Named traces I1–I4 (`harness/traces/lists/`):
 
 | Tag | Name | Contents |
 |---|---|---|
-| 0x94 | `LIST_CONFIG2` | node, overscan f32, lookahead f32, fallback f32, template epoch u32, count u16, templates (kind u8, payload bytes u32, then fixed: size f32; widths: u16 count + f32 pairs; text: base, inset, font size, line height, char width f32) |
+| 0x94 | `LIST_CONFIG2` | node, overscan f32, lookahead f32, retain f32 (viewport heights), fallback f32, template epoch u32, count u16, templates (kind u8, payload bytes u32, then fixed: size f32; widths: u16 count + f32 pairs; text: base, inset, font size, line height, char width f32) |
 | 0x95 | `LIST_PATCH` | node, base revision u32, next revision u32, op count u32, then ops: splice (tag, at, remove, add count u32, descriptors), move (tag, from, count, to u32), update (tag, at, count u32, descriptors with the same item ids) |
 | 0x96 | `LIST_ROW2` | row node, list node, item id, revision u32: a row measures for that item at that revision only, so a stale row never measures a new item |
 | 0x97 | `LIST_POLICY` | scroller node, mode u8 (keep-visible, stick-to-end, none), anchor policy u8, end threshold f32, covered start f32, padding end f32 |
@@ -223,12 +323,14 @@ Named traces I1–I4 (`harness/traces/lists/`):
   JS resends a full reconciliation), not applied wrongly.
 - **Events.**
   - `LIST_VIEWPORT`: list node, revision, mounted first/end, visible
-    first/end, pinned ids, anchor id, index and offset, content offset (f64),
-    flags (at end, following). It is coalesced per frame, and published for
-    range, end and anchor changes; offsets are published only when
-    subscribed.
+    first/end, held first/end, pinned ids, anchor id, index and offset,
+    content offset (f64), flags (at end, following). It is coalesced per
+    frame, and published for range, end, anchor and hold changes; offsets
+    are published only when subscribed.
   - Callback slots (`CALL`, callbacks note): `onRangeChange`,
-    `onViewportChange`, `onAtEndChange` and `loadItems` on the list node.
+    `onViewportChange`, `onAtEndChange`, `loadItems` and `unloadItems` on
+    the list node.
+  - Descriptor flags gain `failed`.
 - **Old ops.** `LIST_CONFIG`, `LIST_SPLICE` and `LIST_INDEX` (0x90–0x92) stay
   for current callers until they migrate; then they go.
 
@@ -238,7 +340,8 @@ Named traces I1–I4 (`harness/traces/lists/`):
    revision-checked row identity; seeded patches equal a clean rebuild; wire
    bytes asserted.
 2. The kit's anchoring rules, threshold and follow, jump commands,
-   `readViewport`, and viewport events, all held to the shared traces.
+   `readViewport`, and viewport events, all held to the shared traces;
+   then loading with holds, and unloading (L and U traces).
 3. A bounded warm cache (`LIST_CACHE`) with revision-safe restore.
 4. The React wrapper (`VirtualList`, `ListContent` inside a ScrollView); the
    current `List` keeps working.
@@ -250,3 +353,6 @@ Named traces I1–I4 (`harness/traces/lists/`):
 - B's kit review agreed: the kit's JS virtualizer consumes this table and
   these ops, with the changes folded in above (`indexOfKey`, text
   template metrics, `pinnedKeys`, delivery classes, islets).
+- Loading and unloading follow Erwin's answers of 2026-10-04 (no layout
+  shifts, at least a screen per load, `unloadItems` with a retain window).
+  They changed the expected requests of I3, I3j, I4 and I4j.
