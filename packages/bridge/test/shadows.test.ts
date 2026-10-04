@@ -77,3 +77,13 @@ test("a variant's boxShadow goes in its values (bit 15)", async () => {
   expect(v.values[0]! & 0x8000).toBe(0x8000)
   expect(v.shadows).toEqual([{ x: 0, y: 12, blur: 24, spread: 0, color: 0x0000_0014, inset: false }])
 })
+
+test("colors take the kit's rgba() form", async () => {
+  const { color } = await import("../src/host.js")
+  expect(color("rgba(0, 0, 0, 0.03)")).toBe(0x0000_0008)
+  expect(color("rgba(255, 255, 255, 0.14)")).toBe(0xffff_ff24)
+  expect(color("rgb(59, 130, 246)")).toBe(0x3b82_f6ff)
+  expect(color("rgb(59 130 246 / 50%)")).toBe(0x3b82_f680)
+  expect(() => color("rgba(1, 2)")).toThrow()
+  expect(() => color("rgba(1, 2, x, 1)")).toThrow()
+})

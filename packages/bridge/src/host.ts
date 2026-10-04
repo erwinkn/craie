@@ -419,10 +419,13 @@ export interface Transport {
  * `MAX_NODES`. */
 const MAX_ID = 1 << 24
 
-/** "#rgb" / "#rrggbb" / "#rrggbbaa" / number -> 0xRRGGBBAA. */
+/** "#rgb" / "#rrggbb" / "#rrggbbaa" / "rgb(r, g, b)" / "rgba(r, g,
+ * b, a)" (the kit's formats; also space-separated with "/ a", and
+ * percentages) / number -> 0xRRGGBBAA. */
 export function color(v: string | number | undefined, fallback = 0): number {
   if (v === undefined) return fallback
   if (typeof v === "number") return v >>> 0
+  if (v.startsWith("rgb")) return rgbFunction(v)
   let s = v.startsWith("#") ? v.slice(1) : v
   if (s.length === 3) s = [...s].map(c => c + c).join("") + "ff"
   if (s.length === 6) s += "ff"
@@ -430,6 +433,21 @@ export function color(v: string | number | undefined, fallback = 0): number {
   const n = parseInt(s, 16)
   if (!Number.isFinite(n)) throw Error(`bad color "${v}"`)
   return n >>> 0
+}
+
+function rgbFunction(v: string): number {
+  const m = /^rgba?\(([^)]*)\)$/.exec(v.trim())
+  const parts = m ? m[1]!.trim().split(/\s*[,/]\s*|\s+/) : []
+  if (parts.length !== 3 && parts.length !== 4) throw Error(`bad color "${v}"`)
+  const channel = (p: string, max: number) => {
+    const pct = p.endsWith("%")
+    const n = Number(pct ? p.slice(0, -1) : p)
+    if (p === "" || !Number.isFinite(n)) throw Error(`bad color "${v}"`)
+    return Math.round(Math.min(1, Math.max(0, pct ? n / 100 : n / max)) * 255)
+  }
+  const [r, g, b] = parts.slice(0, 3).map(p => channel(p, 255)) as [number, number, number]
+  const a = parts.length === 4 ? channel(parts[3]!, 1) : 255
+  return ((r << 24) | (g << 16) | (b << 8) | a) >>> 0
 }
 
 function textOf(props: Record<string, any>): string {
