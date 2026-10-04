@@ -1,0 +1,115 @@
+{
+  "format": "craie-list-trace/1",
+  "id": "K17",
+  "name": "rows arriving in an empty list start from the top",
+  "viewport": {
+    "width": 400,
+    "height": 200
+  },
+  "config": {
+    "overscan": 600,
+    "lookahead": 200,
+    "endThreshold": 80,
+    "anchor": "start",
+    "anchorPolicy": "reading"
+  },
+  "templates": [],
+  "items": [],
+  "steps": [
+    {
+      "do": "mount",
+      "expect": {
+        "visible": [
+          0,
+          -1
+        ]
+      }
+    },
+    {
+      "do": "changes",
+      "changes": [
+        {
+          "kind": "splice",
+          "at": 0,
+          "remove": 0,
+          "items": [
+            {
+              "count": 100,
+              "key": "m{i}",
+              "estimate": 40,
+              "height": 40
+            }
+          ]
+        }
+      ],
+      "expect": {
+        "anchor": {
+          "key": "m0",
+          "offset": 0
+        },
+        "offset": 0,
+        "visible": [
+          0,
+          4
+        ]
+      }
+    },
+    {
+      "do": "scroll",
+      "offset": 1000,
+      "expect": {
+        "anchor": {
+          "key": "m25",
+          "offset": 0
+        }
+      }
+    },
+    {
+      "do": "changes",
+      "changes": [
+        {
+          "kind": "splice",
+          "at": 0,
+          "remove": 100,
+          "items": []
+        }
+      ],
+      "expect": {
+        "offset": 0,
+        "visible": [
+          0,
+          -1
+        ]
+      }
+    },
+    {
+      "do": "changes",
+      "changes": [
+        {
+          "kind": "splice",
+          "at": 0,
+          "remove": 0,
+          "items": [
+            {
+              "count": 100,
+              "key": "m{i}",
+              "estimate": 40,
+              "height": 40
+            }
+          ]
+        }
+      ],
+      "expect": {
+        "anchor": {
+          "key": "m0",
+          "offset": 0
+        },
+        "offset": 0,
+        "visible": [
+          0,
+          4
+        ]
+      }
+    }
+  ]
+}
