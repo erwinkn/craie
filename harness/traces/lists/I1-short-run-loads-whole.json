@@ -1,0 +1,70 @@
+{
+  "format": "craie-list-trace/1",
+  "id": "I1",
+  "name": "a placeholder run the window cuts, short enough to finish on screen, loads whole",
+  "viewport": {
+    "width": 400,
+    "height": 600
+  },
+  "config": {
+    "overscan": 600,
+    "lookahead": 600,
+    "endThreshold": 80,
+    "anchor": "start",
+    "anchorPolicy": "reading"
+  },
+  "templates": [],
+  "items": [
+    {
+      "count": 400,
+      "key": "m{i}",
+      "loaded": true,
+      "estimate": 40,
+      "height": 40
+    },
+    {
+      "count": 20,
+      "key": "m{i}",
+      "loaded": false,
+      "estimate": 40
+    },
+    {
+      "count": 580,
+      "key": "m{i}",
+      "loaded": true,
+      "estimate": 40,
+      "height": 40
+    }
+  ],
+  "steps": [
+    {
+      "do": "mount",
+      "expect": {
+        "visible": [
+          0,
+          14
+        ],
+        "loadItems": null
+      }
+    },
+    {
+      "do": "scrollToIndex",
+      "index": 380,
+      "align": "start",
+      "expect": {
+        "visible": [
+          380,
+          394
+        ],
+        "anchor": {
+          "key": "m380",
+          "offset": 0
+        },
+        "loadItems": [
+          400,
+          419
+        ]
+      }
+    }
+  ]
+}

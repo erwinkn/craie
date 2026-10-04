@@ -667,8 +667,10 @@ impl Paragraph {
         // whitespace) starts at `left`; the free space may be negative on
         // overflow. The trailing whitespace hangs past the content: to
         // the right in a left-to-right line, to the left in a
-        // right-to-left one. `Start` is right in a right-to-left
-        // paragraph.
+        // right-to-left one: each line's own bidi paragraph's direction
+        // (text after a newline may run the other way), as `push_line`
+        // lays its segments out. `Start` is right when the first
+        // paragraph runs right to left, for every line, as Parley does.
         let boxw = max_width.unwrap_or(width);
         let (cut, extra) = match &self.ellipsis {
             Some(Ellipsis {
@@ -685,9 +687,13 @@ impl Paragraph {
         };
         for li in 0..self.lines.len() {
             let line = &self.lines[li];
-            // The cut line's ellipsis takes its place after the content:
-            // right of it in a left-to-right paragraph, left of it in a
-            // right-to-left one.
+            let rtl = self
+                .analysis
+                .get(line.text.start as usize)
+                .map_or(self.base_rtl, |f| f & PARA_RTL != 0);
+            // The cut line's ellipsis takes its place after the content,
+            // on the line's own side: right of it in a left-to-right line,
+            // left of it in a right-to-left one.
             let extra = if li == cut { extra } else { 0.0 };
             let content = line.advance - line.trailing;
             let free = boxw - (content + extra);
@@ -696,7 +702,7 @@ impl Paragraph {
                 Align::Right => free,
                 _ => 0.0,
             };
-            let x = if self.base_rtl {
+            let x = if rtl {
                 left + extra - line.trailing
             } else {
                 left
@@ -704,7 +710,7 @@ impl Paragraph {
             if li == cut
                 && let Some(e) = &mut self.ellipsis
             {
-                e.x = if self.base_rtl { left } else { left + content };
+                e.x = if rtl { left } else { left + content };
                 e.y = line.baseline;
             }
             let (baseline, segs) = (line.baseline, line.segs.clone());
