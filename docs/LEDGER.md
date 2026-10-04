@@ -916,6 +916,19 @@ Reviewer minors and nitpicks not fixed yet.
   the box grown by the offset, so it can reuse this path once the bridge
   takes the prop.
 
+### DF-69: boxes with shadows draw one call each
+
+- Source: #26 review (1,024 boxes with eight shadows: 1,024 draw commands,
+  against 1 without shadows).
+- Where: crates/core/src/span.rs (capacity classes), crates/scene/src/scene.rs
+  (merging).
+- Claim: a chunk of 3 to 9 rects (a fill and its shadows) holds a 4- or
+  16-slot block, so the next chunk's rects are not contiguous and draws
+  merge only within a chunk. Text chunks pay the same for their glyphs.
+- Why deferred: merging across a block's unused slots needs them zeroed
+  (degenerate quads) or an indirect draw list; it is a renderer-wide
+  change, to measure on the Mac against a screen of real buttons.
+
 ## Closed
 
 - DF-57 (work item 6, review #21 M1): end indices were wire indices
@@ -1286,3 +1299,10 @@ Reviewer minors and nitpicks not fixed yet.
 - PR22-09 (same review, P2): beyond validation's subtree walks (PR22-07), ending exits in bulk scanned: each cut looked an exit up in a list (validation and execution), removed it with a `retain` over all exits, searched the others for ones inside, and filtered every queued event; 1,000 cuts made about 2,000,000 visits (4.6 ms), 5,000 about 50,000,000 (69 ms). Running and skipped exits are now sorted sets (`BTreeSet`), an exit inside is found by looking up each freed node, ends found in a frame are collected in one pass, and the events of freed nodes are filtered once, when events are taken (`Ui::freed`). Test: `a_bulk_cut_is_linear` (was `a_bulk_cut_walks_each_subtree_once`) counts validation's walk (3 per toast) and every visit of the ending path, cuts, freed nodes and queued events (4 per toast), for `END_EXIT` and `REMOVE`.
 - PR22-10 (same review, P2): text inside an exit stayed selectable: the subtree is attached while it exits, so a selection inside survived (Copy still copied the removed text), and one around it kept copying an exiting paragraph. Selection validation now treats an exiting ancestor as detached, and the domain's texts skip exiting subtrees. Test: `an_exiting_text_leaves_the_selection` (domain, endpoint and middle paragraph exiting; fails without either check).
 - PR25-01 (GPT-6 Astra review at 0a72b30, P2): `measure()` reported rows a native list hides (a retained row whose item was removed) and their descendants as measured, with zero-size boxes, where they should be `null`. `displayed` now also stops at a row its list hides (`Host::list_row_shown`), and layout events follow the same rule: a hidden node's box is not sent, and a new listener on one waits until it shows. Test: `hidden_list_rows_are_not_measured` (the review's repro, plus the layout event).
+- PR26-01 (GPT-6.1 Sol review at b50436b, P2): inset shadows were cut to the layout padding box while `borderWidth` paints a separate ring, so a black inset spread covered a 4-point blue border (Chrome keeps it blue). The inset cut is now the box inside the painted border. Test: harness `an_inset_shadow_leaves_the_border`.
+- PR26-02 (same review, P2): a spread grew a small radius by the old cubic rule without the box's size, so a 32-point circle with a spread of 40 cast a squarer shape (radius 47.4, Chrome 56), and radius 100 cast another shape than radius 16 on the same box. The radius is now the used one (at most half the shorter side), grown by CSS's outset-adjusted rule with coverage. Tests: `outset_radii_keep_the_shape`, harness `a_spread_circle_stays_round`, `a_radius_past_half_casts_the_used_radius`.
+- PR26-03 (same review, P2): a box below the viewport whose shadow reached into it was not built (chunk admission looked at the box alone). `near` widens a box by its outer shadows' reach. Test: harness `an_offscreen_box_casts_into_view`.
+- PR26-04 (same review, P2): under a nonuniform scale the blur used the geometric mean of the axes (0.267 against the exact 0.331 at scale 2 in x). The shader now shades in the shape's own units, where σ is isotropic, as CSS blurs before the transform. Test: `a_nonuniform_scale_scales_the_blur`.
+- PR26-05 (same review, P2): a shape a negative spread collapsed to no width drew an antialiased line (alpha 127) once its space stopped snapping. An empty shape now casts nothing. Test: `a_collapsed_shape_casts_nothing_in_motion`.
+- PR26-06 (same review, P2): a hard shadow coincident with its rounded box left a fringe on the curve (alpha 61): the knockout multiplied two antialiased masks. A hard shadow is now the difference of the shape's and the box's coverage. Test: `a_coincident_hard_shadow_casts_nothing`.
+- PR26-07 (same review, P3): `color` rejected `" RGB(1, 2, 3) "`; it now trims and takes the function name in any case, as CSS does.

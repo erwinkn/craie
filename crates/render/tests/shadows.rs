@@ -257,3 +257,225 @@ fn offset_and_spread_move_and_grow_the_shape() {
     assert_eq!(px(&img, 17, 30)[3], 0, "left of the moved shape");
     assert_eq!(px(&img, 30, 30)[3], 0, "under the box");
 }
+
+/// Under a translation that stops snapping (motion), a shape that a
+/// negative spread collapsed to no width casts nothing: no antialiased
+/// line (#26 review).
+#[test]
+fn a_collapsed_shape_casts_nothing_in_motion() {
+    let (gpu, mut r) = match gpu() {
+        Some(g) => g,
+        None => {
+            eprintln!("no GPU adapter: skipped");
+            return;
+        }
+    };
+    let mut s = scene();
+    s.transforms.set_local(0, Affine::translate(0.5, 0.0));
+    s.transforms.set_snap(0, false);
+    let mut w = ChunkWriter::new();
+    let at = w.reserve_rect();
+    let mut sh = shadow(Rect::new(32.0, 56.0, 0.0, 8.0), 0.0, 0.0, false);
+    sh.box_rect = Rect::new(16.0, 16.0, 32.0, 40.0);
+    w.set_shadow(at, &sh);
+    s.commit_chunk(0, &mut w);
+    s.set_placement(
+        0,
+        Placement {
+            offset: [0.0, 0.0],
+            transform: 0,
+            clip: NONE,
+        },
+    );
+    s.set_order(vec![OrderItem::Chunk(0)], vec![]);
+    let img = render(gpu, &mut r, &mut s);
+    assert_eq!(
+        px(&img, 32, 59)[3],
+        0,
+        "negative spread collapsing width to0 should not leave an antialiased line"
+    );
+}
+/// A hard shadow coincident with its rounded box casts nothing: its
+/// knockout leaves no fringe on the curve (#26 review).
+#[test]
+fn a_coincident_hard_shadow_casts_nothing() {
+    let (gpu, mut r) = match gpu() {
+        Some(g) => g,
+        None => {
+            eprintln!("no GPU adapter: skipped");
+            return;
+        }
+    };
+    let mut sh = shadow(BOX, 8.0, 0.0, false);
+    sh.box_radius = 8.0;
+    let img = draw(gpu, &mut r, sh);
+    let max = img.iter().map(|p| p[3]).max().unwrap();
+    assert_eq!(
+        max, 0,
+        "zero offset, blur and spread should cast no visible shadow even on a rounded edge"
+    );
+}
+/// Under a scale of 2 in x the blur scales with the shape: the exact
+/// Gaussian of the transformed box within 0.02 (#26 review).
+#[test]
+fn a_nonuniform_scale_scales_the_blur() {
+    let (gpu, mut r) = match gpu() {
+        Some(g) => g,
+        None => {
+            eprintln!("no GPU adapter: skipped");
+            return;
+        }
+    };
+    let mut s = scene();
+    s.transforms.set_local(0, Affine::scale(2.0, 1.0));
+    let mut w = ChunkWriter::new();
+    let at = w.reserve_rect();
+    w.set_shadow(at, &shadow(BOX, 0.0, 4.0, false));
+    s.commit_chunk(0, &mut w);
+    s.set_placement(
+        0,
+        Placement {
+            offset: [0.0, 0.0],
+            transform: 0,
+            clip: NONE,
+        },
+    );
+    s.set_order(vec![OrderItem::Chunk(0)], vec![]);
+    let img = render(gpu, &mut r, &mut s);
+    // Pixel at (28.5,32.5) maps to local (14.25,32.5), before the CSS transform.
+    let want = blurred(14.25 - 32.0, 32.5 - 32.0, 16.0, 4.0);
+    let got = alpha(&img, 28, 32);
+    assert!(
+        (want - got).abs() < 0.02,
+        "scaleX2: coverage={got}, exact transformed Gaussian={want}"
+    );
+}
+fn exact_rounded(x: f64, y: f64, h: f64, r: f64, sigma: f64) -> f64 {
+    let lo = (-h).max(y - 8.0 * sigma);
+    let hi = h.min(y + 8.0 * sigma);
+    let step = (hi - lo) / 20000.0;
+    let mut sum = 0.0;
+    for i in 0..20000 {
+        let z = lo + (i as f64 + 0.5) * step;
+        let delta = (h - r - z.abs()).min(0.0);
+        let extent = h - r + (r * r - delta * delta).max(0.0).sqrt();
+        let along = 0.5
+            * (erf((x + extent) / (sigma * 2f64.sqrt()))
+                - erf((x - extent) / (sigma * 2f64.sqrt())));
+        sum += along * (-(y - z) * (y - z) / (2.0 * sigma * sigma)).exp() * step
+            / (sigma * (2.0 * std::f64::consts::PI).sqrt());
+    }
+    sum
+}
+#[test]
+fn rounded_blurs_stay_gaussian() {
+    let (gpu, mut r) = match gpu() {
+        Some(g) => g,
+        None => {
+            eprintln!("no GPU adapter: skipped");
+            return;
+        }
+    };
+    let mut worst: f64 = 0.0;
+    for sigma in [0.25, 0.5, 2.0, 4.0, 16.0, 64.0] {
+        let mut sh = shadow(BOX, 12.0, sigma, false);
+        sh.box_radius = 12.0;
+        let img = draw(gpu, &mut r, sh);
+        for (x, y) in [(10, 10), (13, 24), (17, 17), (14, 32), (32, 50)] {
+            let want = exact_rounded(
+                x as f64 + 0.5 - 32.0,
+                y as f64 + 0.5 - 32.0,
+                16.0,
+                12.0,
+                sigma as f64,
+            );
+            let error = (alpha(&img, x, y) - want).abs();
+            worst = worst.max(error);
+            assert!(error < 0.04, "({x},{y})sigma{sigma}:error{error}");
+        }
+    }
+    println!("rounded Gaussian samples: worst alpha error={worst}");
+}
+
+/// A uniform 2x scale keeps a ring crisp and composites its alpha in
+/// linear light.
+#[test]
+fn a_2x_ring_is_crisp_and_linear() {
+    let (gpu, mut r) = match gpu() {
+        Some(g) => g,
+        None => {
+            eprintln!("no GPU adapter: skipped");
+            return;
+        }
+    };
+    let mut s = scene();
+    s.transforms.set_local(0, Affine::scale(2.0, 2.0));
+    let mut w = ChunkWriter::new();
+    let at = w.reserve_rect();
+    let sh = BoxShadow {
+        shape: Rect::new(7.0, 7.0, 18.0, 18.0),
+        radius: 0.0,
+        sigma: 0.0,
+        box_rect: Rect::new(8.0, 8.0, 16.0, 16.0),
+        box_radius: 0.0,
+        color: 0x80402080,
+        inset: false,
+    };
+    w.set_shadow(at, &sh);
+    s.commit_chunk(0, &mut w);
+    s.set_placement(
+        0,
+        Placement {
+            offset: [0.0, 0.0],
+            transform: 0,
+            clip: NONE,
+        },
+    );
+    s.set_order(vec![OrderItem::Chunk(0)], vec![]);
+    let img = render(gpu, &mut r, &mut s);
+    assert_eq!(px(&img, 13, 32)[3], 0);
+    assert_eq!(px(&img, 14, 32)[3], 128);
+    assert_eq!(px(&img, 15, 32)[3], 128);
+    assert_eq!(px(&img, 16, 32)[3], 0);
+    let decode = |c: f64| {
+        if c <= 0.04045 {
+            c / 12.92
+        } else {
+            ((c + 0.055) / 1.055).powf(2.4)
+        }
+    };
+    let encode = |c: f64| {
+        if c <= 0.0031308 {
+            c * 12.92
+        } else {
+            1.055 * c.powf(1.0 / 2.4) - 0.055
+        }
+    };
+    for (c, authored) in px(&img, 14, 32)[..3].iter().zip([128, 64, 32]) {
+        let want = encode(decode(authored as f64 / 255.0) * 128.0 / 255.0) * 255.0;
+        assert!((*c as f64 - want).abs() < 2.0);
+    }
+}
+/// Large blurs stay the exact square Gaussian.
+#[test]
+fn large_blurs_stay_gaussian() {
+    let (gpu, mut r) = match gpu() {
+        Some(g) => g,
+        None => {
+            eprintln!("no GPU adapter: skipped");
+            return;
+        }
+    };
+    for sigma in [16.0, 64.0, 2048.0] {
+        let img = draw(gpu, &mut r, shadow(BOX, 0.0, sigma, false));
+        for (x, y) in [(1, 1), (10, 32), (32, 50)] {
+            let want = blurred(
+                x as f64 + 0.5 - 32.0,
+                y as f64 + 0.5 - 32.0,
+                16.0,
+                sigma as f64,
+            );
+            assert!((alpha(&img, x, y) - want).abs() < 0.02);
+        }
+    }
+}

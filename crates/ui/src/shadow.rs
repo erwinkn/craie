@@ -89,37 +89,68 @@ pub mod shadow_flag {
     pub const INSET: u8 = 1 << 0;
 }
 
-/// A corner radius grown by `spread` (CSS Backgrounds 3, "shadow
-/// shape"): r + s, except that a radius smaller than the spread grows
-/// less (by s × (1 + (r/s - 1)³)), so a square corner stays square.
-/// Shrinking clamps at 0.
-fn spread_radius(r: f32, s: f32) -> f32 {
+/// An outer shadow's corner radius: the box's used radius `r` grown
+/// by `spread`, adjusted (CSS Backgrounds 3, "outset-adjusted border
+/// radius") so that a small rounded corner with a big spread does not
+/// turn round: r + s × (1 − (1 − r/s)³ × (1 − coverage³)) where
+/// coverage = 2r / the box's shorter side. A circle stays a circle
+/// (coverage 1); a square corner stays square.
+fn outset_radius(size: (f32, f32), r: f32, s: f32) -> f32 {
     if r <= 0.0 {
-        0.0
-    } else if s <= 0.0 || r >= s {
-        (r + s).max(0.0)
-    } else {
-        let k = r / s - 1.0;
-        r + s * (1.0 + k * k * k)
+        return 0.0;
     }
+    if s <= 0.0 {
+        return (r + s).max(0.0);
+    }
+    let coverage = 2.0 * r / size.0.min(size.1);
+    if r > s || coverage > 1.0 {
+        return r + s;
+    }
+    let k = 1.0 - r / s;
+    r + s * (1.0 - k * k * k * (1.0 - coverage * coverage * coverage))
 }
 
-/// How `s` draws on a box: `border` is the border box and its radius,
-/// `padding` the padding box and its (an inset shadow is cut to it).
-/// `None` when it draws nothing (transparent).
-pub(crate) fn box_shadow(
-    s: &Shadow,
-    border: (Rect, f32),
-    padding: (Rect, f32),
-) -> Option<BoxShadow> {
+/// The radius a box of `size` draws with: at most half its shorter side.
+fn used_radius(size: (f32, f32), r: f32) -> f32 {
+    r.max(0.0).min(size.0.min(size.1) / 2.0)
+}
+
+/// How far `shadows` reach past the box on any side (logical points):
+/// the farthest offset, spread and 3 σ of an outer shadow.
+pub(crate) fn reach(shadows: &Shadows) -> f32 {
+    shadows
+        .as_slice()
+        .iter()
+        .filter(|s| !s.inset && s.color & 0xFF != 0)
+        .map(|s| s.x.abs().max(s.y.abs()) + s.spread.max(0.0) + 1.5 * s.blur + 1.0)
+        .fold(0.0, f32::max)
+}
+
+/// How `s` draws on a box (`border`: the border box and its radius)
+/// whose painted border is `border_width` wide: an outer shadow is cut
+/// against the border box, an inset one against the box inside the
+/// painted border. `None` when it draws nothing (transparent).
+pub(crate) fn box_shadow(s: &Shadow, border: (Rect, f32), border_width: f32) -> Option<BoxShadow> {
     if s.color & 0xFF == 0 {
         return None;
     }
-    let ((b, r), grow) = if s.inset {
-        (padding, -s.spread)
+    let (b, r) = border;
+    let r = used_radius((b.size.width, b.size.height), r);
+    let (b, r) = if s.inset {
+        let bw = border_width
+            .max(0.0)
+            .min(b.size.width.min(b.size.height) / 2.0);
+        let inner = Rect::new(
+            b.origin.x + bw,
+            b.origin.y + bw,
+            b.size.width - 2.0 * bw,
+            b.size.height - 2.0 * bw,
+        );
+        (inner, (r - bw).max(0.0))
     } else {
-        (border, s.spread)
+        (b, r)
     };
+    let grow = if s.inset { -s.spread } else { s.spread };
     let w = (b.size.width + 2.0 * grow).max(0.0);
     let h = (b.size.height + 2.0 * grow).max(0.0);
     let shape = Rect::new(
@@ -128,9 +159,14 @@ pub(crate) fn box_shadow(
         w,
         h,
     );
+    let radius = if s.inset {
+        (r + grow).max(0.0)
+    } else {
+        outset_radius((b.size.width, b.size.height), r, grow)
+    };
     Some(BoxShadow {
         shape,
-        radius: spread_radius(r, grow),
+        radius,
         sigma: s.blur / 2.0,
         box_rect: b,
         box_radius: r,
@@ -143,25 +179,32 @@ pub(crate) fn box_shadow(
 mod tests {
     use super::*;
 
+    /// CSS's outset-adjusted radius: a circle stays one whatever the
+    /// spread (and a radius past half the box acts as half of it); a
+    /// square corner stays square; a small corner on a long box grows
+    /// less than the spread.
     #[test]
-    fn spread_keeps_square_corners_square() {
-        assert_eq!(spread_radius(0.0, 4.0), 0.0);
-        assert_eq!(spread_radius(8.0, 2.0), 10.0);
-        assert_eq!(spread_radius(8.0, -10.0), 0.0);
-        // r < s: grows less than s (r/s = 1/2: s × 7/8).
-        assert_eq!(spread_radius(2.0, 4.0), 2.0 + 4.0 * 0.875);
+    fn outset_radii_keep_the_shape() {
+        let size = (32.0, 32.0);
+        assert_eq!(outset_radius(size, 16.0, 40.0), 56.0);
+        assert_eq!(outset_radius(size, used_radius(size, 100.0), 40.0), 56.0);
+        assert_eq!(outset_radius(size, 0.0, 4.0), 0.0);
+        assert_eq!(outset_radius(size, 8.0, 2.0), 10.0);
+        assert_eq!(outset_radius(size, 8.0, -10.0), 0.0);
+        // r = 2, s = 4 on a 100 × 40 box: coverage 0.1.
+        let want = 2.0 + 4.0 * (1.0 - 0.125 * (1.0 - 0.001));
+        assert!((outset_radius((100.0, 40.0), 2.0, 4.0) - want).abs() < 1e-5);
     }
 
     #[test]
     fn shapes_follow_offset_and_spread() {
         let border = (Rect::new(0.0, 0.0, 100.0, 40.0), 6.0);
-        let padding = (Rect::new(1.0, 1.0, 98.0, 38.0), 5.0);
         let ring = Shadow {
             spread: 1.0,
             color: 0x0000_00FF,
             ..Shadow::default()
         };
-        let s = box_shadow(&ring, border, padding).unwrap();
+        let s = box_shadow(&ring, border, 1.0).unwrap();
         assert_eq!(s.shape, Rect::new(-1.0, -1.0, 102.0, 42.0));
         assert_eq!((s.radius, s.sigma, s.box_rect), (7.0, 0.0, border.0));
         let drop = Shadow {
@@ -170,12 +213,12 @@ mod tests {
             color: 0x0000_0008,
             ..Shadow::default()
         };
-        let s = box_shadow(&drop, border, padding).unwrap();
+        let s = box_shadow(&drop, border, 1.0).unwrap();
         assert_eq!(
             (s.shape, s.sigma),
             (Rect::new(0.0, 18.0, 100.0, 40.0), 23.5)
         );
-        // Inset: the padding box, shrunk by the spread.
+        // Inset: inside the painted border (1), shrunk by the spread.
         let inset = Shadow {
             y: 1.0,
             blur: 2.0,
@@ -184,10 +227,16 @@ mod tests {
             inset: true,
             ..Shadow::default()
         };
-        let s = box_shadow(&inset, border, padding).unwrap();
+        let s = box_shadow(&inset, border, 1.0).unwrap();
         assert_eq!(s.shape, Rect::new(3.0, 4.0, 94.0, 34.0));
-        assert_eq!((s.radius, s.box_rect, s.box_radius), (3.0, padding.0, 5.0));
+        assert_eq!(
+            (s.radius, s.box_rect, s.box_radius),
+            (3.0, Rect::new(1.0, 1.0, 98.0, 38.0), 5.0)
+        );
         let clear = Shadow::default();
-        assert_eq!(box_shadow(&clear, border, padding), None);
+        assert_eq!(box_shadow(&clear, border, 1.0), None);
+        // Reach: offset, spread and 3 σ of the farthest outer shadow.
+        let list = Shadows::new(&[ring, drop, inset]).unwrap();
+        assert_eq!(reach(&list), 18.0 + 1.5 * 47.0 + 1.0);
     }
 }

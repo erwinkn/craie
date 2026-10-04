@@ -43,9 +43,10 @@ struct VsOut {
     @location(4) @interpolate(flat) aux: vec4<f32>,
     // kind, clip, page, flags (rect: has border; glyph: color bitmap).
     // Path: kind 2, clip, gradient record (paint index), is gradient.
-    // Shadow: kind 3, clip, the box's radius (f32 bits), inset. Its
-    // `local` and `half` are the shape's, `params` its radius and σ, and
-    // `aux` the box's center (from the shape's) and half size.
+    // Shadow: kind 3 (outer) or 4 (inset), clip, the box's radius and
+    // device px per shape unit (f32 bits). Its `local` and `half` are the
+    // shape's, `params` its radius and σ, and `aux` the box's center (from
+    // the shape's) and half size, all in shape units.
     @location(5) @interpolate(flat) info: vec4<u32>,
 };
 
@@ -165,23 +166,29 @@ fn vs_main(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> 
     return out;
 }
 
-// A box shadow (prim.rs `FLAG_SHADOW`): the quad covers the blurred
-// shape (3 σ past it) for an outer shadow, the box for an inset one.
-// Under an axis-aligned world the shape and the box snap like the box's
-// fill, so a ring lands on the fill's edge.
+// A box shadow (prim.rs `FLAG_SHADOW`). It is shaded in the shape's own
+// units, where the blur is the isotropic σ it was declared with: CSS
+// blurs the shadow before the element's transform, so a scaled or
+// rotated box carries its blur along. The quad covers the blurred shape
+// (3 σ past it, and a pixel) for an outer shadow, the box for an inset
+// one. Under an axis-aligned world the shape and the box snap like the
+// box's fill, so a ring lands on the fill's edge.
 fn shadow_vertex(r: RectI, corner: vec2<f32>) -> VsOut {
     let p = placements[r.chunk];
     let w = worlds[p.transform];
     let origin = chunk_origin(w, p);
-    let s = sqrt(abs(w.a * w.d - w.b * w.c));
     let at = r.border;
     let box_lo = vec2<f32>(pf(at), pf(at + 1u));
     let box_size = vec2<f32>(pf(at + 2u), pf(at + 3u));
     let inset = (r.flags & 4u) != 0u;
-    let sigma = r.border_width * s;
-    let margin = 3.0 * sigma + 1.0;
+    let sigma = r.border_width;
     var out: VsOut;
+    // Device px per shape unit, for antialiasing hard edges.
+    var aa: f32;
     if ((w.flags & 1u) != 0u) {
+        // Axis-aligned: device x and y stretch by `k` (a rotation by a
+        // quarter turn swaps the columns).
+        let k = vec2<f32>(abs(w.a) + abs(w.c), abs(w.b) + abs(w.d));
         var s0 = origin + linear(w, vec2<f32>(r.x, r.y));
         var s1 = origin + linear(w, vec2<f32>(r.x + r.w, r.y + r.h));
         var b0 = origin + linear(w, box_lo);
@@ -196,8 +203,8 @@ fn shadow_vertex(r: RectI, corner: vec2<f32>) -> VsOut {
         let shi = max(s0, s1);
         let blo = min(b0, b1);
         let bhi = max(b0, b1);
-        var qlo = slo - vec2<f32>(margin);
-        var qhi = shi + vec2<f32>(margin);
+        var qlo = slo - (3.0 * sigma * k + vec2<f32>(1.0));
+        var qhi = shi + (3.0 * sigma * k + vec2<f32>(1.0));
         if (inset) {
             qlo = blo;
             qhi = bhi;
@@ -205,27 +212,29 @@ fn shadow_vertex(r: RectI, corner: vec2<f32>) -> VsOut {
         let dev = mix(qlo, qhi, corner);
         let center = (slo + shi) * 0.5;
         out.pos = to_ndc(dev);
-        out.local = dev - center;
-        out.half = (shi - slo) * 0.5;
-        out.aux = vec4<f32>((blo + bhi) * 0.5 - center, (bhi - blo) * 0.5);
+        // Device px back to shape units, per axis.
+        out.local = (dev - center) / k;
+        out.half = (shi - slo) * 0.5 / k;
+        out.aux = vec4<f32>(((blo + bhi) * 0.5 - center) / k, (bhi - blo) * 0.5 / k);
+        aa = min(k.x, k.y);
     } else {
-        // Rotated or skewed: the shape's own frame, scaled to device px.
+        aa = sqrt(abs(w.a * w.d - w.b * w.c));
         let center = vec2<f32>(r.x + r.w * 0.5, r.y + r.h * 0.5);
-        var qlo = vec2<f32>(r.x, r.y) - vec2<f32>(margin / s);
-        var qsize = vec2<f32>(r.w, r.h) + vec2<f32>(2.0 * margin / s);
+        var qlo = vec2<f32>(r.x, r.y) - vec2<f32>(3.0 * sigma + 1.0 / aa);
+        var qsize = vec2<f32>(r.w, r.h) + vec2<f32>(2.0 * (3.0 * sigma + 1.0 / aa));
         if (inset) {
             qlo = box_lo;
             qsize = box_size;
         }
         let l = qlo + corner * qsize;
         out.pos = to_ndc(origin + linear(w, l));
-        out.local = (l - center) * s;
-        out.half = vec2<f32>(r.w, r.h) * 0.5 * s;
-        out.aux = vec4<f32>((box_lo + box_size * 0.5 - center) * s, box_size * 0.5 * s);
+        out.local = l - center;
+        out.half = vec2<f32>(r.w, r.h) * 0.5;
+        out.aux = vec4<f32>(box_lo + box_size * 0.5 - center, box_size * 0.5);
     }
-    out.params = vec2<f32>(r.radius * s, sigma);
+    out.params = vec2<f32>(r.radius, sigma);
     out.color = unpack(paints[r.fill]);
-    out.info = vec4<u32>(3u, p.clip, bitcast<u32>(pf(at + 4u) * s), select(0u, 1u, inset));
+    out.info = vec4<u32>(select(3u, 4u, inset), p.clip, bitcast<u32>(pf(at + 4u)), bitcast<u32>(aa));
     return out;
 }
 
@@ -268,19 +277,32 @@ fn blurred_rect(p: vec2<f32>, half: vec2<f32>, radius: f32, sigma: f32) -> f32 {
     return alpha;
 }
 
-// A shadow's coverage: the blurred shape (a hard, antialiased edge
-// under a quarter pixel of σ), outside the box for an outer shadow; for
-// an inset one, the box less the blurred shape.
+// A shadow's coverage, in shape units (`shadow_vertex`). An empty shape
+// (a spread that collapsed it) casts nothing. A hard shadow (under a
+// quarter pixel of σ) is the antialiased difference of shape and box:
+// where their edges meet, nothing shows, as when CSS paints the box over
+// its shadow. A blurred one is the blurred shape outside the box (outer)
+// or the box less the blurred shape (inset).
 fn shadow_coverage(in: VsOut) -> f32 {
+    let aa = bitcast<f32>(in.info.w);
     let sigma = in.params.y;
-    var a: f32;
-    if (sigma < 0.25) {
-        a = clamp(0.5 - sd_rect(in.local, in.half, in.params.x), 0.0, 1.0);
-    } else {
+    let empty = in.half.x <= 0.0 || in.half.y <= 0.0;
+    let inset = in.info.x == 4u;
+    let inside = clamp(0.5 - sd_rect(in.local - in.aux.xy, in.aux.zw, bitcast<f32>(in.info.z)) * aa, 0.0, 1.0);
+    var a = 0.0;
+    if (sigma * aa < 0.25) {
+        if (!empty) {
+            a = clamp(0.5 - sd_rect(in.local, in.half, in.params.x) * aa, 0.0, 1.0);
+        }
+        if (inset) {
+            return max(inside - a, 0.0);
+        }
+        return max(a - inside, 0.0);
+    }
+    if (!empty) {
         a = blurred_rect(in.local, in.half, in.params.x, sigma);
     }
-    let inside = clamp(0.5 - sd_rect(in.local - in.aux.xy, in.aux.zw, bitcast<f32>(in.info.z)), 0.0, 1.0);
-    if (in.info.w != 0u) {
+    if (inset) {
         return inside * (1.0 - a);
     }
     return a * (1.0 - inside);
@@ -474,7 +496,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
             let c = in.color;
             out = vec4<f32>(c.rgb * c.a, c.a) * clamp(0.5 - d, 0.0, 1.0);
         }
-    } else if (in.info.x == 3u) {
+    } else if (in.info.x >= 3u) {
         let c = in.color;
         out = vec4<f32>(c.rgb * c.a, c.a) * shadow_coverage(in);
     } else if (in.info.w != 0u) {
