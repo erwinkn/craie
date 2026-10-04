@@ -41,13 +41,13 @@ use craie_vector::{FillRule, LineCap, LineJoin, Stroke};
 use crate::states::{TermDecl, Values, VariantDecl, layout_key, value_field};
 
 use crate::mutation::{
-    Anchor, Claim, Command, Item, ItemDesc, ItemTemplate, ListOp, Mutation, NIL, NodeKind, Role,
-    SubmitKey, Template, TextSpan, Transaction, reported,
+    Align, Anchor, Claim, Command, Item, ItemDesc, ItemTemplate, Jump, ListOp, ListPolicy,
+    Mutation, NIL, NodeKind, Role, SubmitKey, Template, TextSpan, Transaction, reported,
 };
 pub use crate::mutation::{group_flag, interaction_flag, trap_flag};
 
 pub const MAGIC: u32 = 0x3257_5243; // "CRW2"
-pub const VERSION: u16 = 20;
+pub const VERSION: u16 = 21;
 
 pub mod op {
     // structure
@@ -113,6 +113,8 @@ pub mod op {
     pub const LIST_CONFIG2: u8 = 0x94;
     pub const LIST_PATCH: u8 = 0x95;
     pub const LIST_ROW2: u8 = 0x96;
+    pub const LIST_POLICY: u8 = 0x97;
+    pub const LIST_COMMAND: u8 = 0x98;
     // animation
     pub const TRANSITION: u8 = 0xA0;
     pub const ANIMATE: u8 = 0xA1;
@@ -856,6 +858,42 @@ pub fn encode(txn: &Transaction<'_>) -> Vec<u8> {
                 ops.push(op::SCROLL_ANCHOR);
                 u32le(&mut ops, *id);
                 ops.push(*anchor as u8);
+            }
+            Mutation::ListPolicy { id, policy } => {
+                ops.push(op::LIST_POLICY);
+                u32le(&mut ops, *id);
+                ops.push(policy.mode as u8);
+                ops.push(policy.focus as u8);
+                for v in [policy.end_threshold, policy.start_inset, policy.padding_end] {
+                    f32le(&mut ops, v);
+                }
+            }
+            Mutation::ListCommand {
+                id,
+                revision,
+                request,
+                jump,
+            } => {
+                ops.push(op::LIST_COMMAND);
+                for v in [id, revision, request] {
+                    u32le(&mut ops, *v);
+                }
+                match jump {
+                    Jump::Index(i, a) | Jump::Item(i, a) => {
+                        ops.push(if matches!(jump, Jump::Index(..)) {
+                            0
+                        } else {
+                            1
+                        });
+                        u32le(&mut ops, *i);
+                        ops.push(*a as u8);
+                    }
+                    Jump::End => ops.push(2),
+                    Jump::Offset(y) => {
+                        ops.push(3);
+                        ops.extend_from_slice(&y.to_le_bytes());
+                    }
+                }
             }
             Mutation::Transition { id, transitions } => {
                 ops.push(op::TRANSITION);
@@ -1669,6 +1707,42 @@ pub fn decode(buf: &[u8]) -> Result<Transaction<'_>, WireError> {
                 let id = r.u32()?;
                 let anchor = Anchor::from_u8(r.u8()?).ok_or(WireError::BadRef("anchor"))?;
                 Mutation::ScrollAnchor { id, anchor }
+            }
+            op::LIST_POLICY => {
+                let id = r.u32()?;
+                let mode = Anchor::from_u8(r.u8()?).ok_or(WireError::BadRef("anchor"))?;
+                let focus = match r.u8()? {
+                    0 => false,
+                    1 => true,
+                    _ => return Err(WireError::BadRef("anchor policy")),
+                };
+                let policy = ListPolicy {
+                    mode,
+                    focus,
+                    end_threshold: r.f32()?,
+                    start_inset: r.f32()?,
+                    padding_end: r.f32()?,
+                };
+                Mutation::ListPolicy { id, policy }
+            }
+            op::LIST_COMMAND => {
+                let (id, revision, request) = (r.u32()?, r.u32()?, r.u32()?);
+                fn align(r: &mut Reader) -> Result<Align, WireError> {
+                    Align::from_u8(r.u8()?).ok_or(WireError::BadRef("list command align"))
+                }
+                let jump = match r.u8()? {
+                    0 => Jump::Index(r.u32()?, align(&mut r)?),
+                    1 => Jump::Item(r.u32()?, align(&mut r)?),
+                    2 => Jump::End,
+                    3 => Jump::Offset(f64::from_bits(r.u64()?)),
+                    _ => return Err(WireError::BadRef("list command")),
+                };
+                Mutation::ListCommand {
+                    id,
+                    revision,
+                    request,
+                    jump,
+                }
             }
             op::TRANSITION => {
                 let id = r.u32()?;

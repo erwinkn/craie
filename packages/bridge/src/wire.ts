@@ -15,7 +15,7 @@
 // across transactions.
 
 const MAGIC = 0x3257_5243 // "CRW2" little-endian
-export const VERSION = 20
+export const VERSION = 21
 export const NIL = 0xffff_ffff // no node / append / default style
 
 const enum Op {
@@ -58,6 +58,8 @@ const enum Op {
   ListConfig2 = 0x94,
   ListPatch = 0x95,
   ListRow2 = 0x96,
+  ListPolicy = 0x97,
+  ListCommand = 0x98,
   ScrollAnchor = 0x93,
   // animation
   Transition = 0xa0,
@@ -257,6 +259,28 @@ export interface AnimationIn {
 /** Scroll anchoring policies — mirror mutation.rs `Anchor`. */
 export const ANCHOR = { "keep-visible": 0, "stick-to-end": 1, none: 2 } as const
 export type ScrollAnchor = keyof typeof ANCHOR
+/** A scroller's list policy (`LIST_POLICY`) — mirror mutation.rs
+ * `ListPolicy`. Distances in logical points. */
+export interface ListPolicy {
+  mode: ScrollAnchor
+  anchorPolicy?: "reading" | "focus"
+  /** Within this distance of the end, the list is at its end; default
+   * half a point. */
+  endThreshold?: number
+  startInset?: number
+  paddingEnd?: number
+}
+/** A list's jump (`LIST_COMMAND`) — mirror mutation.rs `Jump`. An index
+ * jump refers to the list at the command's revision; a key jump names an
+ * interned item id. */
+export type ListJump =
+  | { kind: "index"; index: number; align?: ListAlign }
+  | { kind: "key"; item: number; align?: ListAlign }
+  | { kind: "end" }
+  | { kind: "offset"; offset: number }
+export type ListAlign = "start" | "center" | "end"
+const LIST_ALIGN = { start: 0, center: 1, end: 2 } as const
+const JUMP_KIND = { index: 0, key: 1, end: 2, offset: 3 } as const
 
 /** A row template for native estimates — mirror mutation.rs
  * `ItemTemplate`: fixed extent, horizontal insets, wrapping font size. */
@@ -1846,7 +1870,9 @@ export class Encoder {
       } else if (t.kind === "widths") {
         b.u32(2 + 8 * t.bands.length)
         b.u16(t.bands.length)
-        for (const [w, size] of t.bands) { b.f32(w); b.f32(size) }
+        // Native takes bands by increasing minimum width.
+        const bands = [...t.bands].sort((x, y) => x[0] - y[0])
+        for (const [w, size] of bands) { b.f32(w); b.f32(size) }
       } else {
         b.u32(20)
         for (const v of [t.base, t.inset, t.fontSize, t.lineHeight, t.charWidth ?? 0.5]) b.f32(v)
@@ -1907,6 +1933,36 @@ export class Encoder {
     this.ops.u8(Op.ScrollAnchor)
     this.ops.u32(id)
     this.ops.u8(ANCHOR[anchor])
+  }
+  /** Scroller `id`'s list policy: anchoring mode, anchor policy, end
+   * threshold, covered start and end padding. */
+  listPolicy(id: number, p: ListPolicy) {
+    const b = this.ops
+    b.u8(Op.ListPolicy)
+    b.u32(id)
+    b.u8(ANCHOR[p.mode])
+    b.u8(p.anchorPolicy === "focus" ? 1 : 0)
+    b.f32(p.endThreshold ?? 0.5)
+    b.f32(p.startInset ?? 0)
+    b.f32(p.paddingEnd ?? 0)
+  }
+  /** A jump of list `id`, applied after its batch's layout and held
+   * until reader input (an offset jump is reader input). */
+  listCommand(id: number, revision: number, request: number, jump: ListJump) {
+    const b = this.ops
+    b.u8(Op.ListCommand)
+    b.u32(id)
+    b.u32(revision)
+    b.u32(request)
+    b.u8(JUMP_KIND[jump.kind])
+    if (jump.kind === "index" || jump.kind === "key") {
+      b.u32(jump.kind === "index" ? jump.index : jump.item)
+      b.u8(LIST_ALIGN[jump.align ?? "start"])
+    } else if (jump.kind === "offset") {
+      b.reserve(8)
+      b.view.setFloat64(b.at, jump.offset, true)
+      b.at += 8
+    }
   }
 
   /** Replaces a node's declared transitions (none: clears). */

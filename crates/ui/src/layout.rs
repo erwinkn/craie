@@ -781,10 +781,12 @@ impl TreeView<'_> {
         // box origin; the reachable scroll extent is how far the content
         // overflows it (clamped at zero — negative overflow is
         // unreachable in LTR top-down).
+        // A list policy's end padding extends the range past the content.
         let so = &layout.scrollable_overflow_rect;
+        let pad = (self.host.lists.policies.get(&id.0)).map_or(0.0, |p| p.padding_end);
         data.scroll_extent = [
             (so.right - data.clip_box.size.width).max(0.0),
-            (so.bottom - data.clip_box.size.height).max(0.0),
+            (so.bottom + pad - data.clip_box.size.height).max(0.0),
         ];
         if data.scroll_extent != before.scroll_extent {
             self.store.extents.push(id.0);

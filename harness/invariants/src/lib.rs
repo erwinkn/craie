@@ -159,7 +159,7 @@ pub fn snapshot(ui: &Ui) -> Transaction<'static> {
         }
         let anchor = host.lists.policy(id.0);
         if anchor != Default::default() {
-            t.scroll_anchor(id.0, anchor);
+            t.list_policy(id.0, anchor);
         }
     }
     for &root in host.children(ROOT) {

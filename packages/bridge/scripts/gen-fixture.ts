@@ -121,6 +121,11 @@ enc.create(11, 0)                                   // its row, for item 20
 enc.listRow(11, 10, 20, 1)
 enc.place(10, 11, NIL)
 enc.scrollAnchor(0, "stick-to-end")
+enc.listPolicy(0, { mode: "stick-to-end", anchorPolicy: "focus", endThreshold: 80, startInset: 12, paddingEnd: 100 })
+enc.listCommand(10, 2, 7, { kind: "key", item: 22, align: "center" })
+enc.listCommand(10, 2, 8, { kind: "offset", offset: 1234.5 })
+enc.listCommand(10, 1, 9, { kind: "index", index: 3, align: "end" }) // stale revision: skipped
+enc.listCommand(10, 2, 10, { kind: "end" })
 enc.transition(0, {                                 // animation family
   opacity: { duration: 250, delay: 50, easing: "ease-out" },
   width: { spring: { stiffness: 200, damping: 20 } },
