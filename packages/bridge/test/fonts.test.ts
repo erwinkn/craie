@@ -51,6 +51,17 @@ test("registerFont sends the file alone, once earlier commits are acked, and res
   expect(fontOps(t).flat().at(-1)!.s).toBeUndefined()
 })
 
+test("registerFont sends the bytes as they were at the call", async () => {
+  const t = new FakeTransport()
+  const root = createRoot(t)
+  const buf = new Uint8Array(inter)
+  const p = root.host.registerFont(buf, "Copied")
+  buf.fill(0)
+  for (let i = 0; i < 2; i++) { await settle(); t.ackAll() }
+  await p
+  expect(Buffer.from(fontOps(t).flat()[0]!.bytes!).equals(inter)).toBe(true)
+})
+
 test("fonts go one at a time: the second waits for the first's ack", async () => {
   const t = new FakeTransport()
   const root = createRoot(t)

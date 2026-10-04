@@ -421,9 +421,10 @@ export interface Transport {
 /** Native bounds node ids (they index dense stores): mirror host.rs
  * `MAX_NODES`. */
 const MAX_ID = 1 << 24
-/** The largest font file `registerFont` sends: the session's 4 MiB
- * commit queue, less room for the transaction's header and strings. */
-export const MAX_FONT_BYTES = 4 * 1024 * 1024 - 64 * 1024
+/** The largest font file `registerFont` sends: half the session's 4 MiB
+ * commit queue, so commits React submits while the UI thread drains a
+ * font still fit. */
+export const MAX_FONT_BYTES = 2 * 1024 * 1024
 
 /** "#rgb" / "#rrggbb" / "#rrggbbaa" / "rgb(r, g, b)" / "rgba(r, g,
  * b, a)" (the kit's formats; also space-separated with "/ a",
@@ -1158,9 +1159,11 @@ export class CraieHost {
    * when the transport fails; a file that holds no face closes the
    * session. */
   registerFont(data: ArrayBuffer | ArrayBufferView, family?: string): Promise<void> {
+    // Copied now: the font may go after earlier acks, and the caller may
+    // reuse, change or transfer its buffer meanwhile.
     const view = data instanceof ArrayBuffer
-      ? new Uint8Array(data)
-      : new Uint8Array(data.buffer, data.byteOffset, data.byteLength)
+      ? new Uint8Array(data.slice(0))
+      : new Uint8Array(data.buffer, data.byteOffset, data.byteLength).slice()
     const magic = String.fromCharCode(...view.subarray(0, 4))
     if (magic === "wOFF" || magic === "wOF2") {
       return Promise.reject(new TypeError(
