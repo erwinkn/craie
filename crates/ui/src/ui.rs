@@ -106,9 +106,12 @@ pub struct Ui {
     pub(crate) motion: crate::keyframes::Motion,
     /// Exits that could not run, ended at the end of the transaction
     /// (`exit.rs`).
-    pub(crate) skipped_exits: Vec<NodeId>,
+    pub(crate) skipped_exits: std::collections::BTreeSet<NodeId>,
     /// Scratch for an exit's end: the exits it ends and why.
     pub(crate) exit_scratch: Vec<(NodeId, u32)>,
+    /// Nodes exits freed since events were last taken, each with the
+    /// generation it had: their queued events go then, in one pass.
+    pub(crate) freed: Vec<(u32, u16)>,
     /// Events accumulated for the JS side since the last `take_events`.
     pub(crate) pending_events: Vec<UiEvent>,
     /// Set when anything observable to assistive tech changed.
@@ -182,7 +185,8 @@ impl Ui {
             selection_revs: Default::default(),
             animations: Default::default(),
             motion: Default::default(),
-            skipped_exits: Vec::new(),
+            skipped_exits: Default::default(),
+            freed: Vec::new(),
             exit_scratch: Vec::new(),
             vector_meshes: Default::default(),
             images: Default::default(),
