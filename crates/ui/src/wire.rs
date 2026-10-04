@@ -47,7 +47,7 @@ use crate::mutation::{
 pub use crate::mutation::{group_flag, interaction_flag, trap_flag};
 
 pub const MAGIC: u32 = 0x3257_5243; // "CRW2"
-pub const VERSION: u16 = 16;
+pub const VERSION: u16 = 17;
 
 pub mod op {
     // structure
@@ -101,6 +101,9 @@ pub mod op {
     /// An image node's configuration: id u32 | fit u8 (0 cover, 1
     /// contain, 2 fill). Its bytes come as a PAYLOAD.
     pub const IMAGE_CONFIG: u8 = 0x73;
+    /// A font file to register: family string u32 (NIL: the file's own
+    /// names) | byte length u32 | the bytes (TTF, OTF, a collection).
+    pub const FONT: u8 = 0x74;
     // command
     pub const COMMAND: u8 = 0x80;
     // lists
@@ -656,6 +659,13 @@ pub fn encode(txn: &Transaction<'_>) -> Vec<u8> {
                 for p in params {
                     u32le(&mut ops, *p);
                 }
+            }
+            Mutation::Font { family, bytes } => {
+                let s = family.as_ref().map_or(NIL, |f| strings.get(f));
+                ops.push(op::FONT);
+                u32le(&mut ops, s);
+                u32le(&mut ops, bytes.len() as u32);
+                ops.extend_from_slice(bytes);
             }
             Mutation::Payload { id, bytes } => {
                 ops.push(op::PAYLOAD);
@@ -1387,6 +1397,17 @@ pub fn decode(buf: &[u8]) -> Result<Transaction<'_>, WireError> {
                 kind: r.u32()?,
                 params: [r.u32()?, r.u32()?, r.u32()?, r.u32()?],
             },
+            op::FONT => {
+                let family = match r.u32()? {
+                    NIL => None,
+                    s => Some(string(s)?.into()),
+                };
+                let len = r.u32()? as usize;
+                Mutation::Font {
+                    family,
+                    bytes: r.take(len)?.into(),
+                }
+            }
             op::PAYLOAD => {
                 let id = r.u32()?;
                 let len = r.u32()? as usize;

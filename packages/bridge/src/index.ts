@@ -117,7 +117,7 @@ export type {
   Transport,
   UiEvent,
 } from "./host.js"
-export { defineStates, onFrameStats } from "./host.js"
+export { defineStates, MAX_FONT_BYTES, onFrameStats } from "./host.js"
 export { Circle, Ellipse, G, Line, Path, Polygon, Polyline, Rect } from "./shapes.js"
 export type {
   CircleProps, EllipseProps, GProps, LineProps, PathProps, PolyProps, RectProps, ShapeProps,

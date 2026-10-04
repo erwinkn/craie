@@ -524,6 +524,12 @@ pub enum Mutation<'a> {
         id: u32,
         bytes: Cow<'a, [u8]>,
     },
+    /// Registers a font file's faces (`Fonts::register`), under `family`
+    /// or the file's own names; the window's, no node.
+    Font {
+        family: Option<Cow<'a, str>>,
+        bytes: Cow<'a, [u8]>,
+    },
     /// A vector node's drawing from runtime shapes (SVG strings,
     /// `craie_vector::svg`). It replaces an asset payload, and a payload
     /// replaces it.
@@ -654,7 +660,7 @@ impl Mutation<'_> {
             | Mutation::Variants { id, .. }
             | Mutation::Color { id, .. } => id,
             Mutation::Place { child, .. } => child,
-            Mutation::Environment { .. } => NIL,
+            Mutation::Environment { .. } | Mutation::Font { .. } => NIL,
         }
     }
 }
@@ -1116,6 +1122,14 @@ impl<'a> Transaction<'a> {
 
     pub fn surface(&mut self, id: u32, kind: u32, params: [u32; 4]) -> &mut Self {
         self.push(Mutation::Surface { id, kind, params })
+    }
+
+    /// Registers a font file (TTF, OTF or a collection).
+    pub fn font(&mut self, family: Option<&'a str>, bytes: impl Into<Cow<'a, [u8]>>) -> &mut Self {
+        self.push(Mutation::Font {
+            family: family.map(Cow::Borrowed),
+            bytes: bytes.into(),
+        })
     }
 
     pub fn payload(&mut self, id: u32, bytes: impl Into<Cow<'a, [u8]>>) -> &mut Self {

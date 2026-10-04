@@ -2017,7 +2017,8 @@ Changes: §15, §16.
   the commits made so far, at rest if asked, written to a PNG on request.
 - Font registration from JS: font bytes into the font store (`RawFonts`
   exists natively). The desktop app ships TTF or OTF files; WOFF2 stays a
-  web format.
+  web format. Built (protocol 17): `registerFont(data, family?)`,
+  variable weights included.
 - Clipboard read and write as commands and results, with plain text plus
   Marbre's in-app rich format (a private pasteboard type on macOS).
 - A window drag region: a node flag that lets the custom title bar move the

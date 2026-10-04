@@ -795,6 +795,11 @@ pub fn validate(host: &Host, txn: &Transaction<'_>) -> Result<Validated, WireErr
                     }
                 }
             }
+            Mutation::Font { family, bytes } => {
+                if crate::text::fonts::RawFonts::faces_in(bytes, family.as_deref()) == 0 {
+                    return Err(invalid("a font with no face"));
+                }
+            }
             Mutation::Environment {
                 narrow_max,
                 compact_max,
@@ -1001,6 +1006,13 @@ impl Ui {
                 Some(b) => b.color = *color,
                 None => self.declare_color(NodeId(*id), *color),
             },
+            Mutation::Font { family, bytes } => {
+                // Copied once: the font store keeps the bytes.
+                self.host.copied_bytes += bytes.len() as u64;
+                let bytes: crate::text::fonts::FaceBytes = std::sync::Arc::new(bytes.to_vec());
+                let added = self.text.fonts.register(bytes, family.as_deref());
+                self.refont(&added);
+            }
             Mutation::States { id, bits } => self.set_app_bits(*id, *bits),
             Mutation::Variants { id, variants } => self.set_variants(*id, variants),
             Mutation::Environment {
@@ -1333,6 +1345,45 @@ impl Ui {
                     self.host.lists.policies.insert(*id, *anchor);
                 }
             }
+        }
+    }
+
+    /// Fonts registered after text resolved: every paragraph with a span
+    /// naming one of `families` (lowercase) resolves its spans again and
+    /// reflows, as a web font that loads late.
+    fn refont(&mut self, families: &[String]) {
+        if families.is_empty() {
+            return;
+        }
+        let mut any = false;
+        for i in 0..self.host.paragraphs.len() {
+            let node = NodeId(i as u32);
+            if !self.host.is_live(node) {
+                continue;
+            }
+            let names = |s: &crate::mutation::TextSpan| {
+                (self.host.families.get(s.family as usize)).map_or("", String::as_str)
+            };
+            let p = &self.host.paragraphs[i];
+            let named = p.spans.iter().any(|s| {
+                let n = names(s).trim().to_lowercase();
+                families.contains(&n)
+            });
+            if !named {
+                continue;
+            }
+            let fonts: Vec<_> = (p.spans.iter())
+                .map(|s| (names(s).to_string(), s.weight, s.italic))
+                .collect();
+            let fonts: Vec<_> = (fonts.into_iter())
+                .map(|(name, weight, italic)| self.text.font(&name, weight, italic))
+                .collect();
+            self.host.paragraphs[i].fonts = fonts;
+            self.host.mark_text(node);
+            any = true;
+        }
+        if any {
+            self.host.revs.text_metrics.bump();
         }
     }
 

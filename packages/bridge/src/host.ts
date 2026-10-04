@@ -421,6 +421,10 @@ export interface Transport {
 /** Native bounds node ids (they index dense stores): mirror host.rs
  * `MAX_NODES`. */
 const MAX_ID = 1 << 24
+/** The largest font file `registerFont` sends: half the session's 4 MiB
+ * commit queue, so commits React submits while the UI thread drains a
+ * font still fit. */
+export const MAX_FONT_BYTES = 2 * 1024 * 1024
 
 /** "#rgb" / "#rrggbb" / "#rrggbbaa" / "rgb(r, g, b)" / "rgba(r, g,
  * b, a)" (the kit's formats; also space-separated with "/ a",
@@ -967,6 +971,8 @@ export class CraieHost {
   private encoder = new Encoder()
   private scheduled = false
   private flushWaiters = new Map<number, () => void>()
+  /** The last font's ack: the next font waits for it (`registerFont`). */
+  private fontChain: Promise<void> = Promise.resolve()
   /** Live nodes by native id — the event-dispatch target table. */
   private nodes = new Map<number, HostNode>()
   /** Open layer containers, in open order: the root level's tail. */
@@ -1114,7 +1120,8 @@ export class CraieHost {
   }
 
   /** Resolves once a frame that includes every commit made so far is on
-   * screen; with `rest`, the first such frame with nothing moving or
+   * screen (React's commits: after `renderSync`, or once an update has
+   * committed; a `render` call may not have yet); with `rest`, the first such frame with nothing moving or
    * loading (no animation, no scroll settling, no image decoding).
    * Never resolves while an animation loops. */
   presented(options: { rest?: boolean } = {}): Promise<Presented> {
@@ -1135,6 +1142,44 @@ export class CraieHost {
       if (ev.text) throw Error(`capture failed: ${ev.text}`)
       return { frame: ev.revision, width: ev.x, height: ev.y }
     })
+  }
+
+  /** Registers a font file the app ships (TTF, OTF or a collection;
+   * not WOFF or WOFF2) under `family`, else under the file's own family
+   * names. Registered families come before the system's for the spans
+   * that name them; text already showing in a family reflows when its
+   * font arrives. A variable font serves every weight its axis holds.
+   * The last registration of a face (family, weight, italic) wins.
+   *
+   * Resolves once native has the font. A font goes alone, once native
+   * has acked everything sent before it (the previous font included),
+   * so it has the session's 4 MiB commit queue to itself: text rendered
+   * meanwhile shows in a fallback face, then reflows. Rejects, sending
+   * nothing, for WOFF or WOFF2, for a file over `MAX_FONT_BYTES`, or
+   * when the transport fails; a file that holds no face closes the
+   * session. */
+  registerFont(data: ArrayBuffer | ArrayBufferView, family?: string): Promise<void> {
+    // Copied now: the font may go after earlier acks, and the caller may
+    // reuse, change or transfer its buffer meanwhile.
+    const view = data instanceof ArrayBuffer
+      ? new Uint8Array(data.slice(0))
+      : new Uint8Array(data.buffer, data.byteOffset, data.byteLength).slice()
+    const magic = String.fromCharCode(...view.subarray(0, 4))
+    if (magic === "wOFF" || magic === "wOF2") {
+      return Promise.reject(new TypeError(
+        "registerFont: WOFF and WOFF2 aren't supported; pass the TTF or OTF file"))
+    }
+    if (view.byteLength > MAX_FONT_BYTES) {
+      return Promise.reject(new RangeError(
+        `registerFont: the file is ${view.byteLength} bytes; at most ${MAX_FONT_BYTES} fit a transaction`))
+    }
+    const sent = this.fontChain.then(async () => {
+      await this.flush()
+      this.encoder.font(family ?? null, view)
+      await this.flush()
+    })
+    this.fontChain = sent.catch(() => {})
+    return sent
   }
 
   /** Writes plain text to the system clipboard. */

@@ -182,6 +182,8 @@ enc.group(7, GROUP.horizontal | GROUP.vertical | GROUP.loop | GROUP.selectOnFocu
 enc.create(9, 7)                                    // image
 enc.payload(9, new Uint8Array([0x89, 0x50, 0x4e, 0x47, 1, 2, 3]))
 enc.imageConfig(9, FIT.contain)
+// A font file the app ships, under a family of its own.
+enc.font("Fixture Var", new Uint8Array(await Bun.file(new URL("../../../assets/fonts/NotoEmoji-Var-Test.ttf", import.meta.url).pathname).arrayBuffer()))
 enc.animation(9, 0, true, [{                        // enter: a spring
   index: 0,
   frames: [{ at: 0, values: { opacity: 0, translateY: [8, 0] } }],

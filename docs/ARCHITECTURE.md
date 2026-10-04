@@ -603,7 +603,24 @@ A custom source takes byte ids from fontique's or `RawFonts`'s
 counter. `RawFonts` is the
 byte-only source (browser profiles, tests): family by name, nearest
 weight and italic with synthesis, fallback by coverage in registration
-order. The `pinned-fonts` feature embeds the harness fonts from
+order. A variable face (a `wght` axis) matches any weight its axis holds
+and is instanced there, clamped to the axis; bold is synthesized only
+past an axis that stops short of 600. A malformed axis (minimum above
+maximum, or not finite) makes the face static. Fonts the app ships
+(protocol 17, `FONT` op 0x74: a family string or NIL, then the file's
+bytes, copied once; `registerFont` in the bridge) register into a
+`RawFonts` of the engine's (`Fonts::register`), asked before the
+platform source for a family it holds; generic names stay the
+platform's. As with web fonts, a registered family draws only where a
+span names it: registered faces take fallback only for spans whose
+primary face is registered (after the platform's emoji face for emoji
+presentation), never for system spans. The last registration of a face
+(family, weight, italic) replaces it; the same bytes again change
+nothing. Registering drops the resolved-font caches, and every
+paragraph with a span naming a newly registered family resolves again
+and reflows, so a font that arrives after first render takes over, as a
+late web font. Validation rejects bytes that hold no face, judged with
+the family names registration uses. The `pinned-fonts` feature embeds the harness fonts from
 `assets/fonts` (Noto Sans regular, bold, and italic, Arabic, Hebrew,
 Devanagari, a JP subset, Symbols 2, and a monochrome emoji subset,
 under OFL). Tests and the harness lay text out on them. On desktop,
@@ -1336,7 +1353,8 @@ ROLE op's reported states since 6; press flags, pressable spans, and
 focus groups and the `tab` and `tablist` roles since 10; keyframe
 animations and the `ENVIRONMENT` event since 11; exits since 12;
 observations since 13; box shadows since 14; text alignment and
-tabular digits since 15; line limits since 16). The session hands
+tabular digits since 15; line limits since 16; registered fonts since
+17). The session hands
 JS its output in native order: acks sit between event frames where they happened, so the ack
 of a transaction never overtakes an event raised before it applied,
 and the facade retires a claim set's old handlers on that ack.
