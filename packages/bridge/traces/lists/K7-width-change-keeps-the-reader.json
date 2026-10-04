@@ -1,0 +1,75 @@
+{
+  "format": "craie-list-trace/1",
+  "id": "K7",
+  "name": "a narrower column re-estimates the rows around the reader, whose row stays at the top",
+  "viewport": {
+    "width": 600,
+    "height": 600
+  },
+  "config": {
+    "overscan": 600,
+    "lookahead": 600,
+    "endThreshold": 80,
+    "anchor": "start",
+    "anchorPolicy": "reading"
+  },
+  "templates": [
+    {
+      "kind": "widths",
+      "bands": [
+        [
+          500,
+          40
+        ],
+        [
+          0,
+          80
+        ]
+      ]
+    }
+  ],
+  "items": [
+    {
+      "count": 200,
+      "key": "m{i}",
+      "estimate": {
+        "template": 0
+      },
+      "height": 40
+    }
+  ],
+  "steps": [
+    {
+      "do": "mount"
+    },
+    {
+      "do": "scroll",
+      "offset": 4000,
+      "expect": {
+        "anchor": {
+          "key": "m100",
+          "offset": 0
+        },
+        "visible": [
+          100,
+          114
+        ]
+      }
+    },
+    {
+      "do": "resize",
+      "width": 300,
+      "height": 600,
+      "expect": {
+        "anchor": {
+          "key": "m100",
+          "offset": 0
+        },
+        "visible": [
+          100,
+          114
+        ]
+      }
+    }
+  ]
+}

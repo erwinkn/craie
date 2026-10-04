@@ -1,0 +1,69 @@
+{
+  "format": "craie-list-trace/1",
+  "id": "K3",
+  "name": "an update to the topmost visible rows hands the anchor to the first visible row it leaves alone",
+  "viewport": {
+    "width": 400,
+    "height": 600
+  },
+  "config": {
+    "overscan": 600,
+    "lookahead": 600,
+    "endThreshold": 80,
+    "anchor": "start",
+    "anchorPolicy": "reading"
+  },
+  "templates": [],
+  "items": [
+    {
+      "count": 100,
+      "key": "m{i}",
+      "estimate": 40,
+      "height": 40
+    }
+  ],
+  "steps": [
+    {
+      "do": "mount"
+    },
+    {
+      "do": "scroll",
+      "offset": 1000,
+      "expect": {
+        "anchor": {
+          "key": "m25",
+          "offset": 0
+        }
+      }
+    },
+    {
+      "do": "changes",
+      "changes": [
+        {
+          "kind": "update",
+          "at": 25,
+          "items": [
+            {
+              "count": 2,
+              "key": "m{i}",
+              "version": 1,
+              "estimate": 40,
+              "height": 80
+            }
+          ]
+        }
+      ],
+      "expect": {
+        "anchor": {
+          "key": "m27",
+          "offset": 80
+        },
+        "offset": 1080,
+        "visible": [
+          26,
+          39
+        ]
+      }
+    }
+  ]
+}
