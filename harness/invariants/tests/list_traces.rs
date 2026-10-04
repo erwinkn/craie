@@ -10,7 +10,7 @@
 use std::collections::{BTreeMap, HashMap};
 
 use craie_core::geom::Size;
-use craie_ui::events::out_kind;
+use craie_ui::events::{list_slot, mask, out_kind};
 use craie_ui::host::NodeId;
 use craie_ui::mutation::{
     Align, Anchor, Item, Jump, ListOp, ListPolicy, NIL, NodeKind, Template, Transaction,
@@ -19,19 +19,12 @@ use craie_ui::ui::Ui;
 
 /// Traces waiting for native work, with what they need.
 const PENDING: &[(&str, &str)] = &[
-    ("I1", "loading: updateItems asks"),
-    ("I2", "loading: updateItems asks"),
-    ("I3", "loading: updateItems asks"),
-    ("I3j", "loading: updateItems asks"),
-    ("I4", "loading: updateItems asks"),
-    ("I4b", "loading: updateItems asks"),
-    ("I4bj", "loading: updateItems asks"),
-    ("I4j", "loading: updateItems asks"),
-    ("K11", "loading: updateItems asks"),
-    ("K12", "loading: updateItems asks"),
-    ("L1", "loading: updateItems asks"),
-    ("L2", "loading: updateItems asks"),
-    ("L3", "loading: updateItems asks"),
+    // Its step-3 offset pins how far above the viewport rows mount; #45
+    // drops it (native lands at 8160 with the reader held).
+    (
+        "L1",
+        "an overscan-dependent offset (until #45 reaches this branch)",
+    ),
     ("U1", "unloading"),
     ("U2", "unloading"),
     ("U3", "unloading"),
@@ -341,6 +334,8 @@ struct Driver {
     revision: u32,
     seq: u64,
     request: u32,
+    /// The current step's `updateItems` loads (first, last), in order.
+    loads: Vec<(u32, u32)>,
 }
 
 impl Driver {
@@ -398,6 +393,7 @@ impl Driver {
             revision: 0,
             seq: 0,
             request: 0,
+            loads: Vec::new(),
         };
         let templates: Vec<Template> = t
             .get("templates")
@@ -457,26 +453,49 @@ impl Driver {
                 &templates,
             )
             .list_patch(LIST, 0, 1, &[ListOp::splice(0, 0, &items)])
+            .interaction(LIST, mask::UPDATE_ITEMS | mask::VISIBLE_CHANGE, false)
             .append(SCROLLER, LIST);
         d.revision = 1;
         d.ui.apply_txn(&tx).expect("the list mounts");
         d
     }
 
-    /// Mounts the rows of the latest range the list reported, as one
-    /// commit, and re-renders mounted rows whose item changed. Returns
+    /// Records the list's `updateItems` loads, then mounts the rows of
+    /// the latest viewport it reported (and its pinned rows), as one
+    /// commit, re-rendering mounted rows whose item changed. Returns
     /// whether it committed.
     fn pump(&mut self) -> bool {
-        let want = (self.ui.take_events().into_iter())
-            .rfind(|e| e.kind == out_kind::LIST_RANGE && e.node == LIST)
-            .map(|e| (e.a as usize, e.b as usize, e.x));
-        let (range, keep) = match want {
-            Some((a, b, x)) => (a..b.min(self.table.len()), x),
-            None => return false,
+        let mut want = None;
+        for e in self.ui.take_events() {
+            if e.node != LIST {
+                continue;
+            }
+            if e.kind == out_kind::CALL && e.key & 0xFF == list_slot::UPDATE_ITEMS {
+                let u = |at: usize| u32::from_le_bytes(e.payload[at..at + 4].try_into().unwrap());
+                if e.payload[0] & 1 != 0 {
+                    self.loads.push((u(1), u(5)));
+                }
+            }
+            if e.kind == out_kind::LIST_VIEWPORT && e.key == 0 {
+                want = Some(e.payload);
+            }
+        }
+        let Some(v) = want else {
+            return false;
         };
-        let mut wanted: Vec<usize> = range.collect();
-        if keep >= 0.0 && !wanted.contains(&(keep as usize)) {
-            wanted.push(keep as usize);
+        let u = |at: usize| u32::from_le_bytes(v[at..at + 4].try_into().unwrap()) as usize;
+        let mut wanted: Vec<usize> = (u(0)..u(4).min(self.table.len())).collect();
+        let pinned = u16::from_le_bytes([v[41], v[42]]) as usize;
+        for k in 0..pinned {
+            let id = u(43 + 4 * k) as u32;
+            if let Some(i) = self
+                .table
+                .iter()
+                .position(|r| self.ids.get(&r.key) == Some(&id))
+                && !wanted.contains(&i)
+            {
+                wanted.push(i);
+            }
         }
         let rows: Vec<Row> = (wanted.into_iter())
             .filter_map(|i| self.table.get(i).cloned())
@@ -609,6 +628,7 @@ impl Driver {
     }
 
     fn step(&mut self, s: &Value) -> Result<(), String> {
+        self.loads.clear();
         let num = |k: &str| s.get(k).and_then(Value::num);
         let align = || match s.get("align").and_then(Value::str) {
             Some("center") => Align::Center,
@@ -722,9 +742,36 @@ impl Driver {
                 errs.push(format!("mounted doesn't cover [{a}, {b}]"));
             }
         }
-        for k in ["load", "unload", "held"] {
-            if e.get(k).is_some() {
-                errs.push(format!("'{k}' isn't observable natively yet"));
+        if let Some(want) = e.get("load") {
+            let got = self.loads.last().copied();
+            let ok = match want {
+                Value::Null => got.is_none(),
+                Value::Arr(_) => {
+                    let (a, b) = pair(want);
+                    got == Some((a as u32, b as u32))
+                }
+                w => {
+                    let (a, b) = pair(w.get("covers").unwrap());
+                    got.is_some_and(|(x, y)| x as i64 <= a && b <= y as i64)
+                }
+            };
+            if !ok {
+                errs.push(format!(
+                    "load {:?} (this step: {:?}), expected {want:?}",
+                    got, self.loads
+                ));
+            }
+        }
+        if let Some(want) = e.get("unload")
+            && !want.arr().is_empty()
+        {
+            errs.push("'unload' isn't observable natively yet".into());
+        }
+        if let Some(want) = e.get("held") {
+            let got = (!v.held.is_empty()).then(|| (v.held.start as i64, v.held.end as i64 - 1));
+            let want = (*want != Value::Null).then(|| pair(want));
+            if got != want {
+                errs.push(format!("held {got:?}, expected {want:?}"));
             }
         }
         if errs.is_empty() {

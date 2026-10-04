@@ -318,6 +318,17 @@ pub mod out_kind {
     /// revision = the list's revision, key = the patch's base. JS
     /// reconciles from that revision.
     pub const LIST_RESYNC: u8 = 27;
+    /// A callback slot's call (`docs/contracts/callbacks.md`): node = the
+    /// owner, key = slot | call id << 8 (0: no answer wanted), `payload`
+    /// = the arguments, as the slot defines them. Slots are listener
+    /// mask bits (`mask`): a list's `updateItems` (reliable) and
+    /// `onVisibleChange` (latest wins, once per frame).
+    pub const CALL: u8 = 28;
+    /// A list's viewport (`ListViewport`), for the bridge: after a frame
+    /// that changed it (key 0), or answering a `read` command (key = its
+    /// request; the list gone: revision NIL and no payload). revision =
+    /// the list's revision; `payload` = `list_viewport_bytes`.
+    pub const LIST_VIEWPORT: u8 = 29;
 }
 
 /// Whether events of `kind` must never drop from the session's queue:
@@ -336,7 +347,21 @@ pub fn reliable(kind: u8) -> bool {
             | out_kind::WINDOW
             | out_kind::PRESENTED
             | out_kind::LIST_RESYNC
+            | out_kind::CALL
+            | out_kind::LIST_VIEWPORT
     )
+}
+
+/// A list's callback slots (`CALL` key bits 0-7, and their listener
+/// mask bits).
+pub mod list_slot {
+    /// `updateItems(ask)`: payload flags u8 (bit 0 load, bit 1 unload
+    /// above, bit 2 unload below), then each present range as first and
+    /// last u32.
+    pub const UPDATE_ITEMS: u32 = 12;
+    /// `onVisibleChange(visible)`: payload first i32, last i32, flags u8
+    /// (bit 0 at end, bit 1 following).
+    pub const VISIBLE_CHANGE: u32 = 13;
 }
 
 /// `WINDOW` key bits.
@@ -400,6 +425,8 @@ pub struct UiEvent {
     pub b: f32,
     pub key: u32,
     pub text: String,
+    /// `CALL` and `LIST_VIEWPORT` bytes, in `text`'s place on the wire.
+    pub payload: Vec<u8>,
 }
 
 impl UiEvent {
@@ -415,6 +442,7 @@ impl UiEvent {
             b: 0.0,
             key: 0,
             text: String::new(),
+            payload: Vec::new(),
         }
     }
 }
@@ -434,6 +462,10 @@ pub mod mask {
     pub const PRESS: u32 = 1 << 9;
     pub const ACTIVATE: u32 = 1 << 10;
     pub const LAYOUT: u32 = 1 << 11;
+    /// A list's `updateItems` slot.
+    pub const UPDATE_ITEMS: u32 = 1 << super::list_slot::UPDATE_ITEMS;
+    /// A list's `onVisibleChange` slot.
+    pub const VISIBLE_CHANGE: u32 = 1 << super::list_slot::VISIBLE_CHANGE;
 }
 
 /// Maps an outbound event kind to its listener mask bit.
@@ -457,8 +489,9 @@ pub fn mask_for(kind: u8) -> u32 {
 
 /// Serializes events into one outbox frame. Record layout (LE):
 /// `kind u8 | pad u8 | generation u16 | node u32 | x f32 | y f32 | a f32
-/// | b f32 | key u32 | revision u32 | text_len u32 | text utf8`. The frame starts with
-/// a u32 record count.
+/// | b f32 | key u32 | revision u32 | text_len u32 | text utf8`, the
+/// text's place holding `payload`'s bytes for `CALL` and `LIST_VIEWPORT`.
+/// The frame starts with a u32 record count.
 pub fn encode_events(events: &[UiEvent]) -> Vec<u8> {
     let mut out = Vec::with_capacity(4 + events.len() * 36);
     out.extend_from_slice(&(events.len() as u32).to_le_bytes());
@@ -471,8 +504,13 @@ pub fn encode_events(events: &[UiEvent]) -> Vec<u8> {
         }
         out.extend_from_slice(&e.key.to_le_bytes());
         out.extend_from_slice(&e.revision.to_le_bytes());
-        out.extend_from_slice(&(e.text.len() as u32).to_le_bytes());
-        out.extend_from_slice(e.text.as_bytes());
+        let bytes = if e.payload.is_empty() {
+            e.text.as_bytes()
+        } else {
+            &e.payload[..]
+        };
+        out.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+        out.extend_from_slice(bytes);
     }
     out
 }

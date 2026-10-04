@@ -126,6 +126,7 @@ enc.listCommand(10, 2, 7, { kind: "key", item: 22, align: "center" })
 enc.listCommand(10, 2, 8, { kind: "offset", offset: 1234.5 })
 enc.listCommand(10, 1, 9, { kind: "index", index: 3, align: "end" }) // stale revision: skipped
 enc.listCommand(10, 2, 10, { kind: "end" })
+enc.listCommand(10, 2, 11, { kind: "read" })
 enc.transition(0, {                                 // animation family
   opacity: { duration: 250, delay: 50, easing: "ease-out" },
   width: { spring: { stiffness: 200, damping: 20 } },

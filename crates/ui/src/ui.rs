@@ -472,8 +472,13 @@ impl Ui {
     /// to the axes the node's style scrolls; returns the applied offset
     /// when it changed. A list anchor in it is captured again.
     pub fn scroll_to(&mut self, id: NodeId, x: f32, y: f32) -> Option<[f32; 2]> {
+        let before = self
+            .host
+            .spatial
+            .get(id.index())
+            .map_or(0.0, |s| s.scroll[1]);
         let off = self.set_scroll(id, x, y)?;
-        self.host.lists.reader_scrolled(id.0);
+        self.host.lists.reader_scrolled(id.0, off[1] - before);
         Some(off)
     }
 

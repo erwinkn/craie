@@ -702,6 +702,9 @@ pub enum Jump {
     End,
     /// A list content offset at the viewport's top: reader input.
     Offset(f64),
+    /// Not a jump: the list's viewport, answered after the layout that
+    /// follows (`LIST_VIEWPORT` keyed by the command's request).
+    Read,
 }
 
 /// Imperative UI commands.

@@ -167,6 +167,17 @@ pub struct ListState {
     pub keep_id: u32,
     /// Items changed since the last report: report again.
     pub resend: bool,
+    /// The last load asked (`updateItems`, first and last item), and
+    /// whether a batch since moved rows or changed one inside it.
+    pub asked: Option<(u32, u32)>,
+    pub rearm: bool,
+    /// Held items (identities): arrived in the viewport while a
+    /// placeholder stays there. They keep their placeholder extents and
+    /// don't measure until released.
+    pub held: Vec<u32>,
+    /// The viewport and visible range last reported.
+    sent: Option<ListViewport>,
+    sent_visible: Option<(i64, i64, bool, bool)>,
 }
 
 impl Default for ListState {
@@ -194,6 +205,11 @@ impl Default for ListState {
             keep: NIL,
             keep_id: NIL,
             resend: false,
+            asked: None,
+            rearm: false,
+            held: Vec::new(),
+            sent: None,
+            sent_visible: None,
         }
     }
 }
@@ -276,6 +292,9 @@ pub struct Saved {
     pub jump: Option<Align>,
     /// Reader input moved the viewport since the last capture.
     pub moved: bool,
+    /// The reader's last scroll direction: -1 up, 1 down, 0 none since a
+    /// jump or the mount. Loads extend that way.
+    pub direction: i8,
 }
 
 impl Saved {
@@ -289,6 +308,7 @@ impl Saved {
         explicit: false,
         jump: None,
         moved: false,
+        direction: 0,
     };
 }
 
@@ -306,6 +326,115 @@ pub struct ListViewport {
     pub following: bool,
     /// Identities of rows kept rendered for focus.
     pub pinned: Vec<u32>,
+    /// Held items (rendered as placeholders), first to last.
+    pub held: Range<u32>,
+    /// Items the bridge keeps mounted (pinned rows besides).
+    pub mounted: Range<u32>,
+}
+
+impl ListViewport {
+    /// `LIST_VIEWPORT`'s payload (LE): mounted first and end, visible
+    /// first and end, held first and end (u32 each, ends exclusive), the
+    /// anchor's identity (NIL: none) and index (u32) and offset (f32),
+    /// the content offset (f32), flags (u8: bit 0 at end, bit 1
+    /// following), then the pinned count (u16) and identities (u32).
+    pub fn bytes(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(46 + 4 * self.pinned.len());
+        let (id, index, offset) = self.anchor.unwrap_or((NIL, 0, 0.0));
+        for v in [
+            self.mounted.start,
+            self.mounted.end,
+            self.visible.start,
+            self.visible.end,
+            self.held.start,
+            self.held.end,
+            id,
+            index,
+        ] {
+            out.extend_from_slice(&v.to_le_bytes());
+        }
+        out.extend_from_slice(&offset.to_le_bytes());
+        out.extend_from_slice(&self.offset.to_le_bytes());
+        out.push(self.at_end as u8 | (self.following as u8) << 1);
+        out.extend_from_slice(&(self.pinned.len() as u16).to_le_bytes());
+        for p in &self.pinned {
+            out.extend_from_slice(&p.to_le_bytes());
+        }
+        out
+    }
+}
+
+/// A placeholder still waiting for content: not loaded, not failed.
+fn pending(d: &Item) -> bool {
+    d.flags & (Item::LOADED | Item::FAILED) == 0
+}
+
+impl ListState {
+    /// The extent from item `a`'s start to item `b`'s end.
+    fn span_extent(&self, a: usize, b: usize) -> f32 {
+        self.offset(b) + self.extents.size(b) - self.offset(a)
+    }
+
+    /// The islet rule's request for a viewport `v0..v1` of the list's
+    /// content, `view` tall, with `lookahead` (negative: one viewport)
+    /// and the reader's direction (0: none since a mount or a jump):
+    /// the pending items meeting the window, extended toward the reader
+    /// to at least a screen, then widened on each side over a run's rest
+    /// no taller than a screen. None when no pending item meets it.
+    pub fn request(&self, v0: f32, v1: f32, lookahead: f32, direction: i8) -> Option<(u32, u32)> {
+        let n = self.items.len();
+        let total = self.total();
+        let view = (v1 - v0).max(0.0);
+        let look = if lookahead < 0.0 { view } else { lookahead };
+        let (w0, w1) = (v0 - look, v1 + look);
+        if n == 0 || w1 <= 0.0 || w0 >= total {
+            return None;
+        }
+        let meets = |i: usize| {
+            let o = self.offset(i);
+            o < w1 && o + self.extents.size(i) > w0
+        };
+        let lo = self.item_at(w0.max(0.0));
+        let hi = self.item_at(w1.min(total - 1e-3).max(0.0));
+        let mut base = (lo..=hi).filter(|&i| meets(i) && pending(&self.items[i]));
+        let mut first = base.next()?;
+        let mut last = base.next_back().unwrap_or(first);
+        let is = |i: usize| pending(&self.items[i]);
+        // At least a screen, one pending row at a time, the reader's way
+        // (after a mount or a jump: the way the run continues, down when
+        // both).
+        let down = match direction {
+            d if d > 0 => true,
+            d if d < 0 => false,
+            _ => last + 1 < n && is(last + 1) || !(first > 0 && is(first - 1)),
+        };
+        while self.span_extent(first, last) < view {
+            if down && last + 1 < n && is(last + 1) {
+                last += 1;
+            } else if !down && first > 0 && is(first - 1) {
+                first -= 1;
+            } else {
+                break;
+            }
+        }
+        // Widening: a run's rest past the request, no taller than a
+        // screen, joins it (scanned no further than a screen).
+        let mut start = first;
+        while start > 0 && is(start - 1) && self.span_extent(start - 1, first - 1) <= view {
+            start -= 1;
+        }
+        if start < first && (start == 0 || !is(start - 1)) {
+            first = start;
+        }
+        let mut end = last;
+        while end + 1 < n && is(end + 1) && self.span_extent(last + 1, end + 1) <= view {
+            end += 1;
+        }
+        if end > last && (end + 1 == n || !is(end + 1)) {
+            last = end;
+        }
+        Some((first as u32, last as u32))
+    }
 }
 
 /// A row's tag: it renders version `version` of item `item` of list
@@ -328,6 +457,8 @@ pub struct Lists {
     pub(crate) saved: HashMap<u32, Saved>,
     /// Jumps waiting for their batch's layout, by list, in order.
     pub(crate) jumps: Vec<(u32, Jump)>,
+    /// `read` commands waiting for the next frame: (list, request).
+    pub(crate) reads: Vec<(u32, u32)>,
     /// Rows tagged by item (`LIST_ROW2`), by row node.
     pub rows: HashMap<u32, RowTag>,
     /// (average advance, line height) per font size (f32 bits).
@@ -362,7 +493,9 @@ impl Lists {
             .map
             .get(&list)
             .and_then(|l| l.items.get(index as usize));
-        t.list == list && item.is_some_and(|d| d.id == t.item && d.version == t.version)
+        t.list == list
+            && item.is_some_and(|d| d.id == t.item && d.version == t.version)
+            && !self.map[&list].held.contains(&t.item)
     }
 
     pub fn policy(&self, scroller: u32) -> Policy {
@@ -379,11 +512,14 @@ impl Lists {
 
     /// Reader input scrolled `scroller`: its anchor ends any jump and is
     /// captured again after the frame.
-    pub(crate) fn reader_scrolled(&mut self, scroller: u32) {
+    pub(crate) fn reader_scrolled(&mut self, scroller: u32, dy: f32) {
         if let Some(s) = self.saved.get_mut(&scroller) {
             s.moved = true;
             s.explicit = false;
             s.jump = None;
+            if dy != 0.0 {
+                s.direction = if dy < 0.0 { -1 } else { 1 };
+            }
         }
     }
 
@@ -646,6 +782,47 @@ impl Lists {
         }
         let l = self.map.get_mut(&id).unwrap();
         l.revision = next;
+    }
+
+    /// A batch re-arms list `id`'s last load when it moves rows (a splice
+    /// or a move: indices may shift) or changes one inside it (an answer,
+    /// maybe partial); updates elsewhere leave it (trace L4).
+    pub(crate) fn rearm(&mut self, id: u32, ops: &[ListOp]) {
+        let Some(l) = self.map.get_mut(&id) else {
+            return;
+        };
+        let inside = |at: u32, k: u32| l.asked.is_some_and(|(a, b)| at <= b && at + k > a);
+        let rearm = ops.iter().any(|op| match op {
+            ListOp::Update { at, items } => inside(*at, (items.len() / Item::BYTES) as u32),
+            ListOp::Move { count: 0, .. } => false,
+            _ => true,
+        });
+        l.rearm |= rearm;
+    }
+
+    /// Releases held items `ids` of list `id`: each takes its own
+    /// estimate (it kept its placeholder's) and measures from then on.
+    pub(crate) fn release(&mut self, text: &mut TextEngine, id: u32, ids: &[u32]) {
+        if ids.is_empty() {
+            return;
+        }
+        let est = self.estimator(text, id);
+        let Some(l) = self.map.get_mut(&id) else {
+            return;
+        };
+        l.held.retain(|h| !ids.contains(h));
+        let width = l.width;
+        for &h in ids {
+            if let Some(i) = l.index_of(h) {
+                let e = if width.is_finite() {
+                    est.of(&l.items[i as usize], width)
+                } else {
+                    est.fallback
+                };
+                l.extents.estimate(i as usize, e);
+            }
+        }
+        l.sent = None;
     }
 
     /// Moves items `from..from + count` to `to` (an index without them):
@@ -914,11 +1091,25 @@ impl Placement {
         }
         let total = l.total();
         let bottom = self.flipped();
-        let index = if bottom {
+        let mut index = if bottom {
             l.item_at(self.v1.min(total - 1e-3).max(0.0))
         } else {
             l.item_at(self.v0.max(0.0))
         };
+        // While a placeholder waits in view, the topmost visible loaded
+        // row holds (with none loaded, the topmost visible row).
+        let vis = self.visible(l);
+        if vis.clone().any(|i| pending(&l.items[i as usize])) {
+            let loaded = |&i: &u32| l.items[i as usize].flags & Item::LOADED != 0;
+            let top = if bottom {
+                vis.rev().find(loaded)
+            } else {
+                vis.clone().find(loaded)
+            };
+            if let Some(i) = top {
+                index = i as usize;
+            }
+        }
         let edge = l.offset(index) + if bottom { l.extents.size(index) } else { 0.0 };
         Saved {
             list: id,
@@ -1242,6 +1433,7 @@ impl crate::ui::Ui {
                     self.jump_to_end(list, sc, end_mode, window);
                     continue;
                 }
+                Jump::Read => continue,
                 Jump::Offset(y) => {
                     let target = p.scroll[1] + p.view_y(y as f32);
                     let x = self.host.spatial[sc.index()].scroll[0];
@@ -1272,6 +1464,7 @@ impl crate::ui::Ui {
         if end_mode {
             let s = self.host.lists.saved.entry(sc.0).or_insert(Saved::NONE);
             (s.following, s.explicit, s.jump, s.moved) = (true, false, None, false);
+            s.direction = 0;
             return;
         }
         let [x, _] = self.host.spatial[sc.index()].scroll;
@@ -1377,6 +1570,7 @@ impl crate::ui::Ui {
             } else {
                 l.items.get(keep as usize).map_or(NIL, |d| d.id)
             };
+            let v2 = l.v2;
             // After a splice the event goes out even with the same range:
             // it names the item order (revision) its indices refer to.
             if next != reported || keep != l.keep || keep_id != l.keep_id || l.resend {
@@ -1395,9 +1589,110 @@ impl crate::ui::Ui {
                 e.key = keep_id;
                 self.pending_events.push(e);
             }
+            if v2 {
+                self.sync_loading(id, &p);
+            }
         }
         self.host.lists.ids = ids;
         self.host.lists.anchored = anchored;
+        self.answer_reads();
+    }
+
+    /// The lists contract's per-frame work for list `id` in placement
+    /// `p`: held rows that left the viewport, or whose placeholders are
+    /// all gone, apply; the islet request goes to `updateItems` when it
+    /// is new or re-armed; the viewport and the visible range are
+    /// reported when they changed.
+    fn sync_loading(&mut self, id: u32, p: &Placement) {
+        let list = NodeId(id);
+        let listeners = self.host.interaction(list).listeners;
+        let l = &self.host.lists.map[&id];
+        let vis = p.visible(l);
+        if !l.held.is_empty() {
+            let waiting = vis.clone().any(|i| pending(&l.items[i as usize]));
+            let shown = |h: u32| vis.clone().any(|i| l.items[i as usize].id == h);
+            let gone: Vec<u32> = (l.held.iter().copied())
+                .filter(|&h| !waiting || !shown(h))
+                .collect();
+            if !gone.is_empty() {
+                self.host.lists.release(&mut self.text, id, &gone);
+                self.host.mark_layout(list);
+            }
+        }
+        if listeners & crate::events::mask::UPDATE_ITEMS != 0 {
+            let direction = (self.host.lists.saved.get(&p.scroller.0)).map_or(0, |s| s.direction);
+            let l = &self.host.lists.map[&id];
+            let request = l.request(p.v0, p.v1, l.lookahead, direction);
+            let asked = l.asked;
+            if let Some((a, b)) = request
+                && (l.rearm || !asked.is_some_and(|(x, y)| x <= a && b <= y))
+            {
+                let l = self.host.lists.map.get_mut(&id).unwrap();
+                l.asked = Some((a, b));
+                l.rearm = false;
+                let mut e = self.event(out_kind::CALL, list);
+                e.key = crate::events::list_slot::UPDATE_ITEMS;
+                e.payload = vec![1];
+                e.payload.extend_from_slice(&a.to_le_bytes());
+                e.payload.extend_from_slice(&b.to_le_bytes());
+                self.pending_events.push(e);
+            }
+        }
+        let Some(v) = self.list_viewport(list) else {
+            return;
+        };
+        let l = self.host.lists.map.get_mut(&id).unwrap();
+        let visible = (
+            v.visible.start as i64,
+            v.visible.end as i64 - 1,
+            v.at_end,
+            v.following,
+        );
+        let report = l.sent.as_ref() != Some(&v);
+        let notify = l.sent_visible != Some(visible);
+        if report {
+            l.sent = Some(v.clone());
+            let revision = l.revision;
+            let mut e = self.event(out_kind::LIST_VIEWPORT, list);
+            (e.x, e.y) = (v.mounted.start as f32, v.mounted.end as f32);
+            (e.a, e.b) = (v.visible.start as f32, v.visible.end as f32);
+            e.revision = revision;
+            e.payload = v.bytes();
+            self.pending_events.push(e);
+        }
+        if notify && listeners & crate::events::mask::VISIBLE_CHANGE != 0 {
+            let l = self.host.lists.map.get_mut(&id).unwrap();
+            l.sent_visible = Some(visible);
+            let mut e = self.event(out_kind::CALL, list);
+            e.key = crate::events::list_slot::VISIBLE_CHANGE;
+            let (first, last) = if v.visible.is_empty() {
+                (0, -1)
+            } else {
+                (visible.0, visible.1)
+            };
+            e.payload.extend_from_slice(&(first as i32).to_le_bytes());
+            e.payload.extend_from_slice(&(last as i32).to_le_bytes());
+            e.payload.push(v.at_end as u8 | (v.following as u8) << 1);
+            self.pending_events.push(e);
+        }
+    }
+
+    /// Answers the `read` commands that waited for this frame.
+    fn answer_reads(&mut self) {
+        for (list, request) in std::mem::take(&mut self.host.lists.reads) {
+            let mut e = self.event(out_kind::LIST_VIEWPORT, NodeId(list));
+            e.key = request;
+            match self.list_viewport(NodeId(list)) {
+                Some(v) => {
+                    (e.x, e.y) = (v.mounted.start as f32, v.mounted.end as f32);
+                    (e.a, e.b) = (v.visible.start as f32, v.visible.end as f32);
+                    e.revision = self.host.lists.get(list).map_or(0, |l| l.revision);
+                    e.payload = v.bytes();
+                }
+                None => e.revision = NIL,
+            }
+            self.pending_events.push(e);
+        }
     }
 
     /// What the batch rule needs before `ops` apply to list `list`: its
@@ -1454,7 +1749,62 @@ impl crate::ui::Ui {
     /// longest increasing subsequence of the span's surviving items;
     /// it is unchanged when its identity survives with the same version,
     /// loaded and failed flags.
-    pub(crate) fn batch_anchor(&mut self, list: u32, b: Before) {
+    /// List `list`'s visible items before a batch, for the hold rule:
+    /// identity, flags, extent, measured.
+    pub(crate) fn shown_items(&self, list: u32) -> Vec<(u32, u8, f32, bool)> {
+        let (Some(l), Some(size)) = (self.host.lists.get(list), self.laid_out) else {
+            return Vec::new();
+        };
+        let Some(p) = self.list_placement(NodeId(list), size) else {
+            return Vec::new();
+        };
+        p.visible(l)
+            .map(|i| {
+                let (d, i) = (&l.items[i as usize], i as usize);
+                (d.id, d.flags, l.extents.size(i), l.extents.is_measured(i))
+            })
+            .collect()
+    }
+
+    /// The hold rule, once a batch applied (`lists.md`, "Loading without
+    /// layout shifts"): rows that arrived (unloaded to loaded) in the
+    /// viewport are held while a pending placeholder stays there,
+    /// keeping their placeholder extents; once none stays, every held row
+    /// applies. Returns the rows released.
+    pub(crate) fn hold(&mut self, list: u32, shown: &[(u32, u8, f32, bool)]) -> Vec<u32> {
+        let Some(l) = self.host.lists.map.get_mut(&list) else {
+            return Vec::new();
+        };
+        let mut arrived = Vec::new();
+        let mut waiting = false;
+        for &(id, flags, extent, measured) in shown {
+            let Some(i) = l.index_of(id) else { continue };
+            let now = l.items[i as usize];
+            waiting |= pending(&now);
+            if flags & Item::LOADED == 0 && now.flags & Item::LOADED != 0 {
+                arrived.push((i as usize, id, extent, measured));
+            }
+        }
+        if waiting {
+            for (i, id, extent, measured) in arrived {
+                if measured {
+                    l.extents.measure(i, extent);
+                } else {
+                    l.extents.estimate(i, extent);
+                }
+                if !l.held.contains(&id) {
+                    l.held.push(id);
+                }
+            }
+            return Vec::new();
+        }
+        let released = std::mem::take(&mut l.held);
+        l.held = released.clone();
+        self.host.lists.release(&mut self.text, list, &released);
+        released
+    }
+
+    pub(crate) fn batch_anchor(&mut self, list: u32, b: Before, released: &[u32]) {
         let Some(l) = self.host.lists.get(list) else {
             return;
         };
@@ -1496,11 +1846,14 @@ impl crate::ui::Ui {
                 .is_ok_and(|k| on[k])
         };
         const STATE: u8 = Item::LOADED | Item::FAILED;
+        // A row released in this batch changed, though its descriptor
+        // arrived earlier (trace L5).
         let unchanged = |i: u32, before: &Item| {
-            map(i).is_some_and(|j| {
-                let now = &l.items[j as usize];
-                now.version == before.version && now.flags & STATE == before.flags & STATE
-            })
+            !released.contains(&before.id)
+                && map(i).is_some_and(|j| {
+                    let now = &l.items[j as usize];
+                    now.version == before.version && now.flags & STATE == before.flags & STATE
+                })
         };
         let s = b.saved;
         let keep = |index: u32, delta: f32, explicit: bool| Saved {
@@ -1560,13 +1913,29 @@ impl crate::ui::Ui {
             .get(keep as usize)
             .map(|d| d.id)
             .filter(|&id| id != NIL);
+        // Held rows are visible ones (the others are released).
+        let visible = p.visible(l);
+        let held: Vec<u32> = if l.held.is_empty() {
+            Vec::new()
+        } else {
+            visible
+                .clone()
+                .filter(|&i| l.held.contains(&l.items[i as usize].id))
+                .collect()
+        };
+        let held = match (held.first(), held.last()) {
+            (Some(&a), Some(&b)) => a..b + 1,
+            _ => 0..0,
+        };
         Some(ListViewport {
-            visible: p.visible(l),
+            visible,
             anchor,
             offset: p.v0,
             at_end: p.scroller.is_node() && p.scroll[1] >= p.max_scroll - threshold,
             following: saved.is_some_and(|s| s.following),
             pinned: pinned.into_iter().collect(),
+            held,
+            mounted: l.reported.clone(),
         })
     }
 

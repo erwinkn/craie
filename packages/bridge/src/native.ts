@@ -12,7 +12,7 @@ import { fileURLToPath } from "node:url"
 import { format } from "node:util"
 import { createRoot, type Root } from "./index.js"
 import type { Transport } from "./host.js"
-import { VERSION } from "./wire.js"
+import { EVENT_KIND, VERSION } from "./wire.js"
 
 export interface NativeHostHandle {
   readonly id: number
@@ -52,9 +52,14 @@ export function decodeEvents(buf: Uint8Array, at = 0): import("./host.js").UiEve
     const revision = view.getUint32(pos + 28, true)
     const len = view.getUint32(pos + 32, true)
     pos += 36
-    const s = len ? text.decode(buf.subarray(at + pos, at + pos + len)) : ""
+    // CALL and LIST_VIEWPORT carry bytes in the text's place.
+    const binary = kind === EVENT_KIND.call || kind === EVENT_KIND.listViewport
+    const raw = buf.subarray(at + pos, at + pos + len)
+    const s = len && !binary ? text.decode(raw) : ""
     pos += len
-    out.push({ kind, node, generation, revision, x, y, a, b, key, text: s })
+    const e: import("./host.js").UiEvent = { kind, node, generation, revision, x, y, a, b, key, text: s }
+    if (binary) e.bytes = raw.slice()
+    out.push(e)
   }
   return out
 }

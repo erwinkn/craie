@@ -1568,9 +1568,12 @@ impl Ui {
                 // The anchor is chosen against the geometry before the
                 // batch, once the batch applied.
                 let before = self.batch_before(*id, &ops);
+                let shown = self.shown_items(*id);
+                self.host.lists.rearm(*id, &ops);
                 self.host.lists.patch(&mut self.text, *id, *next, &ops);
+                let released = self.hold(*id, &shown);
                 if let Some(b) = before {
-                    self.batch_anchor(*id, b);
+                    self.batch_anchor(*id, b, &released);
                 }
                 self.host.revs.layout_input.bump();
                 self.host.mark_layout(NodeId(*id));
@@ -1620,14 +1623,21 @@ impl Ui {
                 self.force_paint = true;
             }
             Mutation::ListCommand {
-                id, revision, jump, ..
+                id,
+                revision,
+                request,
+                jump,
             } => {
                 // An index made for another item order is skipped.
                 let current = self.host.lists.get(*id).map_or(0, |l| l.revision);
                 if matches!(jump, crate::mutation::Jump::Index(..)) && *revision != current {
                     return;
                 }
-                self.host.lists.jumps.push((*id, *jump));
+                if *jump == crate::mutation::Jump::Read {
+                    self.host.lists.reads.push((*id, *request));
+                } else {
+                    self.host.lists.jumps.push((*id, *jump));
+                }
                 self.force_paint = true;
             }
             Mutation::ScrollAnchor { id, anchor } => {

@@ -227,6 +227,7 @@ export function readFrame(buf: Uint8Array): Frame {
         const kind = u8(); op.f.push(kind)
         if (kind <= 1) op.f.push(u32(), u8())
         else if (kind === 3) { op.f.push(dv.getFloat64(at, true)); at += 8 }
+        else if (kind > 4) throw Error(`list command kind ${kind}`)
         break
       }
       case 0xa0: { // transition: count x (prop, timing)

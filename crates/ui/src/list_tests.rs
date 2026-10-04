@@ -472,6 +472,11 @@ fn seeded_patches_equal_a_clean_rebuild() {
 /// A window-sized scroller (400 x 200) holding a list of `n` items
 /// 40 points tall (identities `1..=n`), under `policy`, laid out.
 fn scrolled(n: u32, policy: crate::mutation::ListPolicy) -> Ui {
+    scrolled_with(&items(1..=n), policy, 0)
+}
+
+/// `scrolled` with these items, and list `listeners`.
+fn scrolled_with(items: &[Item], policy: crate::mutation::ListPolicy, listeners: u32) -> Ui {
     let mut ui = Ui::new(1.0);
     let scroller = taffy::Style {
         size: taffy::Size {
@@ -491,7 +496,8 @@ fn scrolled(n: u32, policy: crate::mutation::ListPolicy) -> Ui {
             .append(NIL, 0);
         t.create(LIST, NodeKind::List)
             .list_config2(LIST, 0.0, -1.0, 3.0, 40.0, 0, &[])
-            .list_patch(LIST, 0, 1, &[ListOp::splice(0, 0, &items(1..=n))])
+            .list_patch(LIST, 0, 1, &[ListOp::splice(0, 0, items)])
+            .interaction(LIST, listeners, false)
             .append(0, LIST);
     })
     .unwrap();
@@ -734,4 +740,187 @@ fn a_scroller_without_a_list_keeps_the_readers_offset() {
     .unwrap();
     ui.render(VIEW);
     assert_eq!(scroll(&ui), 300.0);
+}
+
+/// An item 40 points tall, loaded or a placeholder (`failed` too).
+fn row40(id: u32, loaded: bool, failed: bool) -> Item {
+    let mut d = Item::sized(id, 0, 40.0);
+    if !loaded {
+        d.flags &= !Item::LOADED;
+    }
+    if failed {
+        d.flags |= Item::FAILED;
+    }
+    d
+}
+
+/// The islet request (`ListState::request`): the pending items meeting
+/// the window, extended toward the reader to a screen, then widened
+/// over a run's rest no taller than a screen; failed items never.
+#[test]
+fn islet_requests() {
+    use crate::list::ListState;
+    let list = |loaded: &dyn Fn(u32) -> (bool, bool)| {
+        let mut ui = Ui::new(1.0);
+        let all: Vec<Item> = (0..100)
+            .map(|i| {
+                let (l, f) = loaded(i);
+                row40(i + 1, l, f)
+            })
+            .collect();
+        send(&mut ui, |t| {
+            t.create(LIST, NodeKind::List)
+                .list_config2(LIST, 0.0, -1.0, 3.0, 40.0, 0, &[])
+                .list_patch(LIST, 0, 1, &[ListOp::splice(0, 0, &all)])
+                .append(NIL, LIST);
+        })
+        .unwrap();
+        ui.host.lists.estimate(&mut ui.text, LIST, WIDTH);
+        ui
+    };
+    let ask = |ui: &Ui, v0: f32, look: f32, dir: i8| {
+        let l: &ListState = ui.host.lists.get(LIST).unwrap();
+        l.request(v0, v0 + 200.0, look, dir)
+    };
+    // Rows 20-29 pending, viewport 400..600 (rows 10-14), no lookahead:
+    // nothing meets it.
+    let ui = list(&|i| (!(20..30).contains(&i), false));
+    assert_eq!(ask(&ui, 400.0, 0.0, 0), None);
+    // Viewport 720..920 (rows 18-22): base 20-22, down to a screen
+    // (20-24), then the rest (25-29, 200 pt: a screen) joins.
+    assert_eq!(ask(&ui, 720.0, 0.0, 1), Some((20, 29)));
+    // Rows 20-39 pending. A lookahead of one viewport (negative) from
+    // 420: the window 220..820 meets row 20; the request extends down
+    // to a screen (20-24); the rest (600 pt) is over a screen: no more.
+    let ui = list(&|i| (!(20..40).contains(&i), false));
+    assert_eq!(ask(&ui, 420.0, -1.0, 0), Some((20, 24)));
+    // Reading up into the run's end (rows 37-39 in view), the screen
+    // extends up (35-39).
+    assert_eq!(ask(&ui, 1500.0, 0.0, -1), Some((35, 39)));
+    // A failed item ends the run: never asked, nor past it.
+    let ui = list(&|i| (!(20..30).contains(&i), i == 25));
+    assert_eq!(ask(&ui, 720.0, 0.0, 1), Some((20, 24)));
+}
+
+/// `updateItems` goes once per request: an update elsewhere asks
+/// nothing new; a partial answer inside it asks for the rest (L4).
+#[test]
+fn asks_go_once_until_their_rows_change() {
+    use crate::events::{list_slot, mask};
+    use crate::mutation::ListPolicy;
+    let all: Vec<Item> = (0..100).map(|i| row40(i + 1, i >= 20, false)).collect();
+    let mut ui = scrolled_with(&all, ListPolicy::default(), mask::UPDATE_ITEMS);
+    let loads = |ui: &mut Ui| -> Vec<(u32, u32)> {
+        (ui.take_events().into_iter())
+            .filter(|e| e.kind == out_kind::CALL && e.key == list_slot::UPDATE_ITEMS)
+            .map(|e| {
+                assert_eq!(e.payload[0], 1, "a load, no unload");
+                let u = |at: usize| u32::from_le_bytes(e.payload[at..at + 4].try_into().unwrap());
+                (u(1), u(5))
+            })
+            .collect()
+    };
+    // 200 pt viewport, lookahead a viewport: rows 0-9 (the rest, 400
+    // pt, is over a screen).
+    assert_eq!(loads(&mut ui), [(0, 9)]);
+    ui.render(VIEW);
+    assert_eq!(loads(&mut ui), [], "nothing new");
+    send(&mut ui, |t| {
+        t.list_patch(
+            LIST,
+            1,
+            2,
+            &[ListOp::update(99, &[row40(100, true, false)])],
+        );
+    })
+    .unwrap();
+    ui.render(VIEW);
+    assert_eq!(loads(&mut ui), [], "an update far below");
+    let answer: Vec<Item> = (1..=5).map(|id| row40(id, true, false)).collect();
+    send(&mut ui, |t| {
+        t.list_patch(LIST, 2, 3, &[ListOp::update(0, &answer)]);
+    })
+    .unwrap();
+    ui.render(VIEW);
+    assert_eq!(loads(&mut ui), [(5, 9)], "the rest");
+}
+
+/// Rows that arrive while a placeholder stays in view are held at
+/// their placeholder size and don't measure; once none stays, they
+/// apply. `LIST_VIEWPORT` names them; a `read` answers with the same.
+#[test]
+fn arrivals_hold_until_the_view_is_whole() {
+    use crate::events::mask;
+    use crate::mutation::{Jump, ListPolicy};
+    let all: Vec<Item> = (0..100).map(|i| row40(i + 1, false, false)).collect();
+    let mut ui = scrolled_with(&all, ListPolicy::default(), mask::UPDATE_ITEMS);
+    let tall = |id: u32| {
+        let mut d = Item::sized(id, 1, 80.0);
+        d.flags |= Item::LOADED;
+        d
+    };
+    // Rows 0-2 arrive 80 tall; rows 3-4 still wait in view.
+    send(&mut ui, |t| {
+        t.list_patch(
+            LIST,
+            1,
+            2,
+            &[ListOp::update(0, &[tall(1), tall(2), tall(3)])],
+        );
+    })
+    .unwrap();
+    ui.render(VIEW);
+    let v = ui.list_viewport(crate::host::NodeId(LIST)).unwrap();
+    assert_eq!(v.held, 0..3);
+    assert_eq!(v.visible, 0..5, "placeholder sizes");
+    let reports: Vec<_> = (ui.take_events().into_iter())
+        .filter(|e| e.kind == out_kind::LIST_VIEWPORT)
+        .collect();
+    let last = reports.last().expect("a report");
+    assert_eq!((last.key, &last.payload), (0, &v.bytes()));
+    assert_eq!(
+        u32::from_le_bytes(last.payload[16..20].try_into().unwrap()),
+        0,
+        "held first"
+    );
+    assert_eq!(
+        u32::from_le_bytes(last.payload[20..24].try_into().unwrap()),
+        3,
+        "held end"
+    );
+    // The rest arrives: every held row applies, at its estimate.
+    send(&mut ui, |t| {
+        t.list_patch(
+            LIST,
+            2,
+            3,
+            &[ListOp::update(3, &[tall(4), tall(5), tall(6)])],
+        );
+    })
+    .unwrap();
+    ui.render(VIEW);
+    let v = ui.list_viewport(crate::host::NodeId(LIST)).unwrap();
+    assert_eq!((v.held.clone(), v.visible.clone()), (0..0, 0..3));
+    // A read answers after the next frame, keyed by its request.
+    send(&mut ui, |t| {
+        t.list_command(LIST, 3, 42, Jump::Read);
+    })
+    .unwrap();
+    ui.render(VIEW);
+    let read = (ui.take_events().into_iter())
+        .find(|e| e.kind == out_kind::LIST_VIEWPORT && e.key == 42)
+        .expect("the read's answer");
+    assert_eq!((read.revision, read.payload), (3, v.bytes()));
+}
+
+/// `CALL` and `LIST_VIEWPORT` records carry their bytes in the text's
+/// place on the wire.
+#[test]
+fn call_payloads_go_in_the_text_slot() {
+    let mut e = crate::events::UiEvent::new(out_kind::CALL, LIST);
+    e.key = crate::events::list_slot::UPDATE_ITEMS;
+    e.payload = vec![1, 5, 0, 0, 0, 19, 0, 0, 0];
+    let b = crate::events::encode_events(&[e]);
+    assert_eq!(b[4 + 32..4 + 36], 9u32.to_le_bytes());
+    assert_eq!(b[4 + 36..], [1, 5, 0, 0, 0, 19, 0, 0, 0]);
 }

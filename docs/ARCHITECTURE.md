@@ -748,7 +748,25 @@ container:
     `stick-to-end` list and is a plain jump on others.
   - `Ui::list_viewport` reports what `readViewport` will: the visible
     range, the anchor, the content offset at the viewport top, at end,
-    following, and the focused row.
+    following, the focused row, the held rows and the mounted range. A
+    `LIST_VIEWPORT` event (protocol 22) carries it after a frame that
+    changed it, and answers a `read` command.
+  - Loading (`lists.md`, "Islets" and "Loading without layout shifts").
+    Each frame a list with an `updateItems` listener computes the islet
+    request: the pending items (not loaded, not failed) meeting the
+    viewport plus the lookahead, extended toward the reader to at least a
+    screen (their own scroll direction; after a mount or a jump, the way
+    the run continues), then widened over a run's rest no taller than a
+    screen. It goes as a `CALL` when it isn't inside the last one asked,
+    or a batch since moved rows or changed one inside it. Rows that
+    arrive in the viewport while a pending placeholder stays there are
+    held: they keep their placeholder extents, don't measure, and are
+    reported held; once no placeholder waits in view (or as each leaves
+    the viewport) they take their own estimates and measure, and the
+    releasing batch counts them as changed for its anchor. While a
+    placeholder waits in view, a reader capture anchors on the topmost
+    visible loaded row. `onVisibleChange` is a `CALL` too, when the
+    visible range or the end state changes.
   Positions go through the same transforms as the range; the anchor is
   the visually top item and its visually top edge, so a flipped list
   anchors its far end. Explicit `ScrollTo` commands in the same batch

@@ -15,7 +15,7 @@
 // across transactions.
 
 const MAGIC = 0x3257_5243 // "CRW2" little-endian
-export const VERSION = 21
+export const VERSION = 22
 export const NIL = 0xffff_ffff // no node / append / default style
 
 const enum Op {
@@ -278,9 +278,10 @@ export type ListJump =
   | { kind: "key"; item: number; align?: ListAlign }
   | { kind: "end" }
   | { kind: "offset"; offset: number }
+  | { kind: "read" }
 export type ListAlign = "start" | "center" | "end"
 const LIST_ALIGN = { start: 0, center: 1, end: 2 } as const
-const JUMP_KIND = { index: 0, key: 1, end: 2, offset: 3 } as const
+const JUMP_KIND = { index: 0, key: 1, end: 2, offset: 3, read: 4 } as const
 
 /** A row template for native estimates — mirror mutation.rs
  * `ItemTemplate`: fixed extent, horizontal insets, wrapping font size. */
@@ -521,7 +522,67 @@ export const EVENT_KIND = {
   /** A `listPatch` with a stale base was skipped (always sent):
    * revision = the list's revision, key = the patch's base. */
   listResync: 27,
+  /** A callback slot's call: key = slot | call id << 8, `bytes` = the
+   * arguments as the slot defines them (`LIST_SLOT`). */
+  call: 28,
+  /** A list's viewport (`decodeListViewport`): after a frame that changed
+   * it (key 0), or answering a `read` command (key = its request;
+   * revision NIL when the list is gone). */
+  listViewport: 29,
 } as const
+
+/** A list's callback slots — mirror events.rs `list_slot`: `CALL` key
+ * bits 0-7, and their listener mask bits. */
+export const LIST_SLOT = { updateItems: 12, visibleChange: 13 } as const
+
+/** A list's viewport, decoded from a `listViewport` event's bytes —
+ * mirror list.rs `ListViewport::bytes`. Ranges end exclusive. */
+export interface ListViewportReport {
+  mounted: { first: number; end: number }
+  visible: { first: number; end: number }
+  held: { first: number; end: number }
+  /** The anchor's item id, index and offset; null when none. */
+  anchor: { item: number; index: number; offset: number } | null
+  offset: number
+  atEnd: boolean
+  following: boolean
+  pinned: number[]
+}
+
+export function decodeListViewport(b: Uint8Array): ListViewportReport {
+  const v = new DataView(b.buffer, b.byteOffset, b.byteLength)
+  const u = (at: number) => v.getUint32(at, true)
+  const flags = b[40]!
+  const pinned = Array.from({ length: v.getUint16(41, true) }, (_, k) => u(43 + 4 * k))
+  return {
+    mounted: { first: u(0), end: u(4) },
+    visible: { first: u(8), end: u(12) },
+    held: { first: u(16), end: u(20) },
+    anchor: u(24) === NIL ? null : { item: u(24), index: u(28), offset: v.getFloat32(32, true) },
+    offset: v.getFloat32(36, true),
+    atEnd: (flags & 1) !== 0,
+    following: (flags & 2) !== 0,
+    pinned,
+  }
+}
+
+/** An `updateItems` call's arguments (`ListAsk`), decoded from its bytes. */
+export function decodeListAsk(b: Uint8Array): {
+  load?: { first: number; last: number }
+  unload?: { first: number; last: number }[]
+} {
+  const v = new DataView(b.buffer, b.byteOffset, b.byteLength)
+  let at = 1
+  const range = () => { const r = { first: v.getUint32(at, true), last: v.getUint32(at + 4, true) }; at += 8; return r }
+  const out: ReturnType<typeof decodeListAsk> = {}
+  if (b[0]! & 1) out.load = range()
+  if (b[0]! & 6) {
+    out.unload = []
+    if (b[0]! & 2) out.unload.push(range())
+    if (b[0]! & 4) out.unload.push(range())
+  }
+  return out
+}
 
 /** A press event's phase — mirror events.rs `press_phase`. */
 export const PRESS_PHASE = { in: 0, out: 1, cancel: 2 } as const
@@ -638,6 +699,10 @@ export const EVENT_MASK = {
   press: 1 << 9,
   activate: 1 << 10,
   layout: 1 << 11,
+  /** A list's `updateItems` slot. */
+  updateItems: 1 << 12,
+  /** A list's `onVisibleChange` slot. */
+  visibleChange: 1 << 13,
 } as const
 
 // Style schema — mask bit order must match wire.rs `mod field`.

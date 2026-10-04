@@ -47,7 +47,7 @@ use crate::mutation::{
 pub use crate::mutation::{group_flag, interaction_flag, trap_flag};
 
 pub const MAGIC: u32 = 0x3257_5243; // "CRW2"
-pub const VERSION: u16 = 21;
+pub const VERSION: u16 = 22;
 
 pub mod op {
     // structure
@@ -889,6 +889,7 @@ pub fn encode(txn: &Transaction<'_>) -> Vec<u8> {
                         ops.push(*a as u8);
                     }
                     Jump::End => ops.push(2),
+                    Jump::Read => ops.push(4),
                     Jump::Offset(y) => {
                         ops.push(3);
                         ops.extend_from_slice(&y.to_le_bytes());
@@ -1735,6 +1736,7 @@ pub fn decode(buf: &[u8]) -> Result<Transaction<'_>, WireError> {
                     1 => Jump::Item(r.u32()?, align(&mut r)?),
                     2 => Jump::End,
                     3 => Jump::Offset(f64::from_bits(r.u64()?)),
+                    4 => Jump::Read,
                     _ => return Err(WireError::BadRef("list command")),
                 };
                 Mutation::ListCommand {
