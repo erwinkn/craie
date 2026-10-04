@@ -1,14 +1,14 @@
 {
   "format": "craie-list-trace/1",
-  "id": "I4",
-  "name": "loads pending above the reader: the topmost visible loaded row holds as they land taller",
+  "id": "I3j",
+  "name": "after a jump, a partial answer: the jump holds and the next request is exactly the rest",
   "viewport": {
     "width": 400,
     "height": 600
   },
   "config": {
     "overscan": 600,
-    "lookahead": 600,
+    "lookahead": 0,
     "endThreshold": 80,
     "anchor": "start",
     "anchorPolicy": "reading"
@@ -18,11 +18,18 @@
     {
       "count": 100,
       "key": "m{i}",
+      "loaded": true,
+      "estimate": 40,
+      "height": 40
+    },
+    {
+      "count": 30,
+      "key": "m{i}",
       "loaded": false,
       "estimate": 40
     },
     {
-      "count": 100,
+      "count": 870,
       "key": "m{i}",
       "loaded": true,
       "estimate": 40,
@@ -33,37 +40,26 @@
     {
       "do": "mount",
       "expect": {
-        "loadItems": [
+        "visible": [
           0,
-          29
-        ]
+          14
+        ],
+        "loadItems": null
       }
     },
     {
       "do": "scrollToIndex",
-      "index": 105,
+      "index": 95,
       "align": "start",
       "expect": {
         "visible": [
-          105,
-          119
+          95,
+          109
         ],
         "loadItems": [
-          90,
-          99
+          100,
+          109
         ]
-      }
-    },
-    {
-      "do": "scrollBy",
-      "delta": 20,
-      "expect": {
-        "anchor": {
-          "key": "m105",
-          "offset": -20
-        },
-        "offset": 4220,
-        "loadItems": null
       }
     },
     {
@@ -71,24 +67,51 @@
       "changes": [
         {
           "kind": "update",
-          "at": 90,
+          "at": 100,
           "items": [
             {
-              "count": 10,
+              "count": 7,
               "key": "m{i}",
               "loaded": true,
               "estimate": 40,
-              "height": 80
+              "height": 40
             }
           ]
         }
       ],
       "expect": {
+        "visible": [
+          95,
+          109
+        ],
         "anchor": {
-          "key": "m105",
-          "offset": -20
+          "key": "m95",
+          "offset": 0
         },
-        "offset": 4620,
+        "loadItems": [
+          107,
+          109
+        ]
+      }
+    },
+    {
+      "do": "changes",
+      "changes": [
+        {
+          "kind": "update",
+          "at": 107,
+          "items": [
+            {
+              "count": 3,
+              "key": "m{i}",
+              "loaded": true,
+              "estimate": 40,
+              "height": 40
+            }
+          ]
+        }
+      ],
+      "expect": {
         "loadItems": null
       }
     }

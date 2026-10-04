@@ -1,7 +1,7 @@
 {
   "format": "craie-list-trace/1",
   "id": "I3",
-  "name": "a partial answer leaves a 3-row run on screen; the next request is exactly that run",
+  "name": "a partial answer leaves a short run on screen; the next request is exactly that run, the topmost visible loaded row holding",
   "viewport": {
     "width": 400,
     "height": 600
@@ -63,6 +63,25 @@
       }
     },
     {
+      "do": "scrollBy",
+      "delta": 20,
+      "expect": {
+        "visible": [
+          95,
+          110
+        ],
+        "anchor": {
+          "key": "m95",
+          "offset": -20
+        },
+        "offset": 3820,
+        "loadItems": [
+          100,
+          110
+        ]
+      }
+    },
+    {
       "do": "changes",
       "changes": [
         {
@@ -82,15 +101,16 @@
       "expect": {
         "visible": [
           95,
-          109
+          110
         ],
         "anchor": {
           "key": "m95",
-          "offset": 0
+          "offset": -20
         },
+        "offset": 3820,
         "loadItems": [
           107,
-          109
+          110
         ]
       }
     },
@@ -102,7 +122,7 @@
           "at": 107,
           "items": [
             {
-              "count": 3,
+              "count": 4,
               "key": "m{i}",
               "loaded": true,
               "estimate": 40,

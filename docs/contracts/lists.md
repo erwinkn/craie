@@ -124,9 +124,10 @@ interface ListViewport {
 
 ## Islets: no placeholder gap left on screen
 
-An *islet* is a short run of loaded rows stranded between placeholders, or
-a short placeholder run stranded between loaded rows: a gap the reader
-would see filling in piece by piece. The virtualizer prevents them through
+An *islet* is a short placeholder run left on screen between loaded rows:
+a gap the reader would see filling in piece by piece. A short loaded run
+stranded between placeholders needs no rule of its own: the placeholder
+runs on its two sides are judged separately, as below. The virtualizer prevents them through
 the request it makes. It alone knows extents and the viewport height, so
 it decides on both sides, and the source only answers.
 
@@ -166,6 +167,10 @@ Named traces I1–I4 (`harness/traces/lists/`):
 - **I4.** Loads pending above the reader: the topmost visible loaded row
   holds its place. **I4b:** with none loaded, the topmost visible
   placeholder holds.
+- **I3j, I4j, I4bj.** The same data reached by a jump alone: an explicit
+  jump holds through a partial answer and through loads landing above it.
+  In I3, I4 and I4b, a reader scroll of 20 points after the jump makes the
+  pending-load anchor rule decide.
 
 ## Behavior both sides implement (shared traces)
 

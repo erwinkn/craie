@@ -41,13 +41,24 @@
           105,
           119
         ],
-        "anchor": {
-          "key": "m105",
-          "offset": 0
-        },
         "loadItems": [
           90,
           134
+        ]
+      }
+    },
+    {
+      "do": "scrollBy",
+      "delta": 20,
+      "expect": {
+        "anchor": {
+          "key": "m105",
+          "offset": -20
+        },
+        "offset": 4220,
+        "loadItems": [
+          90,
+          135
         ]
       }
     },
@@ -71,12 +82,12 @@
       "expect": {
         "anchor": {
           "key": "m105",
-          "offset": 0
+          "offset": -20
         },
-        "offset": 4800,
+        "offset": 4820,
         "loadItems": [
           105,
-          134
+          135
         ]
       }
     }

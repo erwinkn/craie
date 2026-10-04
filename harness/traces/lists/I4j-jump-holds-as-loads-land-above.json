@@ -1,7 +1,7 @@
 {
   "format": "craie-list-trace/1",
-  "id": "I4",
-  "name": "loads pending above the reader: the topmost visible loaded row holds as they land taller",
+  "id": "I4j",
+  "name": "after a jump, loads land taller above the reader: the jump target holds",
   "viewport": {
     "width": 400,
     "height": 600
@@ -48,22 +48,14 @@
           105,
           119
         ],
+        "anchor": {
+          "key": "m105",
+          "offset": 0
+        },
         "loadItems": [
           90,
           99
         ]
-      }
-    },
-    {
-      "do": "scrollBy",
-      "delta": 20,
-      "expect": {
-        "anchor": {
-          "key": "m105",
-          "offset": -20
-        },
-        "offset": 4220,
-        "loadItems": null
       }
     },
     {
@@ -86,9 +78,9 @@
       "expect": {
         "anchor": {
           "key": "m105",
-          "offset": -20
+          "offset": 0
         },
-        "offset": 4620,
+        "offset": 4600,
         "loadItems": null
       }
     }

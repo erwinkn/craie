@@ -9,7 +9,7 @@ estimates or overscan heuristics, which may differ between the two.
 Files are named `<id>-<slug>.json`. Craie keeps its copy in
 `harness/traces/lists/` and the kit in its own tree. Each side copies the
 other's files verbatim, and the coordinator checks that both copies match.
-The first five (`I1`–`I4b`) are the islet traces of `lists.md`.
+The first eight (`I1` to `I4bj`) are the islet traces of `lists.md`.
 
 ## A trace
 
