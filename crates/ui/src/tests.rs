@@ -3101,3 +3101,44 @@ fn text_aligns_in_its_box() {
     bad[row + 4 + 4 + 2 + 1] = 1 << 3;
     assert!(wire::decode(&bad).is_err());
 }
+
+/// A line limit lays the paragraph out again with its ellipsis: one
+/// line truncates in the text's box, and lifting the limit restores
+/// every line. Only text nodes take one; it crosses the wire.
+#[test]
+fn a_line_limit_truncates_text() {
+    let mut ui = Ui::new(1.0);
+    ui.text = craie_text::TextEngine::with_source(Box::new(craie_text::fonts::pinned()));
+    let mut style = taffy::Style::default();
+    style.size.width = taffy::Dimension::length(100.0);
+    let text = "The quick brown fox jumps over the lazy dog";
+    let mut t = Transaction::new(1);
+    t.create(1, NodeKind::Text)
+        .layout(1, &style)
+        .text(1, text, 16.0, 0xFFFF_FFFF)
+        .lines(1, 1)
+        .append(u32::MAX, 1)
+        .create(2, NodeKind::View)
+        .append(u32::MAX, 2);
+    let buf = wire::encode(&t);
+    assert_eq!(wire::decode(&buf).unwrap().mutations, t.mutations);
+    ui.apply(&buf).unwrap();
+    ui.render(Size::new(400.0, 300.0));
+    let p = ui.text_layout(NodeId(1)).unwrap();
+    assert_eq!(p.lines.len(), 1);
+    assert_eq!(p.ellipsis.as_ref().unwrap().line, Some(0));
+    let one = ui.layouts.rect(NodeId(1)).size.height;
+    let mut t = Transaction::new(2);
+    t.lines(1, 0);
+    ui.apply_txn(&t).unwrap();
+    ui.render(Size::new(400.0, 300.0));
+    let p = ui.text_layout(NodeId(1)).unwrap();
+    assert!(p.lines.len() > 1 && p.ellipsis.is_none());
+    assert!(
+        ui.layouts.rect(NodeId(1)).size.height > one,
+        "the box grows back"
+    );
+    let mut t = Transaction::new(3);
+    t.lines(2, 1);
+    assert!(ui.apply_txn(&t).is_err());
+}

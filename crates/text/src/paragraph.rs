@@ -64,6 +64,10 @@ pub struct TextStyle {
     pub tabular: bool,
     /// Where lines sit in the line box. Read from span zero only.
     pub align: Align,
+    /// At most this many lines, the last ending in an ellipsis when text
+    /// remains; 0: no limit. 1 also means no wrapping (React Native's
+    /// `numberOfLines`; CSS truncate). Read from span zero only.
+    pub max_lines: u16,
 }
 
 /// A paragraph's horizontal alignment. `Start` follows the paragraph's
@@ -89,8 +93,24 @@ impl Default for TextStyle {
             line_height: 0.0,
             tabular: false,
             align: Align::Start,
+            max_lines: 0,
         }
     }
+}
+
+/// The "…" a clamped paragraph ends its last line with, shaped once in
+/// span zero's style; `rewrap` places it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Ellipsis {
+    pub font: FontInstanceId,
+    pub size: f32,
+    /// Glyph ids and advances, left to right.
+    pub glyphs: Vec<(u16, f32)>,
+    pub width: f32,
+    /// The line it ends (None: nothing was cut), its pen x and baseline.
+    pub line: Option<u32>,
+    pub x: f32,
+    pub y: f32,
 }
 
 /// A styled range: from byte `start` to the next span's start. Span zero
@@ -217,6 +237,12 @@ pub struct Paragraph {
     pub base_rtl: bool,
     /// Span zero's alignment.
     pub align: Align,
+    /// Span zero's line limit (0: none) and its ellipsis.
+    pub max_lines: u16,
+    pub ellipsis: Option<Ellipsis>,
+    /// The text the lines show: all of it, or up to the cut before the
+    /// ellipsis. Glyphs past it are not drawn.
+    pub visible_end: u32,
     /// The wrap width the lines were made for (None: unbounded).
     pub max_width: Option<f32>,
     /// One byte of analysis flags per text byte: `BREAK` and `PARA_RTL`
@@ -541,6 +567,14 @@ impl Paragraph {
         let clusters = &mut scratch.clusters[..];
         let limit = max_width.unwrap_or(f32::MAX);
         self.base_rtl = self.analysis.first().is_some_and(|f| f & PARA_RTL != 0);
+        // A line limit: one line also means no wrapping (truncate); the
+        // last line kept ends in the ellipsis when text remains.
+        let clamp = self.max_lines as usize;
+        let wrap = if clamp == 1 { f32::MAX } else { limit };
+        self.visible_end = self.text_len;
+        if let Some(e) = &mut self.ellipsis {
+            e.line = None;
+        }
 
         // Line breaking over clusters (Parley's greedy rules); each line
         // is laid out as soon as its end is known.
@@ -551,10 +585,17 @@ impl Paragraph {
         let mut opportunity: Option<usize> = None;
         let mut i = 0usize;
         let mut lines = 0usize;
+        let mut clamped = false;
         while i < clusters.len() {
             let c = &clusters[i];
             if c.boundary && x != 0.0 {
                 opportunity = Some(i);
+            }
+            let last = clamp > 0 && lines + 1 == clamp;
+            if c.newline && last && i + 1 < clusters.len() {
+                self.cut_line(clusters, start..i, limit, &mut y, &mut width);
+                clamped = true;
+                break;
             }
             if c.newline {
                 self.push_line(clusters, start..i + 1, &mut y, &mut width);
@@ -566,7 +607,7 @@ impl Paragraph {
                 continue;
             }
             let next = x + c.advance;
-            if next <= limit {
+            if next <= wrap {
                 x = next;
             } else if c.space {
                 // Overflowing whitespace hangs and never breaks by itself:
@@ -575,6 +616,11 @@ impl Paragraph {
                 // after it closes the same line (UAX #14 LB6, LB7).
                 x = next;
             } else if let Some(o) = opportunity.take() {
+                if last {
+                    self.cut_line(clusters, start..o, limit, &mut y, &mut width);
+                    clamped = true;
+                    break;
+                }
                 self.push_line(clusters, start..o, &mut y, &mut width);
                 lines += 1;
                 start = o;
@@ -587,9 +633,20 @@ impl Paragraph {
             i += 1;
         }
         // The last line; a trailing newline leaves an empty last line.
+        // Under a limit, one that overflows (unwrapped, or unbreakable)
+        // is cut too.
         let ends_in_newline = clusters.last().is_some_and(|c| c.newline);
-        if start < clusters.len() || lines == 0 || ends_in_newline {
-            let n = clusters.len();
+        let n = clusters.len();
+        let full = clamp > 0 && lines >= clamp;
+        if clamped || full {
+            // Every line is laid out (a final newline's empty line is past
+            // the limit).
+        } else if clamp > 0
+            && start < n
+            && clusters[start..n].iter().map(|c| c.advance).sum::<f32>() > limit
+        {
+            self.cut_line(clusters, start..n, limit, &mut y, &mut width);
+        } else if start < n || lines == 0 || ends_in_newline {
             self.push_line(clusters, start..n, &mut y, &mut width);
         }
         // An empty last line adds no height.
@@ -613,6 +670,14 @@ impl Paragraph {
         // right-to-left one. `Start` is right in a right-to-left
         // paragraph.
         let boxw = max_width.unwrap_or(width);
+        let (cut, extra) = match &self.ellipsis {
+            Some(Ellipsis {
+                line: Some(l),
+                width,
+                ..
+            }) => (*l as usize, *width),
+            _ => (usize::MAX, 0.0),
+        };
         let align = match (self.align, self.base_rtl) {
             (Align::Start, false) => Align::Left,
             (Align::Start, true) => Align::Right,
@@ -620,17 +685,28 @@ impl Paragraph {
         };
         for li in 0..self.lines.len() {
             let line = &self.lines[li];
-            let free = boxw - (line.advance - line.trailing);
+            // The cut line's ellipsis takes its place after the content:
+            // right of it in a left-to-right paragraph, left of it in a
+            // right-to-left one.
+            let extra = if li == cut { extra } else { 0.0 };
+            let content = line.advance - line.trailing;
+            let free = boxw - (content + extra);
             let left = match align {
                 Align::Center => free / 2.0,
                 Align::Right => free,
                 _ => 0.0,
             };
             let x = if self.base_rtl {
-                left - line.trailing
+                left + extra - line.trailing
             } else {
                 left
             };
+            if li == cut
+                && let Some(e) = &mut self.ellipsis
+            {
+                e.x = if self.base_rtl { left } else { left + content };
+                e.y = line.baseline;
+            }
             let (baseline, segs) = (line.baseline, line.segs.clone());
             self.lines[li].x = x;
             let mut pen = x;
@@ -647,6 +723,50 @@ impl Paragraph {
                     }
                 }
             }
+        }
+    }
+
+    /// Lays out the last line a limit keeps, cut so that its content and
+    /// the ellipsis fit `limit`: clusters in logical order while they fit,
+    /// less trailing whitespace. Nothing past the cut draws.
+    fn cut_line(
+        &mut self,
+        clusters: &mut [Cluster],
+        range: Range<usize>,
+        limit: f32,
+        y: &mut f32,
+        width: &mut f32,
+    ) {
+        let ellipsis = self.ellipsis.as_ref().map_or(0.0, |e| e.width);
+        let budget = limit - ellipsis;
+        let mut cut = range.start;
+        let mut x = 0.0f32;
+        while cut < range.end && x + clusters[cut].advance <= budget {
+            x += clusters[cut].advance;
+            cut += 1;
+        }
+        while cut > range.start && (clusters[cut - 1].space || clusters[cut - 1].newline) {
+            cut -= 1;
+        }
+        let at = if cut > range.start {
+            clusters[cut - 1].text.end
+        } else {
+            clusters
+                .get(range.start)
+                .map_or(self.text_len, |c| c.text.start)
+        };
+        self.push_line(clusters, range.start..cut, y, width);
+        let line = self.lines.len() - 1;
+        if cut == range.start {
+            // Nothing fits but the ellipsis: an empty line at the cut.
+            self.lines[line].text = at..at;
+            self.lines[line].caret_end = at;
+        }
+        self.visible_end = at;
+        let content = self.lines[line].advance - self.lines[line].trailing;
+        *width = width.max(content + ellipsis);
+        if let Some(e) = &mut self.ellipsis {
+            e.line = Some(line as u32);
         }
     }
 
@@ -1143,6 +1263,8 @@ impl Shaper {
         let mut p = Paragraph {
             text_len: text.len() as u32,
             align: spans[0].style.align,
+            max_lines: spans[0].style.max_lines,
+            visible_end: text.len() as u32,
             ..Paragraph::default()
         };
         let attrs = |s: &TextStyle| FontAttrs {
@@ -1408,7 +1530,42 @@ impl Shaper {
         self.items = items;
         self.buffer = Some(buffer);
         p.mark_clusters(text, &mut self.clusters);
+        if p.max_lines > 0 {
+            p.ellipsis = self.ellipsis(&spans[0].style, fonts);
+        }
         p
+    }
+
+    /// "…" in `style` (its first run: the face that covers it).
+    fn ellipsis(&mut self, style: &TextStyle, fonts: &mut dyn Resolve) -> Option<Ellipsis> {
+        let spans = [SpanStyle {
+            start: 0,
+            style: TextStyle {
+                max_lines: 0,
+                ..*style
+            },
+        }];
+        let q = self.shape(
+            &TextSpec {
+                text: "\u{2026}",
+                spans: &spans,
+            },
+            fonts,
+        );
+        let run = q.runs.first()?;
+        let glyphs: Vec<(u16, f32)> = q.glyphs[run.glyphs.start as usize..run.glyphs.end as usize]
+            .iter()
+            .map(|g| (g.id, g.advance))
+            .collect();
+        Some(Ellipsis {
+            font: run.font,
+            size: run.size,
+            width: glyphs.iter().map(|g| g.1).sum(),
+            glyphs,
+            line: None,
+            x: 0.0,
+            y: 0.0,
+        })
     }
 
     /// `run_metrics`, cached per (instance, size, line height).

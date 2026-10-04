@@ -21,6 +21,7 @@ enc.create(1, 1)                                    // text
 const text = "héllo — مرحبا 日本語"
 const bold = new TextEncoder().encode("héllo ").length // byte offset of span 1
 const joined = new TextEncoder().encode("héllo — مرحبا ").length // span 2
+enc.lines(1, 2)                                     // at most two lines, then "…"
 enc.paragraph(1, text, [
   { start: 0, fontSize: 18.5, color: 0x6dc7_ff80, lineHeight: 24, inheritColor: true, align: "center" },
   {

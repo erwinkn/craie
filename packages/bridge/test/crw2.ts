@@ -136,6 +136,7 @@ export function readFrame(buf: Uint8Array): Frame {
       }
       case 0x40: op.s = strings[u32()]; op.f.push(u32(), u32()); break // paragraph
       case 0x41: op.f.push(f32()); op.s = strings[u32()]; op.f.push(u8()); break
+      case 0x42: op.f.push(u16()); break // lines
       case 0x50: op.f.push(u8(), u8()); break // role, reported
       case 0x51: op.s = strings[u32()]; break // label
       case 0x60: op.f.push(u32(), u8()); break // interaction

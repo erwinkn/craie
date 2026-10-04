@@ -60,6 +60,7 @@ fn js_fixture_decodes_and_executes() {
     // view + input + surface + list + row + two vectors + an image +
     // layer remain.
     assert_eq!(host.len(), 9);
+    assert_eq!(host.paragraphs[1].max_lines, 2, "the line limit");
     assert_eq!(host.kind(NodeId(0)), Some(NodeKind::View));
     let paint = host.paint[0];
     assert_eq!(paint.fill, 0x1122_33ff);

@@ -926,6 +926,18 @@ Reviewer minors and nitpicks not fixed yet.
   (`textAlign`, 6 uses); justification needs space distribution in the
   line placement and carets that follow it.
 
+### DF-67: the ellipsis cuts in logical order, past the cut nothing selects
+
+- Source: milestone 3 (line clamp, protocol 16).
+- Where: crates/text/src/paragraph.rs (`cut_line`).
+- Claim: a clamped line is cut in logical order, so in a line mixing
+  directions the kept part may not be the visually leading one, and the
+  ellipsis goes at the paragraph's end side. Text past the cut keeps its
+  glyphs but is on no line: a selection or caret there falls back to the
+  cut. Only a tail ellipsis exists (no head or middle).
+- Why deferred: the kit truncates labels, titles and paths in one
+  direction; CSS's own bidi truncation is loosely specified.
+
 ## Closed
 
 - DF-57 (work item 6, review #21 M1): end indices were wire indices

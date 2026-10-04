@@ -201,7 +201,8 @@ blur, spread (f32), a color u32 and flags (bit 0 inset); variant values
 carry the same list under bit 15. A span row's former reserved byte is
 its feature byte (protocol 15): tabular digits (bit 0) and, read from
 span zero, the paragraph's alignment (bits 1 and 2: start, left,
-center, right); unknown bits fail decoding. The spatial op's mask carries z (bit 2, an
+center, right); unknown bits fail decoding. `LINES` (0x42, protocol 16:
+id, then a u16 count, 0 for none) sets a text node's line limit. The spatial op's mask carries z (bit 2, an
 i32; work item 4), and the layer op (0x22: id, then the owner or NIL)
 makes a node a layer container. The state family (0xB0, protocol 4, work
 item 5): `STATES` sets a scope's app bits (u64; the input bits are
@@ -451,7 +452,17 @@ then UAX #9 L1 and L2 per line, in place, then aligns each line in the
 line box (the wrap width, else the widest line; protocol 15): span
 zero's alignment puts the line's visible content (its advance less
 trailing whitespace) at the left, center or right, the trailing space
-hanging past it, and `Start` follows the paragraph's direction. A span
+hanging past it, and `Start` follows the paragraph's direction. A line
+limit (protocol 16, span zero's `max_lines`, from the `LINES` op) keeps
+that many lines; 1 also turns wrapping off. The last line kept, when
+text remains (a soft or hard break past it, or an overflowing last
+line), is cut at a cluster, in logical order, so that its content and
+an ellipsis fit the width, trailing whitespace dropped. The ellipsis is
+"…" shaped once in span zero's style when the paragraph is shaped, and
+placed after the content (before it, in a right-to-left paragraph),
+alignment counting it. `visible_end` marks the cut: emission skips
+glyphs past it, and the unbounded measure (intrinsic width) cuts
+nothing. A span
 with tabular digits shapes with OpenType `tnum` (items split on it, and
 it joins the shape plan's key). A segment whose L1 level has
 another direction than its run places its clusters in reverse, and the
@@ -1312,7 +1323,7 @@ ROLE op's reported states since 6; press flags, pressable spans, and
 focus groups and the `tab` and `tablist` roles since 10; keyframe
 animations and the `ENVIRONMENT` event since 11; exits since 12;
 observations since 13; box shadows since 14; text alignment and
-tabular digits since 15). The session hands
+tabular digits since 15; line limits since 16). The session hands
 JS its output in native order: acks sit between event frames where they happened, so the ack
 of a transaction never overtakes an event raised before it applied,
 and the facade retires a claim set's old handlers on that ack.

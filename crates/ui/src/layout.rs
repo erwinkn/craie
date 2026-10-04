@@ -825,6 +825,7 @@ pub fn shape_paragraph(text: &mut TextEngine, p: &Paragraph, wrap: Option<f32>) 
                 line_height: s.line_height,
                 tabular: s.tabular,
                 align: s.align,
+                max_lines: if i == 0 { p.max_lines } else { 0 },
             },
         })
         .collect();
