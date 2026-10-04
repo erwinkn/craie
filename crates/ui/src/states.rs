@@ -79,8 +79,10 @@ pub mod value_field {
     pub const ROTATE: u16 = 1 << 10;
     pub const SCALE_X: u16 = 1 << 11;
     pub const SCALE_Y: u16 = 1 << 12;
+    /// The box shadows (`shadow.rs`), the list as a whole.
+    pub const SHADOWS: u16 = 1 << 15;
     /// Values only nodes with a box hold.
-    pub const BOX: u16 = FILL | BORDER_COLOR | RADIUS | BORDER_WIDTH;
+    pub const BOX: u16 = FILL | BORDER_COLOR | RADIUS | BORDER_WIDTH | SHADOWS;
     /// Every transform part.
     pub const PARTS: u16 = TRANSFORM | TRANSLATE_X | TRANSLATE_Y | ROTATE | SCALE_X | SCALE_Y;
     pub const ALL: u16 = BOX | COLOR | OPACITY | LAYOUT | PARTS;
@@ -177,6 +179,7 @@ pub struct Values {
     /// The keys of `layout` that apply (`layout_key`).
     pub layout_keys: u64,
     pub layout: LayoutRow,
+    pub shadows: crate::shadow::Shadows,
 }
 
 impl Default for Values {
@@ -191,6 +194,7 @@ impl Default for Values {
             parts: Parts::IDENTITY,
             layout_keys: 0,
             layout: crate::host::default_style(),
+            shadows: Default::default(),
         }
     }
 }
@@ -204,6 +208,7 @@ impl Values {
             && self.radius.is_finite()
             && (0.0..=1.0).contains(&self.opacity)
             && self.parts.is_finite()
+            && self.shadows.valid()
     }
 
     /// Overlays `v`'s present values, property by property. Layout goes
@@ -222,6 +227,9 @@ impl Values {
         }
         if m & RADIUS != 0 {
             self.radius = x.radius;
+        }
+        if m & SHADOWS != 0 {
+            self.shadows = x.shadows;
         }
         if m & COLOR != 0 {
             self.color = x.color;
@@ -662,6 +670,9 @@ impl Ui {
         if changed(COLOR, prev.color == next.color) {
             self.declare_color(node, next.color);
         }
+        if changed(SHADOWS, prev.shadows == next.shadows) {
+            self.set_shadows(node, next.shadows);
+        }
     }
 
     /// Recomputes the input bits from hover, the primary press, and
@@ -863,6 +874,7 @@ impl Ui {
             v.fill = p.fill;
             v.border = (p.border_color, p.border_width);
             v.radius = p.radius;
+            v.shadows = self.host.shadows.get(&node.0).copied().unwrap_or_default();
         }
         for prop in Prop::ALL {
             if self.motion.under(node, prop).is_some() {

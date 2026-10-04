@@ -1527,7 +1527,11 @@ contract).
   dashed), a radius for each corner, and a fill from a paint source. A
   shadow layer has x, y, blur, spread, color and inset, and layers draw in
   order; the kit already sends them structured (`elevation.card` is a ring
-  layer plus a shadow stack).
+  layer plus a shadow stack). Built (protocol 14, `shadow.rs`): the
+  shadow list, up to 8 layers, as React Native's structured `boxShadow`
+  on every box and in variants; analytic (P1's first option), checked
+  against the Gaussian on the GPU. Shadows snap under a transition for
+  now.
 - **Rings** are outlines: the kit's `ring` and `ringOffset` draw a 2 point
   stroke around the border box at an offset, a rounded rectangle that
   follows the corner radii. Elevation rings stay shadow layers.

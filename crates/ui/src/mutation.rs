@@ -441,6 +441,8 @@ pub enum Mutation<'a> {
         fill: Option<u32>,
         radius: Option<f32>,
         border: Option<(u32, f32)>,
+        /// Replaces the box shadows (`shadow.rs`); empty: none.
+        shadows: Option<crate::shadow::Shadows>,
     },
     // text
     /// `spans` indexes the transaction's span table.
@@ -803,11 +805,25 @@ impl<'a> Transaction<'a> {
             fill,
             radius,
             border,
+            shadows: None,
         })
     }
 
     pub fn fill(&mut self, id: u32, color: u32) -> &mut Self {
         self.paint(id, Some(color), None, None)
+    }
+
+    /// Replaces the node's box shadows, first on top. Panics past
+    /// `shadow::MAX_SHADOWS`.
+    pub fn shadows(&mut self, id: u32, list: &[crate::shadow::Shadow]) -> &mut Self {
+        let shadows = crate::shadow::Shadows::new(list).expect("too many shadows");
+        self.push(Mutation::Paint {
+            id,
+            fill: None,
+            radius: None,
+            border: None,
+            shadows: Some(shadows),
+        })
     }
 
     /// Declares the node's transitions (replacing any).

@@ -52,7 +52,10 @@ enc.spatial(0, {                                    // every field
   transform: transformMatrix([{ translateX: 3 }, { scale: 2 }]), opacity: 0.75, z: -2,
   translate: [4, -1, 0.5, 0], rotate: Math.PI / 2, scale: [1.5, 0.5],
 })
-enc.paint(0, 0x1122_33ff, 6.5, { color: 0xff00_00ff, width: 2 })
+enc.paint(0, 0x1122_33ff, 6.5, { color: 0xff00_00ff, width: 2 }, [  // a ring, then an inset drop
+  { x: 0, y: 0, blur: 0, spread: 1, color: 0x3030_30ff, inset: false },
+  { x: 0.5, y: 1, blur: 2, spread: -1, color: 0x0000_001f, inset: true },
+])
 enc.create(2, 2)                                    // input
 enc.inputConfig(2, 15, "type here", true, SUBMIT_KEY["mod+enter"])
 enc.interaction(2, 0xfff, INTERACTION.focusable | INTERACTION.autoFocus) // all listeners
@@ -117,6 +120,7 @@ enc.variants(5, [                                  // on the row, scoped by the 
       borderColor: 0x0000_00ff, borderWidth: 1, radius: 3, color: null, opacity: 0.5,
       transform: [1, 0, 0, 1, 0, 2], layout: { width: "50%", height: 44 },
       translateX: [2, -0.5], rotate: 0.25, scaleY: 0.5,     // parts, one axis each
+      shadows: [{ x: 0, y: 12, blur: 24, spread: 0, color: 0x0000_0014, inset: false }],
     },
   },
 ])

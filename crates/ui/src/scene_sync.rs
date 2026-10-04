@@ -621,11 +621,17 @@ impl Ui {
     fn near(&self, id: NodeId, region: &Rect) -> bool {
         let p = self.scene.placement(id.0);
         let d = self.layouts.data(id);
+        // Its outer shadows draw past it: admit it when they may show.
+        let m = self
+            .host
+            .shadows
+            .get(&id.0)
+            .map_or(0.0, crate::shadow::reach);
         let local = Rect::new(
-            p.offset[0],
-            p.offset[1],
-            d.rect.size.width,
-            d.rect.size.height,
+            p.offset[0] - m,
+            p.offset[1] - m,
+            d.rect.size.width + 2.0 * m,
+            d.rect.size.height + 2.0 * m,
         );
         let b = self.scene.transforms.world(p.transform).map_rect(&local);
         // Overflowing content (text wider than its box) stays in range
@@ -708,12 +714,24 @@ impl Ui {
         }
         let mut w = std::mem::take(&mut self.sync.writer);
         w.clear();
+        let shadows = self.host.shadows.get(&id.0).copied().unwrap_or_default();
+        // Shadow rects reserved in paint order: outer ones under the
+        // fill (the last listed lowest), inset ones over it.
+        let mut placed = [None; crate::shadow::MAX_SHADOWS];
+        let reserve = |w: &mut ChunkWriter, inset: bool, placed: &mut [Option<usize>]| {
+            for (i, s) in shadows.as_slice().iter().enumerate().rev() {
+                if s.inset == inset && s.color & 0xFF != 0 {
+                    placed[i] = Some(w.reserve_rect());
+                }
+            }
+        };
         if kind.has_box() {
             let p = self.host.paint[id.index()];
             // Slots 0 and 1 are always the fill and border: color patches
             // address them directly.
             let fill = w.paint(p.fill);
             let border = w.paint(p.border_color);
+            reserve(&mut w, false, &mut placed);
             let has_border = p.border_width > 0.0 && p.border_color & 0xFF != 0;
             if p.fill & 0xFF != 0 || has_border {
                 w.rect_bordered(
@@ -724,6 +742,7 @@ impl Ui {
                     p.border_width,
                 );
             }
+            reserve(&mut w, true, &mut placed);
         }
         match kind {
             NodeKind::Text => self.build_text(id, &data, &mut w),
@@ -732,6 +751,29 @@ impl Ui {
             NodeKind::Vector => self.build_vector(id, &data, &mut w),
             NodeKind::Image => self.build_image(id, &data, &mut w),
             NodeKind::View | NodeKind::List => {}
+        }
+        // The shadows' paint records go after the kind's own slots (an
+        // input numbers its own from 2).
+        if !shadows.is_empty() {
+            let p = self.host.paint[id.index()];
+            let border = (
+                Rect::new(0.0, 0.0, data.rect.size.width, data.rect.size.height),
+                p.radius,
+            );
+            // An inset shadow is cut inside the painted border, which the
+            // fill rect draws (`border_width`), not the layout's.
+            let border_width = if p.border_color & 0xFF != 0 {
+                p.border_width
+            } else {
+                0.0
+            };
+            for (i, s) in shadows.as_slice().iter().enumerate() {
+                if let Some(at) = placed[i]
+                    && let Some(b) = crate::shadow::box_shadow(s, border, border_width)
+                {
+                    w.set_shadow(at, &b);
+                }
+            }
         }
         self.scene.commit_chunk(id.0, &mut w);
         self.sync.writer = w;
