@@ -1,0 +1,83 @@
+{
+  "format": "craie-list-trace/1",
+  "id": "I2",
+  "name": "a jump into unloaded rows 10 short of a loaded region joins it; far from one it does not widen",
+  "viewport": {
+    "width": 400,
+    "height": 600
+  },
+  "config": {
+    "overscan": 600,
+    "lookahead": 0,
+    "endThreshold": 80,
+    "anchor": "start",
+    "anchorPolicy": "reading"
+  },
+  "templates": [],
+  "items": [
+    {
+      "count": 30000,
+      "key": "m{i}",
+      "loaded": false,
+      "estimate": 40
+    },
+    {
+      "count": 1000,
+      "key": "m{i}",
+      "loaded": true,
+      "estimate": 40,
+      "height": 40
+    },
+    {
+      "count": 19000,
+      "key": "m{i}",
+      "loaded": false,
+      "estimate": 40
+    }
+  ],
+  "steps": [
+    {
+      "do": "mount",
+      "expect": {
+        "visible": [
+          0,
+          14
+        ],
+        "load": [
+          0,
+          14
+        ]
+      }
+    },
+    {
+      "do": "scrollToIndex",
+      "index": 29975,
+      "align": "start",
+      "expect": {
+        "visible": [
+          29975,
+          29989
+        ],
+        "load": [
+          29975,
+          29999
+        ]
+      }
+    },
+    {
+      "do": "scrollToIndex",
+      "index": 10000,
+      "align": "start",
+      "expect": {
+        "visible": [
+          10000,
+          10014
+        ],
+        "load": [
+          10000,
+          10014
+        ]
+      }
+    }
+  ]
+}

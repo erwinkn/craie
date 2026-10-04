@@ -1555,7 +1555,9 @@ contract).
 - **Text**: a line clamp with an ellipsis, text alignment, OpenType
   features per span (tabular digits first, then the theme's `font.features`),
   no-wrap, decoration color, and text transform (uppercase, capitalize).
-  Balanced and pretty wrapping come later.
+  Balanced and pretty wrapping come later. Built (protocol 15): text
+  alignment (`textAlign`: auto, left, center, right; justify draws as
+  auto) and tabular digits (React Native's `fontVariant`).
 
 **Decisions.**
 

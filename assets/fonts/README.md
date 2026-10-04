@@ -50,3 +50,14 @@ The variable test face (1.9 KB):
 pyftsubset "NotoEmoji[wght].ttf" --text="🙂" --layout-features='*' \
   --output-file=NotoEmoji-Var-Test.ttf
 ```
+
+`Inter-Subset-Regular.ttf` is Inter 4.001 (rsms, SIL OFL 1.1,
+`Inter-OFL.txt`), the face Marbre ships, subset to printable ASCII with
+every layout feature kept (75 KB): its figures are proportional by
+default, so the tabular-digits test can see `tnum`. It is not a pinned
+face; that test loads it alone.
+
+```
+pyftsubset Inter-Regular.ttf --unicodes="U+0020-007E" \
+  --layout-features='*' --output-file=Inter-Subset-Regular.ttf
+```

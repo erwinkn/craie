@@ -39,6 +39,10 @@ fn js_fixture_decodes_and_executes() {
     assert_eq!(txn.families[s1.family as usize], "monospace");
     assert_eq!((s1.decoration, s1.letter_spacing), (3, 0.5));
     assert_eq!((s1.weight, s1.italic), (700, true));
+    // Span zero's alignment, span one's tabular digits.
+    use craie_text::paragraph::Align;
+    assert_eq!((s0.align, s0.tabular), (Align::Center, false));
+    assert_eq!((s1.align, s1.tabular), (Align::Start, true));
 
     let mut ui = Ui::new(1.0);
     assert_eq!(ui.apply(&buf).unwrap(), 99);

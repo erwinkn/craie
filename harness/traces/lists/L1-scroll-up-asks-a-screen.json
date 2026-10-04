@@ -1,0 +1,111 @@
+{
+  "format": "craie-list-trace/1",
+  "id": "L1",
+  "name": "a half-screen scroll up into placeholders asks for a whole screen above; the answer lands taller in one frame, the topmost visible loaded row holding",
+  "viewport": {
+    "width": 400,
+    "height": 600
+  },
+  "config": {
+    "overscan": 600,
+    "lookahead": 0,
+    "endThreshold": 80,
+    "anchor": "start",
+    "anchorPolicy": "reading"
+  },
+  "templates": [],
+  "items": [
+    {
+      "count": 200,
+      "key": "m{i}",
+      "loaded": false,
+      "estimate": 40
+    },
+    {
+      "count": 800,
+      "key": "m{i}",
+      "loaded": true,
+      "estimate": 40,
+      "height": 40
+    }
+  ],
+  "steps": [
+    {
+      "do": "mount",
+      "expect": {
+        "visible": [
+          0,
+          14
+        ],
+        "load": [
+          0,
+          14
+        ]
+      }
+    },
+    {
+      "do": "scrollToIndex",
+      "index": 205,
+      "align": "start",
+      "expect": {
+        "visible": [
+          205,
+          219
+        ],
+        "load": null
+      }
+    },
+    {
+      "do": "scrollBy",
+      "delta": -300,
+      "expect": {
+        "visible": [
+          197,
+          212
+        ],
+        "anchor": {
+          "key": "m200",
+          "offset": 100
+        },
+        "offset": 7900,
+        "held": null,
+        "load": [
+          185,
+          199
+        ]
+      }
+    },
+    {
+      "do": "changes",
+      "changes": [
+        {
+          "kind": "update",
+          "at": 185,
+          "items": [
+            {
+              "count": 15,
+              "key": "m{i}",
+              "loaded": true,
+              "estimate": 40,
+              "height": 60,
+              "version": 1
+            }
+          ]
+        }
+      ],
+      "expect": {
+        "visible": [
+          198,
+          212
+        ],
+        "anchor": {
+          "key": "m200",
+          "offset": 100
+        },
+        "offset": 8200,
+        "held": null,
+        "load": null
+      }
+    }
+  ]
+}

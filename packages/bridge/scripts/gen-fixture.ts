@@ -22,10 +22,10 @@ const text = "héllo — مرحبا 日本語"
 const bold = new TextEncoder().encode("héllo ").length // byte offset of span 1
 const joined = new TextEncoder().encode("héllo — مرحبا ").length // span 2
 enc.paragraph(1, text, [
-  { start: 0, fontSize: 18.5, color: 0x6dc7_ff80, lineHeight: 24, inheritColor: true },
+  { start: 0, fontSize: 18.5, color: 0x6dc7_ff80, lineHeight: 24, inheritColor: true, align: "center" },
   {
     start: bold, fontSize: 18.5, color: 0xffff_ffff, weight: 700, italic: true,
-    fontFamily: "monospace", decoration: 3, letterSpacing: 0.5, pressable: true,
+    fontFamily: "monospace", decoration: 3, letterSpacing: 0.5, pressable: true, tabular: true,
   },
   // The same link, on: a press on span 1 released here activates.
   { start: joined, fontSize: 18.5, color: 0xffff_ffff, pressable: true, pressJoins: true },

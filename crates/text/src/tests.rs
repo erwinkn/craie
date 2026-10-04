@@ -892,3 +892,213 @@ fn letter_spacing_and_line_height() {
         assert_eq!(l.baseline, l.top + l.ascent + leading * 0.5);
     }
 }
+
+fn styled(e: &mut TextEngine, text: &str, width: Option<f32>, style: TextStyle) -> Paragraph {
+    let spans = [SpanStyle {
+        start: 0,
+        style: TextStyle {
+            size: 16.0,
+            ..style
+        },
+    }];
+    e.layout_text(
+        &TextSpec {
+            text,
+            spans: &spans,
+        },
+        width,
+    )
+}
+
+/// Each line's visible content (its advance less trailing whitespace)
+/// sits at the left, center or right of the line box; the trailing
+/// space of a wrapped line hangs past it. `Start` follows the direction.
+#[test]
+fn lines_align_left_center_and_right() {
+    use crate::paragraph::Align;
+    let mut e = engine();
+    let text = "Wrapped words fill lines";
+    let content = |p: &Paragraph, i: usize| {
+        let l = &p.lines[i];
+        (l.x, l.x + l.advance - l.trailing)
+    };
+    for (align, want) in [
+        (Align::Start, 0.0f32),
+        (Align::Left, 0.0),
+        (Align::Center, 0.5),
+        (Align::Right, 1.0),
+    ] {
+        let p = styled(
+            &mut e,
+            text,
+            Some(120.0),
+            TextStyle {
+                align,
+                ..TextStyle::default()
+            },
+        );
+        assert!(p.lines.len() > 1, "wraps");
+        assert!(p.lines[0].trailing > 0.0, "a wrapped line ends in a space");
+        for i in 0..p.lines.len() {
+            let (l, r) = content(&p, i);
+            let free = 120.0 - (r - l);
+            assert!(
+                (l - free * want).abs() < 1e-3,
+                "{align:?} line {i}: {l} of {free}"
+            );
+        }
+    }
+    // Right to left: `Start` is right, `Left` puts the content at 0 with
+    // the trailing whitespace hanging left of it.
+    let rtl = "שלום עולם שלום עולם";
+    let p = styled(
+        &mut e,
+        rtl,
+        Some(80.0),
+        TextStyle {
+            align: Align::Left,
+            ..TextStyle::default()
+        },
+    );
+    assert!(p.base_rtl && p.lines.len() > 1);
+    for l in &p.lines {
+        assert!(
+            (l.x + l.trailing).abs() < 1e-3,
+            "content at 0: {} + {}",
+            l.x,
+            l.trailing
+        );
+    }
+    let p = styled(&mut e, rtl, Some(80.0), TextStyle::default());
+    for l in &p.lines {
+        assert!(
+            (l.x + l.advance - 80.0).abs() < 1e-3,
+            "start is right: {}",
+            l.x + l.advance
+        );
+    }
+}
+
+/// Tabular digits share one advance (OpenType `tnum`), on Inter (the
+/// kit's face), whose figures are proportional by default: "1111" is
+/// narrower than "8888" until tabular.
+#[test]
+fn tabular_digits_share_one_advance() {
+    let mut fonts = crate::fonts::RawFonts::new();
+    fonts.add_static(include_bytes!(
+        "../../../assets/fonts/Inter-Subset-Regular.ttf"
+    ));
+    let mut e = TextEngine::with_source(Box::new(fonts));
+    let width = |e: &mut TextEngine, text: &str, tabular: bool| {
+        styled(
+            e,
+            text,
+            None,
+            TextStyle {
+                tabular,
+                ..TextStyle::default()
+            },
+        )
+        .width
+    };
+    let (ones, eights) = (width(&mut e, "1111", false), width(&mut e, "8888", false));
+    let (t_ones, t_eights) = (width(&mut e, "1111", true), width(&mut e, "8888", true));
+    assert!(
+        ones < eights - 4.0,
+        "proportional by default: {ones} against {eights}"
+    );
+    assert!(
+        (t_ones - t_eights).abs() < 1e-3,
+        "tabular: {t_ones} against {t_eights}"
+    );
+    // Tabular in the middle of a span list splits the run: the letters
+    // around it shape as they do alone.
+    let spans = [
+        SpanStyle {
+            start: 0,
+            style: TextStyle {
+                size: 16.0,
+                ..TextStyle::default()
+            },
+        },
+        SpanStyle {
+            start: 2,
+            style: TextStyle {
+                size: 16.0,
+                tabular: true,
+                ..TextStyle::default()
+            },
+        },
+    ];
+    let p = e.layout_text(
+        &TextSpec {
+            text: "ab1111",
+            spans: &spans,
+        },
+        None,
+    );
+    let alone = width(&mut e, "ab", false) + t_ones;
+    assert!(
+        (p.width - alone).abs() < 1e-3,
+        "{} against {alone}",
+        p.width
+    );
+}
+
+/// After a newline the text may run the other way: its trailing space
+/// hangs on its own paragraph's side, so left, center and right place
+/// the visible content (#27 review). `Start` follows the first
+/// paragraph, for every line, as Parley does.
+#[test]
+fn lines_align_by_their_own_direction() {
+    use crate::paragraph::Align;
+    let mut e = engine();
+    for (text, align) in [
+        ("abc\nשלום ", Align::Left),
+        ("abc\nשלום ", Align::Center),
+        ("שלום\nabc ", Align::Right),
+        ("שלום\nabc ", Align::Start),
+        ("abc\nשלום ", Align::Start),
+    ] {
+        let p = styled(
+            &mut e,
+            text,
+            Some(200.0),
+            TextStyle {
+                align,
+                ..TextStyle::default()
+            },
+        );
+        for (i, line) in p.lines.iter().enumerate() {
+            let content: Vec<_> = p
+                .glyphs
+                .iter()
+                .filter(|g| {
+                    line.text.contains(&g.cluster)
+                        && !matches!(text[g.cluster as usize..].chars().next(), Some(' ' | '\n'))
+                })
+                .collect();
+            if content.is_empty() {
+                continue;
+            }
+            let left = content.iter().map(|g| g.x).fold(f32::INFINITY, f32::min);
+            let right = content
+                .iter()
+                .map(|g| g.x + g.advance)
+                .fold(f32::NEG_INFINITY, f32::max);
+            let rtl = p.base_rtl;
+            let free = 200.0 - (right - left);
+            let want = match align {
+                Align::Left => 0.0,
+                Align::Center => free / 2.0,
+                Align::Right => free,
+                Align::Start if rtl => free,
+                Align::Start => 0.0,
+            };
+            assert!(
+                (left - want).abs() < 1e-3,
+                "{text:?} {align:?} line {i}: {left} against {want}"
+            );
+        }
+    }
+}

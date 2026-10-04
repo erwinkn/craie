@@ -1,0 +1,131 @@
+{
+  "format": "craie-list-trace/1",
+  "id": "L2",
+  "name": "a jump into unloaded rows: the visible content arrives in two parts and applies once, the loaded part held until then",
+  "viewport": {
+    "width": 400,
+    "height": 600
+  },
+  "config": {
+    "overscan": 600,
+    "lookahead": 0,
+    "endThreshold": 80,
+    "anchor": "start",
+    "anchorPolicy": "reading"
+  },
+  "templates": [],
+  "items": [
+    {
+      "count": 1000,
+      "key": "m{i}",
+      "loaded": false,
+      "estimate": 40
+    }
+  ],
+  "steps": [
+    {
+      "do": "mount",
+      "expect": {
+        "visible": [
+          0,
+          14
+        ],
+        "load": [
+          0,
+          14
+        ]
+      }
+    },
+    {
+      "do": "scrollToIndex",
+      "index": 500,
+      "align": "start",
+      "expect": {
+        "visible": [
+          500,
+          514
+        ],
+        "anchor": {
+          "key": "m500",
+          "offset": 0
+        },
+        "offset": 20000,
+        "held": null,
+        "load": [
+          500,
+          514
+        ]
+      }
+    },
+    {
+      "do": "changes",
+      "changes": [
+        {
+          "kind": "update",
+          "at": 500,
+          "items": [
+            {
+              "count": 8,
+              "key": "m{i}",
+              "loaded": true,
+              "estimate": 40,
+              "height": 60,
+              "version": 1
+            }
+          ]
+        }
+      ],
+      "expect": {
+        "visible": [
+          500,
+          514
+        ],
+        "anchor": {
+          "key": "m500",
+          "offset": 0
+        },
+        "offset": 20000,
+        "held": [
+          500,
+          507
+        ],
+        "load": [
+          508,
+          522
+        ]
+      }
+    },
+    {
+      "do": "changes",
+      "changes": [
+        {
+          "kind": "update",
+          "at": 508,
+          "items": [
+            {
+              "count": 15,
+              "key": "m{i}",
+              "loaded": true,
+              "estimate": 40,
+              "height": 60,
+              "version": 1
+            }
+          ]
+        }
+      ],
+      "expect": {
+        "visible": [
+          500,
+          509
+        ],
+        "anchor": {
+          "key": "m500",
+          "offset": 0
+        },
+        "offset": 20000,
+        "held": null,
+        "load": null
+      }
+    }
+  ]
+}

@@ -1,0 +1,141 @@
+{
+  "format": "craie-list-trace/1",
+  "id": "I3",
+  "name": "a partial answer leaves a short run on screen; the next request starts there, a screen long, the topmost visible loaded row holding and the loaded part held",
+  "viewport": {
+    "width": 400,
+    "height": 600
+  },
+  "config": {
+    "overscan": 600,
+    "lookahead": 0,
+    "endThreshold": 80,
+    "anchor": "start",
+    "anchorPolicy": "reading"
+  },
+  "templates": [],
+  "items": [
+    {
+      "count": 100,
+      "key": "m{i}",
+      "loaded": true,
+      "estimate": 40,
+      "height": 40
+    },
+    {
+      "count": 30,
+      "key": "m{i}",
+      "loaded": false,
+      "estimate": 40
+    },
+    {
+      "count": 870,
+      "key": "m{i}",
+      "loaded": true,
+      "estimate": 40,
+      "height": 40
+    }
+  ],
+  "steps": [
+    {
+      "do": "mount",
+      "expect": {
+        "visible": [
+          0,
+          14
+        ],
+        "load": null
+      }
+    },
+    {
+      "do": "scrollToIndex",
+      "index": 95,
+      "align": "start",
+      "expect": {
+        "visible": [
+          95,
+          109
+        ],
+        "load": [
+          100,
+          129
+        ]
+      }
+    },
+    {
+      "do": "scrollBy",
+      "delta": 20,
+      "expect": {
+        "visible": [
+          95,
+          110
+        ],
+        "anchor": {
+          "key": "m95",
+          "offset": -20
+        },
+        "offset": 3820,
+        "load": null
+      }
+    },
+    {
+      "do": "changes",
+      "changes": [
+        {
+          "kind": "update",
+          "at": 100,
+          "items": [
+            {
+              "count": 7,
+              "key": "m{i}",
+              "loaded": true,
+              "estimate": 40,
+              "height": 40
+            }
+          ]
+        }
+      ],
+      "expect": {
+        "visible": [
+          95,
+          110
+        ],
+        "anchor": {
+          "key": "m95",
+          "offset": -20
+        },
+        "offset": 3820,
+        "load": [
+          107,
+          129
+        ],
+        "held": [
+          100,
+          106
+        ]
+      }
+    },
+    {
+      "do": "changes",
+      "changes": [
+        {
+          "kind": "update",
+          "at": 107,
+          "items": [
+            {
+              "count": 4,
+              "key": "m{i}",
+              "loaded": true,
+              "estimate": 40,
+              "height": 40
+            }
+          ]
+        }
+      ],
+      "expect": {
+        "held": null,
+        "load": null
+      }
+    }
+  ]
+}
