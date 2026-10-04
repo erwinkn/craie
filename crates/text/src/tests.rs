@@ -1156,3 +1156,80 @@ fn the_ellipsis_aligns_with_its_line() {
     );
     assert!((l.x + l.advance - 80.0).abs() < 1e-3, "start is right");
 }
+
+/// After a newline the text may run the other way: its trailing space
+/// hangs on its own paragraph's side, so left, center and right place
+/// the visible content (#27 review). `Start` follows the first
+/// paragraph, for every line, as Parley does.
+#[test]
+fn lines_align_by_their_own_direction() {
+    use crate::paragraph::Align;
+    let mut e = engine();
+    for (text, align) in [
+        ("abc\nשלום ", Align::Left),
+        ("abc\nשלום ", Align::Center),
+        ("שלום\nabc ", Align::Right),
+        ("שלום\nabc ", Align::Start),
+        ("abc\nשלום ", Align::Start),
+    ] {
+        let p = styled(
+            &mut e,
+            text,
+            Some(200.0),
+            TextStyle {
+                align,
+                ..TextStyle::default()
+            },
+        );
+        for (i, line) in p.lines.iter().enumerate() {
+            let content: Vec<_> = p
+                .glyphs
+                .iter()
+                .filter(|g| {
+                    line.text.contains(&g.cluster)
+                        && !matches!(text[g.cluster as usize..].chars().next(), Some(' ' | '\n'))
+                })
+                .collect();
+            if content.is_empty() {
+                continue;
+            }
+            let left = content.iter().map(|g| g.x).fold(f32::INFINITY, f32::min);
+            let right = content
+                .iter()
+                .map(|g| g.x + g.advance)
+                .fold(f32::NEG_INFINITY, f32::max);
+            let rtl = p.base_rtl;
+            let free = 200.0 - (right - left);
+            let want = match align {
+                Align::Left => 0.0,
+                Align::Center => free / 2.0,
+                Align::Right => free,
+                Align::Start if rtl => free,
+                Align::Start => 0.0,
+            };
+            assert!(
+                (left - want).abs() < 1e-3,
+                "{text:?} {align:?} line {i}: {left} against {want}"
+            );
+        }
+    }
+}
+
+/// The ellipsis follows its own line's direction: a cut line after a
+/// newline into right-to-left text ends on the left, though the first
+/// paragraph runs left to right (#27 review on the clamp).
+#[test]
+fn the_ellipsis_follows_its_lines_direction() {
+    let mut e = engine();
+    let text = "abc\nשלום עולם שלום עולם שלום עולם";
+    let p = clamped(&mut e, text, Some(80.0), 2);
+    let (l, el) = (&p.lines[1], p.ellipsis.as_ref().unwrap());
+    assert!(!p.base_rtl && el.line == Some(1));
+    assert!(
+        (el.x + el.width - (l.x + l.trailing)).abs() < 1e-3,
+        "left of the content: {} against {}",
+        el.x + el.width,
+        l.x + l.trailing
+    );
+    assert!(el.x.abs() < 1e-3, "start is left: {}", el.x);
+}
