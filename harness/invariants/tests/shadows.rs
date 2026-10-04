@@ -366,3 +366,48 @@ fn shadows_scroll_with_their_box() {
     assert_eq!(px(&after, 14, 52), [255, 0, 0, 255]);
     assert_eq!(px(&after, 18, 52), [255, 255, 255, 255]);
 }
+
+/// A 100 × 40 box, radius 20, spread 40: CSS's coverage is 2 × 20 / 100,
+/// and the shadow's radius 55.32, as Chrome draws it (#26 re-check).
+#[test]
+fn a_long_box_takes_the_css_outset_radius() {
+    let (gpu, mut r) = match gpu() {
+        Some(g) => g,
+        None => {
+            eprintln!("no GPU adapter: skipped");
+            return;
+        }
+    };
+    let mut ui = Ui::new(1.0);
+    let mut root = sized(256.0, 256.0);
+    root.padding = taffy::Rect::length(80.0);
+    let mut t = Transaction::new(1);
+    t.create(0, NodeKind::View)
+        .layout(0, &root)
+        .append(u32::MAX, 0);
+    t.create(1, NodeKind::View)
+        .layout(1, &sized(100.0, 40.0))
+        .paint(1, Some(0), Some(20.0), None)
+        .shadows(
+            1,
+            &[Shadow {
+                spread: 40.0,
+                color: 0xffffffff,
+                ..Default::default()
+            }],
+        )
+        .append(0, 1);
+    ui.apply_txn(&t).unwrap();
+    ui.render(Size::new(256.0, 256.0));
+    let radius = ui.scene().rects.get(ui.scene().chunk(1).unwrap().rects)[0].radius;
+    ui.scene_mut().clear = Color(0);
+    let img = render(gpu, &mut r, ui.scene_mut());
+    println!(
+        "rectangular pill: radius={radius}, pixel(56,56)={:?}; CSS radius=55.32",
+        px(&img, 56, 56)
+    );
+    assert!(
+        (radius - 55.32).abs() < 0.001,
+        "CSS coverage = 2 * min(20/100,20/40) = 0.4; radius must be 55.32, got {radius}"
+    );
+}

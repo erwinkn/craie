@@ -43,8 +43,9 @@ struct VsOut {
     @location(4) @interpolate(flat) aux: vec4<f32>,
     // kind, clip, page, flags (rect: has border; glyph: color bitmap).
     // Path: kind 2, clip, gradient record (paint index), is gradient.
-    // Shadow: kind 3 (outer) or 4 (inset), clip, the box's radius and
-    // device px per shape unit (f32 bits). Its `local` and `half` are the
+    // Shadow: kind 3 (outer) or 4 (inset), clip, the box's radius (f32
+    // bits) and device px per shape unit along x and y (two f16). Its
+    // `local` and `half` are the
     // shape's, `params` its radius and σ, and `aux` the box's center (from
     // the shape's) and half size, all in shape units.
     @location(5) @interpolate(flat) info: vec4<u32>,
@@ -187,8 +188,9 @@ fn shadow_vertex(r: RectI, corner: vec2<f32>) -> VsOut {
     let inset = (r.flags & 4u) != 0u;
     let sigma = r.border_width;
     var out: VsOut;
-    // Device px per shape unit, for antialiasing hard edges.
-    var aa: f32;
+    // Device px per shape unit along each of its axes, for antialiasing
+    // edges in device px.
+    var aa: vec2<f32>;
     if ((w.flags & 1u) != 0u) {
         // Axis-aligned: device x and y stretch by `k` (a rotation by a
         // quarter turn swaps the columns).
@@ -220,12 +222,14 @@ fn shadow_vertex(r: RectI, corner: vec2<f32>) -> VsOut {
         out.local = (dev - center) / k;
         out.half = (shi - slo) * 0.5 / k;
         out.aux = vec4<f32>(((blo + bhi) * 0.5 - center) / k, (bhi - blo) * 0.5 / k);
-        aa = min(k.x, k.y);
+        aa = k;
     } else {
-        aa = sqrt(abs(w.a * w.d - w.b * w.c));
+        // The shape's axes in device px: its frame's columns.
+        aa = vec2<f32>(length(vec2<f32>(w.a, w.b)), length(vec2<f32>(w.c, w.d)));
         let center = vec2<f32>(r.x + r.w * 0.5, r.y + r.h * 0.5);
-        var qlo = vec2<f32>(r.x, r.y) - vec2<f32>(3.0 * sigma + 1.0 / aa);
-        var qsize = vec2<f32>(r.w, r.h) + vec2<f32>(2.0 * (3.0 * sigma + 1.0 / aa));
+        let margin = vec2<f32>(3.0 * sigma) + 1.0 / max(aa, vec2<f32>(1e-6));
+        var qlo = vec2<f32>(r.x, r.y) - margin;
+        var qsize = vec2<f32>(r.w, r.h) + 2.0 * margin;
         if (inset) {
             qlo = box_lo;
             qsize = box_size;
@@ -238,7 +242,7 @@ fn shadow_vertex(r: RectI, corner: vec2<f32>) -> VsOut {
     }
     out.params = vec2<f32>(r.radius, sigma);
     out.color = unpack(paints[r.fill]);
-    out.info = vec4<u32>(select(3u, 4u, inset), p.clip, bitcast<u32>(pf(at + 4u)), bitcast<u32>(aa));
+    out.info = vec4<u32>(select(3u, 4u, inset), p.clip, bitcast<u32>(pf(at + 4u)), pack2x16float(aa));
     return out;
 }
 
@@ -287,16 +291,23 @@ fn blurred_rect(p: vec2<f32>, half: vec2<f32>, radius: f32, sigma: f32) -> f32 {
 // where their edges meet, nothing shows, as when CSS paints the box over
 // its shadow. A blurred one is the blurred shape outside the box (outer)
 // or the box less the blurred shape (inset).
+// A rounded rect's antialiased coverage, `p`, `half` and `r` in shape
+// units scaled to device px per axis (`k`): exact along straight edges
+// under any axis-aligned scale.
+fn device_coverage(p: vec2<f32>, half: vec2<f32>, r: f32, k: vec2<f32>) -> f32 {
+    return clamp(0.5 - sd_rect(p * k, half * k, r * min(k.x, k.y)), 0.0, 1.0);
+}
+
 fn shadow_coverage(in: VsOut) -> f32 {
-    let aa = bitcast<f32>(in.info.w);
+    let k = unpack2x16float(in.info.w);
     let sigma = in.params.y;
     let empty = in.half.x <= 0.0 || in.half.y <= 0.0;
     let inset = in.info.x == 4u;
-    let inside = clamp(0.5 - sd_rect(in.local - in.aux.xy, in.aux.zw, bitcast<f32>(in.info.z)) * aa, 0.0, 1.0);
+    let inside = device_coverage(in.local - in.aux.xy, in.aux.zw, bitcast<f32>(in.info.z), k);
     var a = 0.0;
-    if (sigma * aa < 0.25) {
+    if (sigma * max(k.x, k.y) < 0.25) {
         if (!empty) {
-            a = clamp(0.5 - sd_rect(in.local, in.half, in.params.x) * aa, 0.0, 1.0);
+            a = device_coverage(in.local, in.half, in.params.x, k);
         }
         if (inset) {
             return max(inside - a, 0.0);
