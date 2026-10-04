@@ -1233,3 +1233,76 @@ fn the_ellipsis_follows_its_lines_direction() {
     );
     assert!(el.x.abs() < 1e-3, "start is left: {}", el.x);
 }
+
+/// #28 review: a line that only shows the ellipsis keeps its height,
+/// alone or last (PR28-02).
+#[test]
+fn an_ellipsis_only_line_has_height() {
+    let mut e = engine();
+    let p = clamped(&mut e, "abcdefghijk", Some(1.0), 1);
+    assert_eq!(p.ellipsis.as_ref().unwrap().line, Some(0));
+    assert!(p.height > 0.0, "alone: {}", p.height);
+    let p = clamped(&mut e, "a\nabcdefghijk", Some(20.0), 2);
+    assert_eq!(p.ellipsis.as_ref().unwrap().line, Some(1));
+    assert!(p.height > p.lines[0].height, "last: {}", p.height);
+}
+
+/// #28 review: the ellipsis is in span zero's font, which may be taller
+/// than the cut line's text: the line takes its metrics (PR28-03).
+#[test]
+fn the_ellipsis_metrics_enter_its_line() {
+    let mut e = engine();
+    let text = "A\nabcdefghijabcdefghijabcdefghij";
+    let style = |size, max_lines| TextStyle {
+        size,
+        max_lines,
+        ..TextStyle::default()
+    };
+    let spans = [
+        SpanStyle {
+            start: 0,
+            style: style(64.0, 2),
+        },
+        SpanStyle {
+            start: 2,
+            style: style(8.0, 0),
+        },
+    ];
+    let p = e.layout_text(
+        &TextSpec {
+            text,
+            spans: &spans,
+        },
+        Some(100.0),
+    );
+    assert_eq!(p.ellipsis.as_ref().unwrap().line, Some(1));
+    let l = &p.lines[1];
+    assert!(l.height >= p.empty_metrics.line_height, "{}", l.height);
+    assert!(l.ascent >= p.empty_metrics.ascent);
+    assert!((p.height - (l.top + l.height)).abs() < 1e-3);
+}
+
+/// #28 review: a final newline doesn't let an overflowing last line
+/// through uncut, and hanging spaces alone don't cut (PR28-04, PR28-07).
+#[test]
+fn the_limit_cuts_overflow_not_hanging_spaces() {
+    let mut e = engine();
+    let p = clamped(&mut e, "abcdefghijk\n", Some(30.0), 1);
+    assert_eq!(p.ellipsis.as_ref().unwrap().line, Some(0));
+    assert!(p.visible_end < 11);
+    let p = clamped(&mut e, "a               ", Some(30.0), 1);
+    assert_eq!(p.ellipsis.as_ref().unwrap().line, None);
+    assert_eq!(p.visible_end, 16);
+}
+
+/// #28 review: the intrinsic width (no wrap width) is the content's,
+/// lines past the limit included, as without a limit (PR28-05).
+#[test]
+fn intrinsic_width_ignores_the_limit() {
+    let mut e = engine();
+    let text = "a\nthis is the much wider second line";
+    let p = clamped(&mut e, text, None, 1);
+    let free = clamped(&mut e, text, None, 0);
+    assert_eq!(p.lines.len(), 1);
+    assert_eq!(p.width, free.width);
+}
