@@ -240,6 +240,16 @@ export interface ListenerProps {
    * below. Layers opened inside escape it, as portals do. A focus
    * inside moves out (to the enclosing trap's target, else nowhere). */
   inert?: boolean
+  /** Out of the accessibility tree with its subtree, input untouched:
+   * hover, press, focus and selection work as before. Layers opened
+   * inside stay in the tree, as portals do; so does the path to a focused
+   * node inside, as Chrome does. Any of the three hides; `aria-hidden`,
+   * when set, wins over the other two (`false` shows), as in React
+   * Native. */
+  "aria-hidden"?: boolean | "true" | "false"
+  accessibilityElementsHidden?: boolean
+  /** Only `"no-hide-descendants"` acts (it hides, as `aria-hidden`). */
+  importantForAccessibility?: "auto" | "yes" | "no" | "no-hide-descendants"
 }
 
 /** Which animation ended (`onAnimationEnd`): `enter` or `animation`,

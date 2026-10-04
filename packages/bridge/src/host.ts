@@ -647,7 +647,18 @@ function interactionFlags(props: Record<string, any>): number {
     (props.selectable ? INTERACTION.selectable : 0) |
     (props.inert ? INTERACTION.inert : 0) |
     (props.autoFocus ? INTERACTION.autoFocus : 0) |
-    pressFlags(props) << INTERACTION.pressShift
+    pressFlags(props) << INTERACTION.pressShift |
+    (a11yHidden(props) ? INTERACTION.a11yHidden : 0)
+}
+
+/** Hidden from accessibility: web `aria-hidden` (a Booleanish: `"false"`
+ * doesn't hide) or React Native's two, with React Native's precedence:
+ * `aria-hidden`, when set, wins over both. */
+function a11yHidden(props: Record<string, any>): boolean {
+  const v = props["aria-hidden"]
+  const aria = v === true || v === "true" ? true : v === false || v === "false" ? false : undefined
+  if (aria !== undefined) return aria
+  return !!props.accessibilityElementsHidden || props.importantForAccessibility === "no-hide-descendants"
 }
 
 function listenerMask(props: Record<string, any>): number {

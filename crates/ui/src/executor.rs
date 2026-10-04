@@ -1208,7 +1208,8 @@ impl Ui {
                 let focusable = flags & interaction_flag::FOCUSABLE != 0;
                 let selectable = flags & interaction_flag::SELECTABLE != 0;
                 let auto_focus = flags & interaction_flag::AUTO_FOCUS != 0;
-                let press = flags >> interaction_flag::PRESS_SHIFT;
+                let press = flags >> interaction_flag::PRESS_SHIFT & crate::mutation::press::ALL;
+                let a11y_hidden = flags & interaction_flag::A11Y_HIDDEN != 0;
                 // An exiting node stays inert whatever it declares.
                 let inert = flags & interaction_flag::INERT != 0 || self.exiting(NodeId(*id));
                 let inert = self.set_inert(NodeId(*id), inert);
@@ -1221,6 +1222,7 @@ impl Ui {
                     || i.selectable != selectable
                     || i.press != press
                     || i.auto_focus != auto_focus
+                    || i.a11y_hidden != a11y_hidden
                     || inert
                 {
                     self.observe.listeners(*id, i.listeners, *listeners);
@@ -1229,6 +1231,7 @@ impl Ui {
                     i.selectable = selectable;
                     i.press = press;
                     i.auto_focus = auto_focus;
+                    i.a11y_hidden = a11y_hidden;
                     self.host.set_listeners(*id as usize, *listeners);
                     // A new hover listener: the hover at rest may be
                     // stale (it was not tracked without one).

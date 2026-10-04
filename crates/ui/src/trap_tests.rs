@@ -383,6 +383,69 @@ fn inert_blocks_hit_focus_and_accessibility() {
     assert_eq!(focused(&ui), None);
 }
 
+/// `A11Y_HIDDEN`: the node and its subtree leave the accessibility
+/// tree, a layer it owns stays; hit testing, press flags and focus are
+/// untouched. While focus is inside, the hidden node stays in the tree
+/// with its path, as Chrome keeps it (#35 review).
+#[test]
+fn a11y_hidden_leaves_input_alone() {
+    let mut ui = app();
+    let mut t = Transaction::new(2);
+    view(&mut t, 0, 3, &boxed(0.0, 100.0, 100.0, 100.0));
+    button(&mut t, 3, 4, &boxed(0.0, 0.0, 50.0, 50.0));
+    let pressable = press::PRESSABLE << f::PRESS_SHIFT;
+    t.interaction_bits(3, FOCUS, f::FOCUSABLE | f::A11Y_HIDDEN | pressable);
+    layer(&mut t, 5, 4, 10);
+    button(&mut t, 5, 6, &boxed(300.0, 300.0, 50.0, 50.0));
+    apply(&mut ui, &t);
+    assert_eq!(hit(&ui, 25.0, 125.0), Some(4));
+    assert_eq!(hit(&ui, 75.0, 175.0), Some(3));
+    assert_eq!(ui.host.interaction(NodeId(3)).press, press::PRESSABLE);
+    assert_eq!(ring(&mut ui, false, 5), [1, 2, 3, 4, 6]);
+
+    let has = |ui: &Ui, id: u32| {
+        ui.a11y_tree(VIEW)
+            .nodes
+            .iter()
+            .any(|(a, _)| *a == crate::a11y::aid(NodeId(id)))
+    };
+    assert!(!has(&ui, 3) && !has(&ui, 4));
+    assert!(has(&ui, 1) && has(&ui, 6));
+
+    // Focus inside: the path to it is back, and focus is reported there.
+    focus(&mut ui, 3, 4);
+    assert_eq!(focused(&ui), Some(4));
+    assert!(has(&ui, 3) && has(&ui, 4));
+    assert_eq!(ui.a11y_tree(VIEW).focus, crate::a11y::aid(NodeId(4)));
+    // Focus elsewhere: hidden again.
+    focus(&mut ui, 4, 1);
+    assert!(!has(&ui, 3) && !has(&ui, 4));
+
+    // Cleared, the subtree comes back.
+    let mut t = Transaction::new(5);
+    t.interaction_bits(3, FOCUS, f::FOCUSABLE | pressable);
+    apply(&mut ui, &t);
+    assert!(has(&ui, 3) && has(&ui, 4));
+
+    // Over an open modal, it hides the modal too, as `aria-hidden` does,
+    // except while focus is inside; a layer owned from inside stays.
+    open(&mut ui, 6, MODAL, true);
+    assert!(has(&ui, 11));
+    let mut t = Transaction::new(7);
+    t.interaction_bits(10, 0, f::A11Y_HIDDEN);
+    apply(&mut ui, &t);
+    assert_eq!(focused(&ui), Some(13), "the trap still holds focus");
+    assert!(has(&ui, 11) && has(&ui, 13), "focus inside: still there");
+    assert_eq!(ui.a11y_tree(VIEW).focus, crate::a11y::aid(NodeId(13)));
+    focus(&mut ui, 8, 21);
+    assert_eq!(focused(&ui), Some(21), "the dialog's own menu");
+    assert!(!has(&ui, 11) && !has(&ui, 13), "focus outside it: hidden");
+    assert!(
+        has(&ui, 20) && has(&ui, 21),
+        "layer 20, owned from inside, stays"
+    );
+}
+
 /// O1 in a trap: a focus that becomes inert goes to the trap's
 /// `autoFocus` node; one removed, with the `autoFocus` node, to its
 /// first focusable. Each blurs.
