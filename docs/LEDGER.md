@@ -938,17 +938,19 @@ Reviewer minors and nitpicks not fixed yet.
 - Why deferred: the kit truncates labels, titles and paths in one
   direction; CSS's own bidi truncation is loosely specified.
 
-### DF-68: registered fonts: no WOFF2, no family lists, one file per transaction
+### DF-68: registered fonts: no WOFF2, no family lists, 4 MiB per file
 
 - Source: milestone 3 (registered fonts, protocol 17).
 - Where: crates/text/src/fonts.rs (`RawFonts`), crates/ui/src/bridge.rs
   (`MAX_BYTES`), packages/bridge/src/host.ts (`registerFont`).
-- Claim: `registerFont` takes TTF, OTF and collections, not WOFF2. A span
-  names one family, so the kit's family lists (`Inter Variable, Inter,
-  ...`) are resolved by its adapter to the first registered one. Each font
-  goes as its own transaction, under the session's 4 MiB commit queue: a
-  larger file (a full CJK font) fails to submit. Only `wght` is followed
-  among variation axes (not `wdth`, `slnt`, `opsz`).
+- Claim: `registerFont` takes TTF, OTF and collections; it rejects WOFF
+  and WOFF2 with a `TypeError`. A span names one family, so the kit's
+  family lists (`Inter Variable, Inter, ...`) are resolved by its adapter
+  to the first registered one. Each font goes alone, once everything sent
+  before it is acked, so it has the session's 4 MiB commit queue to
+  itself; a file over `MAX_FONT_BYTES` (4 MiB less 64 KiB; a full CJK
+  font) rejects with a `RangeError`, since no op splits a font. Only
+  `wght` is followed among variation axes (not `wdth`, `slnt`, `opsz`).
 - Why deferred: Marbre ships Inter and JetBrains Mono as TTF, each well
   under 1 MiB; the rest waits for a font that needs it.
 

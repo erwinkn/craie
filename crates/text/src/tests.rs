@@ -1192,9 +1192,9 @@ fn variable_faces_take_the_requested_weight() {
     }
 }
 
-/// Registered fonts come before the source for a family they hold, and
-/// first in fallback; generic names stay the source's, and a span
-/// resolved before the registration keeps its face.
+/// Registered fonts come before the source for a family they hold;
+/// generic names stay the source's, and a span resolved before the
+/// registration keeps its face (the executor resolves it again).
 #[test]
 fn registered_fonts_come_first() {
     let mut e = engine();
@@ -1205,7 +1205,7 @@ fn registered_fonts_come_first() {
         std::sync::Arc::new(&include_bytes!("../../../assets/fonts/Inter-Subset-Regular.ttf")[..]),
         None,
     );
-    assert_eq!(added, 1);
+    assert_eq!(added, vec!["inter"]);
     let inter = e.font("Inter", 400, false);
     assert!(inter.is_some() && inter != noto, "the registered family");
     assert_eq!(
@@ -1235,8 +1235,170 @@ fn registered_fonts_come_first() {
     assert_eq!(
         e.fonts
             .register(std::sync::Arc::new(&b"not a font"[..]), None),
-        0
+        Vec::<String>::new()
     );
+}
+
+/// The font of each run of `text` laid out in one span of `font`
+/// (None: the default family), by the run's first byte.
+fn run_fonts(
+    e: &mut TextEngine,
+    text: &str,
+    font: Option<crate::fonts::FontInstanceId>,
+) -> Vec<(u32, crate::fonts::FontInstanceId)> {
+    let spans = [SpanStyle {
+        start: 0,
+        style: TextStyle {
+            size: 16.0,
+            font,
+            ..TextStyle::default()
+        },
+    }];
+    let p = e.layout_text(
+        &TextSpec {
+            text,
+            spans: &spans,
+        },
+        None,
+    );
+    p.runs.iter().map(|r| (r.text.start, r.font)).collect()
+}
+
+fn shared(bytes: &'static [u8]) -> crate::fonts::FaceBytes {
+    std::sync::Arc::new(bytes)
+}
+
+/// A weight axis whose minimum is above its maximum (a malformed
+/// `fvar`) makes the face static instead of panicking in a clamp, when
+/// selected and when fallback ranks it (#29 review).
+#[test]
+fn a_malformed_weight_axis_makes_a_static_face() {
+    use crate::fonts::{FontAttrs, FontSource, RawFonts};
+    let swapped = include_bytes!("../../../assets/fonts/NotoEmoji-Var-Swapped.ttf");
+    let mut raw = RawFonts::new();
+    assert_eq!(raw.add_as(shared(swapped), Some("Var")).len(), 1);
+    for weight in [100, 300, 500, 700, 900] {
+        let attrs = FontAttrs {
+            weight,
+            italic: false,
+        };
+        let b = raw.select("Var", attrs).unwrap();
+        assert!(b.variations.is_empty(), "{weight}: static");
+        assert_eq!(
+            raw.fallback("🙂", crate::ScriptTag::of('🙂'), attrs, true)
+                .len(),
+            1
+        );
+    }
+    // Through the engine: an Inter span with 🙂 ranks the registered
+    // faces in fallback.
+    let mut e = engine();
+    e.fonts.register(shared(swapped), Some("Brand"));
+    e.fonts.register(
+        shared(include_bytes!(
+            "../../../assets/fonts/Inter-Subset-Regular.ttf"
+        )),
+        None,
+    );
+    let inter = e.font("Inter", 700, false);
+    assert!(inter.is_some());
+    assert_eq!(run_fonts(&mut e, "a🙂", inter).len(), 2);
+}
+
+/// Registered fonts take fallback only for spans whose own font is
+/// registered, and never ahead of the system for emoji presentation:
+/// a family nobody names doesn't draw (#29 review).
+#[test]
+fn registered_fonts_fall_back_for_their_spans_only() {
+    let mut e = engine();
+    let noto = e.font("", 400, false).unwrap();
+    let source_emoji = run_fonts(&mut e, "a🙂", None)[1].1;
+    let source_hebrew = run_fonts(&mut e, "a\u{5d0}", None)[1].1;
+    assert_ne!(source_emoji, noto);
+    // A 🙂 face and a Hebrew face, under names no span uses.
+    e.fonts.register(
+        shared(include_bytes!(
+            "../../../assets/fonts/NotoEmoji-Var-Test.ttf"
+        )),
+        Some("Brand Emoji"),
+    );
+    e.fonts.register(
+        shared(include_bytes!(
+            "../../../assets/fonts/NotoSansHebrew-Regular.ttf"
+        )),
+        Some("Brand Hebrew"),
+    );
+    e.fonts.register(
+        shared(include_bytes!(
+            "../../../assets/fonts/Inter-Subset-Regular.ttf"
+        )),
+        None,
+    );
+    // A system span: the system's faces, as before.
+    assert_eq!(run_fonts(&mut e, "a🙂", None)[1].1, source_emoji);
+    assert_eq!(run_fonts(&mut e, "a\u{5d0}", None)[1].1, source_hebrew);
+    // An Inter span: registered first, but emoji presentation goes to
+    // the system's emoji face first.
+    let inter = e.font("Inter", 400, false);
+    let hebrew = run_fonts(&mut e, "a\u{5d0}", inter)[1].1;
+    assert_ne!(hebrew, source_hebrew, "the registered Hebrew face");
+    assert_eq!(hebrew, e.font("Brand Hebrew", 400, false).unwrap());
+    assert_eq!(run_fonts(&mut e, "a🙂", inter)[1].1, source_emoji);
+}
+
+/// The last registration of a face wins; the same bytes again change
+/// nothing; another weight of the family adds a face.
+#[test]
+fn the_last_registration_of_a_face_wins() {
+    use crate::fonts::{FontAttrs, FontSource, RawFonts};
+    let inter = include_bytes!("../../../assets/fonts/Inter-Subset-Regular.ttf");
+    let regular = include_bytes!("../../../assets/fonts/NotoSans-Regular.ttf");
+    let bold = include_bytes!("../../../assets/fonts/NotoSans-Bold.ttf");
+    let mut raw = RawFonts::new();
+    let len = |raw: &mut RawFonts, weight| {
+        let attrs = FontAttrs {
+            weight,
+            italic: false,
+        };
+        raw.select("Brand", attrs)
+            .unwrap()
+            .bytes
+            .as_ref()
+            .as_ref()
+            .len()
+    };
+    assert_eq!(raw.add_as(shared(inter), Some("Brand")), vec!["brand"]);
+    assert!(
+        raw.add_as(shared(inter), Some("Brand")).is_empty(),
+        "same bytes"
+    );
+    assert_eq!(raw.add_as(shared(regular), Some(" BRAND ")), vec!["brand"]);
+    assert_eq!(len(&mut raw, 400), regular.len(), "replaced");
+    assert_eq!(raw.add_as(shared(bold), Some("Brand")).len(), 1);
+    assert_eq!(len(&mut raw, 700), bold.len(), "another weight");
+    assert_eq!(len(&mut raw, 400), regular.len());
+}
+
+/// Validation and registration agree on which faces register: a face
+/// without names registers under a given family only (#29 review).
+#[test]
+fn faces_in_matches_registration() {
+    use crate::fonts::RawFonts;
+    let mut nameless = include_bytes!("../../../assets/fonts/Inter-Subset-Regular.ttf").to_vec();
+    let tables = u16::from_be_bytes([nameless[4], nameless[5]]) as usize;
+    let rec = (0..tables)
+        .map(|i| 12 + 16 * i)
+        .find(|&r| &nameless[r..r + 4] == b"name")
+        .unwrap();
+    nameless[rec..rec + 4].copy_from_slice(b"xame");
+    let nameless: &'static [u8] = Box::leak(nameless.into_boxed_slice());
+    for family in [None, Some("Brand")] {
+        let mut raw = RawFonts::new();
+        let added = raw.add_as(shared(nameless), family).len();
+        assert_eq!(RawFonts::faces_in(nameless, family), added, "{family:?}");
+        assert_eq!(added, family.is_some() as usize);
+    }
+    assert_eq!(RawFonts::faces_in(b"not a font", Some("Brand")), 0);
 }
 
 /// After a newline the text may run the other way: its trailing space
