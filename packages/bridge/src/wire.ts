@@ -1505,9 +1505,9 @@ export class Encoder {
     this.ops.u32(id)
     this.ops.u32(owner)
   }
-  /** Masked paint update: fill, corner radius, border (color, width). */
   /** A box's paint; absent fields stay. `shadows` replaces the box
-   * shadows (`shadowsIn` first: native rejects what it doesn't). */
+   * shadows (`shadowsIn` first: native rejects what it doesn't); `sides`
+   * replaces the borders per side, which paint instead of `border`. */
   paint(
     id: number,
     fill?: number,

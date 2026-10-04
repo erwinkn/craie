@@ -965,6 +965,28 @@ Reviewer minors and nitpicks not fixed yet.
   (degenerate quads) or an indirect draw list; it is a renderer-wide
   change, to measure on the Mac against a screen of real buttons.
 
+### DF-70: variants don't carry borders per side
+
+- Source: milestone 3 (borders per side, protocol 18).
+- Where: crates/ui/src/variants.rs (`Values`), packages/bridge/src/host.ts
+  (`variantValues`).
+- Claim: `_hover: { borderBottomColor }` is ignored with a warning; a
+  variant changes the uniform border only. `Values`' mask is full (16
+  bits), so sides need a wider mask or a second record.
+- Why deferred: the kit's dividers and cards don't change a side on hover
+  or press; widen the mask when one does.
+
+### DF-71: mixed-color sides meet square
+
+- Source: milestone 3 (borders per side, protocol 18).
+- Where: crates/ui/src/border.rs (`draw`).
+- Claim: sides of different colors draw a rect each, top and bottom
+  owning the corners: no diagonal join as CSS draws, and no rounding (a
+  rounded box with a red top and gray sides has square colored corners).
+  Sides of one color draw one rounded ring and match CSS.
+- Why deferred: the kit uses one color per box (dividers, cards); diagonal
+  joins need a per-corner shape in the shader.
+
 ## Closed
 
 - DF-57 (work item 6, review #21 M1): end indices were wire indices

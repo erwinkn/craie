@@ -202,7 +202,10 @@ carry the same list under bit 15. A span row's former reserved byte is
 its feature byte (protocol 15): tabular digits (bit 0) and, read from
 span zero, the paragraph's alignment (bits 1 and 2: start, left,
 center, right); unknown bits fail decoding. `LINES` (0x42, protocol 16:
-id, then a u16 count, 0 for none) sets a text node's line limit. The spatial op's mask carries z (bit 2, an
+id, then a u16 count, 0 for none) sets a text node's line limit. The
+paint op's mask gains bit 4 (protocol 18): borders per side, four widths
+(f32, top, right, bottom, left, in [0, 4096]) then four colors (u32);
+all zero clears them. The spatial op's mask carries z (bit 2, an
 i32; work item 4), and the layer op (0x22: id, then the owner or NIL)
 makes a node a layer container. The state family (0xB0, protocol 4, work
 item 5): `STATES` sets a scope's app bits (u64; the input bits are
@@ -780,6 +783,12 @@ own chunk: outer ones before its fill, the last listed lowest, inset
 ones after it, under its content. Their rects are reserved in paint
 order and written after the kind's own paint slots, which keep their
 numbers. A shadow list rebuilds the chunk; it does not tween.
+Borders per side (protocol 18, `border.rs`) paint instead of the uniform
+border, inside the border box over the fill, after inset shadows. Sides
+of one color are one hard rect in shadow mode: the border box less the
+box inside the widths, rounded like the box (a divider is one rect).
+Mixed colors draw a rect per side, top and bottom owning the corners
+(DF-71).
 A placement table (offset, transform record, clip) positions
 each chunk. Transform records exist for the window root, scroll
 content, and transformed subtrees; all other nodes draw in their

@@ -780,12 +780,18 @@ impl Ui {
                 Rect::new(0.0, 0.0, data.rect.size.width, data.rect.size.height),
                 p.radius,
             );
-            // An inset shadow is cut inside the painted border, which the
-            // fill rect draws (`border_width`), not the layout's.
-            let border_width = if p.border_color & 0xFF != 0 {
-                p.border_width
-            } else {
-                0.0
+            // An inset shadow is cut inside the painted border (the
+            // fill rect's `border_width`, or the sides), not the layout's.
+            let border_width = match &sides {
+                Some(s) => std::array::from_fn(|i| {
+                    if s.colors[i] & 0xFF != 0 {
+                        s.widths[i]
+                    } else {
+                        0.0
+                    }
+                }),
+                None if p.border_color & 0xFF != 0 => [p.border_width; 4],
+                None => [0.0; 4],
             };
             for (i, s) in shadows.as_slice().iter().enumerate() {
                 if let Some(at) = placed[i]
