@@ -37,6 +37,12 @@ impl Color {
 /// `fill` and `border` index the paint pool (absolute indices, written
 /// when the chunk is committed). `chunk` indexes the chunk placement
 /// table.
+///
+/// With `FLAG_SHADOW` it is a box shadow (`ChunkWriter::set_shadow`):
+/// `rect` and `radius` are the shadow's shape, `border_width` its blur
+/// σ, `fill` its color, and `border` a paint record of five f32 words,
+/// the box it is cut against (x, y, width, height, radius): an outer
+/// shadow shows outside the box, an inset one inside it.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Pod, Zeroable)]
 pub struct RectInstance {
@@ -57,6 +63,10 @@ impl RectInstance {
     /// Edges snap to the device-pixel grid when the placement is
     /// axis-aligned. UI boxes set it; free-form surface content may not.
     pub const FLAG_SNAP: u32 = 1;
+    /// A box shadow (see the type).
+    pub const FLAG_SHADOW: u32 = 1 << 1;
+    /// An inset shadow: drawn inside the box, around the shape.
+    pub const FLAG_INSET: u32 = 1 << 2;
 }
 
 /// One glyph bitmap placed in a chunk. 20 bytes.

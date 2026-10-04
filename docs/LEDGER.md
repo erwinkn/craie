@@ -893,6 +893,29 @@ Reviewer minors and nitpicks not fixed yet.
   of scope) will bring.
 - Resolves in: layout transitions.
 
+### DF-64: shadows don't tween
+
+- Source: milestone 3 (box shadows, protocol 14).
+- Where: crates/ui/src/executor.rs (`set_shadows`), crates/ui/src/shadow.rs.
+- Claim: a shadow list changes at once. The kit's `transition: { property:
+  'shadow' }` (3 recipes, a card's `_hover: { elevation: 'raised' }`) snaps
+  on Craie where the web eases.
+- Why deferred: lists of different lengths need CSS's padding rule (a
+  missing layer is a transparent copy) and a tween per layer; the snap is
+  a small visible difference on few elements.
+
+### DF-65: one corner radius per shadow, no `ring` outline
+
+- Source: milestone 3 (box shadows).
+- Where: crates/scene/src/prim.rs (`RectInstance`), crates/ui/src/shadow.rs.
+- Claim: a shadow takes the box's one radius (Craie boxes have one), and
+  the kit's `ring` and `ringOffset` (an outline 2 points out at an offset,
+  4 uses) are not drawn. Elevation rings (spread layers) are.
+- Why deferred: per-corner radii wait for per-corner box radii (1 use of
+  `radiusTop`/`radiusBottom`); an outline is an outer shadow cut against
+  the box grown by the offset, so it can reuse this path once the bridge
+  takes the prop.
+
 ## Closed
 
 - DF-57 (work item 6, review #21 M1): end indices were wire indices

@@ -51,6 +51,9 @@ mod press_tests;
 mod reach;
 mod scene_sync;
 pub mod selection;
+pub mod shadow;
+#[cfg(test)]
+mod shadow_tests;
 pub mod states;
 #[cfg(test)]
 mod states_tests;

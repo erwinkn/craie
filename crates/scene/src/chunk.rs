@@ -71,6 +71,23 @@ pub struct GradientPaint {
     pub stops: Vec<(f32, u32)>,
 }
 
+/// A box shadow as the scene draws it (`ChunkWriter::set_shadow`), in
+/// chunk-local logical units.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BoxShadow {
+    /// The shadow's shape before the blur: the box offset and spread.
+    pub shape: Rect,
+    pub radius: f32,
+    /// The Gaussian's standard deviation (CSS: half the blur radius).
+    pub sigma: f32,
+    /// The box it is cut against: an outer shadow shows outside it, an
+    /// inset one inside it.
+    pub box_rect: Rect,
+    pub box_radius: f32,
+    pub color: u32,
+    pub inset: bool,
+}
+
 /// A paint slot local to the chunk being written. Also the text brush:
 /// a shaped run carries its slot, so a color change patches the paint
 /// record and touches no glyph.
@@ -199,7 +216,79 @@ impl ChunkWriter {
         true
     }
 
+    /// Reserves a rect at this point of the paint order, written later
+    /// with `set_shadow` (its paint records may come after content that
+    /// numbers its own slots, like an input's).
+    pub fn reserve_rect(&mut self) -> usize {
+        self.rects.push(RectInstance::default());
+        self.extend_segment(SegKind::Rects);
+        self.rects.len() - 1
+    }
+
+    /// Writes a box shadow into the reserved rect `at` (`reserve_rect`),
+    /// with its paint records: the color, then the box it is cut
+    /// against. Its bounds reach 3 σ past an outer shadow's shape (where
+    /// the Gaussian has fallen under 0.3 %); an inset one stays in its
+    /// box.
+    pub fn set_shadow(&mut self, at: usize, s: &BoxShadow) {
+        let color = self.paint(s.color);
+        let params = PaintSlot(self.paints.len() as u32);
+        let b = s.box_rect;
+        self.paints.extend(
+            [
+                b.origin.x,
+                b.origin.y,
+                b.size.width,
+                b.size.height,
+                s.box_radius,
+            ]
+            .map(f32::to_bits),
+        );
+        let mut flags = RectInstance::FLAG_SNAP | RectInstance::FLAG_SHADOW;
+        if s.inset {
+            flags |= RectInstance::FLAG_INSET;
+        }
+        self.rects[at] = RectInstance {
+            rect: [
+                s.shape.origin.x,
+                s.shape.origin.y,
+                s.shape.size.width,
+                s.shape.size.height,
+            ],
+            radius: s.radius,
+            border_width: s.sigma,
+            fill: color.0,
+            border: params.0,
+            chunk: 0,
+            flags,
+        };
+        let bounds = if s.inset {
+            b
+        } else {
+            let m = 3.0 * s.sigma + 1.0;
+            Rect::new(
+                s.shape.origin.x - m,
+                s.shape.origin.y - m,
+                s.shape.size.width + 2.0 * m,
+                s.shape.size.height + 2.0 * m,
+            )
+        };
+        self.grow(bounds);
+    }
+
     fn extend(&mut self, kind: SegKind, bounds: Rect) {
+        self.extend_segment(kind);
+        self.grow(bounds);
+    }
+
+    fn grow(&mut self, bounds: Rect) {
+        self.bounds = Some(match self.bounds {
+            Some(b) => b.union(&bounds),
+            None => bounds,
+        });
+    }
+
+    fn extend_segment(&mut self, kind: SegKind) {
         match self.segments.last_mut() {
             Some(s) if s.kind == kind => s.len += 1,
             _ => {
@@ -219,10 +308,6 @@ impl ChunkWriter {
                 });
             }
         }
-        self.bounds = Some(match self.bounds {
-            Some(b) => b.union(&bounds),
-            None => bounds,
-        });
     }
 
     /// A filled rect in chunk-local logical units, edges snapped.

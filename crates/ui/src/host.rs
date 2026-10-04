@@ -463,6 +463,8 @@ pub struct Host {
     /// Inherited colors (`COLOR`) of text, inputs and `currentColor`
     /// drawings, id-keyed: few nodes set one.
     pub colors: HashMap<u32, u32>,
+    /// Box shadows (`shadow.rs`), id-keyed: most boxes have none.
+    pub shadows: HashMap<u32, crate::shadow::Shadows>,
     /// Item index of a list row (a child of a List node); NIL otherwise.
     pub list_index: Vec<u32>,
     /// List states and scroll anchors (§7).
@@ -535,6 +537,7 @@ impl Host {
             vector_sources_swept: 0,
             claims: HashMap::new(),
             colors: HashMap::new(),
+            shadows: HashMap::new(),
             list_index: Vec::new(),
             lists: crate::list::Lists::default(),
             orders: HashMap::new(),
@@ -734,6 +737,7 @@ impl Host {
         self.images.remove(&id.0);
         self.claims.remove(&id.0);
         self.colors.remove(&id.0);
+        self.shadows.remove(&id.0);
         self.orders.remove(&id.0);
         self.owners.remove(&id.0);
         self.list_index[i] = NIL;
@@ -854,6 +858,7 @@ impl Host {
         self.images.remove(&id.0);
         self.claims.remove(&id.0);
         self.colors.remove(&id.0);
+        self.shadows.remove(&id.0);
         self.orders.remove(&id.0);
         self.owners.remove(&id.0);
         // Its layers lose their owner: a reuse of the id must not adopt

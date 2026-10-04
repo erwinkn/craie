@@ -708,12 +708,24 @@ impl Ui {
         }
         let mut w = std::mem::take(&mut self.sync.writer);
         w.clear();
+        let shadows = self.host.shadows.get(&id.0).copied().unwrap_or_default();
+        // Shadow rects reserved in paint order: outer ones under the
+        // fill (the last listed lowest), inset ones over it.
+        let mut placed = [None; crate::shadow::MAX_SHADOWS];
+        let reserve = |w: &mut ChunkWriter, inset: bool, placed: &mut [Option<usize>]| {
+            for (i, s) in shadows.as_slice().iter().enumerate().rev() {
+                if s.inset == inset && s.color & 0xFF != 0 {
+                    placed[i] = Some(w.reserve_rect());
+                }
+            }
+        };
         if kind.has_box() {
             let p = self.host.paint[id.index()];
             // Slots 0 and 1 are always the fill and border: color patches
             // address them directly.
             let fill = w.paint(p.fill);
             let border = w.paint(p.border_color);
+            reserve(&mut w, false, &mut placed);
             let has_border = p.border_width > 0.0 && p.border_color & 0xFF != 0;
             if p.fill & 0xFF != 0 || has_border {
                 w.rect_bordered(
@@ -724,6 +736,7 @@ impl Ui {
                     p.border_width,
                 );
             }
+            reserve(&mut w, true, &mut placed);
         }
         match kind {
             NodeKind::Text => self.build_text(id, &data, &mut w),
@@ -732,6 +745,23 @@ impl Ui {
             NodeKind::Vector => self.build_vector(id, &data, &mut w),
             NodeKind::Image => self.build_image(id, &data, &mut w),
             NodeKind::View | NodeKind::List => {}
+        }
+        // The shadows' paint records go after the kind's own slots (an
+        // input numbers its own from 2).
+        if !shadows.is_empty() {
+            let p = self.host.paint[id.index()];
+            let border = (
+                Rect::new(0.0, 0.0, data.rect.size.width, data.rect.size.height),
+                p.radius,
+            );
+            let padding = (data.clip_box, (p.radius - p.border_width).max(0.0));
+            for (i, s) in shadows.as_slice().iter().enumerate() {
+                if let Some(at) = placed[i]
+                    && let Some(b) = crate::shadow::box_shadow(s, border, padding)
+                {
+                    w.set_shadow(at, &b);
+                }
+            }
         }
         self.scene.commit_chunk(id.0, &mut w);
         self.sync.writer = w;

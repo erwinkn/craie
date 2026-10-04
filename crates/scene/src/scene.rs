@@ -603,14 +603,24 @@ impl Scene {
                                     } else {
                                         b
                                     };
+                                    let words = self.paints.backing();
+                                    let shadow = r.flags & RectInstance::FLAG_SHADOW != 0;
                                     out.push(Resolved {
-                                        kind: 0,
+                                        kind: if shadow { 3 } else { 0 },
                                         bounds: b,
-                                        color: self.paints.backing()[r.fill as usize],
-                                        aux: if r.border == NO_PAINT {
+                                        color: words[r.fill as usize],
+                                        aux: if shadow {
+                                            // The box it is cut against, and
+                                            // whether it is inset.
+                                            let at = r.border as usize;
+                                            words[at..at + 5].iter().fold(
+                                                (r.flags & RectInstance::FLAG_INSET) as u64,
+                                                |h, &w| h.wrapping_mul(0x100_0000_01B3) ^ w as u64,
+                                            )
+                                        } else if r.border == NO_PAINT {
                                             0
                                         } else {
-                                            self.paints.backing()[r.border as usize] as u64
+                                            words[r.border as usize] as u64
                                         },
                                         params: [r.radius, r.border_width],
                                         opacity: o,
@@ -815,7 +825,8 @@ fn close_run(
 /// One primitive in world space (device px), for equivalence checks.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Resolved {
-    /// 0 rect, 1 glyph, 2 path mesh segment.
+    /// 0 rect, 1 glyph, 2 path mesh segment, 3 box shadow (bounds: its
+    /// shape; aux: a hash of its box and inset flag).
     pub kind: u8,
     pub bounds: Rect,
     pub color: u32,

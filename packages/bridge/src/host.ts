@@ -12,6 +12,9 @@ import {
   CUSTOM_STATES,
   DECORATION,
   ENV_BIT,
+  MAX_SHADOWS,
+  shadowsIn,
+  type ShadowIn,
   STATE_BIT,
   Encoder,
   EVENT_KIND,
@@ -799,8 +802,36 @@ function flattenVariants(
 
 /** Variant block keys that apply; `_` keys nest. */
 const VARIANT_KEYS = new Set([
-  "backgroundColor", "borderColor", "borderWidth", "borderRadius", "color", "style", "animation",
+  "backgroundColor", "borderColor", "borderWidth", "borderRadius", "boxShadow", "color", "style", "animation",
 ])
+
+/** A box shadow as React Native's structured `boxShadow` takes it:
+ * offsets, blur and spread in points; the first listed paints on top. */
+export interface BoxShadow {
+  offsetX?: number
+  offsetY?: number
+  blurRadius?: number
+  spreadDistance?: number
+  color: string | number
+  inset?: boolean
+}
+
+/** `boxShadow` in wire form; past `MAX_SHADOWS` the rest is dropped. */
+function shadowList(list: readonly BoxShadow[] | undefined): ShadowIn[] {
+  if (!list?.length) return []
+  if (list.length > MAX_SHADOWS) warnOnce(`boxShadow holds at most ${MAX_SHADOWS} shadows`)
+  return shadowsIn(list.map(s => ({
+    x: s.offsetX ?? 0,
+    y: s.offsetY ?? 0,
+    blur: s.blurRadius ?? 0,
+    spread: s.spreadDistance ?? 0,
+    color: color(s.color),
+    inset: !!s.inset,
+  })))
+}
+
+const shadowKey = (list: readonly ShadowIn[]) =>
+  list.map(s => `${s.x},${s.y},${s.blur},${s.spread},${s.color},${+s.inset}`).join(";")
 
 /** A variant block's values in wire form (`undefined`: none). Each
  * layout key applies on its own, over the base and less specific
@@ -818,7 +849,8 @@ function variantValues(n: HostNode, block: Record<string, any>, hidden: boolean)
     if (block.borderColor !== undefined) v.borderColor = color(block.borderColor)
     if (block.borderWidth !== undefined) v.borderWidth = block.borderWidth
     if (block.borderRadius !== undefined) v.radius = block.borderRadius
-  } else if (["backgroundColor", "borderColor", "borderWidth", "borderRadius"].some(k => k in block)) {
+    if (block.boxShadow !== undefined) v.shadows = shadowList(block.boxShadow)
+  } else if (["backgroundColor", "borderColor", "borderWidth", "borderRadius", "boxShadow"].some(k => k in block)) {
     warnOnce("a Text variant sets no box paint: wrap it in a View")
   }
   if (block.color !== undefined) v.color = color(block.color)
@@ -1786,12 +1818,17 @@ export class CraieHost {
       const oldR = oldProps.borderRadius ?? 0, newR = props.borderRadius ?? 0
       const oldBc = color(oldProps.borderColor), newBc = color(props.borderColor)
       const oldBw = oldProps.borderWidth ?? 0, newBw = props.borderWidth ?? 0
-      if (oldBg !== newBg || oldR !== newR || oldBc !== newBc || oldBw !== newBw) {
+      const shadows = oldProps.boxShadow === props.boxShadow ? undefined : shadowList(props.boxShadow)
+      const newShadows = shadows && shadowKey(shadows) !== shadowKey(shadowList(oldProps.boxShadow))
+        ? shadows
+        : undefined
+      if (oldBg !== newBg || oldR !== newR || oldBc !== newBc || oldBw !== newBw || newShadows) {
         enc.paint(
           id,
           oldBg !== newBg ? newBg : undefined,
           oldR !== newR ? newR : undefined,
           oldBc !== newBc || oldBw !== newBw ? { color: newBc, width: newBw } : undefined,
+          newShadows,
         )
       }
     }

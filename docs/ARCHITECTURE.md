@@ -195,7 +195,10 @@ carries multiline (bit 0) and the submit key (bits 1 and 2). Commands
 add `InsertText` (a paste claim's answer) and `WriteClipboard` (copy
 and cut; NIL may send it), then (protocol 13) `Measure` (a request
 u32) and `Present` (NIL only: a request u32, flags with rest in bit 0,
-and a path string or NIL). The spatial op's mask carries z (bit 2, an
+and a path string or NIL). The paint op's mask gains bit 3 (protocol
+14): the box shadows, a count u8 (at most 8) then per shadow x, y,
+blur, spread (f32), a color u32 and flags (bit 0 inset); variant values
+carry the same list under bit 15. The spatial op's mask carries z (bit 2, an
 i32; work item 4), and the layer op (0x22: id, then the owner or NIL)
 makes a node a layer container. The state family (0xB0, protocol 4, work
 item 5): `STATES` sets a scope's app bits (u64; the input bits are
@@ -726,7 +729,23 @@ position, paint, chunk; and triangle indices), with up to four
 same-kind segments in paint order (step 5a). A gradient paint is a run
 of words in the paint pool (kind and stop count, geometry, the
 chunk-local to gradient affine, then offset and color per stop), so
-meshes need no second paint table. A placement table (offset, transform record, clip) positions
+meshes need no second paint table. A box shadow (protocol 14,
+`shadow.rs`) is a `RectInstance` in shadow mode: its rect and radius
+are the shadow's shape (the box moved by the offset and grown by the
+spread, CSS's radius rule included), its border width the Gaussian's σ
+(half the CSS blur), its fill the color, and its border slot a paint
+record of the box it is cut against (the border box for an outer
+shadow, the padding box for an inset one). The shader takes a rounded
+rect convolved with the Gaussian analytically (erf along x, four
+samples along y, as Zed's GPUI; a hard antialiased edge under a
+quarter pixel of σ), then keeps what lies outside the box (outer) or
+inside it less the shape (inset); shape and box snap like the box's
+fill, so a 1-point ring lands on its edge. A node's shadows draw in its
+own chunk: outer ones before its fill, the last listed lowest, inset
+ones after it, under its content. Their rects are reserved in paint
+order and written after the kind's own paint slots, which keep their
+numbers. A shadow list rebuilds the chunk; it does not tween.
+A placement table (offset, transform record, clip) positions
 each chunk. Transform records exist for the window root, scroll
 content, and transformed subtrees; all other nodes draw in their
 nearest record's space at an offset. The draw order, layer table,
@@ -1283,7 +1302,7 @@ ROLE op's reported states since 6; press flags, pressable spans, and
 `dialog` and `alertdialog` roles since 8; transform parts since 9;
 focus groups and the `tab` and `tablist` roles since 10; keyframe
 animations and the `ENVIRONMENT` event since 11; exits since 12;
-observations since 13). The session hands
+observations since 13; box shadows since 14). The session hands
 JS its output in native order: acks sit between event frames where they happened, so the ack
 of a transaction never overtakes an event raised before it applied,
 and the facade retires a claim set's old handlers on that ack.

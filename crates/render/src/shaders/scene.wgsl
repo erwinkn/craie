@@ -43,6 +43,9 @@ struct VsOut {
     @location(4) @interpolate(flat) aux: vec4<f32>,
     // kind, clip, page, flags (rect: has border; glyph: color bitmap).
     // Path: kind 2, clip, gradient record (paint index), is gradient.
+    // Shadow: kind 3, clip, the box's radius (f32 bits), inset. Its
+    // `local` and `half` are the shape's, `params` its radius and σ, and
+    // `aux` the box's center (from the shape's) and half size.
     @location(5) @interpolate(flat) info: vec4<u32>,
 };
 
@@ -103,6 +106,9 @@ fn vs_main(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> 
     let kind = ii >> 31u;
     let idx = ii & 0x7fffffffu;
     var out: VsOut;
+    if (kind == 0u && (rects[idx].flags & 2u) != 0u) {
+        return shadow_vertex(rects[idx], corner);
+    }
     if (kind == 0u) {
         let r = rects[idx];
         let p = placements[r.chunk];
@@ -157,6 +163,127 @@ fn vs_main(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> 
         out.info = vec4<u32>(1u, p.clip, ras.page & 0xffffu, ras.page >> 16u);
     }
     return out;
+}
+
+// A box shadow (prim.rs `FLAG_SHADOW`): the quad covers the blurred
+// shape (3 σ past it) for an outer shadow, the box for an inset one.
+// Under an axis-aligned world the shape and the box snap like the box's
+// fill, so a ring lands on the fill's edge.
+fn shadow_vertex(r: RectI, corner: vec2<f32>) -> VsOut {
+    let p = placements[r.chunk];
+    let w = worlds[p.transform];
+    let origin = chunk_origin(w, p);
+    let s = sqrt(abs(w.a * w.d - w.b * w.c));
+    let at = r.border;
+    let box_lo = vec2<f32>(pf(at), pf(at + 1u));
+    let box_size = vec2<f32>(pf(at + 2u), pf(at + 3u));
+    let inset = (r.flags & 4u) != 0u;
+    let sigma = r.border_width * s;
+    let margin = 3.0 * sigma + 1.0;
+    var out: VsOut;
+    if ((w.flags & 1u) != 0u) {
+        var s0 = origin + linear(w, vec2<f32>(r.x, r.y));
+        var s1 = origin + linear(w, vec2<f32>(r.x + r.w, r.y + r.h));
+        var b0 = origin + linear(w, box_lo);
+        var b1 = origin + linear(w, box_lo + box_size);
+        if (snaps(w)) {
+            s0 = round(s0);
+            s1 = round(s1);
+            b0 = round(b0);
+            b1 = round(b1);
+        }
+        let slo = min(s0, s1);
+        let shi = max(s0, s1);
+        let blo = min(b0, b1);
+        let bhi = max(b0, b1);
+        var qlo = slo - vec2<f32>(margin);
+        var qhi = shi + vec2<f32>(margin);
+        if (inset) {
+            qlo = blo;
+            qhi = bhi;
+        }
+        let dev = mix(qlo, qhi, corner);
+        let center = (slo + shi) * 0.5;
+        out.pos = to_ndc(dev);
+        out.local = dev - center;
+        out.half = (shi - slo) * 0.5;
+        out.aux = vec4<f32>((blo + bhi) * 0.5 - center, (bhi - blo) * 0.5);
+    } else {
+        // Rotated or skewed: the shape's own frame, scaled to device px.
+        let center = vec2<f32>(r.x + r.w * 0.5, r.y + r.h * 0.5);
+        var qlo = vec2<f32>(r.x, r.y) - vec2<f32>(margin / s);
+        var qsize = vec2<f32>(r.w, r.h) + vec2<f32>(2.0 * margin / s);
+        if (inset) {
+            qlo = box_lo;
+            qsize = box_size;
+        }
+        let l = qlo + corner * qsize;
+        out.pos = to_ndc(origin + linear(w, l));
+        out.local = (l - center) * s;
+        out.half = vec2<f32>(r.w, r.h) * 0.5 * s;
+        out.aux = vec4<f32>((box_lo + box_size * 0.5 - center) * s, box_size * 0.5 * s);
+    }
+    out.params = vec2<f32>(r.radius * s, sigma);
+    out.color = unpack(paints[r.fill]);
+    out.info = vec4<u32>(3u, p.clip, bitcast<u32>(pf(at + 4u) * s), select(0u, 1u, inset));
+    return out;
+}
+
+// erf on both lanes (Abramowitz and Stegun 7.1.27, error under 5e-4).
+fn erf2(v: vec2<f32>) -> vec2<f32> {
+    let s = sign(v);
+    let a = abs(v);
+    let r1 = 1.0 + (0.278393 + (0.230389 + (0.000972 + 0.078108 * a) * a) * a) * a;
+    let r2 = r1 * r1;
+    return s - s / (r2 * r2);
+}
+
+fn gaussian(x: f32, sigma: f32) -> f32 {
+    return exp(-(x * x) / (2.0 * sigma * sigma)) / (2.5066283 * sigma);
+}
+
+// The blurred shape's coverage along one row: exact in x (erf), for a
+// row `y` from the center of a rounded rect.
+fn blur_along_x(x: f32, y: f32, sigma: f32, corner: f32, half: vec2<f32>) -> f32 {
+    let delta = min(half.y - corner - abs(y), 0.0);
+    let curved = half.x - corner + sqrt(max(0.0, corner * corner - delta * delta));
+    let integral = 0.5 + 0.5 * erf2((x + vec2<f32>(-curved, curved)) * (0.70710678 / sigma));
+    return integral.y - integral.x;
+}
+
+// A rounded rect convolved with a Gaussian of `sigma` at `p` (from its
+// center): exact along x, four samples along y over the ±3 σ the kernel
+// reaches (Evan Wallace's method, as Zed's GPUI draws shadows).
+fn blurred_rect(p: vec2<f32>, half: vec2<f32>, radius: f32, sigma: f32) -> f32 {
+    let corner = min(radius, min(half.x, half.y));
+    let start = clamp(-3.0 * sigma, p.y - half.y, p.y + half.y);
+    let end = clamp(3.0 * sigma, p.y - half.y, p.y + half.y);
+    let step = (end - start) / 4.0;
+    var y = start + step * 0.5;
+    var alpha = 0.0;
+    for (var i = 0; i < 4; i = i + 1) {
+        alpha = alpha + blur_along_x(p.x, p.y - y, sigma, corner, half) * gaussian(y, sigma) * step;
+        y = y + step;
+    }
+    return alpha;
+}
+
+// A shadow's coverage: the blurred shape (a hard, antialiased edge
+// under a quarter pixel of σ), outside the box for an outer shadow; for
+// an inset one, the box less the blurred shape.
+fn shadow_coverage(in: VsOut) -> f32 {
+    let sigma = in.params.y;
+    var a: f32;
+    if (sigma < 0.25) {
+        a = clamp(0.5 - sd_rect(in.local, in.half, in.params.x), 0.0, 1.0);
+    } else {
+        a = blurred_rect(in.local, in.half, in.params.x, sigma);
+    }
+    let inside = clamp(0.5 - sd_rect(in.local - in.aux.xy, in.aux.zw, bitcast<f32>(in.info.z)), 0.0, 1.0);
+    if (in.info.w != 0u) {
+        return inside * (1.0 - a);
+    }
+    return a * (1.0 - inside);
 }
 
 @vertex
@@ -347,6 +474,9 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
             let c = in.color;
             out = vec4<f32>(c.rgb * c.a, c.a) * clamp(0.5 - d, 0.0, 1.0);
         }
+    } else if (in.info.x == 3u) {
+        let c = in.color;
+        out = vec4<f32>(c.rgb * c.a, c.a) * shadow_coverage(in);
     } else if (in.info.w != 0u) {
         // Color bitmap glyph (emoji): the atlas stores sRGB-encoded RGBA;
         // decode then premultiply.
