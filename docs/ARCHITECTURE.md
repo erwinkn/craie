@@ -195,7 +195,13 @@ carries multiline (bit 0) and the submit key (bits 1 and 2). Commands
 add `InsertText` (a paste claim's answer) and `WriteClipboard` (copy
 and cut; NIL may send it), then (protocol 13) `Measure` (a request
 u32) and `Present` (NIL only: a request u32, flags with rest in bit 0,
-and a path string or NIL). The spatial op's mask carries z (bit 2, an
+and a path string or NIL). The paint op's mask gains bit 3 (protocol
+14): the box shadows, a count u8 (at most 8) then per shadow x, y,
+blur, spread (f32), a color u32 and flags (bit 0 inset); variant values
+carry the same list under bit 15. A span row's former reserved byte is
+its feature byte (protocol 15): tabular digits (bit 0) and, read from
+span zero, the paragraph's alignment (bits 1 and 2: start, left,
+center, right); unknown bits fail decoding. The spatial op's mask carries z (bit 2, an
 i32; work item 4), and the layer op (0x22: id, then the owner or NIL)
 makes a node a layer container. The state family (0xB0, protocol 4, work
 item 5): `STATES` sets a scope's app bits (u64; the input bits are
@@ -441,7 +447,13 @@ Parley's greedy line breaking and line metrics under UAX #14
 (overflowing whitespace hangs and never breaks by itself, so it stays
 on the line a following hard break closes; no-break spaces are
 content),
-then UAX #9 L1 and L2 per line, in place. A segment whose L1 level has
+then UAX #9 L1 and L2 per line, in place, then aligns each line in the
+line box (the wrap width, else the widest line; protocol 15): span
+zero's alignment puts the line's visible content (its advance less
+trailing whitespace) at the left, center or right, the trailing space
+hanging past it, and `Start` follows the paragraph's direction. A span
+with tabular digits shapes with OpenType `tnum` (items split on it, and
+it joins the shape plan's key). A segment whose L1 level has
 another direction than its run places its clusters in reverse, and the
 mapping reads that direction. A width change does no shaping and, once
 the stores have grown, no allocation. Measured against Parley in E01:
@@ -726,7 +738,29 @@ position, paint, chunk; and triangle indices), with up to four
 same-kind segments in paint order (step 5a). A gradient paint is a run
 of words in the paint pool (kind and stop count, geometry, the
 chunk-local to gradient affine, then offset and color per stop), so
-meshes need no second paint table. A placement table (offset, transform record, clip) positions
+meshes need no second paint table. A box shadow (protocol 14,
+`shadow.rs`) is a `RectInstance` in shadow mode: its rect and radius
+are the shadow's shape (the box moved by the offset and grown by the
+spread; an outer shadow's radius is CSS's outset-adjusted radius of the
+box's used radius, so a circle stays a circle and a square corner
+square), its border width the Gaussian's σ (half the CSS blur), its
+fill the color, and its border slot a paint record of the box it is cut
+against (the border box for an outer shadow, the box inside the painted
+border for an inset one). The shader works in the shape's own units,
+where σ is isotropic, so a scaled or rotated box carries its blur as
+CSS's transform does: a rounded rect convolved with the Gaussian
+analytically (erf along x, four samples along y, as Zed's GPUI), then
+what lies outside the box (outer) or inside it less the shape (inset).
+Under a quarter pixel of σ the shadow is hard: the antialiased
+difference of shape and box, so a shadow coincident with its box casts
+nothing, and an empty shape casts nothing either. Shape and box snap
+like the box's fill, so a 1-point ring lands on its edge. Chunk
+admission (`near`) widens a box by its shadows' reach. A node's shadows draw in its
+own chunk: outer ones before its fill, the last listed lowest, inset
+ones after it, under its content. Their rects are reserved in paint
+order and written after the kind's own paint slots, which keep their
+numbers. A shadow list rebuilds the chunk; it does not tween.
+A placement table (offset, transform record, clip) positions
 each chunk. Transform records exist for the window root, scroll
 content, and transformed subtrees; all other nodes draw in their
 nearest record's space at an offset. The draw order, layer table,
@@ -1283,7 +1317,8 @@ ROLE op's reported states since 6; press flags, pressable spans, and
 `dialog` and `alertdialog` roles since 8; transform parts since 9;
 focus groups and the `tab` and `tablist` roles since 10; keyframe
 animations and the `ENVIRONMENT` event since 11; exits since 12;
-observations since 13). The session hands
+observations since 13; box shadows since 14; text alignment and
+tabular digits since 15). The session hands
 JS its output in native order: acks sit between event frames where they happened, so the ack
 of a transaction never overtakes an event raised before it applied,
 and the facade retires a claim set's old handlers on that ack.

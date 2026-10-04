@@ -530,13 +530,20 @@ pub fn validate(host: &Host, txn: &Transaction<'_>) -> Result<Validated, WireErr
                 }
             }
             Mutation::Paint {
-                id, radius, border, ..
+                id,
+                radius,
+                border,
+                shadows,
+                ..
             } => {
                 if !o.kind(*id).is_some_and(NodeKind::has_box) {
                     return Err(invalid("paint on a node without a box"));
                 }
                 if radius.is_some_and(|r| !finite(r)) || border.is_some_and(|(_, w)| !finite(w)) {
                     return Err(invalid("non-finite paint"));
+                }
+                if shadows.is_some_and(|s| !s.valid()) {
+                    return Err(invalid("shadow out of range"));
                 }
             }
             Mutation::Paragraph { id, text, spans } => {
@@ -970,13 +977,20 @@ impl Ui {
                 fill,
                 radius,
                 border,
+                shadows,
             } => match self.base_mut(*id) {
                 Some(b) => {
                     b.fill = fill.unwrap_or(b.fill);
                     b.radius = radius.map_or(b.radius, |r| r.max(0.0));
                     b.border = border.map_or(b.border, |(c, w)| (c, w.max(0.0)));
+                    b.shadows = shadows.unwrap_or(b.shadows);
                 }
-                None => self.declare_paint(NodeId(*id), *fill, *radius, *border),
+                None => {
+                    self.declare_paint(NodeId(*id), *fill, *radius, *border);
+                    if let Some(s) = shadows {
+                        self.set_shadows(NodeId(*id), *s);
+                    }
+                }
             },
             Mutation::Color { id, color } => match self.base_mut(*id) {
                 Some(b) => b.color = *color,
@@ -1711,6 +1725,24 @@ impl Ui {
         if geometry || color {
             self.host.revs.paint.bump();
         }
+    }
+}
+
+impl Ui {
+    /// Replaces a node's box shadows: its chunk rebuilds (shadows are
+    /// geometry in it). Shadows don't tween: a transition snaps them.
+    pub(crate) fn set_shadows(&mut self, node: NodeId, shadows: crate::shadow::Shadows) {
+        let before = self.host.shadows.get(&node.0).copied().unwrap_or_default();
+        if before == shadows {
+            return;
+        }
+        if shadows.is_empty() {
+            self.host.shadows.remove(&node.0);
+        } else {
+            self.host.shadows.insert(node.0, shadows);
+        }
+        self.host.dirty.content.push(node.0);
+        self.host.revs.paint.bump();
     }
 }
 

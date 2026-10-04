@@ -39,6 +39,10 @@ fn js_fixture_decodes_and_executes() {
     assert_eq!(txn.families[s1.family as usize], "monospace");
     assert_eq!((s1.decoration, s1.letter_spacing), (3, 0.5));
     assert_eq!((s1.weight, s1.italic), (700, true));
+    // Span zero's alignment, span one's tabular digits.
+    use craie_text::paragraph::Align;
+    assert_eq!((s0.align, s0.tabular), (Align::Center, false));
+    assert_eq!((s1.align, s1.tabular), (Align::Start, true));
 
     let mut ui = Ui::new(1.0);
     assert_eq!(ui.apply(&buf).unwrap(), 99);
@@ -61,6 +65,26 @@ fn js_fixture_decodes_and_executes() {
     assert_eq!(paint.fill, 0x1122_33ff);
     assert_eq!(paint.radius, 6.5);
     assert_eq!((paint.border_color, paint.border_width), (0xff00_00ff, 2.0));
+    // Box shadows: a ring, then an inset drop.
+    use craie_ui::shadow::Shadow;
+    assert_eq!(
+        host.shadows[&0].as_slice(),
+        [
+            Shadow {
+                spread: 1.0,
+                color: 0x3030_30ff,
+                ..Shadow::default()
+            },
+            Shadow {
+                x: 0.5,
+                y: 1.0,
+                blur: 2.0,
+                spread: -1.0,
+                color: 0x0000_001f,
+                inset: true,
+            },
+        ]
+    );
 
     // Spatial: the matrix translateX(3) · scale(2), the parts, opacity
     // 0.75, z -2.
@@ -299,6 +323,15 @@ fn js_fixture_decodes_and_executes() {
         value_field::TRANSFORM | axes
     );
     assert_eq!(narrow.parts.translate, [2.0, 0.0, -0.5, 0.0]);
+    assert_eq!(
+        narrow.shadows.as_slice(),
+        [Shadow {
+            y: 12.0,
+            blur: 24.0,
+            color: 0x0000_0014,
+            ..Shadow::default()
+        }]
+    );
     assert_eq!((narrow.parts.rotate, narrow.parts.scale[1]), (0.25, 0.5));
     assert_eq!(
         narrow.layout.to_taffy().size.height,

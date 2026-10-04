@@ -26,6 +26,7 @@ import {
 } from "react-reconciler/constants.js"
 import {
   CraieHost,
+  type BoxShadow,
   onFrameStats as onFrameStatsInternal,
   warnOnce,
   type ClipboardEvt,
@@ -99,6 +100,7 @@ export {
 export type { Animations } from "./motion.js"
 export type {
   ClipboardEvt,
+  BoxShadow,
   ContextMenuEvt,
   DropEvt,
   ImageErrorEvt,
@@ -317,6 +319,8 @@ export interface VariantStyle {
   borderColor?: string | number
   borderWidth?: number
   borderRadius?: number
+  /** Replaces the box shadows while the variant holds. */
+  boxShadow?: readonly BoxShadow[]
   /** The color text, inputs and `currentColor` drawings inherit. */
   color?: string | number
   /** Layout, `opacity` and the transform parts (`translate`, `rotate`,
@@ -390,6 +394,11 @@ export interface ViewProps extends ListenerProps, StateProps, Variants, MotionPr
   borderRadius?: number
   borderColor?: string | number
   borderWidth?: number
+  /** Box shadows, first on top (React Native's structured
+   * `boxShadow`): an outer one shows outside the box, an inset one
+   * inside its border. At most 8; they don't tween (a transition
+   * snaps them). */
+  boxShadow?: readonly BoxShadow[]
   /** Participates in Tab traversal. */
   focusable?: boolean
   /** The node an enclosing FocusTrap focuses when it activates (the
@@ -441,6 +450,13 @@ export interface TextProps extends ListenerProps, PressProps, Variants, MotionPr
   /** Absolute line height, logical points (per paragraph: the outermost
    * Text's). */
   lineHeight?: number
+  /** Where lines sit in the Text's box (per paragraph: the outermost
+   * Text's). `auto` follows the direction; `justify` is not drawn yet,
+   * and draws as `auto`. */
+  textAlign?: "auto" | "left" | "center" | "right" | "justify"
+  /** React Native's `fontVariant`: `tabular-nums` gives every figure one
+   * advance (OpenType `tnum`), so counters and timers don't shift. */
+  fontVariant?: readonly ("tabular-nums" | "proportional-nums")[]
   /** Accessibility name; defaults to the text content. */
   accessibilityLabel?: string
   accessibilityRole?: AccessibilityRole
@@ -454,6 +470,11 @@ export interface SurfaceProps extends ListenerProps, Variants, MotionProps {
   borderRadius?: number
   borderColor?: string | number
   borderWidth?: number
+  /** Box shadows, first on top (React Native's structured
+   * `boxShadow`): an outer one shows outside the box, an inset one
+   * inside its border. At most 8; they don't tween (a transition
+   * snaps them). */
+  boxShadow?: readonly BoxShadow[]
   /** Native surface kind (see `SURFACE`); Rust hosts may register more. */
   kind: number
   /** Up to four kind-specific parameters: colors or `{ f32 }` values. */
@@ -482,6 +503,11 @@ export interface TextInputProps extends ListenerProps, Omit<StateProps, "disable
   borderRadius?: number
   borderColor?: string | number
   borderWidth?: number
+  /** Box shadows, first on top (React Native's structured
+   * `boxShadow`): an outer one shows outside the box, an inset one
+   * inside its border. At most 8; they don't tween (a transition
+   * snaps them). */
+  boxShadow?: readonly BoxShadow[]
   fontSize?: number
   /** The text color, as a Text's: without it the input inherits its
    * ancestors' color (white at the root), and variants apply to it. */
@@ -626,6 +652,11 @@ interface VectorBase extends ListenerProps, Variants, MotionProps {
   borderRadius?: number
   borderColor?: string | number
   borderWidth?: number
+  /** Box shadows, first on top (React Native's structured
+   * `boxShadow`): an outer one shows outside the box, an inset one
+   * inside its border. At most 8; they don't tween (a transition
+   * snaps them). */
+  boxShadow?: readonly BoxShadow[]
   accessibilityLabel?: string
   accessibilityRole?: AccessibilityRole
   hidden?: boolean
@@ -697,6 +728,11 @@ export interface ImageProps extends ListenerProps, Variants, MotionProps {
   borderRadius?: number
   borderColor?: string | number
   borderWidth?: number
+  /** Box shadows, first on top (React Native's structured
+   * `boxShadow`): an outer one shows outside the box, an inset one
+   * inside its border. At most 8; they don't tween (a transition
+   * snaps them). */
+  boxShadow?: readonly BoxShadow[]
   /** The encoded image (PNG, JPEG, WebP, GIF's first frame): a URL
    * (http, https, data, blob, file) or a path, fetched once per change,
    * or the bytes, compared by identity (a new `Uint8Array` each render is

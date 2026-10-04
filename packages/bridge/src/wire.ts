@@ -5,8 +5,9 @@
 //   strings: count x (u32 byte_len + utf8)
 //   styles:  count x (u64 presence mask + fields in schema order)
 //   spans:   count x 28 bytes (start u32, font_size f32, color u32,
-//            weight u16, flags u8, reserved u8, family u32, letter
-//            spacing f32, line height f32)
+//            weight u16, flags u8, features u8 (tabular, span zero's
+//            alignment), family u32, letter spacing f32, line height
+//            f32)
 //   ops:     u8-tagged records to the end of the buffer
 //
 // Strings, styles, and spans are per-transaction tables: ops refer to
@@ -14,7 +15,7 @@
 // across transactions.
 
 const MAGIC = 0x3257_5243 // "CRW2" little-endian
-export const VERSION = 13
+export const VERSION = 15
 export const NIL = 0xffff_ffff // no node / append / default style
 
 const enum Op {
@@ -275,13 +276,63 @@ export interface ItemDesc {
 const SPATIAL_FIELD = {
   TRANSFORM: 1 << 0, OPACITY: 1 << 1, Z: 1 << 2, TRANSLATE: 1 << 3, ROTATE: 1 << 4, SCALE: 1 << 5,
 } as const
-const PAINT_FIELD = { FILL: 1 << 0, RADIUS: 1 << 1, BORDER: 1 << 2 } as const
+const PAINT_FIELD = { FILL: 1 << 0, RADIUS: 1 << 1, BORDER: 1 << 2, SHADOWS: 1 << 3 } as const
+
+/** Box shadows a node may hold (shadow.rs `MAX_SHADOWS`). */
+export const MAX_SHADOWS = 8
+/** Offsets, blur and spread native accepts, ± points (`MAX_EXTENT`). */
+const SHADOW_EXTENT = 4096
+
+/** One box shadow on the wire: points, a color 0xRRGGBBAA. */
+export interface ShadowIn {
+  x: number
+  y: number
+  blur: number
+  spread: number
+  color: number
+  inset: boolean
+}
+
+/** A shadow list as native accepts it: at most `MAX_SHADOWS`, numbers
+ * finite and in range (blur at least 0). */
+export function shadowsIn(list: readonly ShadowIn[]): ShadowIn[] {
+  const n = (v: number, lo: number) =>
+    Number.isFinite(v) ? Math.min(SHADOW_EXTENT, Math.max(lo, v)) : 0
+  return list.slice(0, MAX_SHADOWS).map(s => ({
+    x: n(s.x, -SHADOW_EXTENT),
+    y: n(s.y, -SHADOW_EXTENT),
+    blur: n(s.blur, 0),
+    spread: n(s.spread, -SHADOW_EXTENT),
+    color: s.color >>> 0,
+    inset: !!s.inset,
+  }))
+}
+
+function putShadows(b: Writer, list: readonly ShadowIn[]) {
+  b.u8(list.length)
+  for (const s of list) {
+    b.f32(s.x)
+    b.f32(s.y)
+    b.f32(s.blur)
+    b.f32(s.spread)
+    b.u32(s.color >>> 0)
+    b.u8(s.inset ? 1 : 0)
+  }
+}
 const SPAN_ITALIC = 1 << 0
 const SPAN_UNDERLINE = 1 << 1
 const SPAN_LINE_THROUGH = 1 << 2
 const SPAN_INHERIT_COLOR = 1 << 3
 const SPAN_PRESSABLE = 1 << 4
 const SPAN_PRESS_JOINS = 1 << 5
+// A span row's second flag byte (wire.rs `span_feature`).
+const SPAN_TABULAR = 1 << 0
+const SPAN_ALIGN_SHIFT = 1
+
+/** A paragraph's alignment — mirror wire.rs `span_feature` (span zero's
+ * applies): `auto` follows the direction, the others are physical. */
+export const TEXT_ALIGN = { auto: 0, left: 1, center: 2, right: 3 } as const
+export type TextAlign = keyof typeof TEXT_ALIGN
 /** Span decoration bits (`TextSpanIn.decoration`). */
 export const DECORATION = { underline: 1, lineThrough: 2 } as const
 
@@ -847,6 +898,10 @@ export interface TextSpanIn {
   /** A nested Text with `onPress`: presses on the span go to its text
    * node, with the span's index. */
   pressable?: boolean
+  /** Tabular digits (OpenType `tnum`). */
+  tabular?: boolean
+  /** The paragraph's alignment; span zero's applies. */
+  align?: TextAlign
   /** A pressable span of the same pressable Text as the span before it
    * (`<Text onPress>See <Text weight={700}>logs</Text></Text>`): a
    * press on one and a release on the other activate. */
@@ -950,6 +1005,8 @@ export interface VariantValues {
   /** Layout values: each key it sets applies on its own (`height`
    * alone keeps the width that applies). */
   layout?: StyleProps
+  /** Replaces the box shadows while the variant holds. */
+  shadows?: readonly ShadowIn[]
 }
 
 /** A SPATIAL op's fields; absent ones stay as they are. */
@@ -987,7 +1044,7 @@ const VALUE_FIELD = {
   FILL: 1 << 0, BORDER_COLOR: 1 << 1, RADIUS: 1 << 2, COLOR: 1 << 3,
   OPACITY: 1 << 4, TRANSFORM: 1 << 5, LAYOUT: 1 << 6, BORDER_WIDTH: 1 << 7,
   TRANSLATE_X: 1 << 8, TRANSLATE_Y: 1 << 9, ROTATE: 1 << 10, SCALE_X: 1 << 11, SCALE_Y: 1 << 12,
-  TRANSITIONS: 1 << 13, ANIMATIONS: 1 << 14,
+  TRANSITIONS: 1 << 13, ANIMATIONS: 1 << 14, SHADOWS: 1 << 15,
 } as const
 // Keyframe-only bits (keyframes.rs `frame_field`; exits only).
 const FRAME_FIELD = { WIDTH: 1 << 13, HEIGHT: 1 << 14 } as const
@@ -1440,11 +1497,14 @@ export class Encoder {
     this.ops.u32(owner)
   }
   /** Masked paint update: fill, corner radius, border (color, width). */
+  /** A box's paint; absent fields stay. `shadows` replaces the box
+   * shadows (`shadowsIn` first: native rejects what it doesn't). */
   paint(
     id: number,
     fill?: number,
     radius?: number,
     border?: { color: number; width: number },
+    shadows?: readonly ShadowIn[],
   ) {
     const b = this.ops
     b.u8(Op.Paint)
@@ -1452,11 +1512,13 @@ export class Encoder {
     b.u8(
       (fill !== undefined ? PAINT_FIELD.FILL : 0) |
         (radius !== undefined ? PAINT_FIELD.RADIUS : 0) |
-        (border !== undefined ? PAINT_FIELD.BORDER : 0),
+        (border !== undefined ? PAINT_FIELD.BORDER : 0) |
+        (shadows !== undefined ? PAINT_FIELD.SHADOWS : 0),
     )
     if (fill !== undefined) b.u32(fill >>> 0)
     if (radius !== undefined) b.f32(radius)
     if (border !== undefined) { b.u32(border.color >>> 0); b.f32(border.width) }
+    if (shadows !== undefined) putShadows(b, shadows)
   }
   /** A paragraph: UTF-8 text plus its style span list. Span starts are
    * UTF-8 byte offsets; span zero starts at 0. */
@@ -1468,6 +1530,7 @@ export class Encoder {
       sp.start, sp.fontSize, sp.color >>> 0, sp.weight ?? 400, sp.italic ? 1 : 0,
       sp.decoration ?? 0, sp.letterSpacing ?? 0, sp.lineHeight ?? 0, sp.fontFamily || null,
       sp.inheritColor ? 1 : 0, sp.pressable ? 1 : 0, sp.pressJoins ? 1 : 0,
+      sp.tabular ? 1 : 0, sp.align ?? "auto",
     ]))
     let start = this.spanIx.get(key)
     if (start === undefined) {
@@ -1488,7 +1551,7 @@ export class Encoder {
           (sp.pressable ? SPAN_PRESSABLE : 0) |
           (sp.pressJoins ? SPAN_PRESS_JOINS : 0),
         )
-        w.u8(0)
+        w.u8((sp.tabular ? SPAN_TABULAR : 0) | TEXT_ALIGN[sp.align ?? "auto"] << SPAN_ALIGN_SHIFT)
         w.u32(sp.fontFamily ? this.strRef(sp.fontFamily) : NIL)
         w.f32(sp.letterSpacing ?? 0)
         w.f32(sp.lineHeight ?? 0)
@@ -1826,7 +1889,8 @@ export class Encoder {
           (has("scaleX") ? VALUE_FIELD.SCALE_X : 0) |
           (has("scaleY") ? VALUE_FIELD.SCALE_Y : 0) |
           (v.transitions ? VALUE_FIELD.TRANSITIONS : 0) |
-          (m.refs ? VALUE_FIELD.ANIMATIONS : 0),
+          (m.refs ? VALUE_FIELD.ANIMATIONS : 0) |
+          (has("shadows") ? VALUE_FIELD.SHADOWS : 0),
       )
       if (x.fill !== undefined) b.u32(x.fill >>> 0)
       if (x.borderColor !== undefined) b.u32(x.borderColor >>> 0)
@@ -1845,6 +1909,7 @@ export class Encoder {
       if (x.rotate !== undefined) b.f32(x.rotate)
       if (x.scaleX !== undefined) b.f32(x.scaleX)
       if (x.scaleY !== undefined) b.f32(x.scaleY)
+      if (x.shadows !== undefined) putShadows(b, x.shadows)
       if (v.transitions) {
         b.u8(m.props.length)
         m.props.forEach((p, i) => {

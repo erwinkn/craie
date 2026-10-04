@@ -8,7 +8,8 @@
 //! strings: string_count × (u32 byte_len + utf8 bytes)
 //! styles:  style_count × (u64 presence mask + fields in schema order)
 //! spans:   span_count × 28 bytes (start u32, font_size f32, color u32,
-//!          weight u16, flags u8, reserved u8, family u32 string ref or
+//!          weight u16, flags u8, features u8 (`span_feature`: tabular,
+//!          span zero's alignment), family u32 string ref or
 //!          NIL, letter_spacing f32, line_height f32)
 //! ops:     u8-tagged records to the end of the buffer
 //! ```
@@ -46,7 +47,7 @@ use crate::mutation::{
 pub use crate::mutation::{group_flag, interaction_flag, trap_flag};
 
 pub const MAGIC: u32 = 0x3257_5243; // "CRW2"
-pub const VERSION: u16 = 13;
+pub const VERSION: u16 = 15;
 
 pub mod op {
     // structure
@@ -160,6 +161,26 @@ pub mod paint_field {
     pub const RADIUS: u8 = 1 << 1;
     /// border_color u32 + border_width f32, written together.
     pub const BORDER: u8 = 1 << 2;
+    /// count u8 (at most `shadow::MAX_SHADOWS`) | count × shadow
+    /// (`put_shadows`): replaces the box shadows.
+    pub const SHADOWS: u8 = 1 << 3;
+}
+
+/// Box shadows: count u8, then per shadow x, y, blur, spread f32,
+/// color u32, flags u8 (`shadow_flag`). 21 bytes each.
+fn put_shadows(out: &mut Vec<u8>, s: &crate::shadow::Shadows) {
+    out.push(s.as_slice().len() as u8);
+    for sh in s.as_slice() {
+        for v in [sh.x, sh.y, sh.blur, sh.spread] {
+            f32le(out, v);
+        }
+        u32le(out, sh.color);
+        out.push(if sh.inset {
+            crate::shadow::shadow_flag::INSET
+        } else {
+            0
+        });
+    }
 }
 
 /// COMMAND op sub-tags.
@@ -206,6 +227,16 @@ pub mod span_flag {
     /// The span continues the pressable before it (`TextSpan::press_joins`).
     pub const PRESS_JOINS: u8 = 1 << 5;
     pub const ALL: u8 = ITALIC | UNDERLINE | LINE_THROUGH | INHERIT_COLOR | PRESSABLE | PRESS_JOINS;
+}
+
+/// A span row's second flag byte (protocol 15; reserved, 0, before).
+pub mod span_feature {
+    /// Tabular digits (OpenType `tnum`).
+    pub const TABULAR: u8 = 1 << 0;
+    /// Bits 1 and 2: the paragraph's alignment (span zero's applies):
+    /// 0 start, 1 left, 2 center, 3 right.
+    pub const ALIGN_SHIFT: u8 = 1;
+    pub const ALL: u8 = TABULAR | 3 << ALIGN_SHIFT;
 }
 
 /// Bytes per span row.
@@ -510,6 +541,7 @@ pub fn encode(txn: &Transaction<'_>) -> Vec<u8> {
                 fill,
                 radius,
                 border,
+                shadows,
             } => {
                 ops.push(op::PAINT);
                 u32le(&mut ops, *id);
@@ -523,6 +555,9 @@ pub fn encode(txn: &Transaction<'_>) -> Vec<u8> {
                 if border.is_some() {
                     mask |= paint_field::BORDER;
                 }
+                if shadows.is_some() {
+                    mask |= paint_field::SHADOWS;
+                }
                 ops.push(mask);
                 if let Some(c) = fill {
                     u32le(&mut ops, *c);
@@ -533,6 +568,9 @@ pub fn encode(txn: &Transaction<'_>) -> Vec<u8> {
                 if let Some((c, w)) = border {
                     u32le(&mut ops, *c);
                     f32le(&mut ops, *w);
+                }
+                if let Some(s) = shadows {
+                    put_shadows(&mut ops, s);
                 }
             }
             Mutation::Paragraph { id, text, spans } => {
@@ -874,7 +912,14 @@ pub fn encode(txn: &Transaction<'_>) -> Vec<u8> {
             flags |= span_flag::PRESS_JOINS;
         }
         out.push(flags);
-        out.push(0);
+        use craie_text::paragraph::Align;
+        let align = match sp.align {
+            Align::Start => 0,
+            Align::Left => 1,
+            Align::Center => 2,
+            Align::Right => 3,
+        };
+        out.push((sp.tabular as u8 * span_feature::TABULAR) | (align << span_feature::ALIGN_SHIFT));
         let family = family_refs.get(sp.family as usize).copied().unwrap_or(NIL);
         out.extend_from_slice(&family.to_le_bytes());
         out.extend_from_slice(&sp.letter_spacing.to_le_bytes());
@@ -1044,10 +1089,17 @@ pub fn decode(buf: &[u8]) -> Result<Transaction<'_>, WireError> {
         let color = r.u32()?;
         let weight = r.u16()?;
         let flags = r.u8()?;
-        let _reserved = r.u8()?;
-        if flags & !span_flag::ALL != 0 {
+        let features = r.u8()?;
+        if flags & !span_flag::ALL != 0 || features & !span_feature::ALL != 0 {
             return Err(WireError::BadRef("span flags"));
         }
+        use craie_text::paragraph::Align;
+        let align = match features >> span_feature::ALIGN_SHIFT & 3 {
+            0 => Align::Start,
+            1 => Align::Left,
+            2 => Align::Center,
+            _ => Align::Right,
+        };
         let family_ref = r.u32()?;
         let letter_spacing = r.f32()?;
         let line_height = r.f32()?;
@@ -1076,6 +1128,8 @@ pub fn decode(buf: &[u8]) -> Result<Transaction<'_>, WireError> {
             letter_spacing,
             line_height,
             family,
+            tabular: features & span_feature::TABULAR != 0,
+            align,
         });
     }
     let string = |i: u32| -> Result<&str, WireError> {
@@ -1189,7 +1243,13 @@ pub fn decode(buf: &[u8]) -> Result<Transaction<'_>, WireError> {
             op::PAINT => {
                 let id = r.u32()?;
                 let mask = r.u8()?;
-                if mask & !(paint_field::FILL | paint_field::RADIUS | paint_field::BORDER) != 0 {
+                if mask
+                    & !(paint_field::FILL
+                        | paint_field::RADIUS
+                        | paint_field::BORDER
+                        | paint_field::SHADOWS)
+                    != 0
+                {
                     return Err(WireError::BadRef("paint mask"));
                 }
                 let fill = if mask & paint_field::FILL != 0 {
@@ -1207,11 +1267,17 @@ pub fn decode(buf: &[u8]) -> Result<Transaction<'_>, WireError> {
                 } else {
                     None
                 };
+                let shadows = if mask & paint_field::SHADOWS != 0 {
+                    Some(r.shadows()?)
+                } else {
+                    None
+                };
                 Mutation::Paint {
                     id,
                     fill,
                     radius,
                     border,
+                    shadows,
                 }
             }
             op::PARAGRAPH => {
@@ -1625,7 +1691,8 @@ fn put_anim_value(out: &mut Vec<u8>, v: &Value) {
 /// RADIUS f32, COLOR (set u8, u32), OPACITY f32, TRANSFORM 6 f32, LAYOUT
 /// (u64 layout keys, then the style fields they fall in, in schema
 /// order), BORDER_WIDTH f32, TRANSLATE_X 2 f32 (points, fraction),
-/// TRANSLATE_Y 2 f32, ROTATE f32, SCALE_X f32, SCALE_Y f32.
+/// TRANSLATE_Y 2 f32, ROTATE f32, SCALE_X f32, SCALE_Y f32, SHADOWS
+/// (`put_shadows`).
 fn put_values(out: &mut Vec<u8>, v: &Values, motion: u16) {
     use value_field::*;
     out.extend_from_slice(&(v.mask | motion).to_le_bytes());
@@ -1666,6 +1733,9 @@ fn put_values(out: &mut Vec<u8>, v: &Values, motion: u16) {
         if v.mask & bit != 0 {
             x.iter().for_each(|&x| f32le(out, x));
         }
+    }
+    if v.mask & SHADOWS != 0 {
+        put_shadows(out, &v.shadows);
     }
 }
 
@@ -1942,6 +2012,33 @@ impl Reader<'_> {
         })
     }
 
+    /// Box shadows (`put_shadows`); strict on count and flags.
+    fn shadows(&mut self) -> Result<crate::shadow::Shadows, WireError> {
+        use crate::shadow::{MAX_SHADOWS, Shadow, Shadows, shadow_flag};
+        let n = self.u8()? as usize;
+        if n > MAX_SHADOWS {
+            return Err(WireError::BadRef("shadow count"));
+        }
+        let mut list = [Shadow::default(); MAX_SHADOWS];
+        for s in &mut list[..n] {
+            let [x, y, blur, spread] = self.f32s()?;
+            let color = self.u32()?;
+            let flags = self.u8()?;
+            if flags & !shadow_flag::INSET != 0 {
+                return Err(WireError::BadRef("shadow flags"));
+            }
+            *s = Shadow {
+                x,
+                y,
+                blur,
+                spread,
+                color,
+                inset: flags & shadow_flag::INSET != 0,
+            };
+        }
+        Ok(Shadows::new(&list[..n]).expect("bounded above"))
+    }
+
     /// Values whose mask may also hold the bits of `extra`.
     fn values(&mut self, extra: u16) -> Result<Values, WireError> {
         use value_field::*;
@@ -2002,6 +2099,9 @@ impl Reader<'_> {
         }
         if v.mask & SCALE_Y != 0 {
             v.parts.scale[1] = self.f32()?;
+        }
+        if v.mask & SHADOWS != 0 {
+            v.shadows = self.shadows()?;
         }
         Ok(v)
     }

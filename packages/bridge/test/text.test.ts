@@ -1,0 +1,38 @@
+import { test, expect } from "bun:test"
+import { createElement as h } from "react"
+import { createRoot, Text } from "../src/index.js"
+import type { Transport, UiEvent } from "../src/host.js"
+import { readFrame } from "./crw2.js"
+
+class FakeTransport implements Transport {
+  frames: Uint8Array[] = []
+  send(frame: Uint8Array) { this.frames.push(frame.slice()) }
+  onAck(_: (seq: number) => void) {}
+  onEvent(_: (ev: UiEvent) => void) {}
+  close() {}
+}
+
+const tick = () => new Promise(r => setTimeout(r, 0))
+
+test("textAlign is the paragraph's; fontVariant's tabular-nums is per span", async () => {
+  const t = new FakeTransport()
+  const root = createRoot(t)
+  root.renderSync(h(Text, { textAlign: "center", fontVariant: ["tabular-nums"] },
+    "Total ",
+    h(Text, { fontVariant: ["proportional-nums"], textAlign: "right" }, "12"),
+    " of 99"))
+  await tick()
+  const spans = t.frames.map(f => readFrame(f)).find(f => f.spans.length)!.spans
+  // Span zero and the run after the nested Text inherit the root's; the
+  // nested Text sets its own tabular, never the alignment.
+  expect(spans.map(s => [s.tabular, s.align])).toEqual([[true, 2], [false, 2], [true, 2]])
+})
+
+test("an unknown alignment draws as auto", async () => {
+  const t = new FakeTransport()
+  const root = createRoot(t)
+  root.renderSync(h(Text, { textAlign: "justify" }, "x"))
+  await tick()
+  const spans = t.frames.map(f => readFrame(f)).find(f => f.spans.length)!.spans
+  expect(spans[0]!.align).toBe(0)
+})

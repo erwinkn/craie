@@ -823,6 +823,8 @@ pub fn shape_paragraph(text: &mut TextEngine, p: &Paragraph, wrap: Option<f32>) 
                 font: p.fonts.get(i).copied().flatten(),
                 letter_spacing: s.letter_spacing,
                 line_height: s.line_height,
+                tabular: s.tabular,
+                align: s.align,
             },
         })
         .collect();

@@ -18,6 +18,8 @@ export interface Op {
     terms: { scope: number; mask: bigint }[]; env: number; values: number[]
     /** Per timing: prop, kind, then six numbers. */
     transitions?: number[][]
+    /** The box shadows (value bit 15). */
+    shadows?: Shadow[]
     /** The block position keying the animations. */
     block?: number
     animations?: Anim[]
@@ -28,6 +30,8 @@ export interface Op {
   trigger?: number
   notify?: number
   animations?: Anim[]
+  /** PAINT: the box shadows, as sent. */
+  shadows?: Shadow[]
   /** STATES: the bits. */
   bits?: bigint
   /** DRAWING: each shape's strings (geometry, transform, dashes) and
@@ -42,6 +46,9 @@ export interface Anim {
   iterations: number; direction: number; fill: number
 }
 
+/** A box shadow as the wire carries it. */
+export interface Shadow { x: number; y: number; blur: number; spread: number; color: number; inset: boolean }
+
 export interface Frame {
   seq: bigint
   strings: string[]
@@ -50,6 +57,8 @@ export interface Frame {
     start: number; fontSize: number; color: number; weight: number; italic: boolean
     decoration: number; family: string | undefined; letterSpacing: number; lineHeight: number
     inheritColor: boolean; pressable: boolean; pressJoins: boolean
+    /** Tabular digits; the alignment (0 auto, 1 left, 2 center, 3 right). */
+    tabular: boolean; align: number
   }[]
   ops: Op[]
 }
@@ -61,6 +70,14 @@ export function readFrame(buf: Uint8Array): Frame {
   const u16 = () => { const v = dv.getUint16(at, true); at += 2; return v }
   const u32 = () => { const v = dv.getUint32(at, true); at += 4; return v }
   const f32 = () => { const v = dv.getFloat32(at, true); at += 4; return v }
+  const readShadows = (): Shadow[] => {
+    const out: Shadow[] = []
+    for (let n = u8(); n > 0; n--) {
+      const [x, y, blur, spread] = [f32(), f32(), f32(), f32()]
+      out.push({ x, y, blur, spread, color: u32(), inset: u8() === 1 })
+    }
+    return out
+  }
   const u64 = () => { const v = dv.getBigUint64(at, true); at += 8; return v }
   if (u32() !== 0x3257_5243) throw Error("bad magic")
   if (u16() !== VERSION) throw Error("bad version")
@@ -78,14 +95,14 @@ export function readFrame(buf: Uint8Array): Frame {
   const spans = []
   for (let i = 0; i < nSpans; i++) {
     const start = u32(), fontSize = f32(), color = u32(), weight = u16(), flags = u8()
-    u8()
+    const features = u8()
     const familyRef = u32(), letterSpacing = f32(), lineHeight = f32()
     spans.push({
       start, fontSize, color, weight, italic: !!(flags & 1),
       decoration: (flags >> 1) & 3,
       family: familyRef === 0xffff_ffff ? undefined : strings[familyRef],
       letterSpacing, lineHeight, inheritColor: !!(flags & 8), pressable: !!(flags & 16),
-      pressJoins: !!(flags & 32),
+      pressJoins: !!(flags & 32), tabular: !!(features & 1), align: (features >> 1) & 3,
     })
   }
   const ops: Op[] = []
@@ -114,6 +131,7 @@ export function readFrame(buf: Uint8Array): Frame {
         if (m & 1) op.f.push(u32())
         if (m & 2) op.f.push(f32())
         if (m & 4) op.f.push(u32(), f32())
+        if (m & 8) op.shadows = readShadows()
         break
       }
       case 0x40: op.s = strings[u32()]; op.f.push(u32(), u32()); break // paragraph
@@ -223,6 +241,7 @@ export function readFrame(buf: Uint8Array): Frame {
           if (m & 512) values.push(f32(), f32())
           for (const bit of [1024, 2048, 4096]) if (m & bit) values.push(f32())
           const v: NonNullable<Op["variants"]>[number] = { terms, env, values }
+          if (m & 32768) v.shadows = readShadows()
           if (m & 8192) {
             v.transitions = []
             for (let k = u8(); k > 0; k--) {

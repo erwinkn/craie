@@ -240,6 +240,10 @@ pub struct TextSpan {
     /// Font family: an index into the transaction's `families` (in the
     /// host, into its family table); `NIL`: the default family.
     pub family: u32,
+    /// Tabular digits (OpenType `tnum`).
+    pub tabular: bool,
+    /// The paragraph's alignment: span zero's applies.
+    pub align: craie_text::paragraph::Align,
 }
 
 impl Default for TextSpan {
@@ -257,12 +261,15 @@ impl Default for TextSpan {
             letter_spacing: 0.0,
             line_height: 0.0,
             family: NIL,
+            tabular: false,
+            align: craie_text::paragraph::Align::Start,
         }
     }
 }
 
 impl TextSpan {
-    /// Everything but color: what shaping and line breaking depend on.
+    /// Everything but color: what shaping, line breaking and line
+    /// placement depend on.
     pub fn same_metrics(&self, other: &TextSpan) -> bool {
         self.start == other.start
             && self.font_size == other.font_size
@@ -271,6 +278,8 @@ impl TextSpan {
             && self.family == other.family
             && self.letter_spacing.to_bits() == other.letter_spacing.to_bits()
             && self.line_height.to_bits() == other.line_height.to_bits()
+            && self.tabular == other.tabular
+            && self.align == other.align
     }
 }
 
@@ -441,6 +450,8 @@ pub enum Mutation<'a> {
         fill: Option<u32>,
         radius: Option<f32>,
         border: Option<(u32, f32)>,
+        /// Replaces the box shadows (`shadow.rs`); empty: none.
+        shadows: Option<crate::shadow::Shadows>,
     },
     // text
     /// `spans` indexes the transaction's span table.
@@ -803,11 +814,25 @@ impl<'a> Transaction<'a> {
             fill,
             radius,
             border,
+            shadows: None,
         })
     }
 
     pub fn fill(&mut self, id: u32, color: u32) -> &mut Self {
         self.paint(id, Some(color), None, None)
+    }
+
+    /// Replaces the node's box shadows, first on top. Panics past
+    /// `shadow::MAX_SHADOWS`.
+    pub fn shadows(&mut self, id: u32, list: &[crate::shadow::Shadow]) -> &mut Self {
+        let shadows = crate::shadow::Shadows::new(list).expect("too many shadows");
+        self.push(Mutation::Paint {
+            id,
+            fill: None,
+            radius: None,
+            border: None,
+            shadows: Some(shadows),
+        })
     }
 
     /// Declares the node's transitions (replacing any).

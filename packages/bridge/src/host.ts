@@ -12,6 +12,10 @@ import {
   CUSTOM_STATES,
   DECORATION,
   ENV_BIT,
+  type TextAlign,
+  MAX_SHADOWS,
+  shadowsIn,
+  type ShadowIn,
   STATE_BIT,
   Encoder,
   EVENT_KIND,
@@ -416,17 +420,37 @@ export interface Transport {
  * `MAX_NODES`. */
 const MAX_ID = 1 << 24
 
-/** "#rgb" / "#rrggbb" / "#rrggbbaa" / number -> 0xRRGGBBAA. */
+/** "#rgb" / "#rrggbb" / "#rrggbbaa" / "rgb(r, g, b)" / "rgba(r, g,
+ * b, a)" (the kit's formats; also space-separated with "/ a",
+ * percentages, any case and surrounding space, as CSS) / number ->
+ * 0xRRGGBBAA. */
 export function color(v: string | number | undefined, fallback = 0): number {
   if (v === undefined) return fallback
   if (typeof v === "number") return v >>> 0
-  let s = v.startsWith("#") ? v.slice(1) : v
+  const t = v.trim()
+  if (/^rgba?\(/i.test(t)) return rgbFunction(t)
+  let s = t.startsWith("#") ? t.slice(1) : t
   if (s.length === 3) s = [...s].map(c => c + c).join("") + "ff"
   if (s.length === 6) s += "ff"
   if (s.length !== 8) throw Error(`bad color "${v}"`)
   const n = parseInt(s, 16)
   if (!Number.isFinite(n)) throw Error(`bad color "${v}"`)
   return n >>> 0
+}
+
+function rgbFunction(v: string): number {
+  const m = /^rgba?\(([^)]*)\)$/i.exec(v.trim())
+  const parts = m ? m[1]!.trim().split(/\s*[,/]\s*|\s+/) : []
+  if (parts.length !== 3 && parts.length !== 4) throw Error(`bad color "${v}"`)
+  const channel = (p: string, max: number) => {
+    const pct = p.endsWith("%")
+    const n = Number(pct ? p.slice(0, -1) : p)
+    if (p === "" || !Number.isFinite(n)) throw Error(`bad color "${v}"`)
+    return Math.round(Math.min(1, Math.max(0, pct ? n / 100 : n / max)) * 255)
+  }
+  const [r, g, b] = parts.slice(0, 3).map(p => channel(p, 255)) as [number, number, number]
+  const a = parts.length === 4 ? channel(parts[3]!, 1) : 255
+  return ((r << 24) | (g << 16) | (b << 8) | a) >>> 0
 }
 
 function textOf(props: Record<string, any>): string {
@@ -501,7 +525,9 @@ function inheritSpan(parent: TextSpanIn, props: Record<string, any>): TextSpanIn
     fontFamily: props.fontFamily !== undefined ? own.fontFamily : parent.fontFamily,
     decoration: props.textDecorationLine !== undefined ? own.decoration : parent.decoration,
     letterSpacing: props.letterSpacing !== undefined ? own.letterSpacing : parent.letterSpacing,
+    tabular: props.fontVariant !== undefined ? own.tabular : parent.tabular,
     lineHeight: parent.lineHeight,
+    align: parent.align,
     // Presses on a pressable nested Text's span, or a span inside it,
     // go to it (`spanTarget`).
     pressable: isPressable(props) || !!parent.pressable,
@@ -533,7 +559,28 @@ export function spanStyle(props: Record<string, any>): TextSpanIn {
     decoration: decorationOf(props.textDecorationLine),
     letterSpacing: props.letterSpacing ?? 0,
     lineHeight: props.lineHeight ?? 0,
+    tabular: tabularOf(props.fontVariant),
+    align: alignOf(props.textAlign),
   }
+}
+
+/** React Native's `fontVariant`: the last of `tabular-nums` and
+ * `proportional-nums` wins. */
+function tabularOf(variant: unknown): boolean {
+  if (!Array.isArray(variant)) return false
+  let on = false
+  for (const v of variant) {
+    if (v === "tabular-nums") on = true
+    else if (v === "proportional-nums") on = false
+  }
+  return on
+}
+
+function alignOf(align: unknown): TextAlign {
+  if (align === undefined || align === "auto") return "auto"
+  if (align === "left" || align === "center" || align === "right") return align
+  warnOnce(`textAlign "${String(align)}" is drawn as "auto"`)
+  return "auto"
 }
 
 function sameSpan(a: TextSpanIn, b: TextSpanIn): boolean {
@@ -541,7 +588,7 @@ function sameSpan(a: TextSpanIn, b: TextSpanIn): boolean {
     a.weight === b.weight && !!a.italic === !!b.italic &&
     a.fontFamily === b.fontFamily && (a.decoration ?? 0) === (b.decoration ?? 0) &&
     (a.letterSpacing ?? 0) === (b.letterSpacing ?? 0) && (a.lineHeight ?? 0) === (b.lineHeight ?? 0) &&
-    !!a.pressable === !!b.pressable
+    !!a.pressable === !!b.pressable && !!a.tabular === !!b.tabular && (a.align ?? "auto") === (b.align ?? "auto")
 }
 
 // Listener prop name -> mask bit; emit INTERACTION when the mask changes.
@@ -799,8 +846,36 @@ function flattenVariants(
 
 /** Variant block keys that apply; `_` keys nest. */
 const VARIANT_KEYS = new Set([
-  "backgroundColor", "borderColor", "borderWidth", "borderRadius", "color", "style", "animation",
+  "backgroundColor", "borderColor", "borderWidth", "borderRadius", "boxShadow", "color", "style", "animation",
 ])
+
+/** A box shadow as React Native's structured `boxShadow` takes it:
+ * offsets, blur and spread in points; the first listed paints on top. */
+export interface BoxShadow {
+  offsetX?: number
+  offsetY?: number
+  blurRadius?: number
+  spreadDistance?: number
+  color: string | number
+  inset?: boolean
+}
+
+/** `boxShadow` in wire form; past `MAX_SHADOWS` the rest is dropped. */
+function shadowList(list: readonly BoxShadow[] | undefined): ShadowIn[] {
+  if (!list?.length) return []
+  if (list.length > MAX_SHADOWS) warnOnce(`boxShadow holds at most ${MAX_SHADOWS} shadows`)
+  return shadowsIn(list.map(s => ({
+    x: s.offsetX ?? 0,
+    y: s.offsetY ?? 0,
+    blur: s.blurRadius ?? 0,
+    spread: s.spreadDistance ?? 0,
+    color: color(s.color),
+    inset: !!s.inset,
+  })))
+}
+
+const shadowKey = (list: readonly ShadowIn[]) =>
+  list.map(s => `${s.x},${s.y},${s.blur},${s.spread},${s.color},${+s.inset}`).join(";")
 
 /** A variant block's values in wire form (`undefined`: none). Each
  * layout key applies on its own, over the base and less specific
@@ -818,7 +893,8 @@ function variantValues(n: HostNode, block: Record<string, any>, hidden: boolean)
     if (block.borderColor !== undefined) v.borderColor = color(block.borderColor)
     if (block.borderWidth !== undefined) v.borderWidth = block.borderWidth
     if (block.borderRadius !== undefined) v.radius = block.borderRadius
-  } else if (["backgroundColor", "borderColor", "borderWidth", "borderRadius"].some(k => k in block)) {
+    if (block.boxShadow !== undefined) v.shadows = shadowList(block.boxShadow)
+  } else if (["backgroundColor", "borderColor", "borderWidth", "borderRadius", "boxShadow"].some(k => k in block)) {
     warnOnce("a Text variant sets no box paint: wrap it in a View")
   }
   if (block.color !== undefined) v.color = color(block.color)
@@ -1786,12 +1862,17 @@ export class CraieHost {
       const oldR = oldProps.borderRadius ?? 0, newR = props.borderRadius ?? 0
       const oldBc = color(oldProps.borderColor), newBc = color(props.borderColor)
       const oldBw = oldProps.borderWidth ?? 0, newBw = props.borderWidth ?? 0
-      if (oldBg !== newBg || oldR !== newR || oldBc !== newBc || oldBw !== newBw) {
+      const shadows = oldProps.boxShadow === props.boxShadow ? undefined : shadowList(props.boxShadow)
+      const newShadows = shadows && shadowKey(shadows) !== shadowKey(shadowList(oldProps.boxShadow))
+        ? shadows
+        : undefined
+      if (oldBg !== newBg || oldR !== newR || oldBc !== newBc || oldBw !== newBw || newShadows) {
         enc.paint(
           id,
           oldBg !== newBg ? newBg : undefined,
           oldR !== newR ? newR : undefined,
           oldBc !== newBc || oldBw !== newBw ? { color: newBc, width: newBw } : undefined,
+          newShadows,
         )
       }
     }

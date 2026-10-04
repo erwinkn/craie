@@ -893,6 +893,52 @@ Reviewer minors and nitpicks not fixed yet.
   of scope) will bring.
 - Resolves in: layout transitions.
 
+### DF-64: shadows don't tween
+
+- Source: milestone 3 (box shadows, protocol 14).
+- Where: crates/ui/src/executor.rs (`set_shadows`), crates/ui/src/shadow.rs.
+- Claim: a shadow list changes at once. The kit's `transition: { property:
+  'shadow' }` (3 recipes, a card's `_hover: { elevation: 'raised' }`) snaps
+  on Craie where the web eases.
+- Why deferred: lists of different lengths need CSS's padding rule (a
+  missing layer is a transparent copy) and a tween per layer; the snap is
+  a small visible difference on few elements.
+
+### DF-65: one corner radius per shadow, no `ring` outline
+
+- Source: milestone 3 (box shadows).
+- Where: crates/scene/src/prim.rs (`RectInstance`), crates/ui/src/shadow.rs.
+- Claim: a shadow takes the box's one radius (Craie boxes have one), and
+  the kit's `ring` and `ringOffset` (an outline 2 points out at an offset,
+  4 uses) are not drawn. Elevation rings (spread layers) are.
+- Why deferred: per-corner radii wait for per-corner box radii (1 use of
+  `radiusTop`/`radiusBottom`); an outline is an outer shadow cut against
+  the box grown by the offset, so it can reuse this path once the bridge
+  takes the prop.
+
+### DF-66: no justified text, no alignment in inputs
+
+- Source: milestone 3 (text alignment, protocol 15).
+- Where: crates/text/src/paragraph.rs (`rewrap_with`), crates/ui/src/input.rs.
+- Claim: `textAlign: 'justify'` draws as `auto`, and a `TextInput` aligns
+  to the start whatever it declares.
+- Why deferred: the kit uses left, center and right on Text only
+  (`textAlign`, 6 uses); justification needs space distribution in the
+  line placement and carets that follow it.
+
+### DF-69: boxes with shadows draw one call each
+
+- Source: #26 review (1,024 boxes with eight shadows: 1,024 draw commands,
+  against 1 without shadows).
+- Where: crates/core/src/span.rs (capacity classes), crates/scene/src/scene.rs
+  (merging).
+- Claim: a chunk of 3 to 9 rects (a fill and its shadows) holds a 4- or
+  16-slot block, so the next chunk's rects are not contiguous and draws
+  merge only within a chunk. Text chunks pay the same for their glyphs.
+- Why deferred: merging across a block's unused slots needs them zeroed
+  (degenerate quads) or an indirect draw list; it is a renderer-wide
+  change, to measure on the Mac against a screen of real buttons.
+
 ## Closed
 
 - DF-57 (work item 6, review #21 M1): end indices were wire indices
@@ -1263,4 +1309,14 @@ Reviewer minors and nitpicks not fixed yet.
 - PR22-09 (same review, P2): beyond validation's subtree walks (PR22-07), ending exits in bulk scanned: each cut looked an exit up in a list (validation and execution), removed it with a `retain` over all exits, searched the others for ones inside, and filtered every queued event; 1,000 cuts made about 2,000,000 visits (4.6 ms), 5,000 about 50,000,000 (69 ms). Running and skipped exits are now sorted sets (`BTreeSet`), an exit inside is found by looking up each freed node, ends found in a frame are collected in one pass, and the events of freed nodes are filtered once, when events are taken (`Ui::freed`). Test: `a_bulk_cut_is_linear` (was `a_bulk_cut_walks_each_subtree_once`) counts validation's walk (3 per toast) and every visit of the ending path, cuts, freed nodes and queued events (4 per toast), for `END_EXIT` and `REMOVE`.
 - PR22-10 (same review, P2): text inside an exit stayed selectable: the subtree is attached while it exits, so a selection inside survived (Copy still copied the removed text), and one around it kept copying an exiting paragraph. Selection validation now treats an exiting ancestor as detached, and the domain's texts skip exiting subtrees. Test: `an_exiting_text_leaves_the_selection` (domain, endpoint and middle paragraph exiting; fails without either check).
 - PR25-01 (GPT-6 Astra review at 0a72b30, P2): `measure()` reported rows a native list hides (a retained row whose item was removed) and their descendants as measured, with zero-size boxes, where they should be `null`. `displayed` now also stops at a row its list hides (`Host::list_row_shown`), and layout events follow the same rule: a hidden node's box is not sent, and a new listener on one waits until it shows. Test: `hidden_list_rows_are_not_measured` (the review's repro, plus the layout event).
+- PR26-01 (GPT-6.1 Sol review at b50436b, P2): inset shadows were cut to the layout padding box while `borderWidth` paints a separate ring, so a black inset spread covered a 4-point blue border (Chrome keeps it blue). The inset cut is now the box inside the painted border. Test: harness `an_inset_shadow_leaves_the_border`.
+- PR26-02 (same review, P2): a spread grew a small radius by the old cubic rule without the box's size, so a 32-point circle with a spread of 40 cast a squarer shape (radius 47.4, Chrome 56), and radius 100 cast another shape than radius 16 on the same box. The radius is now the used one (at most half the shorter side), grown by CSS's outset-adjusted rule with coverage. Tests: `outset_radii_keep_the_shape`, harness `a_spread_circle_stays_round`, `a_radius_past_half_casts_the_used_radius`.
+- PR26-03 (same review, P2): a box below the viewport whose shadow reached into it was not built (chunk admission looked at the box alone). `near` widens a box by its outer shadows' reach. Test: harness `an_offscreen_box_casts_into_view`.
+- PR26-04 (same review, P2): under a nonuniform scale the blur used the geometric mean of the axes (0.267 against the exact 0.331 at scale 2 in x). The shader now shades in the shape's own units, where σ is isotropic, as CSS blurs before the transform. Test: `a_nonuniform_scale_scales_the_blur`.
+- PR26-05 (same review, P2): a shape a negative spread collapsed to no width drew an antialiased line (alpha 127) once its space stopped snapping. An empty shape now casts nothing. Test: `a_collapsed_shape_casts_nothing_in_motion`.
+- PR26-06 (same review, P2): a hard shadow coincident with its rounded box left a fringe on the curve (alpha 61): the knockout multiplied two antialiased masks. A hard shadow is now the difference of the shape's and the box's coverage. Test: `a_coincident_hard_shadow_casts_nothing`.
+- PR26-07 (same review, P3): `color` rejected `" RGB(1, 2, 3) "`; it now trims and takes the function name in any case, as CSS does.
+- PR26-08 (GPT-6.1 Sol re-check at 55a61ad, P2): the outset coverage took 2r over the box's shorter side; CSS's 2 × min(r/w, r/h) is 2r over the longer one for one radius. A 100 × 40 box, radius 20, spread 40, cast radius 60 (Chrome 55.32). Tests: `outset_radii_keep_the_shape`, harness `a_long_box_takes_the_css_outset_radius`.
+- PR26-09 (same re-check, P2): antialiasing and the box's knockout used the smaller axis scale, so under a scale of 2 in x a snapped 1-point ring spread over four columns ([0, 64, 191, 191, 64, 0], Chrome [0, 0, 255, 255, 0, 0]) and the knockout dimmed the blur next to the box (0.357 against 0.475). Edges are now measured in device px per axis (two f16 scales in the shadow's varyings). Tests: `a_stretched_ring_stays_crisp`, `a_stretched_blur_keeps_its_edge`.
+- PR27-01 (GPT-6.1 Sol review at d837eab, P2): alignment read the first bidi paragraph's direction for every line, so after a newline into the other direction the trailing space hung on the wrong side and the line shifted by its width ("abc\nשלום " left-aligned put the second line at 4.16 instead of 0). The trailing space now hangs on each line's own paragraph's side, as `push_line` lays the line out; `Start` still follows the first paragraph for every line, as Parley does (the E01 oracle holds it). Test: `lines_align_by_their_own_direction`.
 - PR30-01 (GPT-6.1 Sol review at 28e0277, P2): `@craie/bridge/react` ships TypeScript source importing `react-reconciler`, whose types were a devDependency, so a git install failed a strict `tsc` with TS7016 even with `skipLibCheck`. `@types/react-reconciler` is now a dependency; the review's install-and-typecheck repro passes at the fix.
