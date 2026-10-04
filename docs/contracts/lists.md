@@ -368,15 +368,24 @@ stays the one source of truth, and the list never flips `loaded` itself.
   wrongly: a reliable `LIST_RESYNC` event (kind 27: the list's revision,
   the patch's base) asks JS to reconcile from the list's revision.
 - **Events.**
-  - `LIST_VIEWPORT`: list node, revision, mounted first/end, visible
-    first/end, held first/end, pinned ids, anchor id, index and offset,
-    flags (at end, following). Coalesced per frame. The mounted range and
-    holds are for the bridge (which rows to mount, which render as
-    placeholders); the rest makes `onVisibleChange` (its four fields) and
-    `readViewport`.
-  - Callback slots (`CALL`, callbacks note): `updateItems` (a flags byte,
-    bit 0 load, bits 1 and 2 an unload range above and below, then each
-    present range as two u32) and `onVisibleChange` on the list node.
+  - `LIST_VIEWPORT` (event kind 29, protocol 22): node = the list,
+    revision = its revision, x/y = mounted first/end, a/b = visible
+    first/end, key = 0 after a frame that changed it, or a `read`
+    command's request (revision NIL when the list is gone). Its bytes, in
+    the record's text place: mounted, visible and held first/end (u32,
+    ends exclusive), the anchor's id (NIL: none) and index (u32) and
+    offset (f32), the content offset (f32), flags (u8: at end,
+    following), the pinned count (u16) and ids (u32). Sent when it
+    changes, at most once per frame. The mounted range and holds are for
+    the bridge (which rows to mount, which render as placeholders); the
+    rest makes `onVisibleChange` (its four fields) and `readViewport`.
+  - Callback slots (`CALL`, event kind 28, callbacks note; slots are
+    `INTERACTION` listener bits): `updateItems` (slot 12, reliable: a
+    flags byte, bit 0 load, bits 1 and 2 an unload range above and
+    below, then each present range as first and last u32) and
+    `onVisibleChange` (slot 13, latest wins once per frame: first and last
+    i32, flags u8: at end, following) on the list node. `key` = slot |
+    call id << 8, and the bytes go in the record's text place.
   - Descriptor flags gain `failed`.
 - **Old ops.** `LIST_CONFIG`, `LIST_SPLICE` and `LIST_INDEX` (0x90–0x92) stay
   for current callers until they migrate; then they go.

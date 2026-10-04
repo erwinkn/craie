@@ -270,6 +270,7 @@ fn js_fixture_decodes_and_executes() {
                 (2, 8, Jump::Offset(1234.5)),
                 (1, 9, Jump::Index(3, Align::End)),
                 (2, 10, Jump::End),
+                (2, 11, Jump::Read),
             ]
         );
     }

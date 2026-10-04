@@ -88,6 +88,8 @@ export interface UiEvent {
   key: number
   /** Text payload (change/submit). */
   text: string
+  /** `call` and `listViewport` arguments, as bytes. */
+  bytes?: Uint8Array
 }
 
 /** A box in logical points. */
