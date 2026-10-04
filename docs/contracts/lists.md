@@ -176,7 +176,10 @@ it decides on both sides, and the source only answers.
 - **At rest, no islet stays on screen.** Once the source has answered every
   request, no placeholder run intersects the viewport.
 - **Anchor while loads are pending.** The topmost visible loaded row holds
-  its place; with none loaded, the topmost visible placeholder holds.
+  its place; with none loaded, the topmost visible placeholder holds. This
+  holds at reader input too, not only when content lands: right after a
+  scroll into placeholders, the anchor is the topmost visible loaded row
+  (L1: m200, 100 points down).
 
 Named traces I1–I4 (`harness/traces/lists/`):
 
@@ -212,8 +215,13 @@ No layout shifts is the hold:
 
 - **Held rows.** While a placeholder that isn't `failed` intersects the
   viewport, rows that load inside the viewport are *held*. They keep their
-  estimated places, and `renderItem` gets `placeholder: true`.
-  `ListViewport.held` names them, from the first to the last.
+  estimated places, and `renderItem` gets `placeholder: true`. A held row
+  isn't measured: its descriptor's version is laid out only on release.
+  Traces name held rows from the first to the last.
+- **Only arrivals hold.** A hold is for rows going from `loaded: false` to
+  `true`. An `update` to a row already loaded (a streaming reply's new
+  version) applies at once, even while a placeholder is visible, so a
+  stream beside a skeleton never freezes.
 - **Release.** When the last such placeholder loads or fails, every held
   row applies in that frame: native lays them out, measures them and
   anchors once, with the anchor rule.
