@@ -1238,6 +1238,7 @@ pub trait Resolve {
         cluster: &str,
         script: ScriptTag,
         attrs: FontAttrs,
+        primary: Option<FontInstanceId>,
     ) -> Option<FontInstanceId>;
     fn store(&mut self) -> &mut FontStore;
 }
@@ -1401,7 +1402,9 @@ impl Shaper {
             let primary = self.primaries[span];
             let font = match primary {
                 Some(f) if covers_cluster(fonts.store(), f, g) => Some(f),
-                _ => fonts.fallback(g, script, attrs(&style)).or(primary),
+                _ => fonts
+                    .fallback(g, script, attrs(&style), primary)
+                    .or(primary),
             };
             match self.items.last_mut() {
                 Some(it)

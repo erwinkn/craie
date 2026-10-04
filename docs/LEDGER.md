@@ -938,17 +938,20 @@ Reviewer minors and nitpicks not fixed yet.
 - Why deferred: the kit truncates labels, titles and paths in one
   direction; CSS's own bidi truncation is loosely specified.
 
-### DF-68: registered fonts: no WOFF2, no family lists, one file per transaction
+### DF-68: registered fonts: no WOFF2, no family lists, 2 MiB per file
 
 - Source: milestone 3 (registered fonts, protocol 17).
 - Where: crates/text/src/fonts.rs (`RawFonts`), crates/ui/src/bridge.rs
   (`MAX_BYTES`), packages/bridge/src/host.ts (`registerFont`).
-- Claim: `registerFont` takes TTF, OTF and collections, not WOFF2. A span
-  names one family, so the kit's family lists (`Inter Variable, Inter,
-  ...`) are resolved by its adapter to the first registered one. Each font
-  goes as its own transaction, under the session's 4 MiB commit queue: a
-  larger file (a full CJK font) fails to submit. Only `wght` is followed
-  among variation axes (not `wdth`, `slnt`, `opsz`).
+- Claim: `registerFont` takes TTF, OTF and collections; it rejects WOFF
+  and WOFF2 with a `TypeError`. A span names one family, so the kit's
+  family lists (`Inter Variable, Inter, ...`) are resolved by its adapter
+  to the first registered one. Each font goes alone, once everything sent
+  before it is acked, so it has the session's 4 MiB commit queue to
+  itself; a file over `MAX_FONT_BYTES` (2 MiB, half the queue, so commits
+  made while a font drains still fit; a full CJK font) rejects with a
+  `RangeError`, since no op splits a font. Only
+  `wght` is followed among variation axes (not `wdth`, `slnt`, `opsz`).
 - Why deferred: Marbre ships Inter and JetBrains Mono as TTF, each well
   under 1 MiB; the rest waits for a font that needs it.
 
@@ -970,22 +973,30 @@ Reviewer minors and nitpicks not fixed yet.
 - Source: milestone 3 (borders per side, protocol 18).
 - Where: crates/ui/src/variants.rs (`Values`), packages/bridge/src/host.ts
   (`variantValues`).
-- Claim: `_hover: { borderBottomColor }` is ignored with a warning; a
-  variant changes the uniform border only. `Values`' mask is full (16
-  bits), so sides need a wider mask or a second record.
+- Claim: `_hover: { borderBottomColor }` is ignored with a warning: a
+  variant can't set a side's own width or color. Sides that fall back
+  to the uniform border follow a variant (or an animation) of
+  `borderColor` and `borderWidth`, as in React Native, so
+  `_focus: { borderColor }` on an underlined input works. `Values`' mask
+  is full (16 bits), so own sides need a wider mask or a second record.
 - Why deferred: the kit's dividers and cards don't change a side on hover
   or press; widen the mask when one does.
 
-### DF-71: mixed-color sides meet square
+### DF-71: mixed-color sides meet square; unequal widths round their inner corners alike
 
 - Source: milestone 3 (borders per side, protocol 18).
 - Where: crates/ui/src/border.rs (`draw`).
-- Claim: sides of different colors draw a rect each, top and bottom
-  owning the corners: no diagonal join as CSS draws, and no rounding (a
-  rounded box with a red top and gray sides has square colored corners).
-  Sides of one color draw one rounded ring and match CSS.
-- Why deferred: the kit uses one color per box (dividers, cards); diagonal
-  joins need a per-corner shape in the shader.
+- Claim: sides of different colors draw a piece each, the outer edge
+  rounded with the box, top and bottom owning the corners: no diagonal
+  join as CSS draws, and translucent mixed colors blend twice where
+  pieces overlap at a corner. Sides of one color draw one ring whose
+  inner corners all take the radius less the narrowest width: CSS's for
+  equal widths, and with unequal ones a rounder, slightly heavier inner
+  corner than CSS's elliptical one (radius less each adjacent width per
+  axis), never a gap.
+- Why deferred: the kit uses one color and one width per box (dividers,
+  cards); diagonal joins and elliptical inner corners need per-corner
+  radii in the shadow shader.
 
 ## Closed
 

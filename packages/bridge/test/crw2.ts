@@ -33,7 +33,7 @@ export interface Op {
   /** PAINT: the box shadows, as sent. */
   shadows?: Shadow[]
   /** PAINT: the borders per side (top, right, bottom, left), as sent. */
-  sides?: { widths: number[]; colors: number[] }
+  sides?: { widths: number[]; colors: number[]; fallback: number }
   /** STATES: the bits. */
   bits?: bigint
   /** DRAWING: each shape's strings (geometry, transform, dashes) and
@@ -134,7 +134,7 @@ export function readFrame(buf: Uint8Array): Frame {
         if (m & 2) op.f.push(f32())
         if (m & 4) op.f.push(u32(), f32())
         if (m & 8) op.shadows = readShadows()
-        if (m & 16) op.sides = { widths: [f32(), f32(), f32(), f32()], colors: [u32(), u32(), u32(), u32()] }
+        if (m & 16) op.sides = { widths: [f32(), f32(), f32(), f32()], colors: [u32(), u32(), u32(), u32()], fallback: u8() }
         break
       }
       case 0x40: op.s = strings[u32()]; op.f.push(u32(), u32()); break // paragraph

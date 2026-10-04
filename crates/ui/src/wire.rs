@@ -588,6 +588,7 @@ pub fn encode(txn: &Transaction<'_>) -> Vec<u8> {
                 if let Some(s) = sides {
                     s.widths.iter().for_each(|&w| f32le(&mut ops, w));
                     s.colors.iter().for_each(|&c| u32le(&mut ops, c));
+                    ops.push(s.fallback);
                 }
             }
             Mutation::Paragraph { id, text, spans } => {
@@ -1306,6 +1307,7 @@ pub fn decode(buf: &[u8]) -> Result<Transaction<'_>, WireError> {
                     Some(crate::border::BorderSides {
                         widths: r.f32s()?,
                         colors: [r.u32()?, r.u32()?, r.u32()?, r.u32()?],
+                        fallback: r.u8()?,
                     })
                 } else {
                     None

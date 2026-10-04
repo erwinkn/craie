@@ -93,6 +93,7 @@ fn js_fixture_decodes_and_executes() {
         craie_ui::border::BorderSides {
             widths: [0.0, 0.5, 1.0, 2.0],
             colors: [0, 0x2020_20ff, 0x3030_30ff, 0x4040_40ff],
+            fallback: 0x81,
         }
     );
     assert!(!host.border_sides.contains_key(&0));
@@ -461,6 +462,18 @@ fn js_fixture_decodes_and_executes() {
         ui.take_image_requests()[..],
         [craie_ui::image::ImageRequest::Probe { .. }]
     ));
+
+    // A font op: its family and bytes, registered.
+    let font = include_bytes!("../../../assets/fonts/NotoEmoji-Var-Test.ttf");
+    assert!(txn.mutations.iter().any(|m| matches!(
+        m,
+        Mutation::Font { family: Some(f), bytes } if f == "Fixture Var" && bytes[..] == font[..]
+    )));
+    assert!(ui.text.font("Fixture Var", 400, false).is_some());
+    assert_ne!(
+        ui.text.font("Fixture Var", 400, false),
+        ui.text.font("", 400, false)
+    );
 
     // WriteClipboard, addressed to no node.
     assert_eq!(ui.inputs.clipboard.get().as_deref(), Some("copied"));

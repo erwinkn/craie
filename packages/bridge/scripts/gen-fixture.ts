@@ -65,7 +65,7 @@ enc.create(3, 3)                                    // surface
 enc.surface(3, SURFACE.bars, [0x6dc7_c8ff, 0x6dc7_ffff, 0, 0])
 enc.payload(3, new Float32Array([0.25, 0.5, 0.75, 1.0]))
 enc.paint(3, 0x1b1d_24ff, 4, undefined, undefined, {  // borders per side, top right bottom left
-  widths: [0, 0.5, 1, 2], colors: [0, 0x2020_20ff, 0x3030_30ff, 0x4040_40ff],
+  widths: [0, 0.5, 1, 2], colors: [0, 0x2020_20ff, 0x3030_30ff, 0x4040_40ff], fallback: 0x81, // left's width and top's color fall back
 })
 enc.label(0, "root container")                      // a11y name
 enc.label(3, "throughput chart")
@@ -184,6 +184,8 @@ enc.group(7, GROUP.horizontal | GROUP.vertical | GROUP.loop | GROUP.selectOnFocu
 enc.create(9, 7)                                    // image
 enc.payload(9, new Uint8Array([0x89, 0x50, 0x4e, 0x47, 1, 2, 3]))
 enc.imageConfig(9, FIT.contain)
+// A font file the app ships, under a family of its own.
+enc.font("Fixture Var", new Uint8Array(await Bun.file(new URL("../../../assets/fonts/NotoEmoji-Var-Test.ttf", import.meta.url).pathname).arrayBuffer()))
 enc.animation(9, 0, true, [{                        // enter: a spring
   index: 0,
   frames: [{ at: 0, values: { opacity: 0, translateY: [8, 0] } }],

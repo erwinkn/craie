@@ -21,31 +21,38 @@ class FakeTransport implements Transport {
 const PAINT = 0x30
 const tick = () => new Promise(r => setTimeout(r, 0))
 
-test("a side's width or color sends all four sides, the rest from borderWidth and borderColor", async () => {
+test("a side's width or color sends all four sides; unset ones fall back to the uniform border natively", async () => {
   const t = new FakeTransport()
   const root = createRoot(t)
   const render = (props: ViewProps) => root.renderSync(createElement(View, props))
-  // The kit's divider: a bottom line.
+  // The kit's divider: a bottom line, in the uniform color.
   render({ borderBottomWidth: 1, borderColor: "#202020" })
   await tick()
-  expect(t.take().find(o => o.tag === PAINT)!.sides).toEqual({
-    widths: [0, 0, 1, 0],
-    colors: [0x2020_20ff, 0x2020_20ff, 0x2020_20ff, 0x2020_20ff],
-  })
+  expect(t.take().find(o => o.tag === PAINT)!.sides).toEqual({ widths: [0, 0, 1, 0], colors: [0, 0, 0, 0], fallback: 0b1111_1011 })
   // One side's color over a uniform border.
   render({ borderWidth: 2, borderColor: "#202020", borderLeftColor: "#ff0000" })
   await tick()
   expect(t.take().find(o => o.tag === PAINT)!.sides).toEqual({
-    widths: [2, 2, 2, 2],
-    colors: [0x2020_20ff, 0x2020_20ff, 0x2020_20ff, 0xff00_00ff],
+    widths: [0, 0, 0, 0],
+    colors: [0, 0, 0, 0xff00_00ff],
+    fallback: 0b0111_1111,
   })
-  // The same sides again send none; dropping them sends zeros.
+  // The same sides again send none, and so does a uniform color change
+  // (native resolves fallen-back sides from it); dropping them sends
+  // every side fallen back: none.
   render({ borderWidth: 2, borderColor: "#202020", borderLeftColor: "#ff0000" })
   await tick()
   expect(t.take().filter(o => o.tag === PAINT).length).toBe(0)
+  render({ borderWidth: 2, borderColor: "#00ff00", borderLeftColor: "#ff0000" })
+  await tick()
+  expect(t.take().find(o => o.tag === PAINT)!.sides).toBeUndefined()
   render({ borderWidth: 2, borderColor: "#202020" })
   await tick()
-  expect(t.take().find(o => o.tag === PAINT)!.sides).toEqual({ widths: [0, 0, 0, 0], colors: [0, 0, 0, 0] })
+  expect(t.take().find(o => o.tag === PAINT)!.sides).toEqual({ widths: [0, 0, 0, 0], colors: [0, 0, 0, 0], fallback: 0xff })
+  // Explicit zeros are sides, not none.
+  render({ borderWidth: 2, borderColor: "#202020", borderTopWidth: 0, borderRightWidth: 0, borderBottomWidth: 0, borderLeftWidth: 0 })
+  await tick()
+  expect(t.take().find(o => o.tag === PAINT)!.sides!.fallback).toBe(0xf0)
 })
 
 test("widths native would reject are clamped", async () => {
