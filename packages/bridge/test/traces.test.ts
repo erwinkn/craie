@@ -15,6 +15,9 @@ const STEPS: Record<string, string[]> = {
   measure: ["key", "height"], resize: ["width", "height"], focus: ["key"], blur: ["key"],
   followKey: ["value"],
 }
+const OPS: Record<string, string[]> = {
+  splice: ["kind", "at", "remove", "items"], move: ["kind", "from", "count", "to"], update: ["kind", "at", "items"],
+}
 const EXPECT = ["visible", "anchor", "offset", "atEnd", "following", "pinnedKeys", "mounted", "load", "unload", "held"]
 
 const only = (what: string, o: object, keys: string[]) =>
@@ -43,6 +46,12 @@ for (const file of files) {
       expect(fields, `step ${step.do}`).toBeDefined()
       only(`${step.do} step`, step, ["do", "expect", ...fields])
       only(`${step.do} expect`, step.expect ?? {}, EXPECT)
+      for (const op of step.changes ?? []) {
+        const fields = OPS[op.kind]
+        expect(fields, `op ${op.kind}`).toBeDefined()
+        only(`${op.kind} op`, op, fields)
+        for (const block of op.items ?? []) only(`${op.kind} block`, block, BLOCK)
+      }
     }
   })
 }

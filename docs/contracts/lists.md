@@ -64,12 +64,17 @@ interface ListChanges {
   arrays by identity, so an array changed in place goes unseen. Rendering
   the same array again changes nothing.
 - **Changes are a fast path.** When `items` is a new array and
-  `changes.from` is the array of the last render, the list applies
-  `changes.ops`, O(k) on the wire. Otherwise (no `changes`, or ones
-  computed from another array, as after a skipped render) it diffs keys
-  between the two arrays and derives the ops itself, O(n). Correctness
-  never depends on `changes`; a store that already knows its edits (a
-  journal, a streaming reply) saves the diff.
+  `changes.from` is the array of the last committed render (a render
+  React threw away doesn't count), the list applies `changes.ops`, O(k)
+  on the wire. Otherwise (no `changes`, or ones computed from another
+  array, as after a skipped render) it diffs keys between the two arrays
+  and derives the ops itself, O(n). Correctness never depends on
+  `changes`; a store that already knows its edits (a journal, a streaming
+  reply) saves the diff.
+- **Ops that don't fit are ignored whole.** An index out of range, an
+  `update` whose keys differ from the rows at its place, or a result
+  whose length isn't `items.length`: the list drops the batch and diffs
+  keys instead. Nothing applies partly.
 - **The keyed diff.** Removed keys are removed, new keys inserted, kept
   keys that changed order moved, and kept keys whose `version`, `loaded`,
   `failed` or `estimate` changed updated. Descriptor objects are compared
