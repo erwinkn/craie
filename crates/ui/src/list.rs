@@ -175,6 +175,14 @@ pub struct ListState {
     /// placeholder stays there. They keep their placeholder extents and
     /// don't measure until released.
     pub held: Vec<u32>,
+    /// Per item: visiting, since it met the retain window and until an
+    /// unload names it (`lists.md`, "Unloading"). Follows the items.
+    pub visiting: Vec<bool>,
+    /// The viewport the last ask was computed for, and whether a batch
+    /// came since: the ask is computed again only then (after a batch, a
+    /// scroll, a jump or a resize), not every frame.
+    asked_at: Option<(f32, f32)>,
+    ask_due: bool,
     /// The viewport and visible range last reported.
     sent: Option<ListViewport>,
     sent_visible: Option<(i64, i64, bool, bool)>,
@@ -208,6 +216,9 @@ impl Default for ListState {
             asked: None,
             rearm: false,
             held: Vec::new(),
+            visiting: Vec::new(),
+            asked_at: None,
+            ask_due: false,
             sent: None,
             sent_visible: None,
         }
@@ -381,6 +392,86 @@ impl ListState {
     /// the pending items meeting the window, extended toward the reader
     /// to at least a screen, then widened on each side over a run's rest
     /// no taller than a screen. None when no pending item meets it.
+    /// Marks the items meeting the retain window around the viewport
+    /// `v0..v1` (`retain` viewport heights each side) visiting.
+    pub fn visit(&mut self, v0: f32, v1: f32) {
+        let total = self.total();
+        let reach = self.retain * (v1 - v0).max(0.0);
+        let (w0, w1) = (v0 - reach, v1 + reach);
+        if self.items.is_empty() || w1 <= 0.0 || w0 >= total {
+            return;
+        }
+        let lo = self.item_at(w0.max(0.0));
+        let hi = self.item_at(w1.min(total - 1e-3).max(0.0));
+        for i in lo..=hi {
+            let o = self.offset(i);
+            if o < w1 && o + self.extents.size(i) > w0 {
+                self.visiting[i] = true;
+            }
+        }
+    }
+
+    /// The unload ask around the viewport `v0..v1`: at most one range per
+    /// side, above then below, each from the candidate nearest the
+    /// viewport outward until a row that isn't one. Candidates are loaded,
+    /// visiting rows entirely outside the retain window extended by one
+    /// more viewport height, but never row `pinned` (focused) nor a row
+    /// inside a pending load (the last asked, while one of its rows waits).
+    pub fn unload(&self, v0: f32, v1: f32, pinned: u32) -> [Option<(u32, u32)>; 2] {
+        let n = self.items.len();
+        let total = self.total();
+        let reach = (self.retain + 1.0) * (v1 - v0).max(0.0);
+        let (b0, b1) = (v0 - reach, v1 + reach);
+        let waiting = self.asked.filter(|&(a, b)| {
+            (a as usize..=(b as usize).min(n.saturating_sub(1))).any(|i| pending(&self.items[i]))
+        });
+        let candidate = |i: usize| {
+            self.visiting[i]
+                && self.items[i].flags & Item::LOADED != 0
+                && i as u32 != pinned
+                && !waiting.is_some_and(|(a, b)| (a..=b).contains(&(i as u32)))
+        };
+        let mut out = [None, None];
+        if n == 0 {
+            return out;
+        }
+        // Above: the last row ending at or above the band.
+        if b0 > 0.0 {
+            let mut j = self.item_at(b0.min(total - 1e-3)) as i64;
+            if self.offset(j as usize) + self.extents.size(j as usize) > b0 {
+                j -= 1;
+            }
+            while j >= 0 && !candidate(j as usize) {
+                j -= 1;
+            }
+            if j >= 0 {
+                let last = j;
+                while j > 0 && candidate(j as usize - 1) {
+                    j -= 1;
+                }
+                out[0] = Some((j as u32, last as u32));
+            }
+        }
+        // Below: the first row starting at or below the band.
+        if b1 < total {
+            let mut j = self.item_at(b1.max(0.0));
+            if self.offset(j) < b1 {
+                j += 1;
+            }
+            while j < n && !candidate(j) {
+                j += 1;
+            }
+            if j < n {
+                let first = j;
+                while j + 1 < n && candidate(j + 1) {
+                    j += 1;
+                }
+                out[1] = Some((first as u32, j as u32));
+            }
+        }
+        out
+    }
+
     pub fn request(&self, v0: f32, v1: f32, lookahead: f32, direction: i8) -> Option<(u32, u32)> {
         let n = self.items.len();
         let total = self.total();
@@ -733,6 +824,7 @@ impl Lists {
             }
         }
         l.items.splice(range.clone(), new.iter().map(|(d, _)| *d));
+        l.visiting.splice(range.clone(), new.iter().map(|_| false));
         l.extents.splice_items(range, extents);
         if !width.is_finite() {
             l.stale = true;
@@ -782,6 +874,7 @@ impl Lists {
         }
         let l = self.map.get_mut(&id).unwrap();
         l.revision = next;
+        l.ask_due = true;
     }
 
     /// A batch re-arms list `id`'s last load when it moves rows (a splice
@@ -835,6 +928,8 @@ impl Lists {
         }
         let moved: Vec<Item> = l.items.drain(f..f + c).collect();
         l.items.splice(t..t, moved);
+        let visits: Vec<bool> = l.visiting.drain(f..f + c).collect();
+        l.visiting.splice(t..t, visits);
         let ext: Vec<(f32, bool)> = (f..f + c)
             .map(|i| (l.extents.size(i), l.extents.is_measured(i)))
             .collect();
@@ -1619,22 +1714,44 @@ impl crate::ui::Ui {
                 self.host.mark_layout(list);
             }
         }
-        if listeners & crate::events::mask::UPDATE_ITEMS != 0 {
+        // After a batch or a move of the viewport only: rows near the
+        // reader visit (whether or not anyone listens), and the ask is
+        // computed again.
+        let pinned = self.focused_row(list);
+        let l = self.host.lists.map.get_mut(&id).unwrap();
+        let due = l.ask_due || l.asked_at != Some((p.v0, p.v1));
+        if due {
+            l.visit(p.v0, p.v1);
+            (l.asked_at, l.ask_due) = (Some((p.v0, p.v1)), false);
+        }
+        if due && listeners & crate::events::mask::UPDATE_ITEMS != 0 {
             let direction = (self.host.lists.saved.get(&p.scroller.0)).map_or(0, |s| s.direction);
             let l = &self.host.lists.map[&id];
             let request = l.request(p.v0, p.v1, l.lookahead, direction);
-            let asked = l.asked;
-            if let Some((a, b)) = request
-                && (l.rearm || !asked.is_some_and(|(x, y)| x <= a && b <= y))
-            {
-                let l = self.host.lists.map.get_mut(&id).unwrap();
-                l.asked = Some((a, b));
-                l.rearm = false;
+            let load = request
+                .filter(|&(a, b)| l.rearm || !l.asked.is_some_and(|(x, y)| x <= a && b <= y));
+            let unload = l.unload(p.v0, p.v1, pinned);
+            if load.is_some() || unload.iter().any(Option::is_some) {
                 let mut e = self.event(out_kind::CALL, list);
+                let l = self.host.lists.map.get_mut(&id).unwrap();
                 e.key = crate::events::list_slot::UPDATE_ITEMS;
-                e.payload = vec![1];
-                e.payload.extend_from_slice(&a.to_le_bytes());
-                e.payload.extend_from_slice(&b.to_le_bytes());
+                e.payload.push(0);
+                if let Some((a, b)) = load {
+                    l.asked = Some((a, b));
+                    l.rearm = false;
+                    e.payload[0] |= 1;
+                    e.payload.extend_from_slice(&a.to_le_bytes());
+                    e.payload.extend_from_slice(&b.to_le_bytes());
+                }
+                // An ask ends the visits it names.
+                for (side, r) in unload.into_iter().enumerate() {
+                    if let Some((a, b)) = r {
+                        e.payload[0] |= 2 << side;
+                        e.payload.extend_from_slice(&a.to_le_bytes());
+                        e.payload.extend_from_slice(&b.to_le_bytes());
+                        l.visiting[a as usize..=b as usize].fill(false);
+                    }
+                }
                 self.pending_events.push(e);
             }
         }

@@ -13,7 +13,7 @@ use craie_core::geom::Size;
 use craie_ui::events::{list_slot, mask, out_kind};
 use craie_ui::host::NodeId;
 use craie_ui::mutation::{
-    Align, Anchor, Item, Jump, ListOp, ListPolicy, NIL, NodeKind, Template, Transaction,
+    Align, Anchor, Command, Item, Jump, ListOp, ListPolicy, NIL, NodeKind, Template, Transaction,
 };
 use craie_ui::ui::Ui;
 
@@ -25,10 +25,6 @@ const PENDING: &[(&str, &str)] = &[
         "L1",
         "an overscan-dependent offset (until #45 reaches this branch)",
     ),
-    ("U1", "unloading"),
-    ("U2", "unloading"),
-    ("U3", "unloading"),
-    ("U4", "unloading"),
 ];
 
 const SCROLLER: u32 = 1;
@@ -334,8 +330,10 @@ struct Driver {
     revision: u32,
     seq: u64,
     request: u32,
-    /// The current step's `updateItems` loads (first, last), in order.
+    /// The current step's `updateItems` loads (first, last), and
+    /// unloads (the ranges of each call that had any), in order.
     loads: Vec<(u32, u32)>,
+    unloads: Vec<Vec<(u32, u32)>>,
 }
 
 impl Driver {
@@ -394,6 +392,7 @@ impl Driver {
             seq: 0,
             request: 0,
             loads: Vec::new(),
+            unloads: Vec::new(),
         };
         let templates: Vec<Template> = t
             .get("templates")
@@ -472,8 +471,20 @@ impl Driver {
             }
             if e.kind == out_kind::CALL && e.key & 0xFF == list_slot::UPDATE_ITEMS {
                 let u = |at: usize| u32::from_le_bytes(e.payload[at..at + 4].try_into().unwrap());
+                let mut at = 1;
+                let mut range = || {
+                    at += 8;
+                    (u(at - 8), u(at - 4))
+                };
                 if e.payload[0] & 1 != 0 {
-                    self.loads.push((u(1), u(5)));
+                    self.loads.push(range());
+                }
+                let unload: Vec<(u32, u32)> = (1..3)
+                    .filter(|b| e.payload[0] & (1 << b) != 0)
+                    .map(|_| range())
+                    .collect();
+                if !unload.is_empty() {
+                    self.unloads.push(unload);
                 }
             }
             if e.kind == out_kind::LIST_VIEWPORT && e.key == 0 {
@@ -523,7 +534,9 @@ impl Driver {
                         self.next_node += 1;
                         self.next_node
                     });
-                    t.create(node, NodeKind::View).append(LIST, node);
+                    t.create(node, NodeKind::View)
+                        .interaction(node, 0, true)
+                        .append(LIST, node);
                     node
                 }
             };
@@ -629,6 +642,7 @@ impl Driver {
 
     fn step(&mut self, s: &Value) -> Result<(), String> {
         self.loads.clear();
+        self.unloads.clear();
         let num = |k: &str| s.get(k).and_then(Value::num);
         let align = || match s.get("align").and_then(Value::str) {
             Some("center") => Align::Center,
@@ -659,6 +673,20 @@ impl Driver {
                 s.get("key").and_then(Value::str).unwrap(),
                 num("height").unwrap() as f32,
             ),
+            "focus" | "blur" => {
+                let key = s.get("key").and_then(Value::str).unwrap();
+                let Some(&(node, _, _)) = self.ids.get(key).and_then(|id| self.rows.get(id)) else {
+                    return Err(format!("{key} isn't mounted"));
+                };
+                let mut t = self.txn();
+                let cmd = if s.get("do").and_then(Value::str) == Some("focus") {
+                    Command::Focus
+                } else {
+                    Command::Blur
+                };
+                t.command(node, cmd);
+                self.ui.apply_txn(&t).expect("the focus applies");
+            }
             "resize" => {
                 self.view = Size::new(num("width").unwrap() as f32, num("height").unwrap() as f32);
             }
@@ -762,10 +790,20 @@ impl Driver {
                 ));
             }
         }
-        if let Some(want) = e.get("unload")
-            && !want.arr().is_empty()
-        {
-            errs.push("'unload' isn't observable natively yet".into());
+        if let Some(want) = e.get("unload") {
+            let want: Vec<(u32, u32)> = (want.arr().iter())
+                .map(|r| {
+                    let (a, b) = pair(r);
+                    (a as u32, b as u32)
+                })
+                .collect();
+            let got = self.unloads.last().cloned().unwrap_or_default();
+            if got != want || self.unloads.len() > 1 {
+                errs.push(format!(
+                    "unload {:?} (this step: {:?}), expected {want:?}",
+                    got, self.unloads
+                ));
+            }
         }
         if let Some(want) = e.get("held") {
             let got = (!v.held.is_empty()).then(|| (v.held.start as i64, v.held.end as i64 - 1));
@@ -833,7 +871,7 @@ fn shared_list_traces() {
                 "{id} ({}): {e}",
                 t.get("name").and_then(Value::str).unwrap()
             )),
-            (Err(_), Some(_)) => {}
+            (Err(e), Some(_)) => eprintln!("pending {id}: {e}"),
         }
     }
     for (id, _) in PENDING {
