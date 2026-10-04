@@ -1,0 +1,132 @@
+{
+  "format": "craie-list-trace/1",
+  "id": "L5",
+  "name": "a hold released by a second answer keeps the row the reader is reading",
+  "viewport": {
+    "width": 400,
+    "height": 600
+  },
+  "config": {
+    "overscan": 600,
+    "lookahead": 0,
+    "endThreshold": 80,
+    "anchor": "start",
+    "anchorPolicy": "reading"
+  },
+  "templates": [],
+  "items": [
+    {
+      "count": 100,
+      "key": "m{i}",
+      "loaded": false,
+      "estimate": 40
+    },
+    {
+      "count": 100,
+      "key": "m{i}",
+      "estimate": 40,
+      "height": 40
+    }
+  ],
+  "steps": [
+    {
+      "do": "mount"
+    },
+    {
+      "do": "scrollToIndex",
+      "index": 105,
+      "align": "start",
+      "expect": {
+        "anchor": {
+          "key": "m105",
+          "offset": 0
+        },
+        "load": null
+      }
+    },
+    {
+      "do": "scrollBy",
+      "delta": -300,
+      "expect": {
+        "visible": [
+          97,
+          112
+        ],
+        "anchor": {
+          "key": "m100",
+          "offset": 100
+        },
+        "load": [
+          85,
+          99
+        ]
+      }
+    },
+    {
+      "do": "changes",
+      "changes": [
+        {
+          "kind": "update",
+          "at": 97,
+          "items": [
+            {
+              "count": 2,
+              "key": "m{i}",
+              "version": 1,
+              "estimate": 40,
+              "height": 80
+            }
+          ]
+        }
+      ],
+      "expect": {
+        "held": [
+          97,
+          98
+        ],
+        "anchor": {
+          "key": "m100",
+          "offset": 100
+        }
+      }
+    },
+    {
+      "do": "changes",
+      "changes": [
+        {
+          "kind": "update",
+          "at": 85,
+          "items": [
+            {
+              "count": 12,
+              "key": "m{i}",
+              "version": 1,
+              "estimate": 40,
+              "height": 80
+            }
+          ]
+        },
+        {
+          "kind": "update",
+          "at": 99,
+          "items": [
+            {
+              "count": 1,
+              "key": "m{i}",
+              "version": 1,
+              "estimate": 40,
+              "height": 80
+            }
+          ]
+        }
+      ],
+      "expect": {
+        "held": null,
+        "anchor": {
+          "key": "m100",
+          "offset": 100
+        }
+      }
+    }
+  ]
+}

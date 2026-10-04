@@ -1,0 +1,105 @@
+{
+  "format": "craie-list-trace/1",
+  "id": "L7",
+  "name": "a held row keeps the size it had as a placeholder until the hold releases",
+  "viewport": {
+    "width": 400,
+    "height": 400
+  },
+  "config": {
+    "overscan": 600,
+    "lookahead": 0,
+    "endThreshold": 80,
+    "anchor": "start",
+    "anchorPolicy": "reading"
+  },
+  "templates": [],
+  "items": [
+    {
+      "count": 20,
+      "key": "m{i}",
+      "loaded": false,
+      "estimate": 40
+    },
+    {
+      "count": 80,
+      "key": "m{i}",
+      "estimate": 40,
+      "height": 40
+    }
+  ],
+  "steps": [
+    {
+      "do": "mount",
+      "expect": {
+        "visible": [
+          0,
+          9
+        ],
+        "load": [
+          0,
+          19
+        ]
+      }
+    },
+    {
+      "do": "changes",
+      "changes": [
+        {
+          "kind": "update",
+          "at": 0,
+          "items": [
+            {
+              "count": 4,
+              "key": "m{i}",
+              "version": 1,
+              "estimate": 120,
+              "height": 120
+            }
+          ]
+        }
+      ],
+      "expect": {
+        "held": [
+          0,
+          3
+        ],
+        "visible": [
+          0,
+          9
+        ],
+        "offset": 0
+      }
+    },
+    {
+      "do": "changes",
+      "changes": [
+        {
+          "kind": "update",
+          "at": 4,
+          "items": [
+            {
+              "count": 16,
+              "key": "m{i}",
+              "version": 1,
+              "estimate": 40,
+              "height": 40
+            }
+          ]
+        }
+      ],
+      "expect": {
+        "held": null,
+        "visible": [
+          0,
+          3
+        ],
+        "anchor": {
+          "key": "m0",
+          "offset": 0
+        },
+        "offset": 0
+      }
+    }
+  ]
+}

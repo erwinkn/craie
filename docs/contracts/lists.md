@@ -189,9 +189,11 @@ it decides on both sides, and the source only answers.
 - **At least a screen.** If the request's estimated extent (from its first
   row to its last) is under one viewport height, it extends one unloaded
   row at a time, before widening, until it reaches a viewport height. It
-  extends in the reader's last scroll direction, or, after a mount or a
-  jump, the way the placeholder run continues past the request (down if
-  both ways). It stops where the run ends.
+  extends in the reader's last scroll direction (their own scroll input,
+  never an offset change a batch caused, such as rows prepended above;
+  trace L6), or, after a mount or a jump, the way the placeholder run
+  continues past the request (down if both ways). It stops where the run
+  ends.
 - **When to ask.** After every change batch, settled scroll, jump and
   resize, the list computes its ask again and calls `updateItems` with the
   difference from what it last asked, if any. Its `load` is the request,
@@ -248,16 +250,19 @@ No layout shifts is the hold:
 
 - **Held rows.** While a placeholder that isn't `failed` intersects the
   viewport, rows that load inside the viewport are *held*. They keep their
-  estimated places, and `renderItem` gets `placeholder: true`. A held row
-  isn't measured: its descriptor's version is laid out only on release.
-  Traces name held rows from the first to the last.
+  places and the size they had as placeholders (not the arrival's new
+  estimate; trace L7), and `renderItem` gets `placeholder: true`. A held
+  row isn't measured: its descriptor's version is laid out only on
+  release. Traces name held rows from the first to the last.
 - **Only arrivals hold.** A hold is for rows going from `loaded: false` to
   `true`. An `update` to a row already loaded (a streaming reply's new
   version) applies at once, even while a placeholder is visible, so a
   stream beside a skeleton never freezes.
 - **Release.** When the last such placeholder loads or fails, every held
   row applies in that frame: native lays them out, measures them and
-  anchors once, with the anchor rule.
+  anchors once, with the anchor rule. For that batch's anchor neither the
+  held rows nor the rows arriving in it count as unchanged, so the row
+  the reader is reading holds (trace L5).
 - **Elsewhere.** Rows that load outside the viewport apply when their
   `update` arrives, and a held row that scrolls out of the viewport
   applies then.
@@ -313,6 +318,12 @@ stays the one source of truth, and the list never flips `loaded` itself.
 - **L4.** A pending load isn't asked again for an update of a row far
   below it; a partial answer inside it asks for the rest, the loaded part
   held.
+- **L5.** A hold released by a second answer keeps the reader's row in
+  place, though rows above it arrived taller.
+- **L6.** After rows are prepended above the reader, their scroll up into
+  placeholders still asks for a screen above.
+- **L7.** Rows arriving with a new estimate while a placeholder is
+  visible keep their placeholder size until the hold releases.
 - **U1.** Scrolling far down unloads the far-above rows once; the source
   drops them.
 - **U2.** Rows past the retain window but inside the band stay while the
