@@ -468,3 +468,270 @@ fn seeded_patches_equal_a_clean_rebuild() {
         assert_eq!(extents(&ui), extents(&clean), "round {round}");
     }
 }
+
+/// A window-sized scroller (400 x 200) holding a list of `n` items
+/// 40 points tall (identities `1..=n`), under `policy`, laid out.
+fn scrolled(n: u32, policy: crate::mutation::ListPolicy) -> Ui {
+    let mut ui = Ui::new(1.0);
+    let scroller = taffy::Style {
+        size: taffy::Size {
+            width: taffy::Dimension::percent(1.0),
+            height: taffy::Dimension::percent(1.0),
+        },
+        overflow: taffy::Point {
+            x: taffy::Overflow::Visible,
+            y: taffy::Overflow::Scroll,
+        },
+        ..crate::host::default_style().to_taffy()
+    };
+    send(&mut ui, |t| {
+        t.create(0, NodeKind::View)
+            .layout(0, &scroller)
+            .list_policy(0, policy)
+            .append(NIL, 0);
+        t.create(LIST, NodeKind::List)
+            .list_config2(LIST, 0.0, -1.0, 3.0, 40.0, 0, &[])
+            .list_patch(LIST, 0, 1, &[ListOp::splice(0, 0, &items(1..=n))])
+            .append(0, LIST);
+    })
+    .unwrap();
+    ui.render(VIEW);
+    ui
+}
+
+const VIEW: Size = Size {
+    width: 400.0,
+    height: 200.0,
+};
+
+fn scroll(ui: &Ui) -> f32 {
+    ui.scroll_offset(crate::host::NodeId(0))[1]
+}
+
+/// Policies and commands reject out-of-range numbers and unknown
+/// bytes, in the executor and the decoder.
+#[test]
+fn list_policies_and_commands_validate() {
+    use crate::mutation::{Align, Jump, ListPolicy};
+    let mut ui = list(4);
+    let bad: [BadOp; 5] = [
+        ("a negative end threshold", |t| {
+            let p = ListPolicy {
+                end_threshold: -1.0,
+                ..ListPolicy::default()
+            };
+            t.list_policy(0, p);
+        }),
+        ("a NaN inset", |t| {
+            let p = ListPolicy {
+                start_inset: f32::NAN,
+                ..ListPolicy::default()
+            };
+            t.list_policy(0, p);
+        }),
+        ("a policy on an absent node", |t| {
+            t.list_policy(77, ListPolicy::default());
+        }),
+        ("a command on a view", |t| {
+            t.list_command(0, 1, 1, Jump::End);
+        }),
+        ("an infinite offset", |t| {
+            t.list_command(LIST, 1, 1, Jump::Offset(f64::INFINITY));
+        }),
+    ];
+    for (what, f) in bad {
+        assert!(send(&mut ui, f).is_err(), "{what}");
+    }
+    // Unknown kind, alignment and anchor policy bytes fail to decode.
+    let mut t = Transaction::new(ui.seq + 1);
+    t.list_command(LIST, 1, 9, Jump::Index(2, Align::Center));
+    let buf = wire::encode(&t);
+    let at = (buf.windows(5))
+        .position(|w| w[0] == wire::op::LIST_COMMAND && w[1..5] == LIST.to_le_bytes())
+        .unwrap();
+    let (kind, align) = (at + 13, at + 18);
+    for (byte, value) in [(kind, 9u8), (align, 3)] {
+        let mut b = buf.clone();
+        b[byte] = value;
+        assert!(wire::decode(&b).is_err(), "byte {byte} = {value}");
+    }
+    let mut t = Transaction::new(ui.seq + 1);
+    t.list_policy(0, ListPolicy::default());
+    let mut b = wire::encode(&t);
+    let at = (b.windows(5))
+        .position(|w| w[0] == wire::op::LIST_POLICY && w[1..5] == 0u32.to_le_bytes())
+        .unwrap();
+    b[at + 6] = 2;
+    assert!(wire::decode(&b).is_err(), "anchor policy 2");
+}
+
+/// An index jump made for another item order is skipped; a key jump
+/// isn't (identities don't move with the order). Jumps hold their item
+/// at its alignment until the reader scrolls.
+#[test]
+fn jumps_hold_their_item_and_skip_stale_indices() {
+    use crate::mutation::{Align, Jump, ListPolicy};
+    let mut ui = scrolled(100, ListPolicy::default());
+    send(&mut ui, |t| {
+        t.list_command(LIST, 1, 1, Jump::Index(50, Align::Start));
+    })
+    .unwrap();
+    ui.render(VIEW);
+    assert_eq!(scroll(&ui), 2000.0);
+    // Revision 2, then an index jump at revision 1: skipped.
+    send(&mut ui, |t| {
+        t.list_patch(LIST, 1, 2, &[ListOp::update(0, &[Item::sized(1, 1, 40.0)])])
+            .list_command(LIST, 1, 2, Jump::Index(10, Align::Start));
+    })
+    .unwrap();
+    ui.render(VIEW);
+    assert_eq!(scroll(&ui), 2000.0, "a stale index");
+    // A key jump at the stale revision, centered: item 11 is index 10.
+    send(&mut ui, |t| {
+        t.list_command(LIST, 1, 3, Jump::Item(11, Align::Center));
+    })
+    .unwrap();
+    ui.render(VIEW);
+    assert_eq!(scroll(&ui), 400.0 - 80.0);
+    // Ten rows above it grow: it stays centered.
+    send(&mut ui, |t| {
+        let grown: Vec<Item> = (1..=10).map(|id| Item::sized(id, 2, 80.0)).collect();
+        t.list_patch(LIST, 2, 3, &[ListOp::update(0, &grown)]);
+    })
+    .unwrap();
+    ui.render(VIEW);
+    assert_eq!(scroll(&ui), 800.0 - 80.0);
+    let v = ui.list_viewport(crate::host::NodeId(LIST)).unwrap();
+    assert_eq!(v.anchor, Some((11, 10, 80.0)));
+    // A missing key does nothing.
+    send(&mut ui, |t| {
+        t.list_command(LIST, 3, 4, Jump::Item(999, Align::Start));
+    })
+    .unwrap();
+    ui.render(VIEW);
+    assert_eq!(scroll(&ui), 720.0);
+}
+
+/// A covered band at the top (`startInset`) isn't viewport: visible
+/// rows, the offset and jump alignment start below it.
+#[test]
+fn a_covered_band_moves_the_viewport() {
+    use crate::mutation::{Align, Jump, ListPolicy};
+    let policy = ListPolicy {
+        start_inset: 50.0,
+        ..ListPolicy::default()
+    };
+    let mut ui = scrolled(100, policy);
+    let v = ui.list_viewport(crate::host::NodeId(LIST)).unwrap();
+    assert_eq!((v.offset, v.visible.clone()), (50.0, 1..5));
+    send(&mut ui, |t| {
+        t.list_command(LIST, 1, 1, Jump::Index(10, Align::Start));
+    })
+    .unwrap();
+    ui.render(VIEW);
+    assert_eq!(scroll(&ui), 350.0, "item 10's top under the band");
+    let v = ui.list_viewport(crate::host::NodeId(LIST)).unwrap();
+    assert_eq!((v.offset, v.anchor), (400.0, Some((11, 10, 0.0))));
+}
+
+/// A row stays when it lies on any longest increasing run of new
+/// indices: a swap or a reversal moves nothing; a block moved far moves
+/// alone.
+#[test]
+fn rows_on_any_longest_run_stay() {
+    use crate::list::on_any_lis;
+    assert_eq!(on_any_lis(&[1, 0]), [true, true]);
+    assert_eq!(on_any_lis(&[3, 2, 1, 0]), [true; 4]);
+    assert_eq!(on_any_lis(&[0, 2, 1, 3]), [true; 4]);
+    assert_eq!(on_any_lis(&[2, 0, 1]), [false, true, true]);
+    // K13: m25 and m26 moved to the top.
+    let k13: Vec<u32> = [25, 26].into_iter().chain(0..25).chain(27..100).collect();
+    let on = on_any_lis(&k13);
+    assert!(!on[0] && !on[1] && on[2..].iter().all(|&b| b));
+    assert!(on_any_lis(&[]).is_empty());
+}
+
+/// A batch's span, from its ops alone, bounds what it touched: the
+/// first `lo` items and the last `suffix` keep their identities and
+/// places, over seeded batches.
+#[test]
+fn batch_spans_bound_what_changed() {
+    use crate::list::Span;
+    let mut rng = Rng::new(7);
+    for _ in 0..400 {
+        let n = rng.below(20);
+        let mut model: Model = (1..=n).map(|id| (Item::sized(id, 0, 40.0), None)).collect();
+        let old: Vec<u32> = model.iter().map(|e| e.0.id).collect();
+        let mut next = 1000;
+        let ops: Vec<ListOp> = (0..1 + rng.below(3))
+            .map(|_| random_op(&mut rng, &mut model, &mut next))
+            .collect();
+        let new: Vec<(u32, u32)> = model.iter().map(|e| (e.0.id, e.0.version)).collect();
+        let Some((span, len)) = Span::of(n, &ops) else {
+            continue;
+        };
+        assert_eq!(len as usize, new.len());
+        assert!(span.lo + span.suffix <= n.min(len), "{span:?} {n} {len}");
+        for i in 0..span.lo as usize {
+            assert_eq!(
+                (new[i].0, new[i].1),
+                (old[i], 0),
+                "prefix {i}: {span:?} {ops:?}"
+            );
+        }
+        for k in 1..=span.suffix as usize {
+            let (a, b) = (old[old.len() - k], new[new.len() - k]);
+            assert_eq!((b.0, b.1), (a, 0), "suffix {k}: {span:?} {ops:?}");
+        }
+    }
+}
+
+/// A stick-to-end scroller holding no list has no anchor: its offset is
+/// the reader's, through layouts that change its content.
+#[test]
+fn a_scroller_without_a_list_keeps_the_readers_offset() {
+    use crate::mutation::{Anchor, ListPolicy};
+    let mut ui = Ui::new(1.0);
+    let scroller = taffy::Style {
+        size: taffy::Size {
+            width: taffy::Dimension::percent(1.0),
+            height: taffy::Dimension::percent(1.0),
+        },
+        overflow: taffy::Point {
+            x: taffy::Overflow::Visible,
+            y: taffy::Overflow::Scroll,
+        },
+        ..crate::host::default_style().to_taffy()
+    };
+    let tall = |h: f32| taffy::Style {
+        size: taffy::Size {
+            width: taffy::Dimension::auto(),
+            height: taffy::Dimension::length(h),
+        },
+        flex_shrink: 0.0,
+        ..crate::host::default_style().to_taffy()
+    };
+    let policy = ListPolicy {
+        mode: Anchor::StickToEnd,
+        ..ListPolicy::default()
+    };
+    send(&mut ui, |t| {
+        t.create(0, NodeKind::View)
+            .layout(0, &scroller)
+            .list_policy(0, policy)
+            .append(NIL, 0);
+        t.create(1, NodeKind::View)
+            .layout(1, &tall(1000.0))
+            .append(0, 1);
+    })
+    .unwrap();
+    ui.render(VIEW);
+    ui.scroll_to(crate::host::NodeId(0), 0.0, 300.0);
+    ui.render(VIEW);
+    send(&mut ui, |t| {
+        t.layout(1, &tall(1200.0));
+    })
+    .unwrap();
+    ui.render(VIEW);
+    assert_eq!(scroll(&ui), 300.0);
+}

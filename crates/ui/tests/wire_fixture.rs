@@ -237,7 +237,42 @@ fn js_fixture_decodes_and_executes() {
     assert_eq!((l.items[0].id, l.items[0].arg), (7, 70_000));
     assert_eq!((l.items[1].id, l.items[1].arg), (5, 42));
     assert_eq!(host.list_index[5], 1);
-    assert_eq!(host.lists.policy(0), craie_ui::mutation::Anchor::StickToEnd);
+    // The scroller's policy: the anchor op, then the full policy.
+    assert_eq!(
+        host.lists.policy(0),
+        craie_ui::mutation::ListPolicy {
+            mode: craie_ui::mutation::Anchor::StickToEnd,
+            focus: true,
+            end_threshold: 80.0,
+            start_inset: 12.0,
+            padding_end: 100.0,
+        }
+    );
+    // Jumps of the contract list: by key, by offset, by index (at a
+    // stale revision), to the end.
+    {
+        use craie_ui::mutation::{Align, Jump};
+        let jumps: Vec<(u32, u32, Jump)> = (txn.mutations.iter())
+            .filter_map(|m| match m {
+                Mutation::ListCommand {
+                    id: 10,
+                    revision,
+                    request,
+                    jump,
+                } => Some((*revision, *request, *jump)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            jumps,
+            [
+                (2, 7, Jump::Item(22, Align::Center)),
+                (2, 8, Jump::Offset(1234.5)),
+                (1, 9, Jump::Index(3, Align::End)),
+                (2, 10, Jump::End),
+            ]
+        );
+    }
 
     // The contract list: config, templates, two patches (the third,
     // stale, skipped with a resync), and a row tagged by item.

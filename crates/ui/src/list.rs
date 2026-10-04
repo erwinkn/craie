@@ -24,7 +24,9 @@ use craie_core::extents::Extents;
 use crate::events::out_kind;
 use crate::geom::{Point, Rect, Size};
 use crate::host::NodeId;
-use crate::mutation::{Anchor, Item, ItemDesc, ItemTemplate, ListOp, NIL, Template};
+use crate::mutation::{
+    Align, Anchor, Item, ItemDesc, ItemTemplate, Jump, ListOp, ListPolicy as Policy, NIL, Template,
+};
 use crate::text::TextEngine;
 use crate::text::paragraph::{SpanStyle, TextSpec, TextStyle};
 use craie_core::Affine;
@@ -245,18 +247,65 @@ impl ListState {
     }
 }
 
-/// A scroller's captured anchor: the visually top edge of list item
-/// `index` of `list` sat `delta` points below the viewport top (`list`
-/// NIL: no list item was visible). `bottom`: that edge is the item's
-/// bottom (the list's y axis points up in the view). `at_end`: the
-/// scroller was at its end.
+/// A scroller's anchor: the visually top edge of list item `index` of
+/// `list` sits `delta` points below the viewport top, and layout holds
+/// it there (`list` NIL: no list item was visible). `bottom`: that edge
+/// is the item's bottom (the list's y axis points up in the view).
+///
+/// The anchor is captured (the visually top item) after a frame with
+/// reader input, when the scroller has none, and every frame while
+/// following; a batch moves it by the batch rule (`batch_anchor`), a jump
+/// sets it, and an edge clamp rewrites its offset to where its item is.
+/// Measurements, resizes and mounts don't: the scroll follows the anchor.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Saved {
     pub list: u32,
     pub index: u32,
     pub delta: f32,
     pub bottom: bool,
+    /// Within the policy's end threshold of the end, at the last frame.
     pub at_end: bool,
+    /// Held at the end until reader input: stick-to-end following, or a
+    /// jump to the end.
+    pub following: bool,
+    /// Set by a jump: held until reader input, through batches that keep
+    /// its item (wherever it moves, however it changes).
+    pub explicit: bool,
+    /// An index jump's alignment: item `index` is aligned again at every
+    /// layout until reader input.
+    pub jump: Option<Align>,
+    /// Reader input moved the viewport since the last capture.
+    pub moved: bool,
+}
+
+impl Saved {
+    const NONE: Saved = Saved {
+        list: NIL,
+        index: 0,
+        delta: 0.0,
+        bottom: false,
+        at_end: false,
+        following: false,
+        explicit: false,
+        jump: None,
+        moved: false,
+    };
+}
+
+/// What a list shows of its viewport (`readViewport`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct ListViewport {
+    /// Items meeting the viewport (empty: none).
+    pub visible: Range<u32>,
+    /// The anchor: item identity, index, and its visually top edge below
+    /// the viewport top.
+    pub anchor: Option<(u32, u32, f32)>,
+    /// The list content offset at the viewport top.
+    pub offset: f32,
+    pub at_end: bool,
+    pub following: bool,
+    /// Identities of rows kept rendered for focus.
+    pub pinned: Vec<u32>,
 }
 
 /// A row's tag: it renders version `version` of item `item` of list
@@ -273,10 +322,12 @@ pub struct RowTag {
 #[derive(Default)]
 pub struct Lists {
     pub(crate) map: HashMap<u32, ListState>,
-    /// Anchor policies that are not the default, by scroller.
-    pub(crate) policies: HashMap<u32, Anchor>,
-    /// Captured anchors by scroller, refreshed after every frame.
+    /// Policies that are not the default, by scroller.
+    pub(crate) policies: HashMap<u32, Policy>,
+    /// Anchors by scroller.
     pub(crate) saved: HashMap<u32, Saved>,
+    /// Jumps waiting for their batch's layout, by list, in order.
+    pub(crate) jumps: Vec<(u32, Jump)>,
     /// Rows tagged by item (`LIST_ROW2`), by row node.
     pub rows: HashMap<u32, RowTag>,
     /// (average advance, line height) per font size (f32 bits).
@@ -314,8 +365,31 @@ impl Lists {
         t.list == list && item.is_some_and(|d| d.id == t.item && d.version == t.version)
     }
 
-    pub fn policy(&self, scroller: u32) -> Anchor {
+    pub fn policy(&self, scroller: u32) -> Policy {
         self.policies.get(&scroller).copied().unwrap_or_default()
+    }
+
+    pub(crate) fn set_policy(&mut self, scroller: u32, policy: Policy) {
+        if policy == Policy::default() {
+            self.policies.remove(&scroller);
+        } else {
+            self.policies.insert(scroller, policy);
+        }
+    }
+
+    /// Reader input scrolled `scroller`: its anchor ends any jump and is
+    /// captured again after the frame.
+    pub(crate) fn reader_scrolled(&mut self, scroller: u32) {
+        if let Some(s) = self.saved.get_mut(&scroller) {
+            s.moved = true;
+            s.explicit = false;
+            s.jump = None;
+        }
+    }
+
+    /// Whether jumps wait for the next layout.
+    pub(crate) fn jumping(&self) -> bool {
+        !self.jumps.is_empty()
     }
 
     /// Forgets everything a freed node held.
@@ -326,6 +400,7 @@ impl Lists {
         self.policies.remove(&id);
         self.saved.remove(&id);
         self.saved.retain(|_, s| s.list != id);
+        self.jumps.retain(|j| j.0 != id);
     }
 
     pub(crate) fn configure(
@@ -792,6 +867,183 @@ impl Placement {
             .apply(Point::new(self.content[0], self.content[1] + y));
         p.y - self.scroll[1] - self.viewport.origin.y
     }
+
+    /// Item `i`'s visually top edge below the viewport top, and its
+    /// height in the view.
+    fn item_view(&self, l: &ListState, i: usize) -> (f32, f32) {
+        let o = l.offset(i);
+        let (a, b) = (self.view_y(o), self.view_y(o + l.extents.size(i)));
+        (a.min(b), (b - a).abs())
+    }
+
+    /// Whether item `i` meets the visible part of the list.
+    fn meets(&self, l: &ListState, i: usize) -> bool {
+        let o = l.offset(i);
+        o < self.v1 && o + l.extents.size(i) > self.v0
+    }
+
+    /// The items meeting the visible part of the list (empty: none).
+    fn visible(&self, l: &ListState) -> Range<u32> {
+        let total = l.total();
+        if l.is_empty() || self.v1 <= 0.0 || self.v0 >= total || self.v0 > self.v1 {
+            return 0..0;
+        }
+        // `item_at` gives a gap to the item above it: step past an item
+        // that ends at or above the top, or starts at or below the
+        // bottom.
+        let mut first = l.item_at(self.v0.max(0.0));
+        if !self.meets(l, first) {
+            first += 1;
+        }
+        let mut last = l.item_at(self.v1.min(total - 1e-3).max(0.0));
+        if last > first && !self.meets(l, last) {
+            last -= 1;
+        }
+        if first > last || !self.meets(l, first) {
+            return 0..0;
+        }
+        first as u32..last as u32 + 1
+    }
+
+    /// The anchor a capture takes: the visually top item (the list's
+    /// near end, or its far end when the list's y axis points up), or
+    /// none.
+    fn capture(&self, l: &ListState, id: u32, visible: bool) -> Saved {
+        if !visible {
+            return Saved::NONE;
+        }
+        let total = l.total();
+        let bottom = self.flipped();
+        let index = if bottom {
+            l.item_at(self.v1.min(total - 1e-3).max(0.0))
+        } else {
+            l.item_at(self.v0.max(0.0))
+        };
+        let edge = l.offset(index) + if bottom { l.extents.size(index) } else { 0.0 };
+        Saved {
+            list: id,
+            index: index as u32,
+            delta: self.view_y(edge),
+            bottom,
+            ..Saved::NONE
+        }
+    }
+}
+
+/// The part of a list a batch's ops touch, known from the ops alone:
+/// the first `lo` items and the last `suffix` keep their places. `at` is
+/// the first structural change (a splice or a move), and `end` the end
+/// of the structural part in the new list (`len - suffix` of its ops).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct Span {
+    pub lo: u32,
+    pub suffix: u32,
+    pub at: Option<u32>,
+    pub end: u32,
+}
+
+impl Span {
+    /// The span of `ops` over a list of `len` items, and the new length;
+    /// None when they change nothing. Indices below the running minimum
+    /// are untouched by every op so far, so each op's own indices bound
+    /// it in the old list's terms (and the suffix likewise).
+    pub(crate) fn of(len: u32, ops: &[ListOp]) -> Option<(Span, u32)> {
+        let (mut lo, mut suffix, mut at, mut struct_suffix) = (u32::MAX, u32::MAX, None, u32::MAX);
+        let mut n = len;
+        for op in ops {
+            let (first, end_before, after) = match op {
+                ListOp::Splice { at, remove, items } => {
+                    let k = items.len() as u32 / Item::BYTES as u32;
+                    (*at, at + remove, n - remove + k)
+                }
+                ListOp::Move { from, count, to } => {
+                    if *count == 0 || from == to {
+                        continue;
+                    }
+                    (*from.min(to), from.max(to) + count, n)
+                }
+                ListOp::Update { at, items } => {
+                    let k = items.len() as u32 / Item::BYTES as u32;
+                    if k == 0 {
+                        continue;
+                    }
+                    (*at, at + k, n)
+                }
+            };
+            lo = lo.min(first);
+            suffix = suffix.min(n - end_before);
+            if !matches!(op, ListOp::Update { .. }) {
+                at = Some(at.map_or(first, |a: u32| a.min(first)));
+                struct_suffix = struct_suffix.min(n - end_before);
+            }
+            n = after;
+        }
+        if lo == u32::MAX {
+            return None;
+        }
+        let suffix = suffix.min(len - lo.min(len)).min(n - lo.min(n));
+        let end = n - struct_suffix.min(n);
+        Some((
+            Span {
+                lo,
+                suffix,
+                at,
+                end,
+            },
+            n,
+        ))
+    }
+}
+
+/// A list as a batch found it, for the batch rule (`Ui::batch_before`).
+pub(crate) struct Before {
+    scroller: u32,
+    saved: Saved,
+    span: Span,
+    old_len: u32,
+    /// Visible items, visually top first: index, descriptor, and their
+    /// visually top edge below the viewport top.
+    rows: Vec<(u32, Item, f32)>,
+    /// The old items in the span.
+    old: Vec<Item>,
+    /// The first visible place and its top.
+    place: (u32, f32),
+}
+
+/// Whether each of `seq` (distinct values) lies on some longest
+/// increasing subsequence: ending[k] + starting[k] - 1 == longest.
+pub(crate) fn on_any_lis(seq: &[u32]) -> Vec<bool> {
+    let lengths = |seq: &mut dyn Iterator<Item = i64>| -> Vec<usize> {
+        // tails[l]: the smallest tail of an increasing run of length l + 1.
+        let mut tails: Vec<i64> = Vec::new();
+        seq.map(|v| {
+            let l = tails.partition_point(|&t| t < v);
+            if l == tails.len() {
+                tails.push(v);
+            } else {
+                tails[l] = v;
+            }
+            l + 1
+        })
+        .collect()
+    };
+    let ending = lengths(&mut seq.iter().map(|&v| v as i64));
+    let mut starting = lengths(&mut seq.iter().rev().map(|&v| -(v as i64)));
+    starting.reverse();
+    let longest = ending.iter().copied().max().unwrap_or(0);
+    (0..seq.len())
+        .map(|k| ending[k] + starting[k] - 1 == longest)
+        .collect()
+}
+
+/// Where alignment `align` puts the top of an item `h` tall in a
+/// viewport `view` tall.
+fn align_delta(align: Align, view: f32, h: f32) -> f32 {
+    match align {
+        Align::Start => 0.0,
+        Align::Center => (view - h) * 0.5,
+        Align::End => view - h,
+    }
 }
 
 /// Distance under which an anchor correction is noise, not motion.
@@ -844,8 +1096,18 @@ impl crate::ui::Ui {
             let style = self.host.style(cur);
             let offset = self.host.spatial[cur.index()].scroll;
             if style.overflow().y == taffy::Overflow::Scroll {
+                // A band covered at the top isn't viewport (`startInset`).
                 let d = self.layouts.data(cur);
-                break (cur, d.clip_box, offset, d.scroll_extent[1]);
+                let inset = self.host.lists.policy(cur.0).start_inset;
+                let c = d.clip_box;
+                let inset = inset.min(c.size.height);
+                let view = Rect::new(
+                    c.origin.x,
+                    c.origin.y + inset,
+                    c.size.width,
+                    c.size.height - inset,
+                );
+                break (cur, view, offset, d.scroll_extent[1]);
             }
             if style.overflow().x == taffy::Overflow::Scroll {
                 to_view = Affine::translate(-offset[0], -offset[1]).mul(&to_view);
@@ -879,11 +1141,13 @@ impl crate::ui::Ui {
         })
     }
 
-    /// After a layout pass: every scroller with a captured anchor scrolls
-    /// so its anchor item keeps its place in the viewport (`KeepVisible`)
-    /// or stays at the end (`StickToEnd`, when it was there).
+    /// After a layout pass: pending jumps take their scrollers, then
+    /// every scroller holds its anchor: at the end while following, its
+    /// jump's item at the jump's alignment, else (`KeepVisible`) its
+    /// anchor item's edge `delta` below the viewport top.
     pub(crate) fn restore_anchors(&mut self) {
         let window = self.laid_out.unwrap_or(Size::ZERO);
+        self.take_jumps(window);
         let saved: Vec<(u32, Saved)> = self
             .host
             .lists
@@ -897,36 +1161,136 @@ impl crate::ui::Ui {
                 continue;
             }
             let policy = self.host.lists.policy(scroller);
-            let target = match policy {
-                Anchor::None => continue,
-                Anchor::StickToEnd if s.at_end => self.layouts.data(sc).scroll_extent[1],
-                _ => {
-                    if s.list == NIL {
-                        continue;
+            let target = if s.following {
+                self.layouts.data(sc).scroll_extent[1]
+            } else {
+                // Jumps hold under any mode; anchors only keep-visible.
+                if s.list == NIL || (s.jump.is_none() && policy.mode == Anchor::None) {
+                    continue;
+                }
+                let Some(p) = self.list_placement(NodeId(s.list), window) else {
+                    continue;
+                };
+                let Some(l) = self.host.lists.get(s.list) else {
+                    continue;
+                };
+                if p.scroller != sc || s.index >= l.len() {
+                    continue;
+                }
+                let i = s.index as usize;
+                match s.jump {
+                    Some(align) => {
+                        let (top, h) = p.item_view(l, i);
+                        p.scroll[1] + top - align_delta(align, p.viewport.size.height, h)
                     }
-                    let Some(p) = self.list_placement(NodeId(s.list), window) else {
-                        continue;
-                    };
-                    let Some(l) = self.host.lists.get(s.list) else {
-                        continue;
-                    };
-                    if p.scroller != sc || s.index >= l.len() {
-                        continue;
+                    // The scroll that puts the item's edge `delta` below
+                    // the viewport top.
+                    None => {
+                        let edge = l.offset(i) + if s.bottom { l.extents.size(i) } else { 0.0 };
+                        p.scroll[1] + p.view_y(edge) - s.delta
                     }
-                    // The scroll that puts the item's edge `delta` below the
-                    // viewport top.
-                    let i = s.index as usize;
-                    let edge = l.offset(i) + if s.bottom { l.extents.size(i) } else { 0.0 };
-                    p.scroll[1] + p.view_y(edge) - s.delta
                 }
             };
             let cur = self.host.spatial[sc.index()].scroll;
             if (target - cur[1]).abs() > ANCHOR_EPS
-                && let Some(off) = self.scroll_to(sc, cur[0], target)
+                && let Some(off) = self.set_scroll(sc, cur[0], target)
             {
                 self.scroll_event(sc, off);
             }
+            // Clamped at an edge: the anchor takes its item's place (an
+            // aligned jump keeps its alignment).
+            let applied = self.host.spatial[sc.index()].scroll[1];
+            if !s.following
+                && s.jump.is_none()
+                && (target - applied).abs() > ANCHOR_EPS
+                && let Some(a) = self.host.lists.saved.get_mut(&scroller)
+            {
+                a.delta += target - applied;
+            }
         }
+    }
+
+    /// Applies the jumps waiting for this layout: each takes its list's
+    /// scroller (an offset jump scrolls as the reader does).
+    fn take_jumps(&mut self, window: Size) {
+        for (list, jump) in std::mem::take(&mut self.host.lists.jumps) {
+            let Some(p) = self.list_placement(NodeId(list), window) else {
+                continue;
+            };
+            let sc = p.scroller;
+            if !sc.is_node() {
+                continue;
+            }
+            let end_mode = self.host.lists.policy(sc.0).mode == Anchor::StickToEnd;
+            let Some(l) = self.host.lists.map.get_mut(&list) else {
+                continue;
+            };
+            let last = l.len().saturating_sub(1);
+            let (index, align) = match jump {
+                // The last item aligned at the end of an end list is the
+                // end: it follows.
+                Jump::Index(i, Align::End) if end_mode && i >= last => {
+                    self.jump_to_end(list, sc, end_mode, window);
+                    continue;
+                }
+                Jump::Index(i, a) => (i.min(last), a),
+                Jump::Item(id, a) => match l.index_of(id) {
+                    Some(i) => (i, a),
+                    None => continue,
+                },
+                Jump::End => {
+                    self.jump_to_end(list, sc, end_mode, window);
+                    continue;
+                }
+                Jump::Offset(y) => {
+                    let target = p.scroll[1] + p.view_y(y as f32);
+                    let x = self.host.spatial[sc.index()].scroll[0];
+                    if let Some(off) = self.scroll_to(sc, x, target) {
+                        self.scroll_event(sc, off);
+                    }
+                    continue;
+                }
+            };
+            if l.is_empty() {
+                continue;
+            }
+            let s = Saved {
+                list,
+                index,
+                bottom: p.flipped(),
+                explicit: true,
+                jump: Some(align),
+                ..Saved::NONE
+            };
+            self.host.lists.saved.insert(sc.0, s);
+        }
+    }
+
+    /// The end: an end list follows it; a start list scrolls there once,
+    /// its anchor then the item at the top, held explicitly.
+    fn jump_to_end(&mut self, list: u32, sc: NodeId, end_mode: bool, window: Size) {
+        if end_mode {
+            let s = self.host.lists.saved.entry(sc.0).or_insert(Saved::NONE);
+            (s.following, s.explicit, s.jump, s.moved) = (true, false, None, false);
+            return;
+        }
+        let [x, _] = self.host.spatial[sc.index()].scroll;
+        let max = self.layouts.data(sc).scroll_extent[1];
+        if let Some(off) = self.set_scroll(sc, x, max) {
+            self.scroll_event(sc, off);
+        }
+        let (Some(p), Some(l)) = (
+            self.list_placement(NodeId(list), window),
+            self.host.lists.get(list),
+        ) else {
+            return;
+        };
+        let visible = !l.is_empty() && !p.visible(l).is_empty();
+        let s = Saved {
+            explicit: true,
+            ..p.capture(l, list, visible)
+        };
+        self.host.lists.saved.insert(sc.0, s);
     }
 
     /// After every frame's layout and scroll: captures each scroller's
@@ -956,42 +1320,37 @@ impl crate::ui::Ui {
             let visible = count > 0 && p.v1 > 0.0 && p.v0 < total && p.v0 <= p.v1;
 
             if p.scroller.is_node() && !anchored.contains(&p.scroller.0) {
-                let at_end = p.scroll[1] >= p.max_scroll - 0.5;
-                let saved = if visible {
-                    // The visually top item: the list's near end, or its
-                    // far end when the list's y axis points up.
-                    let bottom = p.flipped();
-                    let index = if bottom {
-                        l.item_at(p.v1.min(total - 1e-3).max(0.0))
-                    } else {
-                        l.item_at(p.v0.max(0.0))
+                let sc = p.scroller.0;
+                let policy = self.host.lists.policy(sc);
+                let at_end = p.scroll[1] >= p.max_scroll - policy.end_threshold;
+                let old = self.host.lists.saved.get(&sc).copied();
+                // Another list's anchor holds this scroller: it decides.
+                let other = old.is_some_and(|s| {
+                    s.list != NIL
+                        && s.list != id
+                        && !s.moved
+                        && self.host.lists.map.contains_key(&s.list)
+                });
+                if !other {
+                    // The anchor stays unless reader input moved the
+                    // viewport or the end holds instead.
+                    let holds = old.is_some_and(|s| {
+                        !s.moved && !s.following && s.list == id && s.index < count
+                    });
+                    let mut s = match old {
+                        Some(s) if holds => s,
+                        _ => p.capture(l, id, visible),
                     };
-                    let edge = l.offset(index) + if bottom { l.extents.size(index) } else { 0.0 };
-                    Saved {
-                        list: id,
-                        index: index as u32,
-                        delta: p.view_y(edge),
-                        bottom,
-                        at_end,
-                    }
-                } else {
-                    Saved {
-                        list: NIL,
-                        index: 0,
-                        delta: 0.0,
-                        bottom: false,
-                        at_end,
-                    }
-                };
-                // A scroller showing no list item keeps no item anchor.
-                if visible || !self.host.lists.saved.contains_key(&p.scroller.0) {
-                    self.host.lists.saved.insert(p.scroller.0, saved);
-                } else if let Some(s) = self.host.lists.saved.get_mut(&p.scroller.0) {
-                    s.list = NIL;
                     s.at_end = at_end;
-                }
-                if visible {
-                    anchored.push(p.scroller.0);
+                    s.following = match old {
+                        None => policy.mode == Anchor::StickToEnd,
+                        Some(o) if o.moved => policy.mode == Anchor::StickToEnd && at_end,
+                        Some(o) => o.following,
+                    };
+                    self.host.lists.saved.insert(sc, s);
+                    if visible {
+                        anchored.push(sc);
+                    }
                 }
             }
 
@@ -1039,6 +1398,176 @@ impl crate::ui::Ui {
         }
         self.host.lists.ids = ids;
         self.host.lists.anchored = anchored;
+    }
+
+    /// What the batch rule needs before `ops` apply to list `list`: its
+    /// scroller's anchor (unless following, when the end holds), the
+    /// visible rows with their tops, and the touched span's old items.
+    /// None when the anchor isn't this list's or nothing is visible.
+    pub(crate) fn batch_before(&self, list: u32, ops: &[ListOp]) -> Option<Before> {
+        let l = self.host.lists.get(list)?;
+        let p = self.list_placement(NodeId(list), self.laid_out?)?;
+        let saved = *self.host.lists.saved.get(&p.scroller.0)?;
+        if !p.scroller.is_node() || saved.list != list || saved.following {
+            return None;
+        }
+        let (span, _) = Span::of(l.len(), ops)?;
+        let vis = p.visible(l);
+        if vis.is_empty() {
+            return None;
+        }
+        let mut rows: Vec<(u32, Item, f32)> = vis
+            .clone()
+            .map(|i| (i, l.items[i as usize], p.item_view(l, i as usize).0))
+            .collect();
+        if p.flipped() {
+            rows.reverse();
+        }
+        let old_len = l.len();
+        let old = l.items[span.lo as usize..(old_len - span.suffix) as usize].to_vec();
+        let place = span
+            .at
+            .map_or(vis.start, |at| at.max(vis.start))
+            .min(old_len);
+        let top = if (place as usize) < l.items.len() {
+            p.item_view(l, place as usize).0
+        } else {
+            p.view_y(l.total())
+        };
+        Some(Before {
+            scroller: p.scroller.0,
+            saved,
+            span,
+            old_len,
+            rows,
+            old,
+            place: (place, top),
+        })
+    }
+
+    /// The batch rule, once the batch applied (`docs/contracts/lists.md`):
+    /// an explicit anchor keeps its item while it survives; else the
+    /// anchor stays when no visible row was removed or changed and it
+    /// stayed in order; else the topmost visible row that stayed and is
+    /// unchanged holds its place (loaded rows first); else the first
+    /// visible place does. A row stayed outside the span, or on any
+    /// longest increasing subsequence of the span's surviving items;
+    /// it is unchanged when its identity survives with the same version,
+    /// loaded and failed flags.
+    pub(crate) fn batch_anchor(&mut self, list: u32, b: Before) {
+        let Some(l) = self.host.lists.get(list) else {
+            return;
+        };
+        let new_len = l.len();
+        let Span {
+            lo,
+            suffix,
+            at,
+            end,
+        } = b.span;
+        let (old_end, new_end) = (b.old_len - suffix, new_len - suffix);
+        // The span's new items by identity: (id, index), sorted.
+        let mut found: Vec<(u32, u32)> = (lo..new_end)
+            .filter(|&j| l.items[j as usize].id != NIL)
+            .map(|j| (l.items[j as usize].id, j))
+            .collect();
+        found.sort_unstable();
+        let map = |i: u32| -> Option<u32> {
+            if i < lo {
+                Some(i)
+            } else if i >= old_end {
+                Some(i + new_len - b.old_len)
+            } else {
+                let id = b.old[(i - lo) as usize].id;
+                (id != NIL)
+                    .then(|| found.binary_search_by_key(&id, |f| f.0).ok())
+                    .flatten()
+                    .map(|k| found[k].1)
+            }
+        };
+        let survivors: Vec<(u32, u32)> = (lo..old_end).filter_map(|i| Some((i, map(i)?))).collect();
+        let on = on_any_lis(&survivors.iter().map(|s| s.1).collect::<Vec<_>>());
+        let stayed = |i: u32| {
+            if i < lo || i >= old_end {
+                return true;
+            }
+            survivors
+                .binary_search_by_key(&i, |s| s.0)
+                .is_ok_and(|k| on[k])
+        };
+        const STATE: u8 = Item::LOADED | Item::FAILED;
+        let unchanged = |i: u32, before: &Item| {
+            map(i).is_some_and(|j| {
+                let now = &l.items[j as usize];
+                now.version == before.version && now.flags & STATE == before.flags & STATE
+            })
+        };
+        let s = b.saved;
+        let keep = |index: u32, delta: f32, explicit: bool| Saved {
+            index,
+            delta,
+            explicit,
+            jump: if explicit { s.jump } else { None },
+            ..s
+        };
+        let next = if let Some(j) = map(s.index).filter(|_| s.explicit) {
+            keep(j, s.delta, true)
+        } else if let Some(j) = map(s.index)
+            .filter(|_| stayed(s.index) && b.rows.iter().all(|(i, d, _)| unchanged(*i, d)))
+        {
+            keep(j, s.delta, false)
+        } else {
+            let pick = |loaded: bool| {
+                b.rows.iter().find(|(i, d, _)| {
+                    stayed(*i) && unchanged(*i, d) && (!loaded || d.flags & Item::LOADED != 0)
+                })
+            };
+            match pick(true).or_else(|| pick(false)) {
+                Some(&(i, _, top)) => keep(map(i).unwrap(), top, false),
+                None if new_len == 0 => keep(0, 0.0, false),
+                None => {
+                    let (place, top) = b.place;
+                    let bound = if at.is_some() { end } else { place };
+                    keep(place.min(bound).min(new_len - 1), top, false)
+                }
+            }
+        };
+        if let Some(cur) = self.host.lists.saved.get_mut(&b.scroller) {
+            *cur = Saved {
+                at_end: cur.at_end,
+                moved: cur.moved,
+                ..next
+            };
+        }
+    }
+
+    /// What list `list` shows of its viewport, from the current layout
+    /// and scroll (`readViewport`); None for a node that isn't a list.
+    pub fn list_viewport(&self, list: NodeId) -> Option<ListViewport> {
+        let l = self.host.lists.get(list.0)?;
+        let p = self.list_placement(list, self.laid_out.unwrap_or(Size::ZERO))?;
+        let saved = self.host.lists.saved.get(&p.scroller.0).copied();
+        let anchor = saved
+            .filter(|s| p.scroller.is_node() && s.list == list.0 && s.index < l.len())
+            .map(|s| {
+                let i = s.index as usize;
+                (l.items[i].id, s.index, p.item_view(l, i).0)
+            });
+        let threshold = self.host.lists.policy(p.scroller.0).end_threshold;
+        let keep = self.focused_row(list);
+        let pinned = l
+            .items
+            .get(keep as usize)
+            .map(|d| d.id)
+            .filter(|&id| id != NIL);
+        Some(ListViewport {
+            visible: p.visible(l),
+            anchor,
+            offset: p.v0,
+            at_end: p.scroller.is_node() && p.scroll[1] >= p.max_scroll - threshold,
+            following: saved.is_some_and(|s| s.following),
+            pinned: pinned.into_iter().collect(),
+        })
     }
 
     /// The item index of the list row that holds focus, or NIL.

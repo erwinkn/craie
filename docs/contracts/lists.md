@@ -351,8 +351,8 @@ stays the one source of truth, and the list never flips `loaded` itself.
 | 0x94 | `LIST_CONFIG2` | node, overscan f32, lookahead f32, retain f32 (viewport heights), fallback f32, template epoch u32, count u16, templates (kind u8, payload bytes u32, then fixed: size f32; widths: u16 count + f32 pairs; text: base, inset, font size, line height, char width f32) |
 | 0x95 | `LIST_PATCH` | node, base revision u32, next revision u32, op count u32, then ops: splice (tag, at, remove, add count u32, descriptors), move (tag, from, count, to u32), update (tag, at, count u32, descriptors with the same item ids) |
 | 0x96 | `LIST_ROW2` | row node, list node, item id, version token u32: the row follows the item and measures it only at that version, so a row rendered for older content never records its height, and edits to other items need no new tags |
-| 0x97 | `LIST_POLICY` | scroller node, mode u8 (keep-visible, stick-to-end, none), anchor policy u8, end threshold f32, covered start f32, padding end f32 |
-| 0x98 | `LIST_COMMAND` | list node, revision, request id u32, kind u8 (index, key, end, offset, read), then index or item id u32 + align u8, or offset f64 |
+| 0x97 | `LIST_POLICY` | scroller node, mode u8 (0 keep-visible, 1 stick-to-end, 2 none), anchor policy u8 (0 reading, 1 focus), end threshold f32, covered start f32, padding end f32 |
+| 0x98 | `LIST_COMMAND` | list node, revision, request id u32, kind u8 (0 index, 1 key, 2 end, 3 offset; 4 read with the viewport events), then index or item id u32 + align u8 (0 start, 1 center, 2 end), or offset f64. An index made for another revision is skipped |
 | 0x99 | `LIST_CACHE` | scroller, list, cache token u32, action u8 (attach, retain, release): warm restore by `restoreKey`, bounded natively |
 
 - **Descriptor:** 16 bytes. Item id u32 (the bridge interns keys), version

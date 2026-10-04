@@ -221,6 +221,14 @@ export function readFrame(buf: Uint8Array): Frame {
       }
       case 0x96: op.f.push(u32(), u32(), u32()); break // list row 2: list, item, version
       case 0x93: op.f.push(u8()); break // scroll anchor
+      case 0x97: op.f.push(u8(), u8(), f32(), f32(), f32()); break // list policy
+      case 0x98: { // list command: revision, request, kind, then its argument
+        op.f.push(u32(), u32())
+        const kind = u8(); op.f.push(kind)
+        if (kind <= 1) op.f.push(u32(), u8())
+        else if (kind === 3) { op.f.push(dv.getFloat64(at, true)); at += 8 }
+        break
+      }
       case 0xa0: { // transition: count x (prop, timing)
         const n = u8(); op.f.push(n)
         for (let i = 0; i < n; i++) { op.f.push(u8(), u8()); for (let k = 0; k < 6; k++) op.f.push(f32()) }

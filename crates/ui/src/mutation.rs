@@ -641,6 +641,69 @@ impl Anchor {
     }
 }
 
+/// A scroller's list policy (`LIST_POLICY`; `SCROLL_ANCHOR` sets the
+/// mode alone).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ListPolicy {
+    pub mode: Anchor,
+    /// `anchorPolicy: "focus"`: a visible focused row holds first.
+    pub focus: bool,
+    /// Distance from the end within which the scroller is at its end
+    /// (logical points).
+    pub end_threshold: f32,
+    /// A band covered at the viewport's top (logical points).
+    pub start_inset: f32,
+    /// Space past the last row (logical points).
+    pub padding_end: f32,
+}
+
+impl Default for ListPolicy {
+    fn default() -> ListPolicy {
+        ListPolicy {
+            mode: Anchor::KeepVisible,
+            focus: false,
+            end_threshold: 0.5,
+            start_inset: 0.0,
+            padding_end: 0.0,
+        }
+    }
+}
+
+/// Where a jump puts its item in the viewport (`LIST_COMMAND`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[repr(u8)]
+pub enum Align {
+    #[default]
+    Start = 0,
+    Center = 1,
+    End = 2,
+}
+
+impl Align {
+    pub fn from_u8(v: u8) -> Option<Align> {
+        Some(match v {
+            0 => Align::Start,
+            1 => Align::Center,
+            2 => Align::End,
+            _ => return None,
+        })
+    }
+}
+
+/// A list's jump (`LIST_COMMAND`), applied after its batch's layout.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Jump {
+    /// Item `index` (clamped) at an alignment, held there until reader
+    /// input.
+    Index(u32, Align),
+    /// The item with this identity, as `Index`; nothing if it is absent.
+    Item(u32, Align),
+    /// The end, held until reader input.
+    End,
+    /// A list content offset at the viewport's top: reader input.
+    Offset(f64),
+}
+
 /// Imperative UI commands.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Command<'a> {
@@ -872,6 +935,20 @@ pub enum Mutation<'a> {
         id: u32,
         anchor: Anchor,
     },
+    /// Scroll container `id`'s list policy (protocol 21).
+    ListPolicy {
+        id: u32,
+        policy: ListPolicy,
+    },
+    /// A jump of list `id` (protocol 21), after its batch's layout. An
+    /// index refers to the list at `revision`: against another, the
+    /// jump is skipped. `request` names it to JS.
+    ListCommand {
+        id: u32,
+        revision: u32,
+        request: u32,
+        jump: Jump,
+    },
     // animation
     /// Replaces the node's declared transitions (empty clears): later
     /// changes of these properties tween.
@@ -955,6 +1032,8 @@ impl Mutation<'_> {
             | Mutation::ListPatch { id, .. }
             | Mutation::ListRow { id, .. }
             | Mutation::ScrollAnchor { id, .. }
+            | Mutation::ListPolicy { id, .. }
+            | Mutation::ListCommand { id, .. }
             | Mutation::Transition { id, .. }
             | Mutation::Animate { id, .. }
             | Mutation::Animation { id, .. }
@@ -1515,5 +1594,18 @@ impl<'a> Transaction<'a> {
 
     pub fn scroll_anchor(&mut self, id: u32, anchor: Anchor) -> &mut Self {
         self.push(Mutation::ScrollAnchor { id, anchor })
+    }
+
+    pub fn list_policy(&mut self, id: u32, policy: ListPolicy) -> &mut Self {
+        self.push(Mutation::ListPolicy { id, policy })
+    }
+
+    pub fn list_command(&mut self, id: u32, revision: u32, request: u32, jump: Jump) -> &mut Self {
+        self.push(Mutation::ListCommand {
+            id,
+            revision,
+            request,
+            jump,
+        })
     }
 }

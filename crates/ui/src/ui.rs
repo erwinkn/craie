@@ -467,10 +467,19 @@ impl Ui {
         }
     }
 
-    /// Sets a scroll offset, clamped to the layout extent and to the axes
-    /// the node's style scrolls; returns the applied offset when it
-    /// changed.
+    /// Sets a scroll offset as the reader does (wheel, keys, assistive
+    /// technology, a `ScrollTo` from JS), clamped to the layout extent and
+    /// to the axes the node's style scrolls; returns the applied offset
+    /// when it changed. A list anchor in it is captured again.
     pub fn scroll_to(&mut self, id: NodeId, x: f32, y: f32) -> Option<[f32; 2]> {
+        let off = self.set_scroll(id, x, y)?;
+        self.host.lists.reader_scrolled(id.0);
+        Some(off)
+    }
+
+    /// `scroll_to` without counting as reader input: anchor corrections
+    /// and clamps.
+    pub(crate) fn set_scroll(&mut self, id: NodeId, x: f32, y: f32) -> Option<[f32; 2]> {
         self.host.node(id)?;
         let style = self.host.style(id);
         let overflow = style.overflow();
@@ -540,6 +549,7 @@ impl Ui {
             || !d.paint.is_empty()
             || !d.spatial.is_empty()
             || !self.pending_scrolls.is_empty()
+            || self.host.lists.jumping()
             || !self.states.queue.is_empty()
         {
             return true;
@@ -604,6 +614,10 @@ impl Ui {
     /// viewport changed; returns whether it ran.
     pub fn layout(&mut self, size: Size) -> bool {
         if self.host.dirty.layout.is_empty() && self.laid_out == Some(size) {
+            // A jump alone needs no layout pass.
+            if self.host.lists.jumping() {
+                self.restore_anchors();
+            }
             self.apply_pending_scrolls();
             return false;
         }
@@ -634,7 +648,7 @@ impl Ui {
             let node = NodeId(id);
             if self.host.is_live(node) {
                 let [x, y] = self.host.spatial[node.index()].scroll;
-                self.scroll_to(node, x, y);
+                self.set_scroll(node, x, y);
             }
         }
         total

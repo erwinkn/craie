@@ -712,18 +712,47 @@ container:
   list's splice revision; a list reports again after every splice.
   React keeps the focused item's row by key and applies ranges only
   from the current revision.
-- Anchoring: after every frame each scroller captures its anchor (the
-  top visible item and its offset from the viewport top, and whether
-  it is at its end). After a layout pass, `keep-visible` scrolls so the
-  anchor item keeps its place; `stick-to-end` holds the end when it was
-  there. A splice moves the anchor with its item: to its new place
-  when it moved, to the splice start only when it was removed.
+- Anchoring follows the kit's rules (the lists contract, held to the
+  shared traces by `list_traces.rs`). Each scroller keeps one anchor: a
+  list item and its visually top edge's offset below the viewport top.
+  After a layout pass the scroll follows it, so measurements, resizes
+  and mounts move the scroll, never the anchor. It is captured (the
+  visually top item) only after reader input (wheel, keys, assistive
+  technology, a `ScrollTo` from JS), when the scroller has none, and
+  every frame while following. An edge clamp rewrites its offset to
+  where its item is.
+  - A patch moves it once, against the geometry before the batch (the
+    batch rule): an explicit anchor keeps its item while it survives;
+    else the anchor stays when no visible row was removed or changed
+    and it stayed in order; else the topmost visible row that stayed
+    and is unchanged holds (loaded first); else the first visible place
+    does. A row stayed when it lies outside the span the batch touched
+    or on any longest increasing subsequence of the span's survivors;
+    it is unchanged when its identity survives with its version, loaded
+    and failed flags. The span comes from the ops alone (their common
+    prefix and suffix), so an update or an append off screen costs
+    O(k). While following, the rule doesn't run. A `LIST_SPLICE` (the
+    old ops) moves the anchor with its item.
+  - `LIST_POLICY` (protocol 21, by scroller) sets the mode
+    (`keep-visible`, `stick-to-end` with its end threshold, `none`), a
+    band covered at the top (`startInset`: the viewport starts below it,
+    for the visible range, the anchor, the offset and jump alignment),
+    and end padding (scroll range past the content). `stick-to-end`
+    follows from the start; each reader scroll sets following to being
+    within the threshold of the end. `SCROLL_ANCHOR` sets the mode alone.
+  - `LIST_COMMAND` (protocol 21) jumps after its batch's layout: to an
+    index (skipped when made for another revision), an item identity, the
+    end, or a content offset (reader input). An index or item jump holds
+    its item at its alignment (re-aligned as it measures) until reader
+    input, through batches that keep the item. The end follows on a
+    `stick-to-end` list and is a plain jump on others.
+  - `Ui::list_viewport` reports what `readViewport` will: the visible
+    range, the anchor, the content offset at the viewport top, at end,
+    following, and the focused row.
   Positions go through the same transforms as the range; the anchor is
   the visually top item and its visually top edge, so a flipped list
-  anchors its far end. Explicit
-  `ScrollTo`
-  commands in the same batch win. Anchor corrections are motion for the
-  snap policy (§8).
+  anchors its far end. Explicit `ScrollTo` commands in the same batch
+  win. Anchor corrections are motion for the snap policy (§8).
 - The React `List` diffs `items` by identity into one splice (common
   prefix and suffix), keys rows by `keyOf`, and renders the reported
   range. Rows report their position in the set to assistive technology.
@@ -1474,7 +1503,11 @@ rendered row; a focused row stays and survives splices above; seeded
 splices, edits, and scrolls equal a clean rebuild; list frames allocate
 nothing in the UI (always) and in Craie's renderer phases (on a GPU); accessibility
 positions and hidden rows);
-the release-graph
+the shared list traces (`list_traces.rs` plays every file in
+`packages/bridge/traces/lists` through `Ui`, rows mounted for the
+reported range at the traces' heights; a trace that needs native work
+not built yet, loading or unloading today, is listed pending and must
+still fail); the release-graph
 and layer-map checks; E01 (the owned paragraph against Parley on the
 pinned fonts: line breaks, cluster maps, and drawn glyph ids exact,
 advances bit-equal, positions and line metrics within a bound derived

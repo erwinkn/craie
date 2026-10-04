@@ -46,6 +46,10 @@ fn length_ok(v: f32) -> bool {
     finite(v) && (0.0..=MAX_LIST_LENGTH).contains(&v)
 }
 
+/// Largest accepted jump offset: a list of `MAX_ITEMS` items of
+/// `MAX_LIST_LENGTH` points each.
+const MAX_OFFSET: f64 = (crate::list::MAX_ITEMS as f64) * MAX_LIST_LENGTH as f64;
+
 /// Largest accepted retain window, in viewport heights each side.
 const MAX_RETAIN: f32 = 1000.0;
 
@@ -915,6 +919,26 @@ pub fn validate(host: &Host, txn: &Transaction<'_>) -> Result<Validated, WireErr
             Mutation::ScrollAnchor { id, .. } => {
                 need_live(&o, *id, "scroll anchor on an absent node")?;
             }
+            Mutation::ListPolicy { id, policy } => {
+                need_live(&o, *id, "list policy on an absent node")?;
+                let p = policy;
+                if !(length_ok(p.end_threshold)
+                    && length_ok(p.start_inset)
+                    && length_ok(p.padding_end))
+                {
+                    return Err(invalid("list policy out of range"));
+                }
+            }
+            Mutation::ListCommand { id, jump, .. } => {
+                if o.kind(*id) != Some(NodeKind::List) {
+                    return Err(invalid("list command on a non-list node"));
+                }
+                if let crate::mutation::Jump::Offset(y) = jump
+                    && !(y.is_finite() && y.abs() <= MAX_OFFSET)
+                {
+                    return Err(invalid("list command offset out of range"));
+                }
+            }
             Mutation::Transition { id, transitions } => {
                 need_live(&o, *id, "transition on an absent node")?;
                 valid_transitions(transitions)?;
@@ -1541,7 +1565,13 @@ impl Ui {
                 }
                 self.host.copied_bytes += ops.len() as u64;
                 let ops = ListOp::parse(ops).expect("validated list patch");
+                // The anchor is chosen against the geometry before the
+                // batch, once the batch applied.
+                let before = self.batch_before(*id, &ops);
                 self.host.lists.patch(&mut self.text, *id, *next, &ops);
+                if let Some(b) = before {
+                    self.batch_anchor(*id, b);
+                }
                 self.host.revs.layout_input.bump();
                 self.host.mark_layout(NodeId(*id));
                 // Tagged rows follow their items, placed yet or not.
@@ -1577,12 +1607,35 @@ impl Ui {
                 };
                 self.set_list_index(NodeId(*id), index);
             }
-            Mutation::ScrollAnchor { id, anchor } => {
-                if *anchor == crate::mutation::Anchor::default() {
-                    self.host.lists.policies.remove(id);
-                } else {
-                    self.host.lists.policies.insert(*id, *anchor);
+            Mutation::ListPolicy { id, policy } => {
+                let before = self.host.lists.policy(*id);
+                self.host.lists.set_policy(*id, *policy);
+                // End padding is scroll range; a covered band moves what
+                // the viewport is.
+                if before.padding_end != policy.padding_end
+                    || before.start_inset != policy.start_inset
+                {
+                    self.host.mark_layout(NodeId(*id));
                 }
+                self.force_paint = true;
+            }
+            Mutation::ListCommand {
+                id, revision, jump, ..
+            } => {
+                // An index made for another item order is skipped.
+                let current = self.host.lists.get(*id).map_or(0, |l| l.revision);
+                if matches!(jump, crate::mutation::Jump::Index(..)) && *revision != current {
+                    return;
+                }
+                self.host.lists.jumps.push((*id, *jump));
+                self.force_paint = true;
+            }
+            Mutation::ScrollAnchor { id, anchor } => {
+                let policy = crate::mutation::ListPolicy {
+                    mode: *anchor,
+                    ..self.host.lists.policy(*id)
+                };
+                self.host.lists.set_policy(*id, policy);
             }
         }
     }
