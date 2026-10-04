@@ -241,6 +241,7 @@ fn shadows_cross_the_wire_and_validate() {
         radius: None,
         border: None,
         shadows: Shadows::new(&[s]),
+        sides: None,
     };
     for s in [
         Shadow {

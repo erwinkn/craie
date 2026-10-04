@@ -715,6 +715,8 @@ impl Ui {
         let mut w = std::mem::take(&mut self.sync.writer);
         w.clear();
         let shadows = self.host.shadows.get(&id.0).copied().unwrap_or_default();
+        let sides = self.host.border_sides.get(&id.0).copied();
+        let mut side_draw = None;
         // Shadow rects reserved in paint order: outer ones under the
         // fill (the last listed lowest), inset ones over it.
         let mut placed = [None; crate::shadow::MAX_SHADOWS];
@@ -732,7 +734,8 @@ impl Ui {
             let fill = w.paint(p.fill);
             let border = w.paint(p.border_color);
             reserve(&mut w, false, &mut placed);
-            let has_border = p.border_width > 0.0 && p.border_color & 0xFF != 0;
+            // Borders per side replace the uniform border.
+            let has_border = sides.is_none() && p.border_width > 0.0 && p.border_color & 0xFF != 0;
             if p.fill & 0xFF != 0 || has_border {
                 w.rect_bordered(
                     Rect::new(0.0, 0.0, data.rect.size.width, data.rect.size.height),
@@ -743,6 +746,18 @@ impl Ui {
                 );
             }
             reserve(&mut w, true, &mut placed);
+            // Borders per side over the inset shadows, as CSS paints them:
+            // reserved here, written after the kind's own paint slots.
+            if let Some(s) = &sides {
+                let b = Rect::new(0.0, 0.0, data.rect.size.width, data.rect.size.height);
+                let d = crate::border::draw(s, b, p.radius);
+                let n = match &d {
+                    crate::border::SidesDraw::Ring(_) => 1,
+                    crate::border::SidesDraw::Rects(r) => r.len(),
+                };
+                let first = (0..n).map(|_| w.reserve_rect()).next();
+                side_draw = first.map(|at| (at, d));
+            }
         }
         match kind {
             NodeKind::Text => self.build_text(id, &data, &mut w),
@@ -772,6 +787,16 @@ impl Ui {
                     && let Some(b) = crate::shadow::box_shadow(s, border, border_width)
                 {
                     w.set_shadow(at, &b);
+                }
+            }
+        }
+        if let Some((at, d)) = side_draw {
+            match d {
+                crate::border::SidesDraw::Ring(b) => w.set_shadow(at, &b),
+                crate::border::SidesDraw::Rects(rects) => {
+                    for (k, (r, color)) in rects.into_iter().enumerate() {
+                        w.set_fill(at + k, r, color);
+                    }
                 }
             }
         }

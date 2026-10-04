@@ -534,6 +534,7 @@ pub fn validate(host: &Host, txn: &Transaction<'_>) -> Result<Validated, WireErr
                 radius,
                 border,
                 shadows,
+                sides,
                 ..
             } => {
                 if !o.kind(*id).is_some_and(NodeKind::has_box) {
@@ -544,6 +545,9 @@ pub fn validate(host: &Host, txn: &Transaction<'_>) -> Result<Validated, WireErr
                 }
                 if shadows.is_some_and(|s| !s.valid()) {
                     return Err(invalid("shadow out of range"));
+                }
+                if sides.is_some_and(|s| !s.valid()) {
+                    return Err(invalid("border width out of range"));
                 }
             }
             Mutation::Paragraph { id, text, spans } => {
@@ -988,7 +992,13 @@ impl Ui {
                 radius,
                 border,
                 shadows,
-            } => match self.base_mut(*id) {
+                sides,
+            } => {
+                // Variants carry no sides (DF-70): they set the node itself.
+                if let Some(s) = sides {
+                    self.set_border_sides(NodeId(*id), *s);
+                }
+                match self.base_mut(*id) {
                 Some(b) => {
                     b.fill = fill.unwrap_or(b.fill);
                     b.radius = radius.map_or(b.radius, |r| r.max(0.0));
@@ -1001,7 +1011,8 @@ impl Ui {
                         self.set_shadows(NodeId(*id), *s);
                     }
                 }
-            },
+                }
+            }
             Mutation::Color { id, color } => match self.base_mut(*id) {
                 Some(b) => b.color = *color,
                 None => self.declare_color(NodeId(*id), *color),
@@ -1755,6 +1766,21 @@ impl Ui {
 }
 
 impl Ui {
+    /// Replaces a node's borders per side: its chunk rebuilds.
+    pub(crate) fn set_border_sides(&mut self, node: NodeId, sides: crate::border::BorderSides) {
+        let before = self.host.border_sides.get(&node.0).copied();
+        let after = (!sides.is_empty()).then_some(sides);
+        if before == after {
+            return;
+        }
+        match after {
+            Some(s) => self.host.border_sides.insert(node.0, s),
+            None => self.host.border_sides.remove(&node.0),
+        };
+        self.host.dirty.content.push(node.0);
+        self.host.revs.paint.bump();
+    }
+
     /// Replaces a node's box shadows: its chunk rebuilds (shadows are
     /// geometry in it). Shadows don't tween: a transition snaps them.
     pub(crate) fn set_shadows(&mut self, node: NodeId, shadows: crate::shadow::Shadows) {

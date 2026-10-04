@@ -276,6 +276,22 @@ impl ChunkWriter {
         self.grow(bounds);
     }
 
+    /// Writes a filled rect (edges snapped) into the reserved rect `at`
+    /// (`reserve_rect`), with its color's paint record.
+    pub fn set_fill(&mut self, at: usize, r: Rect, color: u32) {
+        let fill = self.paint(color);
+        self.rects[at] = RectInstance {
+            rect: [r.origin.x, r.origin.y, r.size.width, r.size.height],
+            radius: 0.0,
+            border_width: 0.0,
+            fill: fill.0,
+            border: NO_PAINT,
+            chunk: 0,
+            flags: RectInstance::FLAG_SNAP,
+        };
+        self.grow(r);
+    }
+
     fn extend(&mut self, kind: SegKind, bounds: Rect) {
         self.extend_segment(kind);
         self.grow(bounds);
