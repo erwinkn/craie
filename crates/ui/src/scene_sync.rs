@@ -800,16 +800,14 @@ impl Ui {
             }
         }
         if let Some((at, d, border)) = side_draw {
-            for (k, (piece, paint)) in d.into_iter().enumerate() {
-                match paint {
-                    crate::border::SidePaint::Own(color) => {
-                        w.set_shadow(at + k, &craie_scene::BoxShadow { color, ..piece });
-                    }
-                    // The border's slot: color patches reach the side.
-                    crate::border::SidePaint::Uniform => {
-                        w.set_shadow_painted(at + k, &piece, border)
-                    }
-                }
+            for (k, (piece, paint, band)) in d.into_iter().enumerate() {
+                // The border's slot for a side of the uniform color: its
+                // color patches reach the side.
+                let slot = match paint {
+                    crate::border::SidePaint::Own(color) => w.paint(color),
+                    crate::border::SidePaint::Uniform => border,
+                };
+                w.set_shadow_in(at + k, &piece, slot, band);
             }
         }
         self.scene.commit_chunk(id.0, &mut w);

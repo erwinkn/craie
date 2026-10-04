@@ -835,6 +835,9 @@ impl<'a> Transaction<'a> {
     }
 
     /// Replaces the node's borders per side (top, right, bottom, left).
+    /// Sides with `fallback` 0 are all explicit, and paint instead of the
+    /// uniform border even at zero width; `BorderSides::default()` (every
+    /// side fallen back) removes them.
     pub fn border_sides(&mut self, id: u32, sides: crate::border::BorderSides) -> &mut Self {
         self.push(Mutation::Paint {
             id,

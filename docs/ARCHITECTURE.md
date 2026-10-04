@@ -805,9 +805,13 @@ shader snaps a shadow's box like the fill and its shape relative to it,
 so a side is round(width x scale) device pixels from the fill's edge
 wherever the box lands (outer and inset shadows keep their size the same
 way). Sides of one paint are one ring, its inner corners at the radius
-less the narrowest width (DF-71). Mixed paints draw a piece per side,
-the box less a hole cut along it: left and right first, top and bottom
-over them owning the corners.
+less the narrowest width (DF-71). Mixed paints cut that ring into
+horizontal bands (a shadow with `FLAG_BAND` draws between two y values,
+which snap relative to the box like the shape, and its quad covers only
+the band): the top zone, down to the radius or the top width, in the
+top's paint with both corners; the bottom zone likewise; the left and
+right sides between them. Pieces don't overlap, so translucent colors
+blend once; a side not painted leaves its zone to the left and right.
 A placement table (offset, transform record, clip) positions
 each chunk. Transform records exist for the window root, scroll
 content, and transformed subtrees; all other nodes draw in their

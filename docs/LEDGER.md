@@ -986,10 +986,10 @@ Reviewer minors and nitpicks not fixed yet.
 
 - Source: milestone 3 (borders per side, protocol 18).
 - Where: crates/ui/src/border.rs (`draw`).
-- Claim: sides of different colors draw a piece each, the outer edge
-  rounded with the box, top and bottom owning the corners: no diagonal
-  join as CSS draws, and translucent mixed colors blend twice where
-  pieces overlap at a corner. Sides of one color draw one ring whose
+- Claim: with different colors, the corners take the top's and the
+  bottom's colors, joining the left and right sides horizontally where
+  the corner zone (the radius, or the top or bottom width) ends, not on
+  CSS's diagonal. Sides of one color draw one ring whose
   inner corners all take the radius less the narrowest width: CSS's for
   equal widths, and with unequal ones a rounder, slightly heavier inner
   corner than CSS's elliptical one (radius less each adjacent width per
