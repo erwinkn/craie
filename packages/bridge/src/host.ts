@@ -12,6 +12,7 @@ import {
   CUSTOM_STATES,
   DECORATION,
   ENV_BIT,
+  type TextAlign,
   MAX_SHADOWS,
   shadowsIn,
   type ShadowIn,
@@ -524,7 +525,9 @@ function inheritSpan(parent: TextSpanIn, props: Record<string, any>): TextSpanIn
     fontFamily: props.fontFamily !== undefined ? own.fontFamily : parent.fontFamily,
     decoration: props.textDecorationLine !== undefined ? own.decoration : parent.decoration,
     letterSpacing: props.letterSpacing !== undefined ? own.letterSpacing : parent.letterSpacing,
+    tabular: props.fontVariant !== undefined ? own.tabular : parent.tabular,
     lineHeight: parent.lineHeight,
+    align: parent.align,
     // Presses on a pressable nested Text's span, or a span inside it,
     // go to it (`spanTarget`).
     pressable: isPressable(props) || !!parent.pressable,
@@ -556,7 +559,28 @@ export function spanStyle(props: Record<string, any>): TextSpanIn {
     decoration: decorationOf(props.textDecorationLine),
     letterSpacing: props.letterSpacing ?? 0,
     lineHeight: props.lineHeight ?? 0,
+    tabular: tabularOf(props.fontVariant),
+    align: alignOf(props.textAlign),
   }
+}
+
+/** React Native's `fontVariant`: the last of `tabular-nums` and
+ * `proportional-nums` wins. */
+function tabularOf(variant: unknown): boolean {
+  if (!Array.isArray(variant)) return false
+  let on = false
+  for (const v of variant) {
+    if (v === "tabular-nums") on = true
+    else if (v === "proportional-nums") on = false
+  }
+  return on
+}
+
+function alignOf(align: unknown): TextAlign {
+  if (align === undefined || align === "auto") return "auto"
+  if (align === "left" || align === "center" || align === "right") return align
+  warnOnce(`textAlign "${String(align)}" is drawn as "auto"`)
+  return "auto"
 }
 
 function sameSpan(a: TextSpanIn, b: TextSpanIn): boolean {
@@ -564,7 +588,7 @@ function sameSpan(a: TextSpanIn, b: TextSpanIn): boolean {
     a.weight === b.weight && !!a.italic === !!b.italic &&
     a.fontFamily === b.fontFamily && (a.decoration ?? 0) === (b.decoration ?? 0) &&
     (a.letterSpacing ?? 0) === (b.letterSpacing ?? 0) && (a.lineHeight ?? 0) === (b.lineHeight ?? 0) &&
-    !!a.pressable === !!b.pressable
+    !!a.pressable === !!b.pressable && !!a.tabular === !!b.tabular && (a.align ?? "auto") === (b.align ?? "auto")
 }
 
 // Listener prop name -> mask bit; emit INTERACTION when the mask changes.
