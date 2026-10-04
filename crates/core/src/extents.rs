@@ -135,6 +135,13 @@ impl Extents {
         d as f32
     }
 
+    /// Sets item `i` back to an estimate (its content changed, so a
+    /// measurement no longer holds). O(log n).
+    pub fn estimate(&mut self, i: usize, v: f32) {
+        self.measure(i, v);
+        self.measured[i] = false;
+    }
+
     /// Sum of items `0..i`: the offset of item `i`. O(log n).
     pub fn offset(&self, i: usize) -> f32 {
         let mut j = i.min(self.size.len());

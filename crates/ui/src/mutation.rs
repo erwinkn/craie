@@ -342,6 +342,280 @@ impl ItemDesc {
     }
 }
 
+/// A list item's descriptor (protocol 20, `LIST_PATCH`; the lists
+/// contract): identity, version, and how to estimate it before its row
+/// renders. 16 bytes on the wire: id u32, version u32, template u16,
+/// flags u8, a reserved zero byte, then the argument u32: the numeric
+/// estimate's f32 bits (`NUMERIC`), else the text length in Unicode
+/// scalars for the template.
+///
+/// A measurement holds while the item keeps its id and version.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Item {
+    pub id: u32,
+    pub version: u32,
+    pub template: u16,
+    pub flags: u8,
+    pub arg: u32,
+}
+
+impl Item {
+    pub const BYTES: usize = 16;
+    /// Its content is loaded (else a placeholder row, content on demand).
+    pub const LOADED: u8 = 1 << 0;
+    /// `arg` is an f32 estimate, not a text length.
+    pub const NUMERIC: u8 = 1 << 1;
+    /// Not loaded, and the source gave up: not asked again until the
+    /// version changes.
+    pub const FAILED: u8 = 1 << 2;
+    pub const ALL: u8 = Self::LOADED | Self::NUMERIC | Self::FAILED;
+
+    /// A loaded item estimated at `size` points.
+    pub fn sized(id: u32, version: u32, size: f32) -> Item {
+        Item {
+            id,
+            version,
+            template: 0,
+            flags: Self::LOADED | Self::NUMERIC,
+            arg: size.to_bits(),
+        }
+    }
+
+    pub fn loaded(&self) -> bool {
+        self.flags & Self::LOADED != 0
+    }
+
+    /// The numeric estimate, if it has one.
+    pub fn size(&self) -> Option<f32> {
+        (self.flags & Self::NUMERIC != 0).then(|| f32::from_bits(self.arg))
+    }
+
+    /// Decodes packed descriptors (`BYTES` each, little endian).
+    pub fn iter(bytes: &[u8]) -> impl Iterator<Item = Item> + '_ {
+        bytes.chunks_exact(Self::BYTES).map(|c| Item {
+            id: u32::from_le_bytes([c[0], c[1], c[2], c[3]]),
+            version: u32::from_le_bytes([c[4], c[5], c[6], c[7]]),
+            template: u16::from_le_bytes([c[8], c[9]]),
+            flags: c[10],
+            arg: u32::from_le_bytes([c[12], c[13], c[14], c[15]]),
+        })
+    }
+
+    pub fn pack(items: &[Item]) -> Vec<u8> {
+        let mut out = Vec::with_capacity(items.len() * Self::BYTES);
+        for d in items {
+            out.extend_from_slice(&d.id.to_le_bytes());
+            out.extend_from_slice(&d.version.to_le_bytes());
+            out.extend_from_slice(&d.template.to_le_bytes());
+            out.push(d.flags);
+            out.push(0);
+            out.extend_from_slice(&d.arg.to_le_bytes());
+        }
+        out
+    }
+
+    /// Why packed descriptors are malformed, if they are: a partial
+    /// descriptor, NIL identity, unknown flag bits, a nonzero reserved
+    /// byte, a failed item marked loaded, or a numeric estimate outside
+    /// `0..=max`.
+    pub fn check(bytes: &[u8], max: f32) -> Result<(), &'static str> {
+        if bytes.len() % Self::BYTES != 0 {
+            return Err("list items not whole descriptors");
+        }
+        for c in bytes.chunks_exact(Self::BYTES) {
+            let d = Item::iter(c).next().unwrap();
+            if d.id == NIL {
+                return Err("list item without identity");
+            }
+            if d.flags & !Self::ALL != 0 || c[11] != 0 {
+                return Err("unknown list item flags");
+            }
+            if d.flags & Self::FAILED != 0 && d.loaded() {
+                return Err("list item failed and loaded");
+            }
+            if let Some(s) = d.size()
+                && !(s.is_finite() && (0.0..=max).contains(&s))
+            {
+                return Err("list item estimate out of range");
+            }
+        }
+        Ok(())
+    }
+}
+
+/// An estimate template of `LIST_CONFIG2` (the lists contract): fixed,
+/// by width band, or text at the kit's formula.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Template {
+    Fixed(f32),
+    /// (minimum width, size) bands, by increasing width: the last band
+    /// whose minimum the width reaches, else the first.
+    Widths(Vec<(f32, f32)>),
+    /// `base + line_height × max(1, ceil(text length × font_size ×
+    /// char_width / (width − inset)))`.
+    Text {
+        base: f32,
+        inset: f32,
+        font_size: f32,
+        line_height: f32,
+        char_width: f32,
+    },
+}
+
+impl Template {
+    /// Wire kinds: 0 fixed, 1 widths, 2 text.
+    pub fn kind(&self) -> u8 {
+        match self {
+            Template::Fixed(_) => 0,
+            Template::Widths(_) => 1,
+            Template::Text { .. } => 2,
+        }
+    }
+
+    /// The estimate of an item with text length `len` at `width`.
+    pub fn estimate(&self, len: u32, width: f32) -> f32 {
+        match self {
+            Template::Fixed(s) => *s,
+            Template::Widths(bands) => bands
+                .iter()
+                .rev()
+                .find(|b| width >= b.0)
+                .or(bands.first())
+                .map_or(0.0, |b| b.1),
+            Template::Text {
+                base,
+                inset,
+                font_size,
+                line_height,
+                char_width,
+            } => {
+                let advance = font_size * char_width;
+                // A column narrower than one character holds one a line.
+                let avail = (width - inset).max(advance).max(f32::MIN_POSITIVE);
+                let lines = (len as f32 * advance / avail).ceil().max(1.0);
+                base + line_height * lines
+            }
+        }
+    }
+}
+
+/// One op of a `LIST_PATCH`, against the list as the patch's earlier ops
+/// leave it. Descriptors are packed (`Item::BYTES` each).
+#[derive(Clone, Debug, PartialEq)]
+pub enum ListOp<'a> {
+    /// Replaces items `at..at + remove` with `items`.
+    Splice {
+        at: u32,
+        remove: u32,
+        items: Cow<'a, [u8]>,
+    },
+    /// Moves items `from..from + count` to `to`, an index in the list
+    /// without them.
+    Move { from: u32, count: u32, to: u32 },
+    /// New descriptors for items `at..`, with the same identities.
+    Update { at: u32, items: Cow<'a, [u8]> },
+}
+
+impl<'a> ListOp<'a> {
+    /// Wire tags.
+    pub const SPLICE: u8 = 0;
+    pub const MOVE: u8 = 1;
+    pub const UPDATE: u8 = 2;
+
+    pub fn splice(at: u32, remove: u32, items: &[Item]) -> ListOp<'static> {
+        ListOp::Splice {
+            at,
+            remove,
+            items: Item::pack(items).into(),
+        }
+    }
+
+    pub fn update(at: u32, items: &[Item]) -> ListOp<'static> {
+        ListOp::Update {
+            at,
+            items: Item::pack(items).into(),
+        }
+    }
+
+    /// Packs ops as `LIST_PATCH` carries them: per op a tag, then
+    /// splice: at, remove, count u32 and descriptors; move: from, count,
+    /// to u32; update: at, count u32 and descriptors.
+    pub fn pack(ops: &[ListOp]) -> Vec<u8> {
+        let mut out = Vec::new();
+        let u32le = |out: &mut Vec<u8>, v: u32| out.extend_from_slice(&v.to_le_bytes());
+        for op in ops {
+            match op {
+                ListOp::Splice { at, remove, items } => {
+                    out.push(Self::SPLICE);
+                    u32le(&mut out, *at);
+                    u32le(&mut out, *remove);
+                    u32le(&mut out, (items.len() / Item::BYTES) as u32);
+                    out.extend_from_slice(items);
+                }
+                ListOp::Move { from, count, to } => {
+                    out.push(Self::MOVE);
+                    u32le(&mut out, *from);
+                    u32le(&mut out, *count);
+                    u32le(&mut out, *to);
+                }
+                ListOp::Update { at, items } => {
+                    out.push(Self::UPDATE);
+                    u32le(&mut out, *at);
+                    u32le(&mut out, (items.len() / Item::BYTES) as u32);
+                    out.extend_from_slice(items);
+                }
+            }
+        }
+        out
+    }
+
+    /// Reads packed ops, borrowing their descriptors; `None` for a
+    /// malformed stream (unknown tag, truncated, trailing bytes).
+    pub fn parse(bytes: &'a [u8]) -> Option<Vec<ListOp<'a>>> {
+        let mut ops = Vec::new();
+        let mut at = 0usize;
+        let mut u32_at = |at: &mut usize| -> Option<u32> {
+            let b = bytes.get(*at..*at + 4)?;
+            *at += 4;
+            Some(u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+        };
+        while at < bytes.len() {
+            let tag = bytes[at];
+            at += 1;
+            let mut descs = |at: &mut usize, n: u32| -> Option<&'a [u8]> {
+                let len = (n as usize).checked_mul(Item::BYTES)?;
+                let b = bytes.get(*at..at.checked_add(len)?)?;
+                *at += len;
+                Some(b)
+            };
+            ops.push(match tag {
+                Self::SPLICE => {
+                    let (a, r, n) = (u32_at(&mut at)?, u32_at(&mut at)?, u32_at(&mut at)?);
+                    ListOp::Splice {
+                        at: a,
+                        remove: r,
+                        items: descs(&mut at, n)?.into(),
+                    }
+                }
+                Self::MOVE => ListOp::Move {
+                    from: u32_at(&mut at)?,
+                    count: u32_at(&mut at)?,
+                    to: u32_at(&mut at)?,
+                },
+                Self::UPDATE => {
+                    let (a, n) = (u32_at(&mut at)?, u32_at(&mut at)?);
+                    ListOp::Update {
+                        at: a,
+                        items: descs(&mut at, n)?.into(),
+                    }
+                }
+                _ => return None,
+            });
+        }
+        Some(ops)
+    }
+}
+
 /// Scroll anchoring policy of a scroll container (§7).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[repr(u8)]
@@ -556,6 +830,37 @@ pub enum Mutation<'a> {
         id: u32,
         index: u32,
     },
+    /// The lists contract's configuration (protocol 20): overscan and
+    /// lookahead (logical points; a negative lookahead is one viewport
+    /// height), retain (viewport heights), the fallback estimate, and the
+    /// templates. A new `epoch` drops every measurement.
+    ListConfig2 {
+        id: u32,
+        overscan: f32,
+        lookahead: f32,
+        retain: f32,
+        fallback: f32,
+        epoch: u32,
+        templates: Cow<'a, [Template]>,
+    },
+    /// Ops (`ListOp::pack`) taking list `id` from revision `base` to
+    /// `next`. A stale base skips the patch with a resync event.
+    ListPatch {
+        id: u32,
+        base: u32,
+        next: u32,
+        ops: Cow<'a, [u8]>,
+    },
+    /// Tags row `id` with list `list`'s item `item` at revision
+    /// `revision`: the row is placed at the item wherever it moves, and
+    /// measures it only while the list is at that revision. Item NIL
+    /// clears.
+    ListRow {
+        id: u32,
+        list: u32,
+        item: u32,
+        revision: u32,
+    },
     /// Anchoring policy of scroll container `id`.
     ScrollAnchor {
         id: u32,
@@ -639,6 +944,9 @@ impl Mutation<'_> {
             | Mutation::ListConfig { id, .. }
             | Mutation::ListSplice { id, .. }
             | Mutation::ListIndex { id, .. }
+            | Mutation::ListConfig2 { id, .. }
+            | Mutation::ListPatch { id, .. }
+            | Mutation::ListRow { id, .. }
             | Mutation::ScrollAnchor { id, .. }
             | Mutation::Transition { id, .. }
             | Mutation::Animate { id, .. }
@@ -1151,6 +1459,46 @@ impl<'a> Transaction<'a> {
 
     pub fn list_index(&mut self, id: u32, index: u32) -> &mut Self {
         self.push(Mutation::ListIndex { id, index })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn list_config2(
+        &mut self,
+        id: u32,
+        overscan: f32,
+        lookahead: f32,
+        retain: f32,
+        fallback: f32,
+        epoch: u32,
+        templates: &[Template],
+    ) -> &mut Self {
+        self.push(Mutation::ListConfig2 {
+            id,
+            overscan,
+            lookahead,
+            retain,
+            fallback,
+            epoch,
+            templates: templates.to_vec().into(),
+        })
+    }
+
+    pub fn list_patch(&mut self, id: u32, base: u32, next: u32, ops: &[ListOp]) -> &mut Self {
+        self.push(Mutation::ListPatch {
+            id,
+            base,
+            next,
+            ops: ListOp::pack(ops).into(),
+        })
+    }
+
+    pub fn list_row(&mut self, id: u32, list: u32, item: u32, revision: u32) -> &mut Self {
+        self.push(Mutation::ListRow {
+            id,
+            list,
+            item,
+            revision,
+        })
     }
 
     pub fn scroll_anchor(&mut self, id: u32, anchor: Anchor) -> &mut Self {
