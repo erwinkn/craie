@@ -479,3 +479,56 @@ fn large_blurs_stay_gaussian() {
         }
     }
 }
+
+fn transformed_shadow(sh: BoxShadow) -> Vec<[u8; 4]> {
+    let (gpu, mut r) = match gpu() {
+        Some(g) => g,
+        None => {
+            eprintln!("no GPU adapter: skipped");
+            return vec![[0; 4]; (W * W) as usize];
+        }
+    };
+    let mut s = scene();
+    s.transforms.set_local(0, Affine::scale(2.0, 1.0));
+    let mut w = ChunkWriter::new();
+    let at = w.reserve_rect();
+    w.set_shadow(at, &sh);
+    s.commit_chunk(0, &mut w);
+    s.set_placement(
+        0,
+        Placement {
+            offset: [0.0, 0.0],
+            transform: 0,
+            clip: NONE,
+        },
+    );
+    s.set_order(vec![OrderItem::Chunk(0)], vec![]);
+    render(gpu, &mut r, &mut s)
+}
+
+/// Stretched twice in x, a snapped 1-point ring is two whole device
+/// columns, as Chrome draws it (#26 re-check).
+#[test]
+fn a_stretched_ring_stays_crisp() {
+    let img = transformed_shadow(shadow(Rect::new(15.0, 15.0, 34.0, 34.0), 0.0, 0.0, false));
+    let pixels: Vec<_> = (28..34).map(|x| px(&img, x, 32)[3]).collect();
+    println!("2x horizontal snapped ring, alpha x28..33: {pixels:?}");
+    assert_eq!(
+        pixels,
+        vec![0, 0, 255, 255, 0, 0],
+        "integer device edges must give two fully opaque columns and no coverage inside the box"
+    );
+}
+/// Stretched twice in x, the box's knockout does not dim the blur next
+/// to its edge (#26 re-check).
+#[test]
+fn a_stretched_blur_keeps_its_edge() {
+    let img = transformed_shadow(shadow(BOX, 0.0, 4.0, false));
+    let want = blurred(31.5 / 2.0 - 32.0, 32.5 - 32.0, 16.0, 4.0);
+    let got = alpha(&img, 31, 32);
+    println!("2x horizontal blur just outside box: {got}, exact {want}");
+    assert!(
+        (got - want).abs() < 0.02,
+        "pixel center x31.5 is outside snapped box x32: got {got}, exact Gaussian {want}"
+    );
+}

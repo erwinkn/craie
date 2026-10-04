@@ -93,8 +93,9 @@ pub mod shadow_flag {
 /// by `spread`, adjusted (CSS Backgrounds 3, "outset-adjusted border
 /// radius") so that a small rounded corner with a big spread does not
 /// turn round: r + s × (1 − (1 − r/s)³ × (1 − coverage³)) where
-/// coverage = 2r / the box's shorter side. A circle stays a circle
-/// (coverage 1); a square corner stays square.
+/// coverage = 2 × min(r / width, r / height), so 2r over the box's
+/// longer side for one radius. A circle stays a circle (coverage 1); a
+/// square corner stays square.
 fn outset_radius(size: (f32, f32), r: f32, s: f32) -> f32 {
     if r <= 0.0 {
         return 0.0;
@@ -102,7 +103,7 @@ fn outset_radius(size: (f32, f32), r: f32, s: f32) -> f32 {
     if s <= 0.0 {
         return (r + s).max(0.0);
     }
-    let coverage = 2.0 * r / size.0.min(size.1);
+    let coverage = 2.0 * r / size.0.max(size.1);
     if r > s || coverage > 1.0 {
         return r + s;
     }
@@ -191,9 +192,12 @@ mod tests {
         assert_eq!(outset_radius(size, 0.0, 4.0), 0.0);
         assert_eq!(outset_radius(size, 8.0, 2.0), 10.0);
         assert_eq!(outset_radius(size, 8.0, -10.0), 0.0);
-        // r = 2, s = 4 on a 100 × 40 box: coverage 0.1.
-        let want = 2.0 + 4.0 * (1.0 - 0.125 * (1.0 - 0.001));
+        // r = 2, s = 4 on a 100 × 40 box: coverage 2 × 2 / 100.
+        let want = 2.0 + 4.0 * (1.0 - 0.125 * (1.0 - 0.04f32.powi(3)));
         assert!((outset_radius((100.0, 40.0), 2.0, 4.0) - want).abs() < 1e-5);
+        // A 100 × 40 pill-ish box, radius 20, spread 40: coverage 0.4,
+        // radius 55.32 (Chrome's).
+        assert!((outset_radius((100.0, 40.0), 20.0, 40.0) - 55.32).abs() < 1e-3);
     }
 
     #[test]
