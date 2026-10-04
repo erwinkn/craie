@@ -1,0 +1,84 @@
+{
+  "format": "craie-list-trace/1",
+  "id": "I4bj",
+  "name": "after a jump into placeholders, loads land above: the jump target holds",
+  "viewport": {
+    "width": 400,
+    "height": 600
+  },
+  "config": {
+    "overscan": 600,
+    "lookahead": 600,
+    "endThreshold": 80,
+    "anchor": "start",
+    "anchorPolicy": "reading"
+  },
+  "templates": [],
+  "items": [
+    {
+      "count": 200,
+      "key": "m{i}",
+      "loaded": false,
+      "estimate": 40
+    }
+  ],
+  "steps": [
+    {
+      "do": "mount",
+      "expect": {
+        "load": [
+          0,
+          29
+        ]
+      }
+    },
+    {
+      "do": "scrollToIndex",
+      "index": 105,
+      "align": "start",
+      "expect": {
+        "visible": [
+          105,
+          119
+        ],
+        "anchor": {
+          "key": "m105",
+          "offset": 0
+        },
+        "load": [
+          90,
+          134
+        ]
+      }
+    },
+    {
+      "do": "changes",
+      "changes": [
+        {
+          "kind": "update",
+          "at": 90,
+          "items": [
+            {
+              "count": 15,
+              "key": "m{i}",
+              "loaded": true,
+              "estimate": 40,
+              "height": 80
+            }
+          ]
+        }
+      ],
+      "expect": {
+        "anchor": {
+          "key": "m105",
+          "offset": 0
+        },
+        "offset": 4800,
+        "load": [
+          105,
+          134
+        ]
+      }
+    }
+  ]
+}

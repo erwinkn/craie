@@ -1,0 +1,94 @@
+{
+  "format": "craie-list-trace/1",
+  "id": "U1",
+  "name": "scrolling far down asks to unload the far-above rows once; the source drops them",
+  "viewport": {
+    "width": 400,
+    "height": 600
+  },
+  "config": {
+    "overscan": 600,
+    "lookahead": 0,
+    "endThreshold": 80,
+    "anchor": "start",
+    "anchorPolicy": "reading",
+    "retain": 3
+  },
+  "templates": [],
+  "items": [
+    {
+      "count": 1000,
+      "key": "m{i}",
+      "loaded": true,
+      "estimate": 40,
+      "height": 40
+    }
+  ],
+  "steps": [
+    {
+      "do": "mount",
+      "expect": {
+        "visible": [
+          0,
+          14
+        ],
+        "unload": []
+      }
+    },
+    {
+      "do": "scroll",
+      "offset": 4000,
+      "expect": {
+        "visible": [
+          100,
+          114
+        ],
+        "unload": [
+          [
+            0,
+            39
+          ]
+        ]
+      }
+    },
+    {
+      "do": "changes",
+      "changes": [
+        {
+          "kind": "update",
+          "at": 0,
+          "items": [
+            {
+              "count": 40,
+              "key": "m{i}",
+              "loaded": false,
+              "estimate": 40,
+              "version": 1
+            }
+          ]
+        }
+      ],
+      "expect": {
+        "visible": [
+          100,
+          114
+        ],
+        "offset": 4000,
+        "unload": [],
+        "load": null
+      }
+    },
+    {
+      "do": "scrollBy",
+      "delta": 20,
+      "expect": {
+        "visible": [
+          100,
+          115
+        ],
+        "unload": [],
+        "load": null
+      }
+    }
+  ]
+}

@@ -1018,9 +1018,16 @@ pool (vertex index -> index -> vertex) from the same tables. A frame
 run of consecutive mesh draws renders into a 4x multisampled layer of
 its own, resolved and composited in painter order; the window and
 opacity layers stay single-sampled. Opacity layers render into pooled
-offscreen targets and composite with their opacity. Clips test in
-their own space in the fragment stage. Colors decode from sRGB to
-linear in the shader; blending happens in linear.
+offscreen targets and composite with their opacity. Blending follows the
+target's format (`Blending`): by default a plain (non-sRGB) target, on
+which translucent colors, coverage (glyphs, antialiased edges) and
+opacity layers composite sRGB-encoded values, as browsers do: a 16 %
+tint over a dark canvas and a half-covered edge read as Chromium's
+(`tests/blending.rs` holds its values). An *-srgb target (the window's
+`blending: "linear"`, `HostOptions` and `runApp`) blends in linear
+light: the shader decodes authored colors and the target encodes on
+store (`Viewport::linear`). Clips test in
+their own space in the fragment stage.
 
 **Target.** wgpu stays the native GPU abstraction. Craie owns pipeline
 layouts, shaders, buffer layout, upload policy, and pass construction.

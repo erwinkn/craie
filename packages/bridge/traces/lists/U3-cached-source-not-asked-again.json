@@ -1,0 +1,121 @@
+{
+  "format": "craie-list-trace/1",
+  "id": "U3",
+  "name": "a cached source ignores the calls: rows are not asked again until they come back into the retain window and leave it",
+  "viewport": {
+    "width": 400,
+    "height": 600
+  },
+  "config": {
+    "overscan": 600,
+    "lookahead": 0,
+    "endThreshold": 80,
+    "anchor": "start",
+    "anchorPolicy": "reading",
+    "retain": 3
+  },
+  "templates": [],
+  "items": [
+    {
+      "count": 1000,
+      "key": "m{i}",
+      "loaded": true,
+      "estimate": 40,
+      "height": 40
+    }
+  ],
+  "steps": [
+    {
+      "do": "mount",
+      "expect": {
+        "unload": []
+      }
+    },
+    {
+      "do": "scroll",
+      "offset": 4000,
+      "expect": {
+        "visible": [
+          100,
+          114
+        ],
+        "unload": [
+          [
+            0,
+            39
+          ]
+        ]
+      }
+    },
+    {
+      "do": "scrollBy",
+      "delta": 400,
+      "expect": {
+        "visible": [
+          110,
+          124
+        ],
+        "unload": [
+          [
+            40,
+            49
+          ]
+        ]
+      }
+    },
+    {
+      "do": "scrollBy",
+      "delta": -400,
+      "expect": {
+        "visible": [
+          100,
+          114
+        ],
+        "unload": []
+      }
+    },
+    {
+      "do": "scrollBy",
+      "delta": 400,
+      "expect": {
+        "visible": [
+          110,
+          124
+        ],
+        "unload": []
+      }
+    },
+    {
+      "do": "scroll",
+      "offset": 0,
+      "expect": {
+        "visible": [
+          0,
+          14
+        ],
+        "unload": [
+          [
+            75,
+            169
+          ]
+        ]
+      }
+    },
+    {
+      "do": "scroll",
+      "offset": 4000,
+      "expect": {
+        "visible": [
+          100,
+          114
+        ],
+        "unload": [
+          [
+            0,
+            39
+          ]
+        ]
+      }
+    }
+  ]
+}

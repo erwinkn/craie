@@ -1,7 +1,7 @@
 {
   "format": "craie-list-trace/1",
-  "id": "I1",
-  "name": "a placeholder run the window cuts, short enough to finish on screen, loads whole",
+  "id": "K4",
+  "name": "start and center jumps land on their targets though every row is taller than its estimate",
   "viewport": {
     "width": 400,
     "height": 600
@@ -16,24 +16,10 @@
   "templates": [],
   "items": [
     {
-      "count": 400,
+      "count": 200,
       "key": "m{i}",
-      "loaded": true,
       "estimate": 40,
-      "height": 40
-    },
-    {
-      "count": 20,
-      "key": "m{i}",
-      "loaded": false,
-      "estimate": 40
-    },
-    {
-      "count": 580,
-      "key": "m{i}",
-      "loaded": true,
-      "estimate": 40,
-      "height": 40
+      "height": 100
     }
   ],
   "steps": [
@@ -42,27 +28,37 @@
       "expect": {
         "visible": [
           0,
-          14
-        ],
-        "loadItems": null
+          5
+        ]
       }
     },
     {
       "do": "scrollToIndex",
-      "index": 380,
+      "index": 100,
       "align": "start",
       "expect": {
-        "visible": [
-          380,
-          394
-        ],
         "anchor": {
-          "key": "m380",
+          "key": "m100",
           "offset": 0
         },
-        "loadItems": [
-          400,
-          419
+        "visible": [
+          100,
+          105
+        ]
+      }
+    },
+    {
+      "do": "scrollToIndex",
+      "index": 150,
+      "align": "center",
+      "expect": {
+        "anchor": {
+          "key": "m150",
+          "offset": 250
+        },
+        "visible": [
+          147,
+          153
         ]
       }
     }

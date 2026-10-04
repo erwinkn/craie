@@ -10,7 +10,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use craie_core::Size;
-use craie_render::{Gpu, Renderer, WindowSurface};
+use craie_render::{Blending, Gpu, Renderer, WindowSurface};
 use craie_ui::a11y::A11yShared;
 use craie_ui::bridge::Session;
 use craie_ui::events::{self, Event};
@@ -41,6 +41,8 @@ pub struct HostApp {
     start: Instant,
     /// The window is fully covered (`App::occluded`).
     occluded: bool,
+    /// The blending space (`Blending`): it picks the surface format.
+    blending: Blending,
 }
 
 struct Inner {
@@ -183,6 +185,7 @@ impl HostApp {
             probe: Probe::from_env(),
             start: Instant::now(),
             occluded: false,
+            blending: Blending::default(),
         }
     }
 
@@ -220,6 +223,12 @@ impl HostApp {
             Some(inner) => inner.ui.register_surface(kind, painter),
             None => self.surfaces.push((kind, painter)),
         }
+    }
+
+    /// Sets the blending space (default: sRGB-encoded, as browsers).
+    pub fn with_blending(mut self, blending: Blending) -> HostApp {
+        self.blending = blending;
+        self
     }
 
     /// Tells the UI (and so JS) the window's current state.
@@ -376,7 +385,7 @@ impl App for HostApp {
     fn ready(&mut self, window: &Window, wake: &Wake) {
         let (w, h) = window.size();
         let (gpu, surface) = Gpu::for_window(window.surface_target());
-        let surface = WindowSurface::new(&gpu, surface, w, h);
+        let surface = WindowSurface::new(&gpu, surface, w, h, self.blending);
         let renderer = Renderer::new(&gpu, surface.config.format);
         let scale = window.scale_factor() as f32;
         let mut ui = Ui::new(scale);

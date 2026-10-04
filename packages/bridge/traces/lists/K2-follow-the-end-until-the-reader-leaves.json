@@ -1,0 +1,114 @@
+{
+  "format": "craie-list-trace/1",
+  "id": "K2",
+  "name": "an end-anchored list follows appends and growth, and stops once the reader scrolls up",
+  "viewport": {
+    "width": 400,
+    "height": 600
+  },
+  "config": {
+    "overscan": 600,
+    "lookahead": 600,
+    "endThreshold": 80,
+    "anchor": "end",
+    "anchorPolicy": "reading"
+  },
+  "templates": [],
+  "items": [
+    {
+      "count": 30,
+      "key": "m{i}",
+      "estimate": 40,
+      "height": 40
+    }
+  ],
+  "steps": [
+    {
+      "do": "mount",
+      "expect": {
+        "offset": 600,
+        "visible": [
+          15,
+          29
+        ],
+        "atEnd": true,
+        "following": true
+      }
+    },
+    {
+      "do": "changes",
+      "changes": [
+        {
+          "kind": "splice",
+          "at": 30,
+          "remove": 0,
+          "items": [
+            {
+              "count": 2,
+              "key": "m{i}",
+              "estimate": 40,
+              "height": 40
+            }
+          ]
+        }
+      ],
+      "expect": {
+        "offset": 680,
+        "visible": [
+          17,
+          31
+        ],
+        "following": true
+      }
+    },
+    {
+      "do": "measure",
+      "key": "m31",
+      "height": 100,
+      "expect": {
+        "offset": 740,
+        "following": true,
+        "atEnd": true
+      }
+    },
+    {
+      "do": "scrollBy",
+      "delta": -200,
+      "expect": {
+        "offset": 540,
+        "following": false,
+        "atEnd": false,
+        "anchor": {
+          "key": "m13",
+          "offset": -20
+        }
+      }
+    },
+    {
+      "do": "changes",
+      "changes": [
+        {
+          "kind": "splice",
+          "at": 32,
+          "remove": 0,
+          "items": [
+            {
+              "count": 1,
+              "key": "m{i}",
+              "estimate": 40,
+              "height": 40
+            }
+          ]
+        }
+      ],
+      "expect": {
+        "offset": 540,
+        "following": false,
+        "anchor": {
+          "key": "m13",
+          "offset": -20
+        }
+      }
+    }
+  ]
+}
