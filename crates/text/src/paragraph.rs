@@ -611,26 +611,28 @@ impl Paragraph {
         // overflow. The trailing whitespace hangs past the content: to
         // the right in a left-to-right line, to the left in a
         // right-to-left one. `Start` is right in a right-to-left
-        // paragraph.
+        // paragraph. Each line takes its own bidi paragraph's direction
+        // (text after a newline may run the other way), as `push_line`
+        // does.
         let boxw = max_width.unwrap_or(width);
-        let align = match (self.align, self.base_rtl) {
-            (Align::Start, false) => Align::Left,
-            (Align::Start, true) => Align::Right,
-            (a, _) => a,
-        };
         for li in 0..self.lines.len() {
             let line = &self.lines[li];
+            let rtl = self
+                .analysis
+                .get(line.text.start as usize)
+                .map_or(self.base_rtl, |f| f & PARA_RTL != 0);
+            let align = match (self.align, rtl) {
+                (Align::Start, false) => Align::Left,
+                (Align::Start, true) => Align::Right,
+                (a, _) => a,
+            };
             let free = boxw - (line.advance - line.trailing);
             let left = match align {
                 Align::Center => free / 2.0,
                 Align::Right => free,
                 _ => 0.0,
             };
-            let x = if self.base_rtl {
-                left - line.trailing
-            } else {
-                left
-            };
+            let x = if rtl { left - line.trailing } else { left };
             let (baseline, segs) = (line.baseline, line.segs.clone());
             self.lines[li].x = x;
             let mut pen = x;

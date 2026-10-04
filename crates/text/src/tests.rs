@@ -1044,3 +1044,60 @@ fn tabular_digits_share_one_advance() {
         p.width
     );
 }
+
+/// Each line aligns by its own bidi paragraph's direction: after a
+/// newline the text may run the other way, and its trailing space hangs
+/// on that paragraph's side (#27 review).
+#[test]
+fn lines_align_by_their_own_direction() {
+    use crate::paragraph::{Align, PARA_RTL};
+    let mut e = engine();
+    for (text, align) in [
+        ("abc\nשלום ", Align::Left),
+        ("abc\nשלום ", Align::Center),
+        ("שלום\nabc ", Align::Right),
+        ("שלום\nabc ", Align::Start),
+        ("abc\nשלום ", Align::Start),
+    ] {
+        let p = styled(
+            &mut e,
+            text,
+            Some(200.0),
+            TextStyle {
+                align,
+                ..TextStyle::default()
+            },
+        );
+        for (i, line) in p.lines.iter().enumerate() {
+            let content: Vec<_> = p
+                .glyphs
+                .iter()
+                .filter(|g| {
+                    line.text.contains(&g.cluster)
+                        && !matches!(text[g.cluster as usize..].chars().next(), Some(' ' | '\n'))
+                })
+                .collect();
+            if content.is_empty() {
+                continue;
+            }
+            let left = content.iter().map(|g| g.x).fold(f32::INFINITY, f32::min);
+            let right = content
+                .iter()
+                .map(|g| g.x + g.advance)
+                .fold(f32::NEG_INFINITY, f32::max);
+            let rtl = p.analysis[line.text.start as usize] & PARA_RTL != 0;
+            let free = 200.0 - (right - left);
+            let want = match align {
+                Align::Left => 0.0,
+                Align::Center => free / 2.0,
+                Align::Right => free,
+                Align::Start if rtl => free,
+                Align::Start => 0.0,
+            };
+            assert!(
+                (left - want).abs() < 1e-3,
+                "{text:?} {align:?} line {i}: {left} against {want}"
+            );
+        }
+    }
+}
