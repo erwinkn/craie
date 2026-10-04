@@ -1,5 +1,6 @@
 #!/bin/sh
-# Everything CI runs, in order. Fails on the first error.
+# Everything CI runs but the windowed smoke test, in order. Fails on
+# the first error.
 #
 #   scripts/ci.sh
 #
@@ -10,12 +11,19 @@
 #
 # Clippy lints only the host's cfg. Allowed lints, with reasons, are in
 # `[workspace.lints.clippy]` in the root Cargo.toml.
+#
+# .github/workflows/ci.yml runs this script on every PR and on main,
+# then the windowed smoke test (`pnpm smoke`) under Xvfb.
 set -e
 cd "$(dirname "$0")/.."
 
 cargo fmt --all --check
 cargo fetch --locked
-cargo build --workspace --all-targets
+# The default members as `cargo test` builds them, then the addon as
+# `scripts/build-addon.sh` builds it. A `--workspace` build resolved
+# features differently from both, so most crates compiled a third time.
+cargo build --all-targets
+cargo build -p craie-node
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test
 cargo check --target wasm32-unknown-unknown \

@@ -1491,7 +1491,9 @@ facade reuse B's two ids.
   which #21's pin builds up front. Its frames then allocate nothing. A
   size frame relayouts each frame and allocates in layout, as a
   `height` tween does (not asserted). The end allocates no more than
-  removing the same subtree plainly (7 against 9).
+  removing the same subtree plainly (8 against 9; one of the 8 is the
+  list of freed nodes whose queued events go when events are next
+  taken, PR22-09).
 - Tests: `crates/ui/src/exit_tests.rs` covers the subtree drawn, laid
   out and inert; a collapse moving the next sibling up, then the free
   with one event; placement beside an exiting node, in the detach's
