@@ -2,8 +2,9 @@
 // paste claim, a window hotkey), state styles (scopes, variants, an
 // inherited color, a portal) and an image (fetched, decoded natively,
 // reported loaded), awaits the native ack, changes a state and awaits
-// that ack, then closes the session so the main thread's event loop
-// exits.
+// that ack, waits for a frame at rest to be presented, measures the
+// image and checks its layout event and the window's state, then closes
+// the session so the main thread's event loop exits.
 import React, { createElement } from "react"
 import { workerData, parentPort, isMainThread } from "node:worker_threads"
 import {
@@ -17,6 +18,7 @@ import {
   View,
   Text,
   Image,
+  type HostNode,
 } from "@craie/bridge"
 
 if (isMainThread) throw Error("worker only")
@@ -32,6 +34,8 @@ let scrolls = 0
 const PNG =
   "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAEUlEQVR4nGP4z8AAQv8ZYAwAQ84H+VjtZqAAAAAASUVORK5CYII="
 let loaded = ""
+let image: HostNode | null = null
+let laidOut = ""
 function Row({ selected, unread }: { selected: boolean; unread: boolean }) {
   return createElement(
     Pressable,
@@ -89,6 +93,8 @@ function Smoke() {
       src: PNG,
       fit: "contain",
       style: { width: 40, height: 40 },
+      ref: (n: HostNode | null) => { image = n },
+      onLayout: (e) => { laidOut = `${e.width}x${e.height}` },
       onLoad: (e) => {
         loaded = `${e.width}x${e.height}`
         console.log(`[smoke] image loaded: ${loaded}`)
@@ -109,7 +115,18 @@ await new Promise(r => setTimeout(r, 0))
 await root.flush()
 console.log("[smoke] state change acked")
 
+const shown = await root.host.presented({ rest: true })
+console.log(`[smoke] presented frame ${shown.frame} at ${shown.width}x${shown.height}`)
+const box = await image!.measure()
+const window = root.host.window()
+console.log(`[smoke] image laid out ${laidOut}, measured ${JSON.stringify(box)}, window ${JSON.stringify(window)}`)
+const failed =
+  loaded !== "2x2" ? "image did not load"
+  : laidOut !== "40x40" || box?.width !== 40 ? "image layout not observed"
+  : window?.width !== 480 ? "window state not reported"
+  : null
+
 setTimeout(() => {
   console.log("[smoke] closing session")
-  client.close(loaded === "2x2" ? "smoke done" : "image did not load")
-}, 3000)
+  client.close(failed ?? "smoke done")
+}, 1000)
