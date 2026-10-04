@@ -1,0 +1,57 @@
+# scripts/ci.sh, then the windowed smoke test under Xvfb, on Linux.
+# wgpu runs on Mesa's lavapipe (software Vulkan) with the validation
+# layer, as on the dev VM; CRAIE_REQUIRE_GPU turns a missing adapter
+# into a failure instead of skipped GPU tests.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  CRAIE_REQUIRE_GPU: 1
+
+jobs:
+  ci:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: System packages
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -yq --no-install-recommends \
+            mesa-vulkan-drivers libvulkan1 vulkan-validationlayers \
+            xvfb libxkbcommon-x11-0 libfontconfig-dev
+
+      - name: Rust toolchain (rust-toolchain.toml)
+        run: rustup toolchain install
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # PRs read main's cache and never write their own.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.2
+
+      - run: pnpm install --frozen-lockfile
+
+      - run: scripts/ci.sh
+
+      - name: Smoke (windowed, Xvfb)
+        run: xvfb-run -a pnpm smoke

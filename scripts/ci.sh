@@ -1,5 +1,6 @@
 #!/bin/sh
-# Everything CI runs, in order. Fails on the first error.
+# Everything CI runs but the windowed smoke test, in order. Fails on
+# the first error.
 #
 #   scripts/ci.sh
 #
@@ -10,6 +11,9 @@
 #
 # Clippy lints only the host's cfg. Allowed lints, with reasons, are in
 # `[workspace.lints.clippy]` in the root Cargo.toml.
+#
+# .github/workflows/ci.yml runs this script on every PR and on main,
+# then the windowed smoke test (`pnpm smoke`) under Xvfb.
 set -e
 cd "$(dirname "$0")/.."
 
