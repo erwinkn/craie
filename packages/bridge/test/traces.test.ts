@@ -28,7 +28,7 @@ const files = readdirSync(DIR).filter(f => f.endsWith(".json")).sort()
 test("the trace set is the contract's", () => {
   expect(files.map(f => f.split("-")[0])).toEqual([
     "I1", "I2", "I3", "I3j", "I4", "I4b", "I4bj", "I4j",
-    "K1", "K10", "K11", "K12", "K13", "K14", "K15", "K16", "K17", "K2", "K3", "K4", "K5", "K6", "K7", "K8", "K9",
+    "K1", "K10", "K11", "K12", "K13", "K14", "K15", "K16", "K17", "K18", "K2", "K3", "K4", "K5", "K6", "K7", "K8", "K9",
     "L1", "L2", "L3", "U1", "U2", "U3", "U4",
   ])
 })
