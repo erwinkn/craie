@@ -36,3 +36,18 @@ test("an unknown alignment draws as auto", async () => {
   const spans = t.frames.map(f => readFrame(f)).find(f => f.spans.length)!.spans
   expect(spans[0]!.align).toBe(0)
 })
+
+test("numberOfLines sends the outermost Text's line limit when it changes", async () => {
+  const t = new FakeTransport()
+  const root = createRoot(t)
+  const ops = () => t.frames.splice(0).flatMap(f => readFrame(f).ops).filter(o => o.tag === 0x42)
+  root.renderSync(h(Text, { numberOfLines: 1 }, "a long title"))
+  await tick()
+  expect(ops().map(o => o.f[0])).toEqual([1])
+  root.renderSync(h(Text, { numberOfLines: 1 }, "another title"))
+  await tick()
+  expect(ops()).toEqual([])
+  root.renderSync(h(Text, {}, "another title"))
+  await tick()
+  expect(ops().map(o => o.f[0])).toEqual([0])
+})

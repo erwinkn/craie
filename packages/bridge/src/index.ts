@@ -454,6 +454,11 @@ export interface TextProps extends ListenerProps, PressProps, Variants, MotionPr
    * Text's). `auto` follows the direction; `justify` is not drawn yet,
    * and draws as `auto`. */
   textAlign?: "auto" | "left" | "center" | "right" | "justify"
+  /** At most this many lines (React Native's `numberOfLines`; the
+   * outermost Text's): `1` does not wrap and ends in "…" where the text
+   * overflows its box (the kit's `truncate`); `n` wraps, keeps n lines
+   * and ends the last in "…" when text remains. */
+  numberOfLines?: number
   /** React Native's `fontVariant`: `tabular-nums` gives every figure one
    * advance (OpenType `tnum`), so counters and timers don't shift. */
   fontVariant?: readonly ("tabular-nums" | "proportional-nums")[]

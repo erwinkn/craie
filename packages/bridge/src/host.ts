@@ -351,6 +351,8 @@ export interface HostNode {
    * out or cancel reaches it even across a new span table. */
   pressOwner?: HostNode
   sentParagraph?: string
+  /** A text root: the line limit last sent (0: none). */
+  sentLines?: number
   sentInteraction?: string
   /** Vector nodes: the drawing last sent, as JSON of [viewBox, shapes],
    * "" for none; undefined after an asset. */
@@ -562,6 +564,12 @@ export function spanStyle(props: Record<string, any>): TextSpanIn {
     tabular: tabularOf(props.fontVariant),
     align: alignOf(props.textAlign),
   }
+}
+
+/** `numberOfLines` as native takes it: a whole number of lines in
+ * [0, 65535]; anything else is no limit. */
+function linesOf(n: unknown): number {
+  return typeof n === "number" && Number.isFinite(n) && n > 0 ? Math.min(0xffff, Math.floor(n)) : 0
 }
 
 /** React Native's `fontVariant`: the last of `tabular-nums` and
@@ -1222,6 +1230,11 @@ export class CraieHost {
       r.sentParagraph = key
       r.paragraphRev = ((r.paragraphRev ?? 0) + 1) >>> 0
       this.encoder.paragraph(r.id, text, spans)
+    }
+    const lines = linesOf(r.props.numberOfLines)
+    if (lines !== (r.sentLines ?? 0)) {
+      r.sentLines = lines
+      this.encoder.lines(r.id, lines)
     }
     const flags = interactionFlags(r.props)
     const interaction = `${mask},${flags}`

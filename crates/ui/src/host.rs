@@ -332,6 +332,8 @@ pub struct Paragraph {
     /// carry it with their span, so JS routes a span by the span table
     /// it came from (a nested Text replaced since routes to the root).
     pub revision: u32,
+    /// The line limit (`Mutation::Lines`; 0: none).
+    pub max_lines: u16,
 }
 
 /// Which events a node subscribes to, whether it takes focus, and what
@@ -724,6 +726,7 @@ impl Host {
         // Fonts resolve at the first paragraph op (`executor`).
         p.fonts.clear();
         p.revision = 0;
+        p.max_lines = 0;
         if kind == NodeKind::Text {
             p.spans.push(TextSpan::default());
         }

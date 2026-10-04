@@ -166,7 +166,8 @@ impl Ui {
     }
 
     /// Each text node of the interval with its selected range (possibly
-    /// empty), in tree order.
+    /// empty), in tree order. A line limit's hidden text is never
+    /// selected: ranges stop at the ellipsis's cut.
     fn selection_pieces(&self) -> Vec<(NodeId, Range<u32>)> {
         let Some((texts, start, end)) = self.selection_interval() else {
             return Vec::new();
@@ -174,8 +175,9 @@ impl Ui {
         let mut out = Vec::new();
         for (k, &t) in texts.iter().enumerate().take(end.0 + 1).skip(start.0) {
             let len = self.host.paragraph(t).map_or(0, |p| p.text.len() as u32);
-            let from = if k == start.0 { start.1 } else { 0 };
-            let to = if k == end.0 { end.1 } else { len };
+            let shown = self.text_layout(t).map_or(len, |p| p.visible_end.min(len));
+            let from = if k == start.0 { start.1 } else { 0 }.min(shown);
+            let to = if k == end.0 { end.1 } else { len }.min(shown);
             out.push((t, from..to.max(from)));
         }
         out

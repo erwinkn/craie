@@ -1557,7 +1557,9 @@ contract).
   no-wrap, decoration color, and text transform (uppercase, capitalize).
   Balanced and pretty wrapping come later. Built (protocol 15): text
   alignment (`textAlign`: auto, left, center, right; justify draws as
-  auto) and tabular digits (React Native's `fontVariant`).
+  auto) and tabular digits (React Native's `fontVariant`); protocol 16:
+  the line clamp with an ellipsis (React Native's `numberOfLines`, which
+  the kit's `truncate` and `lines` map to).
 
 **Decisions.**
 

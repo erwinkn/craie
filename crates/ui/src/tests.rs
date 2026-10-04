@@ -2684,6 +2684,58 @@ fn selection_spans_paragraphs_in_tree_order() {
     assert_eq!((rects(&ui, 1), rects(&ui, 3)), (0, 0), "highlight gone");
 }
 
+/// #28 review: a selection running past a clamped paragraph stops at
+/// its ellipsis's cut: hidden text is neither highlighted nor copied
+/// (PR28-06).
+#[test]
+fn selection_stops_at_the_line_limit() {
+    use crate::selection::{TextPoint, TextSelection};
+    let mut ui = Ui::new(1.0);
+    ui.text = craie_text::TextEngine::with_source(Box::new(craie_text::fonts::pinned()));
+    let column = taffy::Style {
+        flex_direction: taffy::FlexDirection::Column,
+        size: taffy::Size {
+            width: taffy::Dimension::length(100.0),
+            height: taffy::Dimension::auto(),
+        },
+        ..Default::default()
+    };
+    let mut t = Transaction::new(1);
+    t.create(0, NodeKind::View)
+        .layout(0, &column)
+        .interaction_flags(0, 0, false, true)
+        .append(NIL, 0);
+    let text = "The quick brown fox jumps over the lazy dog";
+    t.create(1, NodeKind::Text)
+        .layout(1, &column)
+        .text(1, text, 16.0, 0xffff_ffff)
+        .lines(1, 1)
+        .append(0, 1);
+    t.create(2, NodeKind::Text)
+        .text(2, "Next paragraph", 16.0, 0xffff_ffff)
+        .append(0, 2);
+    ui.apply_txn(&t).unwrap();
+    ui.render(Size::new(300.0, 200.0));
+    let cut = ui.text_layout(NodeId(1)).unwrap().visible_end;
+    assert!(cut < text.len() as u32);
+    ui.set_text_selection(Some(TextSelection {
+        domain: NodeId(0),
+        anchor: TextPoint {
+            node: NodeId(1),
+            offset: 0,
+        },
+        focus: TextPoint {
+            node: NodeId(2),
+            offset: 4,
+        },
+    }));
+    assert_eq!(ui.selection_ranges()[0], (NodeId(1), 0..cut));
+    assert_eq!(
+        ui.selected_text(),
+        format!("{}\nNext", &text[..cut as usize])
+    );
+}
+
 /// The highlight follows the tree and the text (S3C-01): a paragraph
 /// inserted between the endpoints is highlighted whole; one that grows
 /// is highlighted to its new end.
@@ -3100,4 +3152,45 @@ fn text_aligns_in_its_box() {
     // font_size f32, color u32, weight u16, flags u8, then features.
     bad[row + 4 + 4 + 2 + 1] = 1 << 3;
     assert!(wire::decode(&bad).is_err());
+}
+
+/// A line limit lays the paragraph out again with its ellipsis: one
+/// line truncates in the text's box, and lifting the limit restores
+/// every line. Only text nodes take one; it crosses the wire.
+#[test]
+fn a_line_limit_truncates_text() {
+    let mut ui = Ui::new(1.0);
+    ui.text = craie_text::TextEngine::with_source(Box::new(craie_text::fonts::pinned()));
+    let mut style = taffy::Style::default();
+    style.size.width = taffy::Dimension::length(100.0);
+    let text = "The quick brown fox jumps over the lazy dog";
+    let mut t = Transaction::new(1);
+    t.create(1, NodeKind::Text)
+        .layout(1, &style)
+        .text(1, text, 16.0, 0xFFFF_FFFF)
+        .lines(1, 1)
+        .append(u32::MAX, 1)
+        .create(2, NodeKind::View)
+        .append(u32::MAX, 2);
+    let buf = wire::encode(&t);
+    assert_eq!(wire::decode(&buf).unwrap().mutations, t.mutations);
+    ui.apply(&buf).unwrap();
+    ui.render(Size::new(400.0, 300.0));
+    let p = ui.text_layout(NodeId(1)).unwrap();
+    assert_eq!(p.lines.len(), 1);
+    assert_eq!(p.ellipsis.as_ref().unwrap().line, Some(0));
+    let one = ui.layouts.rect(NodeId(1)).size.height;
+    let mut t = Transaction::new(2);
+    t.lines(1, 0);
+    ui.apply_txn(&t).unwrap();
+    ui.render(Size::new(400.0, 300.0));
+    let p = ui.text_layout(NodeId(1)).unwrap();
+    assert!(p.lines.len() > 1 && p.ellipsis.is_none());
+    assert!(
+        ui.layouts.rect(NodeId(1)).size.height > one,
+        "the box grows back"
+    );
+    let mut t = Transaction::new(3);
+    t.lines(2, 1);
+    assert!(ui.apply_txn(&t).is_err());
 }
