@@ -916,6 +916,16 @@ Reviewer minors and nitpicks not fixed yet.
   the box grown by the offset, so it can reuse this path once the bridge
   takes the prop.
 
+### DF-66: no justified text, no alignment in inputs
+
+- Source: milestone 3 (text alignment, protocol 15).
+- Where: crates/text/src/paragraph.rs (`rewrap_with`), crates/ui/src/input.rs.
+- Claim: `textAlign: 'justify'` draws as `auto`, and a `TextInput` aligns
+  to the start whatever it declares.
+- Why deferred: the kit uses left, center and right on Text only
+  (`textAlign`, 6 uses); justification needs space distribution in the
+  line placement and carets that follow it.
+
 ## Closed
 
 - DF-57 (work item 6, review #21 M1): end indices were wire indices
