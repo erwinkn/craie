@@ -170,8 +170,9 @@ pub mod paint_field {
     /// count u8 (at most `shadow::MAX_SHADOWS`) | count × shadow
     /// (`put_shadows`): replaces the box shadows.
     pub const SHADOWS: u8 = 1 << 3;
-    /// Borders per side: 4 widths f32 then 4 colors u32, top, right,
-    /// bottom, left (all zero: none).
+    /// Borders per side: 4 widths f32, 4 colors u32 (top, right,
+    /// bottom, left), then a fallback u8 (bits 0-3: that side's width is
+    /// the uniform border's, bits 4-7: its color; 0xFF: no sides).
     pub const SIDES: u8 = 1 << 4;
 }
 

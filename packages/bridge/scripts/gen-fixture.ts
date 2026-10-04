@@ -65,7 +65,7 @@ enc.create(3, 3)                                    // surface
 enc.surface(3, SURFACE.bars, [0x6dc7_c8ff, 0x6dc7_ffff, 0, 0])
 enc.payload(3, new Float32Array([0.25, 0.5, 0.75, 1.0]))
 enc.paint(3, 0x1b1d_24ff, 4, undefined, undefined, {  // borders per side, top right bottom left
-  widths: [0, 0.5, 1, 2], colors: [0, 0x2020_20ff, 0x3030_30ff, 0x4040_40ff], fallback: 0x81, // left's width and top's color fall back
+  widths: [0, 0.5, 1, 2], colors: [0, 0x2020_20ff, 0x3030_30ff, 0x4040_40ff], fallback: 0x81, // top's width (bit 0) and left's color (bit 7) fall back
 })
 enc.label(0, "root container")                      // a11y name
 enc.label(3, "throughput chart")

@@ -338,3 +338,59 @@ fn fallen_back_colors_follow_the_uniform_border() {
     assert_eq!(px(&img, 32, 47), [0, 255, 0, 255], "follows the change");
     assert_eq!(px(&img, 32, 16), WHITE, "the other sides stay 0 wide");
 }
+
+/// Mixed colors on rounded corners: every corner's arc is painted, the
+/// top's color above and the bottom's below (#34 re-check: the arcs
+/// between pieces were bare). An input with a highlighted underline,
+/// and four colors.
+#[test]
+fn mixed_colors_keep_their_rounded_corners() {
+    let (blue, green) = (0x0000_ffff, 0x00ff_00ff);
+    // `borderWidth: 1, borderColor: red, borderBottomColor: green`, r 8.
+    let input = BorderSides {
+        widths: [0.0; 4],
+        colors: [0, 0, green, 0],
+        fallback: 0b1011_1111,
+    };
+    let underline = scene(32.0, 32.0, Some(input), Some((RED, 1.0)), 8.0, |_| {});
+    if underline.is_empty() {
+        eprintln!("no GPU adapter: skipped");
+        return;
+    }
+    let four = boxed([2.0; 4], [RED, blue, green, blue], 8.0);
+    // Along each corner's diagonal, from outside the box inward: the
+    // expected hue before the fill.
+    let hue = |p: [u8; 4], c: usize| {
+        let (v, others) = (
+            p[c] as i32,
+            (0..3)
+                .filter(|&k| k != c)
+                .map(|k| p[k] as i32)
+                .max()
+                .unwrap(),
+        );
+        v - others > 60
+    };
+    for (img, name) in [(&underline, "underline"), (&four, "four colors")] {
+        for (cx, cy, dx, dy, c) in [
+            (16, 16, 1, 1, 0),
+            (47, 16, -1, 1, 0),
+            (16, 47, 1, -1, 1),
+            (47, 47, -1, -1, 1),
+        ] {
+            let diag: Vec<[u8; 4]> = (0..10)
+                .map(|k| px(img, (cx + dx * k) as u32, (cy + dy * k) as u32))
+                .collect();
+            assert!(
+                diag.iter().any(|&p| hue(p, c)),
+                "{name}, corner ({cx}, {cy}): {diag:?}"
+            );
+        }
+    }
+    // The straight sides: the input's in its uniform red, the four
+    // colors' in blue.
+    assert_eq!(px(&underline, 16, 32), RED_PX);
+    assert_eq!(px(&four, 16, 32), [0, 0, 255, 255]);
+    assert_eq!(px(&four, 47, 32), [0, 0, 255, 255]);
+    assert_eq!(px(&four, 32, 47), [0, 255, 0, 255]);
+}

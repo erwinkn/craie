@@ -232,12 +232,19 @@ impl ChunkWriter {
     /// box.
     pub fn set_shadow(&mut self, at: usize, s: &BoxShadow) {
         let color = self.paint(s.color);
-        self.set_shadow_painted(at, s, color);
+        self.set_shadow_in(at, s, color, None);
     }
 
-    /// `set_shadow` in an existing paint slot (`s.color` unused): a
-    /// patch of that slot recolors it.
-    pub fn set_shadow_painted(&mut self, at: usize, s: &BoxShadow, color: PaintSlot) {
+    /// `set_shadow` in an existing paint slot (`s.color` unused: a patch
+    /// of that slot recolors it), drawn only between `band`'s two y values
+    /// when given (`FLAG_BAND`).
+    pub fn set_shadow_in(
+        &mut self,
+        at: usize,
+        s: &BoxShadow,
+        color: PaintSlot,
+        band: Option<(f32, f32)>,
+    ) {
         let params = PaintSlot(self.paints.len() as u32);
         let b = s.box_rect;
         self.paints.extend(
@@ -254,6 +261,10 @@ impl ChunkWriter {
         if s.inset {
             flags |= RectInstance::FLAG_INSET;
         }
+        if let Some((y0, y1)) = band {
+            self.paints.extend([y0.to_bits(), y1.to_bits()]);
+            flags |= RectInstance::FLAG_BAND;
+        }
         self.rects[at] = RectInstance {
             rect: [
                 s.shape.origin.x,
@@ -268,7 +279,9 @@ impl ChunkWriter {
             chunk: 0,
             flags,
         };
-        let bounds = if s.inset {
+        let bounds = if let (true, Some((y0, y1))) = (s.inset, band) {
+            Rect::new(b.origin.x, y0, b.size.width, (y1 - y0).max(0.0))
+        } else if s.inset {
             b
         } else {
             let m = 3.0 * s.sigma + 1.0;
