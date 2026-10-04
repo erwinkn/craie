@@ -419,7 +419,7 @@ impl Item {
     /// byte, a failed item marked loaded, or a numeric estimate outside
     /// `0..=max`.
     pub fn check(bytes: &[u8], max: f32) -> Result<(), &'static str> {
-        if bytes.len() % Self::BYTES != 0 {
+        if !bytes.len().is_multiple_of(Self::BYTES) {
             return Err("list items not whole descriptors");
         }
         for c in bytes.chunks_exact(Self::BYTES) {
@@ -857,15 +857,15 @@ pub enum Mutation<'a> {
         next: u32,
         ops: Cow<'a, [u8]>,
     },
-    /// Tags row `id` with list `list`'s item `item` at revision
-    /// `revision`: the row is placed at the item wherever it moves, and
-    /// measures it only while the list is at that revision. Item NIL
+    /// Tags row `id` with list `list`'s item `item` at version
+    /// `version`: the row is placed at the item wherever it moves, and
+    /// measures it only while the item is at that version. Item NIL
     /// clears.
     ListRow {
         id: u32,
         list: u32,
         item: u32,
-        revision: u32,
+        version: u32,
     },
     /// Anchoring policy of scroll container `id`.
     ScrollAnchor {
@@ -1504,12 +1504,12 @@ impl<'a> Transaction<'a> {
         })
     }
 
-    pub fn list_row(&mut self, id: u32, list: u32, item: u32, revision: u32) -> &mut Self {
+    pub fn list_row(&mut self, id: u32, list: u32, item: u32, version: u32) -> &mut Self {
         self.push(Mutation::ListRow {
             id,
             list,
             item,
-            revision,
+            version,
         })
     }
 

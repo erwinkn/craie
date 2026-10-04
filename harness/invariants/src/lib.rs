@@ -153,7 +153,7 @@ pub fn snapshot(ui: &Ui) -> Transaction<'static> {
             }
         }
         if let Some(tag) = host.lists.rows.get(&id.0) {
-            t.list_row(id.0, tag.list, tag.item, tag.revision);
+            t.list_row(id.0, tag.list, tag.item, tag.version);
         } else if host.list_index[id.index()] != NIL {
             t.list_index(id.0, host.list_index[id.index()]);
         }

@@ -109,7 +109,7 @@ pub mod op {
     pub const LIST_INDEX: u8 = 0x92;
     pub const SCROLL_ANCHOR: u8 = 0x93;
     /// The lists contract (protocol 20): configuration, revisioned
-    /// patches, and rows tagged by item identity.
+    /// patches, and rows tagged by item identity and version.
     pub const LIST_CONFIG2: u8 = 0x94;
     pub const LIST_PATCH: u8 = 0x95;
     pub const LIST_ROW2: u8 = 0x96;
@@ -845,10 +845,10 @@ pub fn encode(txn: &Transaction<'_>) -> Vec<u8> {
                 id,
                 list,
                 item,
-                revision,
+                version,
             } => {
                 ops.push(op::LIST_ROW2);
-                for v in [id, list, item, revision] {
+                for v in [id, list, item, version] {
                     u32le(&mut ops, *v);
                 }
             }
@@ -1589,7 +1589,8 @@ pub fn decode(buf: &[u8]) -> Result<Transaction<'_>, WireError> {
             },
             op::LIST_CONFIG2 => {
                 let id = r.u32()?;
-                let (overscan, lookahead, retain, fallback) = (r.f32()?, r.f32()?, r.f32()?, r.f32()?);
+                let (overscan, lookahead, retain, fallback) =
+                    (r.f32()?, r.f32()?, r.f32()?, r.f32()?);
                 let epoch = r.u32()?;
                 let n = r.u16()? as usize;
                 let mut templates = Vec::with_capacity(n.min(r.remaining() / 9));
@@ -1662,7 +1663,7 @@ pub fn decode(buf: &[u8]) -> Result<Transaction<'_>, WireError> {
                 id: r.u32()?,
                 list: r.u32()?,
                 item: r.u32()?,
-                revision: r.u32()?,
+                version: r.u32()?,
             },
             op::SCROLL_ANCHOR => {
                 let id = r.u32()?;

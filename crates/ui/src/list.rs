@@ -259,13 +259,13 @@ pub struct Saved {
     pub at_end: bool,
 }
 
-/// A row's tag: it renders item `item` of list `list` as the list was
-/// at `revision`.
+/// A row's tag: it renders version `version` of item `item` of list
+/// `list`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RowTag {
     pub list: u32,
     pub item: u32,
-    pub revision: u32,
+    pub version: u32,
 }
 
 /// Every list's state, the scroll anchors, and per-size text metrics.
@@ -299,14 +299,19 @@ impl Lists {
         Some(l.and_then(|l| l.index_of(tag.item)).unwrap_or(NIL))
     }
 
-    /// Whether row `row` of list `list` may measure its item: untagged
-    /// (`LIST_INDEX`), or tagged at the list's revision. A row rendered
-    /// for an older revision may show an older version of the item.
-    pub fn row_measures(&self, list: u32, row: u32) -> bool {
-        match (self.rows.get(&row), self.map.get(&list)) {
-            (Some(t), Some(l)) => t.list == list && t.revision == l.revision,
-            _ => true,
-        }
+    /// Whether row `row`, at item index `index` of list `list`, may
+    /// measure the item: untagged (`LIST_INDEX`), or tagged with the
+    /// item's version. A row rendered for an older version shows older
+    /// content: it is placed, but its height isn't the item's.
+    pub fn row_measures(&self, list: u32, row: u32, index: u32) -> bool {
+        let Some(t) = self.rows.get(&row) else {
+            return true;
+        };
+        let item = self
+            .map
+            .get(&list)
+            .and_then(|l| l.items.get(index as usize));
+        t.list == list && item.is_some_and(|d| d.id == t.item && d.version == t.version)
     }
 
     pub fn policy(&self, scroller: u32) -> Anchor {
@@ -449,7 +454,7 @@ impl Lists {
 
     /// Replaces items `at..at + remove` with `new` (an item and a flag
     /// for `keep`): an item that `keep`s the removed one with its
-    /// identity takes its extent and measurement. Anchors follow.
+    /// identity takes its measurement. Anchors follow.
     fn replace(
         &mut self,
         est: &Estimator,
@@ -483,10 +488,12 @@ impl Lists {
                 .ok()
                 .map(|p| removed[p])
         };
+        // A kept item keeps its measurement; an unmeasured one takes its
+        // new descriptor's estimate.
         let extents: Vec<(f32, bool)> = new
             .iter()
             .map(|(d, flag)| match find(d.id) {
-                Some((_, before, e, m)) if keep(&before, d, *flag) => (e, m),
+                Some((_, before, e, true)) if keep(&before, d, *flag) => (e, true),
                 _ if width.is_finite() => (est.of(d, width), false),
                 _ => (est.fallback, false),
             })

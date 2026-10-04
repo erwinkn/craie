@@ -193,6 +193,33 @@ export function readFrame(buf: Uint8Array): Frame {
         break
       }
       case 0x92: op.f.push(u32()); break // list index
+      case 0x94: { // list config 2: overscan, lookahead, retain, fallback, epoch, templates
+        op.f.push(f32(), f32(), f32(), f32(), u32())
+        const n = u16(); op.f.push(n)
+        for (let i = 0; i < n; i++) {
+          const kind = u8(); op.f.push(kind, u32())
+          if (kind === 0) op.f.push(f32())
+          else if (kind === 1) { const k = u16(); op.f.push(k); for (let j = 0; j < 2 * k; j++) op.f.push(f32()) }
+          else op.f.push(f32(), f32(), f32(), f32(), f32())
+        }
+        break
+      }
+      case 0x95: { // list patch: base, next, count, ops (descriptor: id, version, template, flags, 0, arg)
+        op.f.push(u32(), u32())
+        const n = u32(); op.f.push(n)
+        const descs = () => {
+          const k = u32(); op.f.push(k)
+          for (let j = 0; j < k; j++) op.f.push(u32(), u32(), u16(), u8(), u8(), u32())
+        }
+        for (let i = 0; i < n; i++) {
+          const tag = u8(); op.f.push(tag)
+          if (tag === 0) { op.f.push(u32(), u32()); descs() }
+          else if (tag === 1) op.f.push(u32(), u32(), u32())
+          else { op.f.push(u32()); descs() }
+        }
+        break
+      }
+      case 0x96: op.f.push(u32(), u32(), u32()); break // list row 2: list, item, version
       case 0x93: op.f.push(u8()); break // scroll anchor
       case 0xa0: { // transition: count x (prop, timing)
         const n = u8(); op.f.push(n)

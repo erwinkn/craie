@@ -545,7 +545,7 @@ impl TreeView<'_> {
         }
         // (row, index, extent, margin, overflow, measures); a row with no
         // index, one past the end, or a duplicate index is hidden. A row
-        // rendered for an older revision is placed but doesn't measure.
+        // rendered for an older version is placed but doesn't measure.
         type Row = (NodeId, u32, f32, taffy::Rect<f32>, taffy::Rect<f32>, bool);
         let mut rows: Vec<Row> = Vec::new();
         let mut hidden: Vec<NodeId> = Vec::new();
@@ -603,12 +603,11 @@ impl TreeView<'_> {
                 height + margin.top + margin.bottom,
                 margin,
                 overflow,
-                self.host.lists.row_measures(id.0, row.0),
+                self.host.lists.row_measures(id.0, row.0, index),
             ));
         }
-        let measured = || -> Vec<(u32, f32)> {
-            rows.iter().filter(|r| r.5).map(|r| (r.1, r.2)).collect()
-        };
+        let measured =
+            || -> Vec<(u32, f32)> { rows.iter().filter(|r| r.5).map(|r| (r.1, r.2)).collect() };
         if !commit {
             let measured = measured();
             return self

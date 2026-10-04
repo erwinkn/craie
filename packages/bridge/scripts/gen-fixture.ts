@@ -99,6 +99,27 @@ enc.place(0, 4, NIL)
 enc.create(5, 0)                                    // a row
 enc.listIndex(5, 1)
 enc.place(4, 5, NIL)
+enc.create(10, 4)                                   // a contract list
+enc.listConfig2(10, { overscan: 600, lookahead: -1, retain: 3, fallback: 48, epoch: 1 }, [
+  { kind: "fixed", size: 40 },
+  { kind: "widths", bands: [[0, 60], [600, 44]] },
+  { kind: "text", base: 16, inset: 24, fontSize: 14, lineHeight: 20, charWidth: 0.55 },
+])
+enc.listPatch(10, 0, 1, [{ kind: "splice", at: 0, remove: 0, items: [
+  { id: 20, version: 1, size: 40 },
+  { id: 21, template: 2, textLength: 300 },
+  { id: 22, template: 1, loaded: false },
+  { id: 23, size: 32, loaded: false, failed: true },
+] }])
+enc.listPatch(10, 1, 2, [
+  { kind: "move", from: 0, count: 1, to: 2 },       // 21 22 20 23
+  { kind: "update", at: 1, items: [{ id: 22, version: 2, template: 1 }] }, // 22 loads
+])
+enc.listPatch(10, 1, 9, [{ kind: "splice", at: 0, remove: 4, items: [] }]) // stale: skipped
+enc.place(0, 10, NIL)
+enc.create(11, 0)                                   // its row, for item 20
+enc.listRow(11, 10, 20, 1)
+enc.place(10, 11, NIL)
 enc.scrollAnchor(0, "stick-to-end")
 enc.transition(0, {                                 // animation family
   opacity: { duration: 250, delay: 50, easing: "ease-out" },

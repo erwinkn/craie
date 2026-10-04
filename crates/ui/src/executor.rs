@@ -262,9 +262,7 @@ impl Touch {
         match self {
             Touch::Host { edits, .. } => edits.push(Edit::Move(from, count, to)),
             Touch::Seq { ids, .. } => {
-                let moved: Vec<u32> = ids
-                    .drain(from as usize..(from + count) as usize)
-                    .collect();
+                let moved: Vec<u32> = ids.drain(from as usize..(from + count) as usize).collect();
                 ids.splice(to as usize..to as usize, moved);
             }
         }
@@ -287,7 +285,10 @@ impl Touch {
         let same = match self {
             Touch::Host { edits, .. } if edits.is_empty() => {
                 let base = base.expect("a host touch has a host list");
-                base.items[range].iter().map(|d| d.id).eq(updated.iter().copied())
+                base.items[range]
+                    .iter()
+                    .map(|d| d.id)
+                    .eq(updated.iter().copied())
             }
             _ => {
                 self.materialize(base);
@@ -855,7 +856,12 @@ pub fn validate(host: &Host, txn: &Transaction<'_>) -> Result<Validated, WireErr
                     return Err(invalid("list template out of range"));
                 }
             }
-            Mutation::ListPatch { id, base, next, ops } => {
+            Mutation::ListPatch {
+                id,
+                base,
+                next,
+                ops,
+            } => {
                 if o.kind(*id) != Some(NodeKind::List) {
                     return Err(invalid("list patch on a non-list node"));
                 }
@@ -1519,7 +1525,12 @@ impl Ui {
                 self.host.revs.layout_input.bump();
                 self.host.mark_layout(NodeId(*id));
             }
-            Mutation::ListPatch { id, base, next, ops } => {
+            Mutation::ListPatch {
+                id,
+                base,
+                next,
+                ops,
+            } => {
                 let cur = self.host.lists.get(*id).map_or(0, |l| l.revision);
                 if *base != cur {
                     let mut e = self.event(out_kind::LIST_RESYNC, NodeId(*id));
@@ -1547,7 +1558,7 @@ impl Ui {
                 id,
                 list,
                 item,
-                revision,
+                version,
             } => {
                 let index = if *item == NIL {
                     self.host.lists.rows.remove(id);
@@ -1556,10 +1567,10 @@ impl Ui {
                     let tag = crate::list::RowTag {
                         list: *list,
                         item: *item,
-                        revision: *revision,
+                        version: *version,
                     };
                     if self.host.lists.rows.insert(*id, tag) != Some(tag) {
-                        // Measuring may start or stop with the revision.
+                        // Measuring may start or stop with the version.
                         self.host.mark_layout(NodeId(*id));
                     }
                     self.host.lists.tagged_index(*id).unwrap_or(NIL)

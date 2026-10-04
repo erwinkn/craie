@@ -1,6 +1,6 @@
 import { test, expect } from "bun:test"
 import { readFileSync } from "node:fs"
-import { Encoder, NIL, ROLE, VERSION, transformMatrix } from "../src/wire.js"
+import { Encoder, NIL, ROLE, VERSION, transformMatrix, type ListPatchOp } from "../src/wire.js"
 import { readFrame } from "./crw2.js"
 
 // Hand-computed bytes for: create(0, view) | paragraph(0, "hi") | place.
@@ -14,7 +14,7 @@ test("encoder emits the documented byte layout", () => {
   const dv = new DataView(buf.buffer, buf.byteOffset, buf.byteLength)
   let at = 0
   expect(dv.getUint32(at, true)).toBe(0x3257_5243); at += 4 // "CRW2"
-  expect(dv.getUint16(at, true)).toBe(16); at += 2            // version
+  expect(dv.getUint16(at, true)).toBe(20); at += 2            // version
   expect(dv.getUint16(at, true)).toBe(0); at += 2            // flags
   expect(dv.getBigUint64(at, true)).toBe(7n); at += 8        // seq
   expect(dv.getUint32(at, true)).toBe(1); at += 4            // 1 string
@@ -160,8 +160,8 @@ test("bad timings leave the encoder unchanged", () => {
 // The handshake compares each side's wire VERSION. They agree through
 // the fixture: its header must be this VERSION, and Rust's
 // wire_fixture test decodes it only at the Rust VERSION.
-test("line limits bumped the protocol to 16 (text alignment took 15)", () => {
-  expect(VERSION).toBe(16)
+test("the lists contract bumped the protocol to 20 (fonts, border sides, a11y hiding took 17-19)", () => {
+  expect(VERSION).toBe(20)
   expect([ROLE.dialog, ROLE.alertdialog, ROLE.tab, ROLE.tablist]).toEqual([17, 18, 19, 20])
 })
 
@@ -169,4 +169,34 @@ test("the cross-language fixture carries this VERSION", () => {
   const buf = readFileSync(new URL("./fixture.bin", import.meta.url))
   expect(buf.readUInt32LE(0)).toBe(0x3257_5243)
   expect(buf.readUInt16LE(4)).toBe(VERSION)
+})
+
+// The lists contract's costs: an update 42 bytes, a move 30, prepending
+// k rows 30 + 16k.
+test("list patches cost what the contract says", () => {
+  const empty = new Encoder().finish(1n).length
+  const size = (ops: ListPatchOp[]) => {
+    const enc = new Encoder()
+    enc.listPatch(4, 1, 2, ops)
+    return enc.finish(1n).length - empty
+  }
+  expect(size([{ kind: "update", at: 3, items: [{ id: 9, version: 2, size: 40 }] }])).toBe(42)
+  expect(size([{ kind: "move", from: 3, count: 1, to: 0 }])).toBe(30)
+  const rows = (k: number) => Array.from({ length: k }, (_, i) => ({ id: 100 + i, template: 1, textLength: 80 }))
+  for (const k of [0, 1, 5]) expect(size([{ kind: "splice", at: 0, remove: 0, items: rows(k) }])).toBe(30 + 16 * k)
+})
+
+test("a list descriptor packs id, version, template, flags, then its estimate", () => {
+  const enc = new Encoder()
+  enc.listPatch(4, 1, 2, [{ kind: "update", at: 3, items: [
+    { id: 9, version: 2, size: 40 },
+    { id: 10, template: 2, textLength: 300, loaded: false, failed: true },
+  ] }])
+  const [op] = readFrame(enc.finish(1n)).ops
+  // base, next, op count; update: tag, at, count; two descriptors.
+  expect(op!.f).toEqual([
+    1, 2, 1, 2, 3, 2,
+    9, 2, 0, 0b011, 0, new DataView(new Float32Array([40]).buffer).getUint32(0, true),
+    10, 0, 2, 0b100, 0, 300,
+  ])
 })
