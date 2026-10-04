@@ -973,22 +973,30 @@ Reviewer minors and nitpicks not fixed yet.
 - Source: milestone 3 (borders per side, protocol 18).
 - Where: crates/ui/src/variants.rs (`Values`), packages/bridge/src/host.ts
   (`variantValues`).
-- Claim: `_hover: { borderBottomColor }` is ignored with a warning; a
-  variant changes the uniform border only. `Values`' mask is full (16
-  bits), so sides need a wider mask or a second record.
+- Claim: `_hover: { borderBottomColor }` is ignored with a warning: a
+  variant can't set a side's own width or color. Sides that fall back
+  to the uniform border follow a variant (or an animation) of
+  `borderColor` and `borderWidth`, as in React Native, so
+  `_focus: { borderColor }` on an underlined input works. `Values`' mask
+  is full (16 bits), so own sides need a wider mask or a second record.
 - Why deferred: the kit's dividers and cards don't change a side on hover
   or press; widen the mask when one does.
 
-### DF-71: mixed-color sides meet square
+### DF-71: mixed-color sides meet square; unequal widths round their inner corners alike
 
 - Source: milestone 3 (borders per side, protocol 18).
 - Where: crates/ui/src/border.rs (`draw`).
-- Claim: sides of different colors draw a rect each, top and bottom
-  owning the corners: no diagonal join as CSS draws, and no rounding (a
-  rounded box with a red top and gray sides has square colored corners).
-  Sides of one color draw one rounded ring and match CSS.
-- Why deferred: the kit uses one color per box (dividers, cards); diagonal
-  joins need a per-corner shape in the shader.
+- Claim: sides of different colors draw a piece each, the outer edge
+  rounded with the box, top and bottom owning the corners: no diagonal
+  join as CSS draws, and translucent mixed colors blend twice where
+  pieces overlap at a corner. Sides of one color draw one ring whose
+  inner corners all take the radius less the narrowest width: CSS's for
+  equal widths, and with unequal ones a rounder, slightly heavier inner
+  corner than CSS's elliptical one (radius less each adjacent width per
+  axis), never a gap.
+- Why deferred: the kit uses one color and one width per box (dividers,
+  cards); diagonal joins and elliptical inner corners need per-corner
+  radii in the shadow shader.
 
 ## Closed
 

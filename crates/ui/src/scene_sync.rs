@@ -717,6 +717,8 @@ impl Ui {
         let shadows = self.host.shadows.get(&id.0).copied().unwrap_or_default();
         let sides = self.host.border_sides.get(&id.0).copied();
         let mut side_draw = None;
+        // A side paints at least a device pixel.
+        let hairline = 1.0 / self.scale;
         // Shadow rects reserved in paint order: outer ones under the
         // fill (the last listed lowest), inset ones over it.
         let mut placed = [None; crate::shadow::MAX_SHADOWS];
@@ -750,17 +752,13 @@ impl Ui {
             // reserved here, written after the kind's own paint slots.
             if let Some(s) = &sides {
                 let b = Rect::new(0.0, 0.0, data.rect.size.width, data.rect.size.height);
-                let d = crate::border::draw(s, b, p.radius);
-                let n = match &d {
-                    crate::border::SidesDraw::Ring(_) => 1,
-                    crate::border::SidesDraw::Rects(r) => r.len(),
-                };
-                if n > 0 {
+                let d = crate::border::draw(s, p.border_width, b, p.radius, hairline);
+                if !d.is_empty() {
                     let first = w.reserve_rect();
-                    for _ in 1..n {
+                    for _ in 1..d.len() {
                         w.reserve_rect();
                     }
-                    side_draw = Some((first, d));
+                    side_draw = Some((first, d, border));
                 }
             }
         }
@@ -784,10 +782,10 @@ impl Ui {
             // fill rect's `border_width`, or the sides), not the layout's.
             let border_width = match &sides {
                 Some(s) => std::array::from_fn(|i| {
-                    if s.colors[i] & 0xFF != 0 {
-                        s.widths[i]
-                    } else {
-                        0.0
+                    let uniform_clear = p.border_color & 0xFF == 0;
+                    match s.paint(i) {
+                        crate::border::SidePaint::Uniform if uniform_clear => 0.0,
+                        _ => s.painted(i, p.border_width, hairline),
                     }
                 }),
                 None if p.border_color & 0xFF != 0 => [p.border_width; 4],
@@ -801,12 +799,15 @@ impl Ui {
                 }
             }
         }
-        if let Some((at, d)) = side_draw {
-            match d {
-                crate::border::SidesDraw::Ring(b) => w.set_shadow(at, &b),
-                crate::border::SidesDraw::Rects(rects) => {
-                    for (k, (r, color)) in rects.into_iter().enumerate() {
-                        w.set_fill(at + k, r, color);
+        if let Some((at, d, border)) = side_draw {
+            for (k, (piece, paint)) in d.into_iter().enumerate() {
+                match paint {
+                    crate::border::SidePaint::Own(color) => {
+                        w.set_shadow(at + k, &craie_scene::BoxShadow { color, ..piece });
+                    }
+                    // The border's slot: color patches reach the side.
+                    crate::border::SidePaint::Uniform => {
+                        w.set_shadow_painted(at + k, &piece, border)
                     }
                 }
             }

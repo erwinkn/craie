@@ -17,6 +17,7 @@ import {
   shadowsIn,
   type ShadowIn,
   type BorderSidesIn,
+  SIDES_NONE,
   STATE_BIT,
   Encoder,
   EVENT_KIND,
@@ -889,19 +890,24 @@ function shadowList(list: readonly BoxShadow[] | undefined): ShadowIn[] {
 
 const SIDE_NAMES = ["Top", "Right", "Bottom", "Left"] as const
 
-/** React Native's per-side borders (`borderTopWidth`... `borderLeftColor`),
- * each side falling back to `borderWidth` and `borderColor`; `undefined`
- * when no per-side prop is set (the uniform border paints). */
+/** React Native's per-side borders (`borderTopWidth`... `borderLeftColor`):
+ * a side's unset width or color falls back to the uniform border's,
+ * resolved natively as it draws (`fallback`); `undefined` when no
+ * per-side prop is set (the uniform border paints). */
 function sidesOf(props: Record<string, any>): BorderSidesIn | undefined {
-  if (!SIDE_NAMES.some(s => props[`border${s}Width`] !== undefined || props[`border${s}Color`] !== undefined)) {
-    return undefined
-  }
-  const widths = SIDE_NAMES.map(s => props[`border${s}Width`] ?? props.borderWidth ?? 0)
-  const colors = SIDE_NAMES.map(s => color(props[`border${s}Color`] ?? props.borderColor))
-  return { widths: widths as unknown as BorderSidesIn["widths"], colors: colors as unknown as BorderSidesIn["colors"] }
+  let fallback = 0
+  SIDE_NAMES.forEach((s, i) => {
+    if (props[`border${s}Width`] === undefined) fallback |= 1 << i
+    if (props[`border${s}Color`] === undefined) fallback |= 1 << (4 + i)
+  })
+  if (fallback === SIDES_NONE) return undefined
+  const widths = SIDE_NAMES.map(s => props[`border${s}Width`] ?? 0)
+  const colors = SIDE_NAMES.map(s => color(props[`border${s}Color`]))
+  return { widths: widths as unknown as BorderSidesIn["widths"], colors: colors as unknown as BorderSidesIn["colors"], fallback }
 }
 
-const sidesKey = (s: BorderSidesIn | undefined) => (s ? `${s.widths.join(",")};${s.colors.join(",")}` : "")
+const sidesKey = (s: BorderSidesIn | undefined) =>
+  (s ? `${s.widths.join(",")};${s.colors.join(",")};${s.fallback}` : "")
 
 const shadowKey = (list: readonly ShadowIn[]) =>
   list.map(s => `${s.x},${s.y},${s.blur},${s.spread},${s.color},${+s.inset}`).join(";")
@@ -1939,7 +1945,7 @@ export class CraieHost {
       const oldBw = oldProps.borderWidth ?? 0, newBw = props.borderWidth ?? 0
       const sides = sidesOf(props), oldSides = sidesOf(oldProps)
       const newSides = sidesKey(sides) !== sidesKey(oldSides)
-        ? sides ?? { widths: [0, 0, 0, 0], colors: [0, 0, 0, 0] } as BorderSidesIn
+        ? sides ?? { widths: [0, 0, 0, 0], colors: [0, 0, 0, 0], fallback: SIDES_NONE } as BorderSidesIn
         : undefined
       const shadows = oldProps.boxShadow === props.boxShadow ? undefined : shadowList(props.boxShadow)
       const newShadows = shadows && shadowKey(shadows) !== shadowKey(shadowList(oldProps.boxShadow))

@@ -395,9 +395,11 @@ export interface ViewProps extends ListenerProps, StateProps, Variants, MotionPr
   borderColor?: string | number
   borderWidth?: number
   /** Borders per side, as React Native's: a side's width or color falls
-   * back to `borderWidth` and `borderColor`. Any of these paints the
-   * sides instead of the uniform border (one color: rounded with the
-   * box; mixed colors: square-cornered for now). */
+   * back to `borderWidth` and `borderColor` (variants and animations of
+   * those reach it). Any of these paints the sides instead of the
+   * uniform border, rounded with the box. Paint only: like
+   * `borderWidth`, they don't inset the content (the layout border is
+   * `style.borderWidth`). */
   borderTopWidth?: number
   borderRightWidth?: number
   borderBottomWidth?: number

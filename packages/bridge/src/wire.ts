@@ -281,11 +281,16 @@ const SPATIAL_FIELD = {
 const PAINT_FIELD = { FILL: 1 << 0, RADIUS: 1 << 1, BORDER: 1 << 2, SHADOWS: 1 << 3, SIDES: 1 << 4 } as const
 
 /** Borders per side on the wire: widths and colors, top, right, bottom,
- * left (all widths 0: none). */
+ * left. `fallback` bits 0-3: side i's width is the uniform border's;
+ * bits 4-7: its color is (native resolves them as drawn, so variants and
+ * animations of `borderColor`/`borderWidth` reach them). Every bit set
+ * (`SIDES_NONE`): no sides. */
 export interface BorderSidesIn {
   widths: readonly [number, number, number, number]
   colors: readonly [number, number, number, number]
+  fallback: number
 }
+export const SIDES_NONE = 0xff
 
 /** Box shadows a node may hold (shadow.rs `MAX_SHADOWS`). */
 export const MAX_SHADOWS = 8
@@ -1533,6 +1538,7 @@ export class Encoder {
     if (sides !== undefined) {
       for (const w of sides.widths) b.f32(Number.isFinite(w) ? Math.min(4096, Math.max(0, w)) : 0)
       for (const c of sides.colors) b.u32(c >>> 0)
+      b.u8(sides.fallback & 0xff)
     }
   }
   /** A paragraph: UTF-8 text plus its style span list. Span starts are

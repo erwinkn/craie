@@ -1806,10 +1806,12 @@ impl Ui {
 }
 
 impl Ui {
-    /// Replaces a node's borders per side: its chunk rebuilds.
+    /// Replaces a node's borders per side: its chunk rebuilds. Sides that
+    /// all fall back are none (the uniform border paints); explicit zero
+    /// or transparent sides are kept, and paint nothing.
     pub(crate) fn set_border_sides(&mut self, node: NodeId, sides: crate::border::BorderSides) {
         let before = self.host.border_sides.get(&node.0).copied();
-        let after = (!sides.is_empty()).then_some(sides);
+        let after = (sides.fallback != crate::border::BorderSides::ALL_FALLBACK).then_some(sides);
         if before == after {
             return;
         }

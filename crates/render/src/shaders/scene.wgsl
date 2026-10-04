@@ -176,8 +176,9 @@ fn vs_main(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> 
 // blurs the shadow before the element's transform, so a scaled or
 // rotated box carries its blur along. The quad covers the blurred shape
 // (3 σ past it, and a pixel) for an outer shadow, the box for an inset
-// one. Under an axis-aligned world the shape and the box snap like the
-// box's fill, so a ring lands on the fill's edge.
+// one. Under an axis-aligned world the box snaps like the box's fill
+// and the shape relative to it, so a ring lands on the fill's edge with
+// its width rounded once.
 fn shadow_vertex(r: RectI, corner: vec2<f32>) -> VsOut {
     let p = placements[r.chunk];
     let w = worlds[p.transform];
@@ -200,10 +201,15 @@ fn shadow_vertex(r: RectI, corner: vec2<f32>) -> VsOut {
         var b0 = origin + linear(w, box_lo);
         var b1 = origin + linear(w, box_lo + box_size);
         if (snaps(w)) {
-            s0 = round(s0);
-            s1 = round(s1);
-            b0 = round(b0);
-            b1 = round(b1);
+            // The box snaps like the fill; the shape keeps its rounded
+            // distance from it, so a ring or a side is round(width)
+            // device px wherever the box lands.
+            let rb0 = round(b0);
+            let rb1 = round(b1);
+            s0 = rb0 + round(s0 - b0);
+            s1 = rb1 + round(s1 - b1);
+            b0 = rb0;
+            b1 = rb1;
         }
         let slo = min(s0, s1);
         let shi = max(s0, s1);

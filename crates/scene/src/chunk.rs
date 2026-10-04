@@ -232,6 +232,12 @@ impl ChunkWriter {
     /// box.
     pub fn set_shadow(&mut self, at: usize, s: &BoxShadow) {
         let color = self.paint(s.color);
+        self.set_shadow_painted(at, s, color);
+    }
+
+    /// `set_shadow` in an existing paint slot (`s.color` unused): a
+    /// patch of that slot recolors it.
+    pub fn set_shadow_painted(&mut self, at: usize, s: &BoxShadow, color: PaintSlot) {
         let params = PaintSlot(self.paints.len() as u32);
         let b = s.box_rect;
         self.paints.extend(
