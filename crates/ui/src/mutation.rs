@@ -574,7 +574,7 @@ impl<'a> ListOp<'a> {
     pub fn parse(bytes: &'a [u8]) -> Option<Vec<ListOp<'a>>> {
         let mut ops = Vec::new();
         let mut at = 0usize;
-        let mut u32_at = |at: &mut usize| -> Option<u32> {
+        let u32_at = |at: &mut usize| -> Option<u32> {
             let b = bytes.get(*at..*at + 4)?;
             *at += 4;
             Some(u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
@@ -582,7 +582,7 @@ impl<'a> ListOp<'a> {
         while at < bytes.len() {
             let tag = bytes[at];
             at += 1;
-            let mut descs = |at: &mut usize, n: u32| -> Option<&'a [u8]> {
+            let descs = |at: &mut usize, n: u32| -> Option<&'a [u8]> {
                 let len = (n as usize).checked_mul(Item::BYTES)?;
                 let b = bytes.get(*at..at.checked_add(len)?)?;
                 *at += len;

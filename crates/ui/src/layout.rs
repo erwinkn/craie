@@ -543,9 +543,10 @@ impl TreeView<'_> {
         if record {
             self.host.lists.estimate(self.text, id.0, w);
         }
-        // (row, index, extent, margin, overflow); a row with no index,
-        // one past the end, or a duplicate index is hidden.
-        type Row = (NodeId, u32, f32, taffy::Rect<f32>, taffy::Rect<f32>);
+        // (row, index, extent, margin, overflow, measures); a row with no
+        // index, one past the end, or a duplicate index is hidden. A row
+        // rendered for an older revision is placed but doesn't measure.
+        type Row = (NodeId, u32, f32, taffy::Rect<f32>, taffy::Rect<f32>, bool);
         let mut rows: Vec<Row> = Vec::new();
         let mut hidden: Vec<NodeId> = Vec::new();
         let children: Vec<NodeId> = self.host.children(id).to_vec();
@@ -602,10 +603,14 @@ impl TreeView<'_> {
                 height + margin.top + margin.bottom,
                 margin,
                 overflow,
+                self.host.lists.row_measures(id.0, row.0),
             ));
         }
+        let measured = || -> Vec<(u32, f32)> {
+            rows.iter().filter(|r| r.5).map(|r| (r.1, r.2)).collect()
+        };
         if !commit {
-            let measured: Vec<(u32, f32)> = rows.iter().map(|r| (r.1, r.2)).collect();
+            let measured = measured();
             return self
                 .host
                 .lists
@@ -615,7 +620,7 @@ impl TreeView<'_> {
             let Some(list) = self.host.lists.map.get_mut(&id.0) else {
                 return 0.0;
             };
-            for r in &rows {
+            for r in rows.iter().filter(|r| r.5) {
                 list.extents.measure(r.1 as usize, r.2);
             }
             let size = list.extents.total_gap(size_gap);
@@ -626,7 +631,7 @@ impl TreeView<'_> {
             };
             size
         } else {
-            let measured: Vec<(u32, f32)> = rows.iter().map(|r| (r.1, r.2)).collect();
+            let measured = measured();
             self.host
                 .lists
                 .total_at(self.text, id.0, w, size_gap, &measured)
@@ -636,7 +641,7 @@ impl TreeView<'_> {
         };
         let offsets: Vec<f32> = rows.iter().map(|r| list.offset(r.1 as usize)).collect();
         for (k, (r, y)) in rows.iter().zip(offsets).enumerate() {
-            let (row, _, extent, margin, overflow) = *r;
+            let (row, _, extent, margin, overflow, _) = *r;
             let st = self.style_of(row);
             let padding = st.padding().resolve_or_zero(Some(w), no_calc);
             let border = st.border().resolve_or_zero(Some(w), no_calc);

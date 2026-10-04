@@ -1969,7 +1969,7 @@ fn list_identities_are_unique() {
         // The index matches the items after every accepted batch.
         let index_ok = |ui: &Ui| {
             let l = ui.host.lists.get(1).unwrap();
-            let fresh = crate::list::IdIndex::build(l.descs.iter().map(|d| d.id));
+            let fresh = crate::list::IdIndex::build(l.items.iter().map(|d| d.id));
             !fresh.has_duplicates() && fresh == l.ids
         };
         assert!(index_ok(&ui));
@@ -1980,7 +1980,7 @@ fn list_identities_are_unique() {
         apply(&mut ui, &t).unwrap();
         let l = ui.host.lists.get(1).unwrap();
         assert_eq!(
-            l.descs.iter().map(|d| d.id).collect::<Vec<_>>(),
+            l.items.iter().map(|d| d.id).collect::<Vec<_>>(),
             [7, NIL, NIL, 1, 2, 3]
         );
         assert!(index_ok(&ui));

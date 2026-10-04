@@ -17,7 +17,9 @@ use craie_core::geom::{Affine, Rect, Size};
 use craie_core::rng::Rng;
 use craie_scene::{RasterId, Resolved, Scene};
 use craie_ui::host::{NodeId, Parts, ROOT};
-use craie_ui::mutation::{Mutation, NIL, NodeKind, Role, SpatialPatch, TextSpan, Transaction};
+use craie_ui::mutation::{
+    ItemDesc, ListOp, Mutation, NIL, NodeKind, Role, SpatialPatch, TextSpan, Transaction,
+};
 use craie_ui::ui::Ui;
 
 /// Host spans as transaction spans: family indices move from the host's
@@ -118,10 +120,41 @@ pub fn snapshot(ui: &Ui) -> Transaction<'static> {
             }
         }
         if let Some(l) = host.lists.get(id.0) {
-            t.list_config(id.0, l.overscan, l.fallback, &l.templates);
-            t.list_splice(id.0, 0, 0, &l.descs);
+            if l.v2 {
+                t.list_config2(
+                    id.0,
+                    l.overscan,
+                    l.lookahead,
+                    l.retain,
+                    l.fallback,
+                    l.epoch,
+                    &l.templates2,
+                );
+            } else {
+                t.list_config(id.0, l.overscan, l.fallback, &l.templates);
+            }
+            if l.items.iter().all(|d| d.id != NIL) {
+                // Descriptors whole, at the list's revision.
+                let ops = [ListOp::splice(0, 0, &l.items)];
+                t.list_patch(id.0, 0, l.revision, &ops);
+            } else {
+                // `LIST_SPLICE`'s descriptions allow NIL identities.
+                let descs: Vec<ItemDesc> = l
+                    .items
+                    .iter()
+                    .map(|d| ItemDesc {
+                        template: d.template,
+                        text_len: d.arg,
+                        id: d.id,
+                        unchanged: false,
+                    })
+                    .collect();
+                t.list_splice(id.0, 0, 0, &descs);
+            }
         }
-        if host.list_index[id.index()] != NIL {
+        if let Some(tag) = host.lists.rows.get(&id.0) {
+            t.list_row(id.0, tag.list, tag.item, tag.revision);
+        } else if host.list_index[id.index()] != NIL {
             t.list_index(id.0, host.list_index[id.index()]);
         }
         let anchor = host.lists.policy(id.0);
@@ -1155,7 +1188,7 @@ pub fn check_list_index(ui: &Ui) -> Result<(), String> {
         let Some(l) = ui.host.lists.get(i) else {
             continue;
         };
-        let fresh = craie_ui::list::IdIndex::build(l.descs.iter().map(|d| d.id));
+        let fresh = craie_ui::list::IdIndex::build(l.items.iter().map(|d| d.id));
         if fresh.has_duplicates() {
             return Err(format!("list {i}: duplicate identities"));
         }

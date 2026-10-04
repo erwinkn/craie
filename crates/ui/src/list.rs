@@ -259,6 +259,15 @@ pub struct Saved {
     pub at_end: bool,
 }
 
+/// A row's tag: it renders item `item` of list `list` as the list was
+/// at `revision`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RowTag {
+    pub list: u32,
+    pub item: u32,
+    pub revision: u32,
+}
+
 /// Every list's state, the scroll anchors, and per-size text metrics.
 /// Lists are few: a map by node id.
 #[derive(Default)]
@@ -268,6 +277,8 @@ pub struct Lists {
     pub(crate) policies: HashMap<u32, Anchor>,
     /// Captured anchors by scroller, refreshed after every frame.
     pub(crate) saved: HashMap<u32, Saved>,
+    /// Rows tagged by item (`LIST_ROW2`), by row node.
+    pub rows: HashMap<u32, RowTag>,
     /// (average advance, line height) per font size (f32 bits).
     metrics: HashMap<u32, (f32, f32)>,
     /// Per-frame scratch: list ids in order, scrollers anchored.
@@ -280,6 +291,24 @@ impl Lists {
         self.map.get(&id)
     }
 
+    /// The item index row `row` stands for by its tag, if it has one: the
+    /// index of the tagged item in its list (NIL once the item is gone).
+    pub(crate) fn tagged_index(&mut self, row: u32) -> Option<u32> {
+        let tag = *self.rows.get(&row)?;
+        let l = self.map.get_mut(&tag.list);
+        Some(l.and_then(|l| l.index_of(tag.item)).unwrap_or(NIL))
+    }
+
+    /// Whether row `row` of list `list` may measure its item: untagged
+    /// (`LIST_INDEX`), or tagged at the list's revision. A row rendered
+    /// for an older revision may show an older version of the item.
+    pub fn row_measures(&self, list: u32, row: u32) -> bool {
+        match (self.rows.get(&row), self.map.get(&list)) {
+            (Some(t), Some(l)) => t.list == list && t.revision == l.revision,
+            _ => true,
+        }
+    }
+
     pub fn policy(&self, scroller: u32) -> Anchor {
         self.policies.get(&scroller).copied().unwrap_or_default()
     }
@@ -287,6 +316,8 @@ impl Lists {
     /// Forgets everything a freed node held.
     pub(crate) fn forget(&mut self, id: u32) {
         self.map.remove(&id);
+        self.rows.remove(&id);
+        self.rows.retain(|_, t| t.list != id);
         self.policies.remove(&id);
         self.saved.remove(&id);
         self.saved.retain(|_, s| s.list != id);
