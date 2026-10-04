@@ -195,9 +195,12 @@ it decides on both sides, and the source only answers.
 - **When to ask.** After every change batch, settled scroll, jump and
   resize, the list computes its ask again and calls `updateItems` with the
   difference from what it last asked, if any. Its `load` is the request,
-  when it is non-empty and not contained in the last one asked since the
-  last change batch: a smaller request inside a pending one would only cut
-  it short. Without `load`, the last request stands.
+  when it is non-empty and not contained in the last one asked, unless a
+  change batch since then moved rows (a splice or a move: indices may have
+  shifted) or changed a row inside it (an answer, maybe partial). A smaller
+  request inside a pending one would only cut it short, and a batch that
+  only updates rows elsewhere (a reply streaming below) asks nothing new
+  (trace L4). Without `load`, the last request stands.
 - **The source.** It loads the whole request, and may load more. It never
   loads less on purpose. A partial answer, an `update` that leaves part of
   the request unloaded, leads to the next request at the next evaluation.
@@ -307,6 +310,9 @@ stays the one source of truth, and the list never flips `loaded` itself.
 - **L3.** As L2, but the rest of the visible part fails: the hold
   releases, and the failed rows show as placeholders and aren't asked
   again.
+- **L4.** A pending load isn't asked again for an update of a row far
+  below it; a partial answer inside it asks for the rest, the loaded part
+  held.
 - **U1.** Scrolling far down unloads the far-above rows once; the source
   drops them.
 - **U2.** Rows past the retain window but inside the band stay while the
