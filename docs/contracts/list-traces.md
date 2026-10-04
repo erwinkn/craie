@@ -11,10 +11,10 @@ Files are named `<id>-<slug>.json` and live in one place:
 harness reads them from the repo; the kit reads them from its pinned
 bridge package, so both sides run the same bytes and a new trace lands
 through a bridge PR. The first eight (`I1` to `I4bj`) are the islet
-traces of `lists.md`; `L1` to `L3` and `U1` to `U4` are its loading and
+traces of `lists.md`; `L1` to `L7` and `U1` to `U4` are its loading and
 unloading traces. `K1` to `K13` are the kit's, from Marbre PR #69
 (9c98021), with `loadItems` renamed `load`; `K14` to `K16` are from
-Marbre PR #71 (d9de855), verbatim, and `K17` from its re-check (db0fe5f).
+Marbre PR #71 (d9de855), verbatim, and `K17` from its re-check (db0fe5f). `K18` pins the anchor rule both sides agreed after it: the topmost visible row that stayed in order and is unchanged.
 
 ## A trace
 

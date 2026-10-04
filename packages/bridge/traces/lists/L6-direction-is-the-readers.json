@@ -1,0 +1,97 @@
+{
+  "format": "craie-list-trace/1",
+  "id": "L6",
+  "name": "after content shifts above, the reader's scroll up still loads a screen above",
+  "viewport": {
+    "width": 400,
+    "height": 400
+  },
+  "config": {
+    "overscan": 600,
+    "lookahead": 0,
+    "endThreshold": 80,
+    "anchor": "start",
+    "anchorPolicy": "reading"
+  },
+  "templates": [],
+  "items": [
+    {
+      "count": 300,
+      "key": "m{i}",
+      "loaded": false,
+      "estimate": 40
+    },
+    {
+      "count": 700,
+      "key": "m{i}",
+      "estimate": 40,
+      "height": 40
+    }
+  ],
+  "steps": [
+    {
+      "do": "mount"
+    },
+    {
+      "do": "scrollToIndex",
+      "index": 300,
+      "align": "start",
+      "expect": {
+        "load": null
+      }
+    },
+    {
+      "do": "scrollBy",
+      "delta": 100,
+      "expect": {
+        "anchor": {
+          "key": "m302",
+          "offset": -20
+        }
+      }
+    },
+    {
+      "do": "changes",
+      "changes": [
+        {
+          "kind": "splice",
+          "at": 0,
+          "remove": 0,
+          "items": [
+            {
+              "count": 10,
+              "key": "h{i}",
+              "estimate": 40,
+              "height": 40
+            }
+          ]
+        }
+      ],
+      "expect": {
+        "anchor": {
+          "key": "m302",
+          "offset": -20
+        },
+        "offset": 12500
+      }
+    },
+    {
+      "do": "scrollBy",
+      "delta": -150,
+      "expect": {
+        "visible": [
+          308,
+          318
+        ],
+        "anchor": {
+          "key": "m300",
+          "offset": 50
+        },
+        "load": [
+          300,
+          309
+        ]
+      }
+    }
+  ]
+}

@@ -610,11 +610,17 @@ impl Scene {
                                         bounds: b,
                                         color: words[r.fill as usize],
                                         aux: if shadow {
-                                            // The box it is cut against, and
-                                            // whether it is inset.
+                                            // The box it is cut against,
+                                            // whether it is inset, and its
+                                            // band, if any.
                                             let at = r.border as usize;
-                                            words[at..at + 5].iter().fold(
-                                                (r.flags & RectInstance::FLAG_INSET) as u64,
+                                            let banded = r.flags & RectInstance::FLAG_BAND != 0;
+                                            let n = if banded { 7 } else { 5 };
+                                            words[at..at + n].iter().fold(
+                                                (r.flags
+                                                    & (RectInstance::FLAG_INSET
+                                                        | RectInstance::FLAG_BAND))
+                                                    as u64,
                                                 |h, &w| h.wrapping_mul(0x100_0000_01B3) ^ w as u64,
                                             )
                                         } else if r.border == NO_PAINT {
