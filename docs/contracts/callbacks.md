@@ -19,7 +19,7 @@ A callback ref is **(owner node, slot)**. It is not a fresh id per function.
 - **Slot.** A u8 that names which prop it is. Slots 0–31 are typed: today's
   listener mask bits (pointer, key, focus, input, scroll, press, activate,
   layout), plus slots each component defines (a list's `updateItems` and
-  `onViewportChange`; see the list note).
+  `onVisibleChange`; see the list note).
 - **Declaring.** JS serializes props by stripping each function and setting
   its slot's bit in a u32 mask (`INTERACTION`'s listener mask, widened to mean
   "live slots"). Only the presence of a function crosses the wire, never the
@@ -75,7 +75,7 @@ moment.
     drop under queue pressure, like pointer events. Used for the typed
     input events.
   - **Latest wins:** calls coalesce per frame, and only the latest
-    arguments are delivered. Used for `onViewportChange` and frame
+    arguments are delivered. Used for `onVisibleChange` and frame
     statistics.
 
   A slot spec states its class next to its arguments. The lists contract
