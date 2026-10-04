@@ -7,6 +7,8 @@
 //! Craie-level events only; winit is confined here. `Window` implements
 //! `craie_ui::platform::PlatformWindow`, the contract the runtime sees.
 
+/// The blending space a host renders in (`HostOptions.blending`).
+pub use craie_render::Blending;
 pub mod a11y;
 pub mod app;
 pub mod capture;
