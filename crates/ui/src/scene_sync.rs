@@ -755,8 +755,13 @@ impl Ui {
                     crate::border::SidesDraw::Ring(_) => 1,
                     crate::border::SidesDraw::Rects(r) => r.len(),
                 };
-                let first = (0..n).map(|_| w.reserve_rect()).next();
-                side_draw = first.map(|at| (at, d));
+                if n > 0 {
+                    let first = w.reserve_rect();
+                    for _ in 1..n {
+                        w.reserve_rect();
+                    }
+                    side_draw = Some((first, d));
+                }
             }
         }
         match kind {

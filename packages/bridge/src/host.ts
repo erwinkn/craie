@@ -16,6 +16,7 @@ import {
   MAX_SHADOWS,
   shadowsIn,
   type ShadowIn,
+  type BorderSidesIn,
   STATE_BIT,
   Encoder,
   EVENT_KIND,
@@ -881,6 +882,22 @@ function shadowList(list: readonly BoxShadow[] | undefined): ShadowIn[] {
     inset: !!s.inset,
   })))
 }
+
+const SIDE_NAMES = ["Top", "Right", "Bottom", "Left"] as const
+
+/** React Native's per-side borders (`borderTopWidth`... `borderLeftColor`),
+ * each side falling back to `borderWidth` and `borderColor`; `undefined`
+ * when no per-side prop is set (the uniform border paints). */
+function sidesOf(props: Record<string, any>): BorderSidesIn | undefined {
+  if (!SIDE_NAMES.some(s => props[`border${s}Width`] !== undefined || props[`border${s}Color`] !== undefined)) {
+    return undefined
+  }
+  const widths = SIDE_NAMES.map(s => props[`border${s}Width`] ?? props.borderWidth ?? 0)
+  const colors = SIDE_NAMES.map(s => color(props[`border${s}Color`] ?? props.borderColor))
+  return { widths: widths as unknown as BorderSidesIn["widths"], colors: colors as unknown as BorderSidesIn["colors"] }
+}
+
+const sidesKey = (s: BorderSidesIn | undefined) => (s ? `${s.widths.join(",")};${s.colors.join(",")}` : "")
 
 const shadowKey = (list: readonly ShadowIn[]) =>
   list.map(s => `${s.x},${s.y},${s.blur},${s.spread},${s.color},${+s.inset}`).join(";")
@@ -1889,17 +1906,22 @@ export class CraieHost {
       const oldR = oldProps.borderRadius ?? 0, newR = props.borderRadius ?? 0
       const oldBc = color(oldProps.borderColor), newBc = color(props.borderColor)
       const oldBw = oldProps.borderWidth ?? 0, newBw = props.borderWidth ?? 0
+      const sides = sidesOf(props), oldSides = sidesOf(oldProps)
+      const newSides = sidesKey(sides) !== sidesKey(oldSides)
+        ? sides ?? { widths: [0, 0, 0, 0], colors: [0, 0, 0, 0] } as BorderSidesIn
+        : undefined
       const shadows = oldProps.boxShadow === props.boxShadow ? undefined : shadowList(props.boxShadow)
       const newShadows = shadows && shadowKey(shadows) !== shadowKey(shadowList(oldProps.boxShadow))
         ? shadows
         : undefined
-      if (oldBg !== newBg || oldR !== newR || oldBc !== newBc || oldBw !== newBw || newShadows) {
+      if (oldBg !== newBg || oldR !== newR || oldBc !== newBc || oldBw !== newBw || newShadows || newSides) {
         enc.paint(
           id,
           oldBg !== newBg ? newBg : undefined,
           oldR !== newR ? newR : undefined,
           oldBc !== newBc || oldBw !== newBw ? { color: newBc, width: newBw } : undefined,
           newShadows,
+          newSides,
         )
       }
     }

@@ -999,18 +999,18 @@ impl Ui {
                     self.set_border_sides(NodeId(*id), *s);
                 }
                 match self.base_mut(*id) {
-                Some(b) => {
-                    b.fill = fill.unwrap_or(b.fill);
-                    b.radius = radius.map_or(b.radius, |r| r.max(0.0));
-                    b.border = border.map_or(b.border, |(c, w)| (c, w.max(0.0)));
-                    b.shadows = shadows.unwrap_or(b.shadows);
-                }
-                None => {
-                    self.declare_paint(NodeId(*id), *fill, *radius, *border);
-                    if let Some(s) = shadows {
-                        self.set_shadows(NodeId(*id), *s);
+                    Some(b) => {
+                        b.fill = fill.unwrap_or(b.fill);
+                        b.radius = radius.map_or(b.radius, |r| r.max(0.0));
+                        b.border = border.map_or(b.border, |(c, w)| (c, w.max(0.0)));
+                        b.shadows = shadows.unwrap_or(b.shadows);
                     }
-                }
+                    None => {
+                        self.declare_paint(NodeId(*id), *fill, *radius, *border);
+                        if let Some(s) = shadows {
+                            self.set_shadows(NodeId(*id), *s);
+                        }
+                    }
                 }
             }
             Mutation::Color { id, color } => match self.base_mut(*id) {
