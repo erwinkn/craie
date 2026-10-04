@@ -968,6 +968,54 @@ Reviewer minors and nitpicks not fixed yet.
   (degenerate quads) or an indirect draw list; it is a renderer-wide
   change, to measure on the Mac against a screen of real buttons.
 
+### DF-70: variants don't carry borders per side
+
+- Source: milestone 3 (borders per side, protocol 18).
+- Where: crates/ui/src/variants.rs (`Values`), packages/bridge/src/host.ts
+  (`variantValues`).
+- Claim: `_hover: { borderBottomColor }` is ignored with a warning: a
+  variant can't set a side's own width or color. Sides that fall back
+  to the uniform border follow a variant (or an animation) of
+  `borderColor` and `borderWidth`, as in React Native, so
+  `_focus: { borderColor }` on an underlined input works. `Values`' mask
+  is full (16 bits), so own sides need a wider mask or a second record.
+- Why deferred: the kit's dividers and cards don't change a side on hover
+  or press; widen the mask when one does.
+
+### DF-71: mixed-color sides meet square; unequal widths round their inner corners alike
+
+- Source: milestone 3 (borders per side, protocol 18).
+- Where: crates/ui/src/border.rs (`draw`).
+- Claim: with different colors, the corners take the top's and the
+  bottom's colors, joining the left and right sides horizontally where
+  the corner zone (the radius, or the top or bottom width) ends, not on
+  CSS's diagonal. Sides of one color draw one ring whose
+  inner corners all take the radius less the narrowest width: CSS's for
+  equal widths, and with unequal ones a rounder, slightly heavier inner
+  corner than CSS's elliptical one (radius less each adjacent width per
+  axis), never a gap.
+  Two consequences: a pill (radius at least half the height) has corner
+  zones that meet, so its left and right colors don't show; and with the
+  top unpainted, the side strips stop square at the corner, where CSS
+  draws a sub-pixel crescent.
+- Why deferred: the kit uses one color and one width per box (dividers,
+  cards); diagonal joins and elliptical inner corners need per-corner
+  radii in the shadow shader.
+
+### DF-72: a rounded border's outer antialiasing is lighter than the uniform border's
+
+- Source: #34 re-check.
+- Where: crates/ui/src/scene_sync.rs (sides over the fill),
+  crates/render/src/shaders/scene.wgsl (`shadow_coverage`).
+- Claim: borders per side draw as a ring over the box's fill, so on a
+  rounded corner the ring's antialiased edge composites over the fill's
+  own antialiased edge, and the outermost pixels come out lighter than
+  the uniform border's, which shades fill and border in one pass. It
+  shows on any rounded box with sides, one color or mixed.
+- Why deferred: a fraction of one pixel on corner arcs; the fix is to
+  draw the fill inside the ring's hole (or in the same pass) when sides
+  exist.
+
 ## Closed
 
 - DF-57 (work item 6, review #21 M1): end indices were wire indices

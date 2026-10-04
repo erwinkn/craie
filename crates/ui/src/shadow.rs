@@ -128,26 +128,32 @@ pub(crate) fn reach(shadows: &Shadows) -> f32 {
 }
 
 /// How `s` draws on a box (`border`: the border box and its radius)
-/// whose painted border is `border_width` wide: an outer shadow is cut
-/// against the border box, an inset one against the box inside the
-/// painted border. `None` when it draws nothing (transparent).
-pub(crate) fn box_shadow(s: &Shadow, border: (Rect, f32), border_width: f32) -> Option<BoxShadow> {
+/// whose painted border is `widths` wide (top, right, bottom, left): an
+/// outer shadow is cut against the border box, an inset one against the
+/// box inside the painted border. `None` when it draws nothing
+/// (transparent).
+pub(crate) fn box_shadow(s: &Shadow, border: (Rect, f32), widths: [f32; 4]) -> Option<BoxShadow> {
     if s.color & 0xFF == 0 {
         return None;
     }
     let (b, r) = border;
     let r = used_radius((b.size.width, b.size.height), r);
     let (b, r) = if s.inset {
-        let bw = border_width
-            .max(0.0)
-            .min(b.size.width.min(b.size.height) / 2.0);
+        let [t, rt, bt, l] = widths.map(|w| w.max(0.0));
+        // Opposite sides wider than the box meet in the middle.
+        let fit = |a: f32, b: f32, size: f32| {
+            let k = if a + b > size { size / (a + b) } else { 1.0 };
+            (a * k, b * k)
+        };
+        let (l, rt) = fit(l, rt, b.size.width);
+        let (t, bt) = fit(t, bt, b.size.height);
         let inner = Rect::new(
-            b.origin.x + bw,
-            b.origin.y + bw,
-            b.size.width - 2.0 * bw,
-            b.size.height - 2.0 * bw,
+            b.origin.x + l,
+            b.origin.y + t,
+            b.size.width - l - rt,
+            b.size.height - t - bt,
         );
-        (inner, (r - bw).max(0.0))
+        (inner, (r - t.max(rt).max(bt).max(l)).max(0.0))
     } else {
         (b, r)
     };
@@ -208,7 +214,7 @@ mod tests {
             color: 0x0000_00FF,
             ..Shadow::default()
         };
-        let s = box_shadow(&ring, border, 1.0).unwrap();
+        let s = box_shadow(&ring, border, [1.0; 4]).unwrap();
         assert_eq!(s.shape, Rect::new(-1.0, -1.0, 102.0, 42.0));
         assert_eq!((s.radius, s.sigma, s.box_rect), (7.0, 0.0, border.0));
         let drop = Shadow {
@@ -217,7 +223,7 @@ mod tests {
             color: 0x0000_0008,
             ..Shadow::default()
         };
-        let s = box_shadow(&drop, border, 1.0).unwrap();
+        let s = box_shadow(&drop, border, [1.0; 4]).unwrap();
         assert_eq!(
             (s.shape, s.sigma),
             (Rect::new(0.0, 18.0, 100.0, 40.0), 23.5)
@@ -231,14 +237,20 @@ mod tests {
             inset: true,
             ..Shadow::default()
         };
-        let s = box_shadow(&inset, border, 1.0).unwrap();
+        let s = box_shadow(&inset, border, [1.0; 4]).unwrap();
         assert_eq!(s.shape, Rect::new(3.0, 4.0, 94.0, 34.0));
         assert_eq!(
             (s.radius, s.box_rect, s.box_radius),
             (3.0, Rect::new(1.0, 1.0, 98.0, 38.0), 5.0)
         );
+        // Borders per side: inside each side's width.
+        let s = box_shadow(&inset, border, [0.0, 2.0, 1.0, 4.0]).unwrap();
+        assert_eq!(
+            (s.box_rect, s.box_radius),
+            (Rect::new(4.0, 0.0, 94.0, 39.0), 2.0)
+        );
         let clear = Shadow::default();
-        assert_eq!(box_shadow(&clear, border, 1.0), None);
+        assert_eq!(box_shadow(&clear, border, [1.0; 4]), None);
         // Reach: offset, spread and 3 σ of the farthest outer shadow.
         let list = Shadows::new(&[ring, drop, inset]).unwrap();
         assert_eq!(reach(&list), 18.0 + 1.5 * 47.0 + 1.0);

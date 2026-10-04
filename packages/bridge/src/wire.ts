@@ -15,7 +15,7 @@
 // across transactions.
 
 const MAGIC = 0x3257_5243 // "CRW2" little-endian
-export const VERSION = 17
+export const VERSION = 18
 export const NIL = 0xffff_ffff // no node / append / default style
 
 const enum Op {
@@ -278,7 +278,19 @@ export interface ItemDesc {
 const SPATIAL_FIELD = {
   TRANSFORM: 1 << 0, OPACITY: 1 << 1, Z: 1 << 2, TRANSLATE: 1 << 3, ROTATE: 1 << 4, SCALE: 1 << 5,
 } as const
-const PAINT_FIELD = { FILL: 1 << 0, RADIUS: 1 << 1, BORDER: 1 << 2, SHADOWS: 1 << 3 } as const
+const PAINT_FIELD = { FILL: 1 << 0, RADIUS: 1 << 1, BORDER: 1 << 2, SHADOWS: 1 << 3, SIDES: 1 << 4 } as const
+
+/** Borders per side on the wire: widths and colors, top, right, bottom,
+ * left. `fallback` bits 0-3: side i's width is the uniform border's;
+ * bits 4-7: its color is (native resolves them as drawn, so variants and
+ * animations of `borderColor`/`borderWidth` reach them). Every bit set
+ * (`SIDES_NONE`): no sides. */
+export interface BorderSidesIn {
+  widths: readonly [number, number, number, number]
+  colors: readonly [number, number, number, number]
+  fallback: number
+}
+export const SIDES_NONE = 0xff
 
 /** Box shadows a node may hold (shadow.rs `MAX_SHADOWS`). */
 export const MAX_SHADOWS = 8
@@ -1498,15 +1510,16 @@ export class Encoder {
     this.ops.u32(id)
     this.ops.u32(owner)
   }
-  /** Masked paint update: fill, corner radius, border (color, width). */
   /** A box's paint; absent fields stay. `shadows` replaces the box
-   * shadows (`shadowsIn` first: native rejects what it doesn't). */
+   * shadows (`shadowsIn` first: native rejects what it doesn't); `sides`
+   * replaces the borders per side, which paint instead of `border`. */
   paint(
     id: number,
     fill?: number,
     radius?: number,
     border?: { color: number; width: number },
     shadows?: readonly ShadowIn[],
+    sides?: BorderSidesIn,
   ) {
     const b = this.ops
     b.u8(Op.Paint)
@@ -1515,12 +1528,18 @@ export class Encoder {
       (fill !== undefined ? PAINT_FIELD.FILL : 0) |
         (radius !== undefined ? PAINT_FIELD.RADIUS : 0) |
         (border !== undefined ? PAINT_FIELD.BORDER : 0) |
-        (shadows !== undefined ? PAINT_FIELD.SHADOWS : 0),
+        (shadows !== undefined ? PAINT_FIELD.SHADOWS : 0) |
+        (sides !== undefined ? PAINT_FIELD.SIDES : 0),
     )
     if (fill !== undefined) b.u32(fill >>> 0)
     if (radius !== undefined) b.f32(radius)
     if (border !== undefined) { b.u32(border.color >>> 0); b.f32(border.width) }
     if (shadows !== undefined) putShadows(b, shadows)
+    if (sides !== undefined) {
+      for (const w of sides.widths) b.f32(Number.isFinite(w) ? Math.min(4096, Math.max(0, w)) : 0)
+      for (const c of sides.colors) b.u32(c >>> 0)
+      b.u8(sides.fallback & 0xff)
+    }
   }
   /** A paragraph: UTF-8 text plus its style span list. Span starts are
    * UTF-8 byte offsets; span zero starts at 0. */

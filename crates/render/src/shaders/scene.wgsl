@@ -49,6 +49,10 @@ struct VsOut {
     // shape's, `params` its radius and σ, and `aux` the box's center (from
     // the shape's) and half size, all in shape units.
     @location(5) @interpolate(flat) info: vec4<u32>,
+    // Shadow with a band (prim.rs `FLAG_BAND`): mode (0 none, 1 device x,
+    // 2 device y, 3 shape y), then the band's ends in those units. Zero
+    // elsewhere.
+    @location(6) @interpolate(flat) band: vec4<f32>,
 };
 
 // Colors are authored as sRGB 0xRRGGBBAA and composite premultiplied in
@@ -176,8 +180,9 @@ fn vs_main(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> 
 // blurs the shadow before the element's transform, so a scaled or
 // rotated box carries its blur along. The quad covers the blurred shape
 // (3 σ past it, and a pixel) for an outer shadow, the box for an inset
-// one. Under an axis-aligned world the shape and the box snap like the
-// box's fill, so a ring lands on the fill's edge.
+// one. Under an axis-aligned world the box snaps like the box's fill
+// and the shape relative to it, so a ring lands on the fill's edge with
+// its width rounded once.
 fn shadow_vertex(r: RectI, corner: vec2<f32>) -> VsOut {
     let p = placements[r.chunk];
     let w = worlds[p.transform];
@@ -199,11 +204,18 @@ fn shadow_vertex(r: RectI, corner: vec2<f32>) -> VsOut {
         var s1 = origin + linear(w, vec2<f32>(r.x + r.w, r.y + r.h));
         var b0 = origin + linear(w, box_lo);
         var b1 = origin + linear(w, box_lo + box_size);
+        let raw_b0 = b0;
+        let raw_b1 = b1;
         if (snaps(w)) {
-            s0 = round(s0);
-            s1 = round(s1);
-            b0 = round(b0);
-            b1 = round(b1);
+            // The box snaps like the fill; the shape keeps its rounded
+            // distance from it, so a ring or a side is round(width)
+            // device px wherever the box lands.
+            let rb0 = round(b0);
+            let rb1 = round(b1);
+            s0 = rb0 + round(s0 - b0);
+            s1 = rb1 + round(s1 - b1);
+            b0 = rb0;
+            b1 = rb1;
         }
         let slo = min(s0, s1);
         let shi = max(s0, s1);
@@ -214,6 +226,34 @@ fn shadow_vertex(r: RectI, corner: vec2<f32>) -> VsOut {
         if (inset) {
             qlo = blo;
             qhi = bhi;
+        }
+        if ((r.flags & 8u) != 0u) {
+            // The band's ends keep their rounded distance from the nearer
+            // box edge, as the shape does, so bands meet the ring and
+            // each other exactly; the quad stays inside the band. A
+            // quarter turn carries shape y to device x.
+            let e0 = origin + linear(w, vec2<f32>(box_lo.x, pf(at + 5u)));
+            let e1 = origin + linear(w, vec2<f32>(box_lo.x, pf(at + 6u)));
+            let swap = abs(w.c) > abs(w.d);
+            let ends = select(vec2<f32>(e0.y, e1.y), vec2<f32>(e0.x, e1.x), swap);
+            let edges = select(vec2<f32>(raw_b0.y, raw_b1.y), vec2<f32>(raw_b0.x, raw_b1.x), swap);
+            var lo = min(ends.x, ends.y);
+            var hi = max(ends.x, ends.y);
+            if (snaps(w)) {
+                let blo = min(edges.x, edges.y);
+                let bhi = max(edges.x, edges.y);
+                lo = band_snap(lo, blo, bhi);
+                hi = band_snap(hi, blo, bhi);
+            }
+            if (swap) {
+                out.band = vec4<f32>(1.0, lo, hi, 0.0);
+                qlo.x = max(qlo.x, lo);
+                qhi.x = max(min(qhi.x, hi), qlo.x);
+            } else {
+                out.band = vec4<f32>(2.0, lo, hi, 0.0);
+                qlo.y = max(qlo.y, lo);
+                qhi.y = max(min(qhi.y, hi), qlo.y);
+            }
         }
         let dev = mix(qlo, qhi, corner);
         let center = (slo + shi) * 0.5;
@@ -237,6 +277,9 @@ fn shadow_vertex(r: RectI, corner: vec2<f32>) -> VsOut {
         let l = qlo + corner * qsize;
         out.pos = to_ndc(origin + linear(w, l));
         out.local = l - center;
+        if ((r.flags & 8u) != 0u) {
+            out.band = vec4<f32>(3.0, pf(at + 5u) - center.y, pf(at + 6u) - center.y, 0.0);
+        }
         out.half = vec2<f32>(r.w, r.h) * 0.5;
         out.aux = vec4<f32>(box_lo + box_size * 0.5 - center, box_size * 0.5);
     }
@@ -244,6 +287,15 @@ fn shadow_vertex(r: RectI, corner: vec2<f32>) -> VsOut {
     out.color = unpack(paints[r.fill]);
     out.info = vec4<u32>(select(3u, 4u, inset), p.clip, bitcast<u32>(pf(at + 4u)), pack2x16float(aa));
     return out;
+}
+
+// A band end `e` on the device grid: its rounded distance from the
+// nearer of the box's edges `lo` and `hi`, themselves rounded.
+fn band_snap(e: f32, lo: f32, hi: f32) -> f32 {
+    if (e - lo <= hi - e) {
+        return round(lo) + round(e - lo);
+    }
+    return round(hi) + round(e - hi);
 }
 
 // erf on both lanes (Abramowitz and Stegun 7.1.27, error under 5e-4).
@@ -296,6 +348,22 @@ fn blurred_rect(p: vec2<f32>, half: vec2<f32>, radius: f32, sigma: f32) -> f32 {
 // under any axis-aligned scale.
 fn device_coverage(p: vec2<f32>, half: vec2<f32>, r: f32, k: vec2<f32>) -> f32 {
     return clamp(0.5 - sd_rect(p * k, half * k, r * min(k.x, k.y)), 0.0, 1.0);
+}
+
+// A banded shadow's coverage of the band: exact at pixel centers between
+// snapped ends, antialiased otherwise.
+fn band_coverage(in: VsOut) -> f32 {
+    var v: f32;
+    if (in.band.x < 0.5) {
+        return 1.0;
+    } else if (in.band.x < 1.5) {
+        v = in.pos.x;
+    } else if (in.band.x < 2.5) {
+        v = in.pos.y;
+    } else {
+        v = in.local.y;
+    }
+    return clamp(v - in.band.y + 0.5, 0.0, 1.0) * clamp(in.band.z - v + 0.5, 0.0, 1.0);
 }
 
 fn shadow_coverage(in: VsOut) -> f32 {
@@ -513,7 +581,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         }
     } else if (in.info.x >= 3u) {
         let c = in.color;
-        out = vec4<f32>(c.rgb * c.a, c.a) * shadow_coverage(in);
+        out = vec4<f32>(c.rgb * c.a, c.a) * shadow_coverage(in) * band_coverage(in);
     } else if (in.info.w != 0u) {
         // Color bitmap glyph (emoji): the atlas stores sRGB-encoded RGBA;
         // decode then premultiply.

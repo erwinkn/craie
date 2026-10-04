@@ -452,6 +452,8 @@ pub enum Mutation<'a> {
         border: Option<(u32, f32)>,
         /// Replaces the box shadows (`shadow.rs`); empty: none.
         shadows: Option<crate::shadow::Shadows>,
+        /// Replaces the borders per side (`border.rs`); empty: none.
+        sides: Option<crate::border::BorderSides>,
     },
     // text
     /// `spans` indexes the transaction's span table.
@@ -828,6 +830,22 @@ impl<'a> Transaction<'a> {
             radius,
             border,
             shadows: None,
+            sides: None,
+        })
+    }
+
+    /// Replaces the node's borders per side (top, right, bottom, left).
+    /// Sides with `fallback` 0 are all explicit, and paint instead of the
+    /// uniform border even at zero width; `BorderSides::default()` (every
+    /// side fallen back) removes them.
+    pub fn border_sides(&mut self, id: u32, sides: crate::border::BorderSides) -> &mut Self {
+        self.push(Mutation::Paint {
+            id,
+            fill: None,
+            radius: None,
+            border: None,
+            shadows: None,
+            sides: Some(sides),
         })
     }
 
@@ -845,6 +863,7 @@ impl<'a> Transaction<'a> {
             radius: None,
             border: None,
             shadows: Some(shadows),
+            sides: None,
         })
     }
 

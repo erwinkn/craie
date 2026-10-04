@@ -47,7 +47,7 @@ use crate::mutation::{
 pub use crate::mutation::{group_flag, interaction_flag, trap_flag};
 
 pub const MAGIC: u32 = 0x3257_5243; // "CRW2"
-pub const VERSION: u16 = 17;
+pub const VERSION: u16 = 18;
 
 pub mod op {
     // structure
@@ -170,6 +170,10 @@ pub mod paint_field {
     /// count u8 (at most `shadow::MAX_SHADOWS`) | count × shadow
     /// (`put_shadows`): replaces the box shadows.
     pub const SHADOWS: u8 = 1 << 3;
+    /// Borders per side: 4 widths f32, 4 colors u32 (top, right,
+    /// bottom, left), then a fallback u8 (bits 0-3: that side's width is
+    /// the uniform border's, bits 4-7: its color; 0xFF: no sides).
+    pub const SIDES: u8 = 1 << 4;
 }
 
 /// Box shadows: count u8, then per shadow x, y, blur, spread f32,
@@ -548,6 +552,7 @@ pub fn encode(txn: &Transaction<'_>) -> Vec<u8> {
                 radius,
                 border,
                 shadows,
+                sides,
             } => {
                 ops.push(op::PAINT);
                 u32le(&mut ops, *id);
@@ -564,6 +569,9 @@ pub fn encode(txn: &Transaction<'_>) -> Vec<u8> {
                 if shadows.is_some() {
                     mask |= paint_field::SHADOWS;
                 }
+                if sides.is_some() {
+                    mask |= paint_field::SIDES;
+                }
                 ops.push(mask);
                 if let Some(c) = fill {
                     u32le(&mut ops, *c);
@@ -577,6 +585,11 @@ pub fn encode(txn: &Transaction<'_>) -> Vec<u8> {
                 }
                 if let Some(s) = shadows {
                     put_shadows(&mut ops, s);
+                }
+                if let Some(s) = sides {
+                    s.widths.iter().for_each(|&w| f32le(&mut ops, w));
+                    s.colors.iter().for_each(|&c| u32le(&mut ops, c));
+                    ops.push(s.fallback);
                 }
             }
             Mutation::Paragraph { id, text, spans } => {
@@ -1265,7 +1278,8 @@ pub fn decode(buf: &[u8]) -> Result<Transaction<'_>, WireError> {
                     & !(paint_field::FILL
                         | paint_field::RADIUS
                         | paint_field::BORDER
-                        | paint_field::SHADOWS)
+                        | paint_field::SHADOWS
+                        | paint_field::SIDES)
                     != 0
                 {
                     return Err(WireError::BadRef("paint mask"));
@@ -1290,12 +1304,22 @@ pub fn decode(buf: &[u8]) -> Result<Transaction<'_>, WireError> {
                 } else {
                     None
                 };
+                let sides = if mask & paint_field::SIDES != 0 {
+                    Some(crate::border::BorderSides {
+                        widths: r.f32s()?,
+                        colors: [r.u32()?, r.u32()?, r.u32()?, r.u32()?],
+                        fallback: r.u8()?,
+                    })
+                } else {
+                    None
+                };
                 Mutation::Paint {
                     id,
                     fill,
                     radius,
                     border,
                     shadows,
+                    sides,
                 }
             }
             op::PARAGRAPH => {
