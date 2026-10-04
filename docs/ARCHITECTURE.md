@@ -650,7 +650,7 @@ container:
   second store; a percentage gap resolves against a definite content
   height, else the list sizes without it and places rows with it
   resolved against that size clamped by min/max, as flex does. About
-  29 bytes per item with the identity index; 2^24 items at most.
+  30 bytes per item with the identity index; 2^24 items at most.
 - Items have identity: the bridge interns each item's React key to a
   u32, and each list keeps a sorted index of its identities (4 bytes
   per item, merge-updated per splice). Identity keeps
@@ -767,6 +767,15 @@ container:
     placeholder waits in view, a reader capture anchors on the topmost
     visible loaded row. `onVisibleChange` is a `CALL` too, when the
     visible range or the end state changes.
+  - Unloading (`lists.md`, "Unloading"), in the same call. A per-item
+    flag, which follows the items, marks rows visiting once they meet the
+    retain window (`retain` viewport heights each side) until an unload
+    names them. Candidates are loaded, visiting rows entirely outside the
+    retain window plus one viewport height, never the focused row or a
+    row of a pending load; each side asks one range, from the nearest
+    candidate outward until a row that isn't one. The ask (load and
+    unload) and the visits are computed again only after a batch or a
+    move of the viewport (a scroll, a jump, a resize), not every frame.
   Positions go through the same transforms as the range; the anchor is
   the visually top item and its visually top edge, so a flipped list
   anchors its far end. Explicit `ScrollTo` commands in the same batch

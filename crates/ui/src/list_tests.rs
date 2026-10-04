@@ -924,3 +924,43 @@ fn call_payloads_go_in_the_text_slot() {
     assert_eq!(b[4 + 32..4 + 36], 9u32.to_le_bytes());
     assert_eq!(b[4 + 36..], [1, 5, 0, 0, 0, 19, 0, 0, 0]);
 }
+
+/// Unloading (`lists.md`): rows that visited the retain window and left
+/// it by more than a viewport are asked once, each side from the
+/// nearest outward until a row that isn't a candidate; a pinned row and
+/// rows of a pending load are never asked.
+#[test]
+fn far_rows_unload_once() {
+    use crate::list::ListState;
+    let mut ui = Ui::new(1.0);
+    let all: Vec<Item> = (0..200).map(|i| row40(i + 1, i != 150, false)).collect();
+    send(&mut ui, |t| {
+        t.create(LIST, NodeKind::List)
+            .list_config2(LIST, 0.0, -1.0, 1.0, 40.0, 0, &[])
+            .list_patch(LIST, 0, 1, &[ListOp::splice(0, 0, &all)])
+            .append(NIL, LIST);
+    })
+    .unwrap();
+    ui.host.lists.estimate(&mut ui.text, LIST, WIDTH);
+    let l: &mut ListState = ui.host.lists.map.get_mut(&LIST).unwrap();
+    // Retain one viewport (200 pt) each side: at 0..200 rows 0-9 visit.
+    l.visit(0.0, 200.0);
+    assert_eq!(l.unload(0.0, 200.0, NIL), [None, None], "nothing far yet");
+    // At 2000..2200 the band is 1600..2600: rows 0-9 are far above;
+    // rows 65+ never visited.
+    l.visit(2000.0, 2200.0);
+    assert_eq!(l.unload(2000.0, 2200.0, NIL), [Some((0, 9)), None]);
+    // Row 5 pinned: the range stops before it.
+    assert_eq!(l.unload(2000.0, 2200.0, 5), [Some((6, 9)), None]);
+    // Back at the top: the rows visited at 2000 (45-59) are far below;
+    // 10-44 never visited (the reader jumped), so the nearest is 45.
+    l.visit(5800.0, 6000.0);
+    assert_eq!(l.unload(0.0, 200.0, NIL), [None, Some((45, 59))]);
+    // Once asked, their visit ends; next come the rows visited at 5800
+    // (140-154), up to row 150, a placeholder; a pending load holds its
+    // rows too.
+    l.visiting[45..60].fill(false);
+    assert_eq!(l.unload(0.0, 200.0, NIL), [None, Some((140, 149))]);
+    l.asked = Some((145, 160));
+    assert_eq!(l.unload(0.0, 200.0, NIL), [None, Some((140, 144))]);
+}
