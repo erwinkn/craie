@@ -1,7 +1,7 @@
 {
   "format": "craie-list-trace/1",
-  "id": "I4j",
-  "name": "after a jump, loads land taller above the reader: the jump target holds",
+  "id": "K9",
+  "name": "two updates in one batch move the anchor once, off both rows they change, as one update of both would",
   "viewport": {
     "width": 400,
     "height": 600
@@ -18,44 +18,22 @@
     {
       "count": 100,
       "key": "m{i}",
-      "loaded": false,
-      "estimate": 40
-    },
-    {
-      "count": 100,
-      "key": "m{i}",
-      "loaded": true,
       "estimate": 40,
       "height": 40
     }
   ],
   "steps": [
     {
-      "do": "mount",
-      "expect": {
-        "loadItems": [
-          0,
-          29
-        ]
-      }
+      "do": "mount"
     },
     {
-      "do": "scrollToIndex",
-      "index": 105,
-      "align": "start",
+      "do": "scroll",
+      "offset": 1000,
       "expect": {
-        "visible": [
-          105,
-          119
-        ],
         "anchor": {
-          "key": "m105",
+          "key": "m25",
           "offset": 0
-        },
-        "loadItems": [
-          90,
-          99
-        ]
+        }
       }
     },
     {
@@ -63,12 +41,25 @@
       "changes": [
         {
           "kind": "update",
-          "at": 90,
+          "at": 25,
           "items": [
             {
-              "count": 10,
+              "count": 1,
               "key": "m{i}",
-              "loaded": true,
+              "version": 1,
+              "estimate": 40,
+              "height": 80
+            }
+          ]
+        },
+        {
+          "kind": "update",
+          "at": 26,
+          "items": [
+            {
+              "count": 1,
+              "key": "m{i}",
+              "version": 1,
               "estimate": 40,
               "height": 80
             }
@@ -77,11 +68,14 @@
       ],
       "expect": {
         "anchor": {
-          "key": "m105",
-          "offset": 0
+          "key": "m27",
+          "offset": 80
         },
-        "offset": 4600,
-        "loadItems": null
+        "offset": 1080,
+        "visible": [
+          26,
+          39
+        ]
       }
     }
   ]

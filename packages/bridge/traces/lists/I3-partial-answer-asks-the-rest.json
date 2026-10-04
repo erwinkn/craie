@@ -1,7 +1,7 @@
 {
   "format": "craie-list-trace/1",
-  "id": "I3j",
-  "name": "after a jump, a partial answer: the jump holds and the next request is exactly the rest",
+  "id": "I3",
+  "name": "a partial answer leaves a short run on screen; the next request starts there, a screen long, the topmost visible loaded row holding and the loaded part held",
   "viewport": {
     "width": 400,
     "height": 600
@@ -44,7 +44,7 @@
           0,
           14
         ],
-        "loadItems": null
+        "load": null
       }
     },
     {
@@ -56,10 +56,26 @@
           95,
           109
         ],
-        "loadItems": [
+        "load": [
           100,
-          109
+          129
         ]
+      }
+    },
+    {
+      "do": "scrollBy",
+      "delta": 20,
+      "expect": {
+        "visible": [
+          95,
+          110
+        ],
+        "anchor": {
+          "key": "m95",
+          "offset": -20
+        },
+        "offset": 3820,
+        "load": null
       }
     },
     {
@@ -82,15 +98,20 @@
       "expect": {
         "visible": [
           95,
-          109
+          110
         ],
         "anchor": {
           "key": "m95",
-          "offset": 0
+          "offset": -20
         },
-        "loadItems": [
+        "offset": 3820,
+        "load": [
           107,
-          109
+          129
+        ],
+        "held": [
+          100,
+          106
         ]
       }
     },
@@ -102,7 +123,7 @@
           "at": 107,
           "items": [
             {
-              "count": 3,
+              "count": 4,
               "key": "m{i}",
               "loaded": true,
               "estimate": 40,
@@ -112,7 +133,8 @@
         }
       ],
       "expect": {
-        "loadItems": null
+        "held": null,
+        "load": null
       }
     }
   ]

@@ -1,7 +1,7 @@
 {
   "format": "craie-list-trace/1",
-  "id": "I4bj",
-  "name": "after a jump into placeholders, loads land above: the jump target holds",
+  "id": "K3",
+  "name": "an update to the topmost visible rows hands the anchor to the first visible row it leaves alone",
   "viewport": {
     "width": 400,
     "height": 600
@@ -16,39 +16,24 @@
   "templates": [],
   "items": [
     {
-      "count": 200,
+      "count": 100,
       "key": "m{i}",
-      "loaded": false,
-      "estimate": 40
+      "estimate": 40,
+      "height": 40
     }
   ],
   "steps": [
     {
-      "do": "mount",
-      "expect": {
-        "loadItems": [
-          0,
-          29
-        ]
-      }
+      "do": "mount"
     },
     {
-      "do": "scrollToIndex",
-      "index": 105,
-      "align": "start",
+      "do": "scroll",
+      "offset": 1000,
       "expect": {
-        "visible": [
-          105,
-          119
-        ],
         "anchor": {
-          "key": "m105",
+          "key": "m25",
           "offset": 0
-        },
-        "loadItems": [
-          90,
-          134
-        ]
+        }
       }
     },
     {
@@ -56,12 +41,12 @@
       "changes": [
         {
           "kind": "update",
-          "at": 90,
+          "at": 25,
           "items": [
             {
-              "count": 15,
+              "count": 2,
               "key": "m{i}",
-              "loaded": true,
+              "version": 1,
               "estimate": 40,
               "height": 80
             }
@@ -70,13 +55,13 @@
       ],
       "expect": {
         "anchor": {
-          "key": "m105",
-          "offset": 0
+          "key": "m27",
+          "offset": 80
         },
-        "offset": 4800,
-        "loadItems": [
-          105,
-          134
+        "offset": 1080,
+        "visible": [
+          26,
+          39
         ]
       }
     }

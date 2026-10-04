@@ -1,7 +1,7 @@
 {
   "format": "craie-list-trace/1",
-  "id": "I4b",
-  "name": "loads pending with no loaded row visible: the topmost visible placeholder holds",
+  "id": "I4",
+  "name": "loads pending above the reader: the topmost visible loaded row holds as they land taller",
   "viewport": {
     "width": 400,
     "height": 600
@@ -16,17 +16,24 @@
   "templates": [],
   "items": [
     {
-      "count": 200,
+      "count": 100,
       "key": "m{i}",
       "loaded": false,
       "estimate": 40
+    },
+    {
+      "count": 100,
+      "key": "m{i}",
+      "loaded": true,
+      "estimate": 40,
+      "height": 40
     }
   ],
   "steps": [
     {
       "do": "mount",
       "expect": {
-        "loadItems": [
+        "load": [
           0,
           29
         ]
@@ -41,9 +48,9 @@
           105,
           119
         ],
-        "loadItems": [
-          90,
-          134
+        "load": [
+          85,
+          99
         ]
       }
     },
@@ -56,10 +63,7 @@
           "offset": -20
         },
         "offset": 4220,
-        "loadItems": [
-          90,
-          135
-        ]
+        "load": null
       }
     },
     {
@@ -70,7 +74,7 @@
           "at": 90,
           "items": [
             {
-              "count": 15,
+              "count": 10,
               "key": "m{i}",
               "loaded": true,
               "estimate": 40,
@@ -84,11 +88,8 @@
           "key": "m105",
           "offset": -20
         },
-        "offset": 4820,
-        "loadItems": [
-          105,
-          135
-        ]
+        "offset": 4620,
+        "load": null
       }
     }
   ]
