@@ -31,7 +31,7 @@
     {
       "do": "mount",
       "expect": {
-        "loadItems": null
+        "load": null
       }
     },
     {
@@ -39,7 +39,7 @@
       "width": 400,
       "height": 400,
       "expect": {
-        "loadItems": [
+        "load": [
           10,
           19
         ]

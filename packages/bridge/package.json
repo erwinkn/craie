@@ -7,7 +7,9 @@
   "exports": {
     ".": "./src/index.ts",
     "./wire": "./src/wire.ts",
-    "./react": "./src/react.ts"
+    "./react": "./src/react.ts",
+    "./traces/*": "./traces/*",
+    "./package.json": "./package.json"
   },
   "scripts": {
     "test": "bun test"

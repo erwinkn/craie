@@ -6,12 +6,14 @@ TypeScript core (Craie B) and Craie's native virtualizer (Craie A, through
 actions, then what must be observable after each step. It never states
 estimates or overscan heuristics, which may differ between the two.
 
-Files are named `<id>-<slug>.json`. Craie keeps its copy in
-`harness/traces/lists/` and the kit in its own tree. Each side copies the
-other's files verbatim, and the coordinator checks that both copies match.
-The first eight (`I1` to `I4bj`) are the islet traces of `lists.md`;
-`L1` to `L3` and `U1` to `U4` are its loading and unloading traces. `K1`
-to `K12` are the kit's, copied verbatim from Marbre.
+Files are named `<id>-<slug>.json` and live in one place:
+`packages/bridge/traces/lists/`, shipped with `@craie/bridge`. Craie's
+harness reads them from the repo; the kit reads them from its pinned
+bridge package, so both sides run the same bytes and a new trace lands
+through a bridge PR. The first eight (`I1` to `I4bj`) are the islet
+traces of `lists.md`; `L1` to `L3` and `U1` to `U4` are its loading and
+unloading traces. `K1` to `K13` are the kit's, from Marbre PR #69
+(9c98021), with `loadItems` renamed `load`.
 
 ## A trace
 
@@ -74,7 +76,7 @@ that.
 | `scrollToKey` | `key`, `align` | The handle's jump by key |
 | `scrollToEnd` | | The handle's jump to the end |
 | `scrollToOffset` | `offset` | The handle's offset write, which counts as reader input |
-| `changes` | `changes` | One commit's batch: `splice` / `move` / `update` as in `lists.md`; `items` are blocks as above, `{i}` counting from the op's `at` |
+| `changes` | `changes` | One commit's batch: `splice` / `move` / `update` as in `lists.md`; `items` are blocks as above, `{i}` counting from the op's `at`. A props driver renders the edited `items` with these ops as `changes`; the keyed diff must land the same |
 | `measure` | `key`, `height` | A mounted row's content laid out at a new height |
 | `resize` | `width`, `height` | The viewport changes |
 | `focus` / `blur` | `key` | Focus enters a row, or leaves it |
@@ -102,10 +104,11 @@ of the call.
 
 ## Running them
 
-- **Craie** reads every file in `harness/traces/lists/` in a harness test
+- **Craie** reads every file in `packages/bridge/traces/lists/` in a harness test
   (`list_traces.rs`). Mounted rows report the trace's heights, and
   `updateItems` calls are recorded from the list's callback slot.
-- **The kit** reads its copy with its core and records the same.
+- **The kit** reads the same files from `@craie/bridge/traces/lists/`
+  with its core and records the same.
 - **Seeded traces** (generated changes, scrolls and loads) don't live in
   files. Each side checks its own against a clean rebuild, and only named
   traces are shared.
