@@ -1016,6 +1016,27 @@ Reviewer minors and nitpicks not fixed yet.
   draw the fill inside the ring's hole (or in the same pass) when sides
   exist.
 
+### DF-73: `aria-hidden` on a nested Text doesn't hide its span
+
+- Source: #35 review.
+- Where: packages/bridge/src/host.ts (nested Text becomes a span),
+  crates/ui/src/a11y.rs.
+- Claim: a Text nested in a Text is a span of its parent's paragraph,
+  not a node, so `aria-hidden` on it has no node to set: VoiceOver still
+  reads a decorative "*" (a "Required" star) with the label around it.
+- Why deferred: needs a per-span accessibility flag in the paragraph's
+  text (or a label override); the kit puts decorations in Views.
+
+### DF-74: `importantForAccessibility="no"` does nothing
+
+- Source: #35 review.
+- Where: packages/bridge/src/host.ts (`a11yHidden`).
+- Claim: React Native's "no" (the node itself ignored, its children
+  still read) has no Craie equivalent: only "no-hide-descendants" acts,
+  as `aria-hidden`. "auto" and "yes" are the default anyway.
+- Why deferred: needs a "flatten this node" mode in the projection; no
+  kit component uses "no".
+
 ## Closed
 
 - DF-57 (work item 6, review #21 M1): end indices were wire indices

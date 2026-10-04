@@ -37,4 +37,12 @@ test("aria-hidden and React Native's two props set A11Y_HIDDEN, and nothing else
   expect(await flagsOf({ importantForAccessibility: "no" })).toBe(INTERACTION.focusable)
   expect(await flagsOf({ importantForAccessibility: "no-hide-descendants" }))
     .toBe(INTERACTION.focusable | INTERACTION.a11yHidden)
+  // Booleanish strings, and aria-hidden winning when set (React Native);
+  // each render flips the flags, so each sends an op.
+  expect(await flagsOf({ "aria-hidden": "false" })).toBe(INTERACTION.focusable)
+  expect(await flagsOf({ "aria-hidden": "true" })).toBe(INTERACTION.focusable | INTERACTION.a11yHidden)
+  expect(await flagsOf({ "aria-hidden": false, accessibilityElementsHidden: true })).toBe(INTERACTION.focusable)
+  expect(await flagsOf({ accessibilityElementsHidden: true })).toBe(INTERACTION.focusable | INTERACTION.a11yHidden)
+  expect(await flagsOf({ "aria-hidden": false, importantForAccessibility: "no-hide-descendants" }))
+    .toBe(INTERACTION.focusable)
 })

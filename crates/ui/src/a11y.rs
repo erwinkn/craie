@@ -150,8 +150,8 @@ impl Ui {
                 n.set_modal();
             }
         }
-        // Focus inside a hidden subtree is reported on the window: the
-        // focused node must be in the tree.
+        // Focus the tree lacks (in a display: none subtree) is reported
+        // on the window: the focused node must be in the tree.
         let focus = self
             .focused()
             .map(aid)
@@ -163,6 +163,16 @@ impl Ui {
             tree_id: TreeId::ROOT,
             focus,
         }
+    }
+
+    /// Whether `id` is hidden from accessibility (`A11Y_HIDDEN`): not
+    /// while focus is on it or inside it, as Chrome does, so a focused
+    /// node stays in the tree with its path.
+    fn a11y_hidden(&self, id: NodeId) -> bool {
+        self.host.interaction(id).a11y_hidden
+            && !self
+                .focused()
+                .is_some_and(|f| self.ancestors(f).any(|n| n == id))
     }
 
     /// The node announced as modal for modal trap `t`: the first
@@ -195,7 +205,7 @@ impl Ui {
             // Never `display: none` or inert: a trap under such a node
             // is inactive. Hidden from accessibility alone, it hides the
             // modal too, as `aria-hidden` does on the web.
-            Class::Path if self.host.interaction(id).a11y_hidden => None,
+            Class::Path if self.a11y_hidden(id) => None,
             Class::Path => {
                 let mut an = Node::new(Role::GenericContainer);
                 let kids: Vec<A11yId> = self
@@ -229,7 +239,7 @@ impl Ui {
         let props = self.host.interaction(id);
         if style.display() == taffy::Display::None
             || node.flags.contains(NodeFlags::INERT)
-            || props.a11y_hidden
+            || self.a11y_hidden(id)
         {
             return None;
         }

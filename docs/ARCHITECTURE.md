@@ -183,8 +183,8 @@ selectable, inert and auto-focus (bits 0 to 3, the last two since
 protocol 8), then pressable, disabled and keep-focus (bits 4 to 6,
 protocol 7), and accessibility-hidden (bit 7, protocol 19: the node and
 its subtree leave the accessibility tree, layers it owns excepted, and
-input is untouched; focus inside is reported on the window). Every bit
-is defined. The trap op (0x62, protocol
+input is untouched). The byte is full: the next flag needs a wider
+field or a new op. The trap op (0x62, protocol
 8) sets a node's focus-trap flags: active, modal, auto-focus and
 restore-focus (ARCHITECTURE-update topic 3). The group op (0x63,
 protocol 10) makes a node a focus group: horizontal, vertical, loop and
@@ -1269,7 +1269,10 @@ the prop was given, `selected` on list rows and tabs only
 (ARCHITECTURE-update §13). Under an active modal trap, AccessKit's `modal` goes on the
 trap's first `dialog` or `alertdialog` node, else on the trap. A list row reports its position among all items and the item
 count; rows appear in item order, and rows layout hides are not
-published.
+published. A node hidden from accessibility (`A11Y_HIDDEN`) leaves the
+tree with its subtree, layers it owns excepted, except while focus is
+on it or inside it: then it stays, so the focused node and its path are
+in the tree, as Chrome does with `aria-hidden`.
 Bounds are transform-aware. The whole tree still republishes on any
 a11y-observable change; the semantic dirty queue exists but does not
 drive incremental updates yet. Actions queue back onto the UI thread.
