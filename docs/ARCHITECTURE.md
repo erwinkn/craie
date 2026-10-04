@@ -986,8 +986,7 @@ tint over a dark canvas and a half-covered edge read as Chromium's
 `blending: "linear"`, `HostOptions` and `runApp`) blends in linear
 light: the shader decodes authored colors and the target encodes on
 store (`Viewport::linear`). Clips test in
-their own space in the fragment stage. Colors decode from sRGB to
-linear in the shader; blending happens in linear.
+their own space in the fragment stage.
 
 **Target.** wgpu stays the native GPU abstraction. Craie owns pipeline
 layouts, shaders, buffer layout, upload policy, and pass construction.
