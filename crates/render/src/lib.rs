@@ -15,7 +15,7 @@ pub mod context;
 mod atlas_gpu;
 mod pipelines;
 
-pub use context::{Gpu, WindowSurface};
+pub use context::{Blending, Gpu, WindowSurface};
 
 use std::ops::Range;
 
@@ -34,7 +34,8 @@ struct Viewport {
     scale: f32,
     page: f32,
     opacity: f32,
-    _pad0: f32,
+    /// 1: blend in linear light; 0: sRGB-encoded (`Renderer::linear`).
+    linear: f32,
     rect: [f32; 4],
     uv: [f32; 2],
     _pad1: [f32; 2],
@@ -158,6 +159,8 @@ pub struct RenderStats {
 
 pub struct Renderer {
     format: wgpu::TextureFormat,
+    /// Blends in linear light (an *-srgb target), not sRGB-encoded.
+    linear: bool,
     /// `[single, multisampled]` (`pipelines::MSAA`).
     scene_pipeline: [wgpu::RenderPipeline; 2],
     path_pipeline: [wgpu::RenderPipeline; 2],
@@ -194,6 +197,10 @@ pub struct Renderer {
 }
 
 impl Renderer {
+    /// A renderer for targets of `format`. Its blending space follows the
+    /// format: an *-srgb target blends in linear light (it encodes on
+    /// store); a plain one blends sRGB-encoded values, as browsers do
+    /// (`Blending`).
     pub fn new(gpu: &Gpu, format: wgpu::TextureFormat) -> Renderer {
         let p = pipelines::build(gpu, format);
         let atlas_sampler = gpu.device.create_sampler(&wgpu::SamplerDescriptor {
@@ -218,6 +225,7 @@ impl Renderer {
         });
         Renderer {
             format,
+            linear: format.is_srgb(),
             scene_pipeline: p.scene,
             path_pipeline: p.path,
             composite_pipeline: p.composite,
@@ -506,6 +514,7 @@ impl Renderer {
             size: [width as f32, height as f32],
             scale: scene.scale,
             page,
+            linear: self.linear as u32 as f32,
             ..Viewport::default()
         };
 
@@ -621,10 +630,14 @@ impl Renderer {
                 label: Some("craie frame"),
             });
         let clear = scene.clear;
+        let channel = |shift: u32| {
+            let v = ((clear.0 >> shift) & 0xff) as f64 / 255.0;
+            if self.linear { srgb_to_linear(v) } else { v }
+        };
         let clear = wgpu::Color {
-            r: srgb_to_linear(((clear.0 >> 24) & 0xff) as f64 / 255.0),
-            g: srgb_to_linear(((clear.0 >> 16) & 0xff) as f64 / 255.0),
-            b: srgb_to_linear(((clear.0 >> 8) & 0xff) as f64 / 255.0),
+            r: channel(24),
+            g: channel(16),
+            b: channel(8),
             a: (clear.0 & 0xff) as f64 / 255.0,
         };
         let mut layer_ix = 0usize;

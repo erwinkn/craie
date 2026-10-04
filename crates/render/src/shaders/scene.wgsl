@@ -50,11 +50,15 @@ struct VsOut {
     @location(5) @interpolate(flat) info: vec4<u32>,
 };
 
-// Colors are authored as sRGB 0xRRGGBBAA. Compositing is linear and
-// premultiplied: decode the authored channels, multiply by alpha, and let
-// the *-srgb render target encode back to sRGB on store. Glyph coverage
-// (R8) is already linear.
+// Colors are authored as sRGB 0xRRGGBBAA and composite premultiplied in
+// the blending space (`vp.linear`): sRGB-encoded values by default, as
+// browsers blend, on a plain target; or linear light, decoded here, on an
+// *-srgb target that encodes back on store. Glyph coverage (R8) and edge
+// antialiasing are coverage, applied in that same space.
 fn srgb_decode(v: f32) -> f32 {
+    if (vp.linear < 0.5) {
+        return v;
+    }
     if (v <= 0.04045) {
         return v / 12.92;
     }

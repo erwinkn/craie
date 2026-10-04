@@ -42,7 +42,7 @@ function App() {
     }, h(Text, { fontSize: 13, color: name === "filled" ? "#fafafa" : "#3f3f46" }, name))))
 }
 
-root.render(h(App))
+root.renderSync(h(App))
 parentPort?.postMessage({ craieReady: true })
 const shot = process.env.CRAIE_SHOT ?? "elevation.png"
 const frame = await root.host.capture(shot, { rest: true })

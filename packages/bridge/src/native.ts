@@ -61,7 +61,12 @@ export function decodeEvents(buf: Uint8Array, at = 0): import("./host.js").UiEve
 
 export interface Bindings {
   craieRuntimeVersion(): number
-  NativeHost: new (options?: { title?: string; width?: number; height?: number }) => NativeHostHandle
+  NativeHost: new (options?: {
+    title?: string
+    width?: number
+    height?: number
+    blending?: "srgb" | "linear"
+  }) => NativeHostHandle
   NativeClient: new (id: number) => NativeClientHandle
 }
 
@@ -178,6 +183,10 @@ export async function runApp(
     title?: string
     width?: number
     height?: number
+    /** How translucent colors and edges composite: `srgb` (default)
+     * blends sRGB-encoded values, as browsers do; `linear` blends in
+     * linear light. */
+    blending?: "srgb" | "linear"
   } = {},
 ): Promise<void> {
   if (!isMainThread) throw Error("runApp requires the main thread")

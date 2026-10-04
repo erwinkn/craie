@@ -65,6 +65,8 @@ pub struct HostOptions {
     pub title: Option<String>,
     pub width: Option<f64>,
     pub height: Option<f64>,
+    /// "srgb" (default: blend sRGB-encoded, as browsers) or "linear".
+    pub blending: Option<String>,
 }
 
 #[napi]
@@ -74,6 +76,7 @@ pub struct NativeHost {
     title: String,
     width: f64,
     height: f64,
+    blending: craie_platform_winit::Blending,
 }
 
 #[napi]
@@ -91,7 +94,17 @@ impl NativeHost {
             title: None,
             width: None,
             height: None,
+            blending: None,
         });
+        let blending = match options.blending.as_deref() {
+            None | Some("srgb") => craie_platform_winit::Blending::Srgb,
+            Some("linear") => craie_platform_winit::Blending::Linear,
+            Some(other) => {
+                return Err(Error::from_reason(format!(
+                    "blending must be \"srgb\" or \"linear\", not {other:?}"
+                )));
+            }
+        };
         let width = options.width.unwrap_or(800.0) as f32;
         let height = options.height.unwrap_or(600.0) as f32;
         if !width.is_finite() || !height.is_finite() || width <= 0.0 || height <= 0.0 {
@@ -107,6 +120,7 @@ impl NativeHost {
             title: options.title.unwrap_or_else(|| "Craie".into()),
             width: width as f64,
             height: height as f64,
+            blending,
         })
     }
 
@@ -125,9 +139,9 @@ impl NativeHost {
         let size = Size::new(self.width as f32, self.height as f32);
         // `CRAIE_HEADLESS`: no window (measurements with no display on).
         if std::env::var_os("CRAIE_HEADLESS").is_some() {
-            craie_platform_winit::headless::run(session.clone(), size, 2.0);
+            craie_platform_winit::headless::run(session.clone(), size, 2.0, self.blending);
         } else {
-            let app = HostApp::new(session.clone());
+            let app = HostApp::new(session.clone()).with_blending(self.blending);
             craie_platform_winit::run(&self.title, size, app);
         }
         RUNNING.with(|r| r.set(false));

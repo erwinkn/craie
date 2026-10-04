@@ -312,7 +312,7 @@ impl platform::App for Demo {
     fn ready(&mut self, window: &Window, _wake: &platform::Wake) {
         let (w, h) = window.size();
         let (gpu, surface) = Gpu::for_window(window.surface_target());
-        let surface = WindowSurface::new(&gpu, surface, w, h);
+        let surface = WindowSurface::new(&gpu, surface, w, h, craie_render::Blending::default());
         let renderer = Renderer::new(&gpu, surface.config.format);
         let mut text = TextEngine::new();
         let paras = paragraphs();
