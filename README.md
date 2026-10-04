@@ -56,7 +56,7 @@ recycle node ids safely and React props like `onPointerDown` fire.
 
 ```tsx
 // app.tsx (runs in the worker)
-import { attachApp, View, Text } from "@craie/react"
+import { attachApp, View, Text } from "@craie/bridge/react"
 
 const root = attachApp()
 root.render(
@@ -68,10 +68,14 @@ root.render(
 
 ```ts
 // host.ts (main thread)
-import { runApp } from "@craie/react"
+import { runApp } from "@craie/bridge/react"
 await runApp(new URL("./app.tsx", import.meta.url),
   { title: "craie", width: 900, height: 640 })
 ```
+
+The React API is `@craie/bridge/react` (`@craie/react` re-exports it in
+the workspace). Outside it, install the bridge from git:
+`"@craie/bridge": "git+https://github.com/erwinkn/craie.git#main&path:packages/bridge"`.
 
 ### Elements
 
