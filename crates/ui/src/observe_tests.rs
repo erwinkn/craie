@@ -373,3 +373,59 @@ fn commands_round_trip_and_validate() {
     buf[at + 5] = 3;
     assert!(wire::decode(&buf).is_err());
 }
+
+/// A row its list hides (a retained row whose item was removed) is not
+/// displayed: measures of it and of what it holds answer "not
+/// measured", and its listener hears nothing while it is hidden (#25
+/// review).
+#[test]
+fn hidden_list_rows_are_not_measured() {
+    use crate::mutation::ItemDesc;
+    let mut ui = Ui::new(1.0);
+    apply(&mut ui, |t| {
+        t.create(1, NodeKind::List)
+            .layout(1, &sized(200.0, 100.0))
+            .list_config(1, 0.0, 20.0, &[])
+            .list_splice(
+                1,
+                0,
+                0,
+                &[ItemDesc {
+                    id: 42,
+                    ..Default::default()
+                }],
+            )
+            .append(NIL, 1)
+            .create(2, NodeKind::View)
+            .layout(2, &sized(40.0, 20.0))
+            .list_index(2, 0)
+            .append(1, 2)
+            .create(3, NodeKind::View)
+            .layout(3, &sized(10.0, 10.0))
+            .interaction(3, mask::LAYOUT, false)
+            .append(2, 3);
+    });
+    ui.render(VIEW);
+    assert_eq!(layouts(&mut ui), vec![(3, [0.0, 0.0, 10.0, 10.0])]);
+    apply(&mut ui, |t| {
+        t.list_splice(1, 0, 1, &[])
+            .command(2, Command::Measure(7))
+            .command(3, Command::Measure(8))
+            .layout(3, &sized(12.0, 10.0));
+    });
+    ui.render(VIEW);
+    assert!(
+        !ui.host
+            .list_row_shown(crate::host::NodeId(1), crate::host::NodeId(2))
+    );
+    let events = ui.take_events();
+    let measured: Vec<(u32, u32)> = of(&events, out_kind::MEASURE)
+        .iter()
+        .map(|e| (e.key, e.revision))
+        .collect();
+    assert_eq!(measured, vec![(7, 0), (8, 0)]);
+    assert!(
+        of(&events, out_kind::LAYOUT).is_empty(),
+        "hidden: no layout event"
+    );
+}
