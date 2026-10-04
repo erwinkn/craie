@@ -1,0 +1,52 @@
+{
+  "format": "craie-list-trace/1",
+  "id": "K12",
+  "name": "a placeholder meeting the viewport by half a point is asked for",
+  "viewport": {
+    "width": 400,
+    "height": 40.5
+  },
+  "config": {
+    "overscan": 600,
+    "lookahead": 0,
+    "endThreshold": 80,
+    "anchor": "start",
+    "anchorPolicy": "reading"
+  },
+  "templates": [],
+  "items": [
+    {
+      "count": 1,
+      "key": "m{i}",
+      "estimate": 40,
+      "height": 40
+    },
+    {
+      "count": 1,
+      "key": "m{i}",
+      "loaded": false,
+      "estimate": 40
+    },
+    {
+      "count": 8,
+      "key": "m{i}",
+      "estimate": 40,
+      "height": 40
+    }
+  ],
+  "steps": [
+    {
+      "do": "mount",
+      "expect": {
+        "visible": [
+          0,
+          1
+        ],
+        "loadItems": [
+          1,
+          1
+        ]
+      }
+    }
+  ]
+}

@@ -10,7 +10,8 @@ Files are named `<id>-<slug>.json`. Craie keeps its copy in
 `harness/traces/lists/` and the kit in its own tree. Each side copies the
 other's files verbatim, and the coordinator checks that both copies match.
 The first eight (`I1` to `I4bj`) are the islet traces of `lists.md`;
-`L1` to `L3` and `U1` to `U4` are its loading and unloading traces.
+`L1` to `L3` and `U1` to `U4` are its loading and unloading traces. `K1`
+to `K12` are the kit's, copied verbatim from Marbre.
 
 ## A trace
 
