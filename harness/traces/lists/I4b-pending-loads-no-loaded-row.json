@@ -26,7 +26,7 @@
     {
       "do": "mount",
       "expect": {
-        "loadItems": [
+        "load": [
           0,
           29
         ]
@@ -41,7 +41,7 @@
           105,
           119
         ],
-        "loadItems": [
+        "load": [
           90,
           134
         ]
@@ -56,7 +56,7 @@
           "offset": -20
         },
         "offset": 4220,
-        "loadItems": [
+        "load": [
           90,
           135
         ]
@@ -85,7 +85,7 @@
           "offset": -20
         },
         "offset": 4820,
-        "loadItems": [
+        "load": [
           105,
           135
         ]

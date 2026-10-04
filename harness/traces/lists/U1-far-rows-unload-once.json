@@ -32,7 +32,7 @@
           0,
           14
         ],
-        "unloadItems": []
+        "unload": []
       }
     },
     {
@@ -43,7 +43,7 @@
           100,
           114
         ],
-        "unloadItems": [
+        "unload": [
           [
             0,
             39
@@ -74,8 +74,8 @@
           114
         ],
         "offset": 4000,
-        "unloadItems": [],
-        "loadItems": null
+        "unload": [],
+        "load": null
       }
     },
     {
@@ -86,8 +86,8 @@
           100,
           115
         ],
-        "unloadItems": [],
-        "loadItems": null
+        "unload": [],
+        "load": null
       }
     }
   ]

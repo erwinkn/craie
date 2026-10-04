@@ -1,7 +1,7 @@
 {
   "format": "craie-list-trace/1",
   "id": "U4",
-  "name": "a focused row is never unloaded: the range stops before it, the rows past it are asked next, and the row itself after blur",
+  "name": "a focused row is never unloaded: the range stops before it, the rows past it are asked next, and the row itself at the first ask after blur",
   "viewport": {
     "width": 400,
     "height": 600
@@ -28,7 +28,7 @@
     {
       "do": "mount",
       "expect": {
-        "unloadItems": []
+        "unload": []
       }
     },
     {
@@ -37,8 +37,7 @@
       "expect": {
         "pinnedKeys": [
           "m10"
-        ],
-        "unloadItems": []
+        ]
       }
     },
     {
@@ -52,7 +51,7 @@
         "pinnedKeys": [
           "m10"
         ],
-        "unloadItems": [
+        "unload": [
           [
             11,
             39
@@ -68,7 +67,7 @@
           100,
           115
         ],
-        "unloadItems": [
+        "unload": [
           [
             0,
             9
@@ -80,8 +79,18 @@
       "do": "blur",
       "key": "m10",
       "expect": {
-        "pinnedKeys": [],
-        "unloadItems": [
+        "pinnedKeys": []
+      }
+    },
+    {
+      "do": "scrollBy",
+      "delta": -20,
+      "expect": {
+        "visible": [
+          100,
+          114
+        ],
+        "unload": [
           [
             10,
             10

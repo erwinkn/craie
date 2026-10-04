@@ -31,7 +31,7 @@ The first eight (`I1` to `I4bj`) are the islet traces of `lists.md`;
   "steps": [
     { "do": "mount" },
     { "do": "scrollToIndex", "index": 380, "align": "start",
-      "expect": { "visible": [380, 394], "loadItems": [400, 419] } }
+      "expect": { "visible": [380, 394], "load": [400, 419] } }
   ]
 }
 ```
@@ -59,9 +59,10 @@ The first eight (`I1` to `I4bj`) are the islet traces of `lists.md`;
 ## Steps
 
 Each step does one thing, then the virtualizer settles: layout, then
-measurement corrections, then anchoring, then any `loadItems` call, then
-any `unloadItems` calls (above, then below). Its `expect`, if present, is
-checked after that.
+measurement corrections, then anchoring. Then, unless the step was a
+`measure`, `focus`, `blur` or `followKey`, it computes its ask and makes
+at most one `updateItems` call. Its `expect`, if present, is checked after
+that.
 
 | `do` | Fields | Meaning |
 |---|---|---|
@@ -91,21 +92,18 @@ device pixel (1 at scale 1).
 | `atEnd`, `following` | As in `ListViewport` |
 | `pinnedKeys` | As in `ListViewport`, in any order |
 | `mounted` | `{ "covers": [a, b] }`: the mounted range contains a..b (its exact extent is the implementation's) |
-| `loadItems` | `[first, last]`: exactly one call since the previous step, with this request. `null`: no call. `{ "covers": [a, b] }`: one call whose request contains a..b |
-| `unloadItems` | The ranges of the `unloadItems` calls since the previous step, in order: `[[a, b], ...]`; `[]` for none |
-| `held` | `[first, last]` of the held rows (`ListViewport.held`), or `null` |
+| `load` | The step's `updateItems` call has this `load`: `[first, last]`. `null`: no call, or one without `load`. `{ "covers": [a, b] }`: a `load` containing a..b |
+| `unload` | The step's call's `unload` ranges, in order: `[[a, b], ...]`; `[]`: no call, or one without `unload` |
+| `held` | `[first, last]` of the held rows, from the first to the last (on Craie, `LIST_VIEWPORT`'s held range), or `null` |
 
-A step without `loadItems` (or `unloadItems`) in its `expect` doesn't
-check those calls.
-Implementations record calls in order. A trace that expects a call
-consumes it.
+A step without `load` or `unload` in its `expect` doesn't check that part
+of the call.
 
 ## Running them
 
 - **Craie** reads every file in `harness/traces/lists/` in a harness test
   (`list_traces.rs`). Mounted rows report the trace's heights, and
-  `loadItems` and `unloadItems` calls are recorded from the list's
-  callback slots.
+  `updateItems` calls are recorded from the list's callback slot.
 - **The kit** reads its copy with its core and records the same.
 - **Seeded traces** (generated changes, scrolls and loads) don't live in
   files. Each side checks its own against a clean rebuild, and only named

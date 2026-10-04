@@ -33,7 +33,7 @@
     {
       "do": "mount",
       "expect": {
-        "loadItems": [
+        "load": [
           0,
           29
         ]
@@ -48,7 +48,7 @@
           105,
           119
         ],
-        "loadItems": [
+        "load": [
           85,
           99
         ]
@@ -63,7 +63,7 @@
           "offset": -20
         },
         "offset": 4220,
-        "loadItems": null
+        "load": null
       }
     },
     {
@@ -89,7 +89,7 @@
           "offset": -20
         },
         "offset": 4620,
-        "loadItems": null
+        "load": null
       }
     }
   ]

@@ -33,7 +33,7 @@
     {
       "do": "mount",
       "expect": {
-        "loadItems": [
+        "load": [
           0,
           29
         ]
@@ -52,7 +52,7 @@
           "key": "m105",
           "offset": 0
         },
-        "loadItems": [
+        "load": [
           85,
           99
         ]
@@ -81,7 +81,7 @@
           "offset": 0
         },
         "offset": 4600,
-        "loadItems": null
+        "load": null
       }
     }
   ]

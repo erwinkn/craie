@@ -15,12 +15,17 @@ both sides. It builds on the list co-design study (contract C) and on
   kit's JS virtualizer and Craie's native one consume the same table and the
   same ops. Each runs its own copy of the algorithm, and both are held to the
   same JSON traces.
-- **Callbacks are for lazy content and notification only:** load these rows,
-  and the range or viewport changed. They are never for layout.
-- **Rows stay ordinary React** (`renderItem(index)`), mounted for the range
-  the virtualizer reports. Craie's React wrapper reshapes the table into wire
-  records and sends it; native owns sizes, measurement and correction, so no
-  sizes cross to JS.
+- **Two callbacks, for data and notification only:** `updateItems` (load
+  these rows, these may go) and the optional `onViewportChange`. They are
+  never for layout.
+- **Rows stay ordinary React** (`renderItem`), mounted for a range the
+  virtualizer keeps to itself: the kit renders its own on web and React
+  Native, and on Craie native tells the bridge which rows to mount. Craie's
+  React wrapper reshapes the table into wire records and sends it; native
+  owns sizes, measurement and correction, so no sizes cross to JS.
+- **The public surface** is `renderItem`, `updateItems`,
+  `onViewportChange` and the handle (`scrollToIndex`, `scrollToKey`,
+  `scrollToEnd`, `scrollToOffset`, `readViewport`).
 
 ## The table (JS)
 
@@ -78,11 +83,12 @@ interface VirtualListProps {
   retain?: number                       // viewport heights kept loaded each side; default 3
   startInset?: number; paddingEnd?: number; restoreKey?: string
   // callbacks (callback-ref slots on the list node)
-  onRangeChange?(range: { first: number; last: number }): void   // mounted range, overscan included
-  onViewportChange?(v: ListViewport): void                      // opt-in, coalesced per frame
-  onAtEndChange?(atEnd: boolean): void
-  loadItems?(range: { first: number; last: number }): void      // unloaded items near the viewport
-  unloadItems?(range: { first: number; last: number }): void    // loaded items far from it
+  updateItems?(ask: ListAsk): void          // data: load near the viewport, unload far from it
+  onViewportChange?(v: ListViewport): void  // optional; latest wins, at most once per frame
+}
+interface ListAsk {                         // what changed since the last ask
+  load?: { first: number; last: number }               // at most one range; replaces the last
+  unload?: readonly { first: number; last: number }[]  // at most two: far above, then far below
 }
 interface ListHandle {
   scrollToIndex(i: number, o?: { align?: "start" | "center" | "end" }): void
@@ -93,11 +99,11 @@ interface ListHandle {
 }
 interface ListViewport {
   revision: number
-  range: { first: number; last: number }; visible: { first: number; last: number }
+  visible: { first: number; last: number }  // the Inbox's mark-seen reads this
   anchor: { key: string; index: number; offset: number } | null
-  pinnedKeys: readonly string[]          // rows kept mounted for focus
-  held: { first: number; last: number } | null  // visible rows loaded but still shown as placeholders
-  offset: number; atEnd: boolean; following: boolean
+  pinnedKeys: readonly string[]             // rows kept mounted for focus
+  atEnd: boolean                            // "jump to latest" reads this
+  following: boolean
 }
 ```
 
@@ -110,23 +116,22 @@ interface ListViewport {
 
   | Slot | Arguments | Delivery |
   |---|---|---|
-  | `loadItems` | `{ first, last }` | Reliable |
-  | `unloadItems` | `{ first, last }` | Every call, coalesced per frame to one range per side |
-  | `onRangeChange` | `{ first, last }` | Every call |
-  | `onAtEndChange` | `atEnd` | Every call |
-  | `onViewportChange` | `ListViewport` | Latest wins (per frame) |
+  | `updateItems` | `ListAsk` | Reliable; a newer `load` replaces an older one |
+  | `onViewportChange` | `ListViewport` | Latest wins, at most once per frame |
 
-- **Lazy loading.**
-  - Native asks for content only through `loadItems`, by the islet rule
-    below.
+- **Lazy content.**
+  - The list asks for content, and offers to drop it, only through
+    `updateItems`: loads by the islet rule, unloads by the retain window
+    (below).
   - JS answers by changing the data, not by returning a value. Once the
     content arrives, an `update` marks the items loaded with a new version
-    and better estimates. Rows already mounted render the placeholder
-    meanwhile.
-  - So `loadItems` needs no reply channel. It is reliable (never dropped),
-    and later calls supersede earlier ones.
-- **Mount order.** `onRangeChange` drives which rows React mounts. The bridge
-  mounts the reported range and pins focused rows, as Craie does today.
+    and better estimates; rows already mounted render the placeholder
+    meanwhile. A source may also keep rows cached and change nothing.
+  - So `updateItems` needs no reply channel. It is reliable (never
+    dropped), and a newer `load` supersedes an older one.
+- **Mount order.** The mounted range is internal. On Craie, native sends
+  it to the bridge (`LIST_VIEWPORT`), which mounts it and pins focused
+  rows, as Craie does today.
 
 ## Islets: no placeholder gap left on screen
 
@@ -157,10 +162,12 @@ it decides on both sides, and the source only answers.
   extends in the reader's last scroll direction, or, after a mount or a
   jump, the way the placeholder run continues past the request (down if
   both ways). It stops where the run ends.
-- **When to call.** After every change batch and every settled scroll, the
-  request is computed again. `loadItems` is called when it is non-empty
-  and not contained in the last request made since the last change batch.
-  A smaller request inside a pending one would only cut it short.
+- **When to ask.** After every change batch, settled scroll, jump and
+  resize, the list computes its ask again and calls `updateItems` with the
+  difference from what it last asked, if any. Its `load` is the request,
+  when it is non-empty and not contained in the last one asked since the
+  last change batch: a smaller request inside a pending one would only cut
+  it short. Without `load`, the last request stands.
 - **The source.** It loads the whole request, and may load more. It never
   loads less on purpose. A partial answer, an `update` that leaves part of
   the request unloaded, leads to the next request at the next evaluation.
@@ -179,7 +186,7 @@ Named traces I1–I4 (`harness/traces/lists/`):
   region: the request joins that region. Far from any loaded region, it
   doesn't widen.
 - **I3.** A partial answer leaves a 4-row placeholder run on screen: the next
-  `loadItems` starts at that run, extended to a screen and widened.
+  load starts at that run, extended to a screen and widened.
 - **I4.** Loads pending above the reader: the topmost visible loaded row
   holds its place. **I4b:** with none loaded, the topmost visible
   placeholder holds.
@@ -190,7 +197,7 @@ Named traces I1–I4 (`harness/traces/lists/`):
 
 ## Loading without layout shifts
 
-Erwin's rules (recorded decision): at most one range load on screen, loads
+Erwin's rules (D135): at most one range load on screen, loads
 of at least a screen, newer requests replacing older ones, and no layout
 shifts when content lands. The islet rules above give the first three:
 
@@ -198,8 +205,8 @@ shifts when content lands. The islet rules above give the first three:
   unloaded row intersecting the viewport, as one range.
 - **At least a screen,** in the scroll direction. Scrolling up half a
   screen into placeholders asks for the whole screen above (trace L1).
-- **Newer requests replace older ones.** The source answers the latest. An
-  answer to an older request still applies, as data.
+- **Newer requests replace older ones.** A `load` replaces the last at the
+  source. An answer to an older request still applies, as data.
 
 No layout shifts is the hold:
 
@@ -224,8 +231,8 @@ No layout shifts is the hold:
 
 ## Unloading
 
-The list decides what to unload, as it decides what to load, and asks
-through a callback. The source answers with data. The descriptor table
+Erwin's rules (D136). The list decides what to unload, as it decides what
+to load, and asks in the same `updateItems` call. The source answers with data. The descriptor table
 stays the one source of truth, and the list never flips `loaded` itself.
 
 - **Retain window.** The viewport extended by `retain` viewport heights
@@ -240,17 +247,16 @@ stays the one source of truth, and the list never flips `loaded` itself.
   (focused) rows are never candidates, and neither are rows inside a
   pending load request (the last one, while one of its rows is still
   unloaded and not failed).
-- **The call.** At most one per side, after every change batch, settled
-  scroll and change of pinned rows, after any `loadItems` call: above
-  first, then below. Each covers consecutive candidates, from the one
-  nearest the viewport outward. A row that isn't a candidate ends it, and
-  candidates past it wait for a later evaluation. Delivery is every call.
+- **The ask.** `unload` holds at most one range per side, above first,
+  then below, computed with the load. Each covers consecutive candidates,
+  from the one nearest the viewport outward. A row that isn't a candidate
+  ends it, and candidates past it wait for a later ask.
 - **The source.**
   - It may drop the content: an `update` marks the rows `loaded: false`,
     with new versions.
-  - Or it may keep them cached and change nothing. The call ended their
+  - Or it may keep them cached and change nothing. The ask ended their
     visit, so the list asks again only after they come back into the
-    retain window and leave it again.
+    retain window and leave it again: an ask carries only what changed.
 
 ## Loading and unloading traces
 
@@ -270,7 +276,8 @@ stays the one source of truth, and the list never flips `loaded` itself.
 - **U3.** A cached source ignores the calls: they aren't repeated until the
   rows come back and leave again.
 - **U4.** A focused row is never unloaded: the range stops before it, the
-  rows past it are asked next, and the row itself after blur.
+  rows past it are asked next, and the row itself at the first ask after
+  blur.
 
 ## Behavior both sides implement (shared traces)
 
@@ -294,8 +301,8 @@ stays the one source of truth, and the list never flips `loaded` itself.
   Commands clamp indices; a missing key does nothing.
 - **Traces.** Shared JSON step traces (`list-traces.md`) carry identities,
   versions, loaded state, viewport geometry, injected heights, and the
-  expected anchor, offset, follow state, visible range and `loadItems`
-  requests. TypeScript drives the kit core; Rust drives native `Ui`. They
+  expected anchor, offset, follow state, visible range and `updateItems`
+  asks. TypeScript drives the kit core; Rust drives native `Ui`. They
   test what is observable, not equal estimates or equal overscan
   heuristics. Seeded traces back up the named ones (study §4 table).
 
@@ -324,12 +331,12 @@ stays the one source of truth, and the list never flips `loaded` itself.
 - **Events.**
   - `LIST_VIEWPORT`: list node, revision, mounted first/end, visible
     first/end, held first/end, pinned ids, anchor id, index and offset,
-    content offset (f64), flags (at end, following). It is coalesced per
-    frame, and published for range, end, anchor and hold changes; offsets
-    are published only when subscribed.
-  - Callback slots (`CALL`, callbacks note): `onRangeChange`,
-    `onViewportChange`, `onAtEndChange`, `loadItems` and `unloadItems` on
-    the list node.
+    flags (at end, following). Coalesced per frame. The mounted range and
+    holds are for the bridge (which rows to mount, which render as
+    placeholders); the rest makes `onViewportChange` and `readViewport`.
+  - Callback slots (`CALL`, callbacks note): `updateItems` (a flags byte,
+    bit 0 load, bits 1 and 2 an unload range above and below, then each
+    present range as two u32) and `onViewportChange` on the list node.
   - Descriptor flags gain `failed`.
 - **Old ops.** `LIST_CONFIG`, `LIST_SPLICE` and `LIST_INDEX` (0x90–0x92) stay
   for current callers until they migrate; then they go.
@@ -354,5 +361,6 @@ stays the one source of truth, and the list never flips `loaded` itself.
   these ops, with the changes folded in above (`indexOfKey`, text
   template metrics, `pinnedKeys`, delivery classes, islets).
 - Loading and unloading follow Erwin's answers of 2026-10-04 (no layout
-  shifts, at least a screen per load, `unloadItems` with a retain window).
-  They changed the expected requests of I3, I3j, I4 and I4j.
+  shifts and at least a screen per load, D135; unloading with a retain
+  window, D136), and his simplification to one data callback and one
+  notification. They changed the expected requests of I3, I3j, I4 and I4j.
