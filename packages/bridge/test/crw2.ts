@@ -57,6 +57,8 @@ export interface Frame {
     start: number; fontSize: number; color: number; weight: number; italic: boolean
     decoration: number; family: string | undefined; letterSpacing: number; lineHeight: number
     inheritColor: boolean; pressable: boolean; pressJoins: boolean
+    /** Tabular digits; the alignment (0 auto, 1 left, 2 center, 3 right). */
+    tabular: boolean; align: number
   }[]
   ops: Op[]
 }
@@ -93,14 +95,14 @@ export function readFrame(buf: Uint8Array): Frame {
   const spans = []
   for (let i = 0; i < nSpans; i++) {
     const start = u32(), fontSize = f32(), color = u32(), weight = u16(), flags = u8()
-    u8()
+    const features = u8()
     const familyRef = u32(), letterSpacing = f32(), lineHeight = f32()
     spans.push({
       start, fontSize, color, weight, italic: !!(flags & 1),
       decoration: (flags >> 1) & 3,
       family: familyRef === 0xffff_ffff ? undefined : strings[familyRef],
       letterSpacing, lineHeight, inheritColor: !!(flags & 8), pressable: !!(flags & 16),
-      pressJoins: !!(flags & 32),
+      pressJoins: !!(flags & 32), tabular: !!(features & 1), align: (features >> 1) & 3,
     })
   }
   const ops: Op[] = []

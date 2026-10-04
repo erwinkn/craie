@@ -59,6 +59,23 @@ pub struct TextStyle {
     /// Absolute line height, logical points; 0: the font's. Read from
     /// span zero only (per paragraph).
     pub line_height: f32,
+    /// Tabular digits: shaped with OpenType `tnum`, so figures share one
+    /// advance and a ticking counter doesn't shift.
+    pub tabular: bool,
+    /// Where lines sit in the line box. Read from span zero only.
+    pub align: Align,
+}
+
+/// A paragraph's horizontal alignment. `Start` follows the paragraph's
+/// direction (right in a right-to-left one); the others are physical,
+/// as CSS `left`, `center` and `right`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum Align {
+    #[default]
+    Start,
+    Left,
+    Center,
+    Right,
 }
 
 impl Default for TextStyle {
@@ -70,6 +87,8 @@ impl Default for TextStyle {
             font: None,
             letter_spacing: 0.0,
             line_height: 0.0,
+            tabular: false,
+            align: Align::Start,
         }
     }
 }
@@ -196,6 +215,8 @@ pub struct Paragraph {
     pub empty_metrics: RunMetrics,
     pub text_len: u32,
     pub base_rtl: bool,
+    /// Span zero's alignment.
+    pub align: Align,
     /// The wrap width the lines were made for (None: unbounded).
     pub max_width: Option<f32>,
     /// One byte of analysis flags per text byte: `BREAK` and `PARA_RTL`
@@ -584,17 +605,31 @@ impl Paragraph {
         self.width = width;
         self.height = y;
 
-        // Alignment (start): right-to-left paragraphs align right in the
-        // line box (the wrap width, else the widest line).
+        // Alignment in the line box (the wrap width, else the widest
+        // line): the line's visible content (its advance less trailing
+        // whitespace) starts at `left`; the free space may be negative on
+        // overflow. The trailing whitespace hangs past the content: to
+        // the right in a left-to-right line, to the left in a
+        // right-to-left one. `Start` is right in a right-to-left
+        // paragraph.
         let boxw = max_width.unwrap_or(width);
+        let align = match (self.align, self.base_rtl) {
+            (Align::Start, false) => Align::Left,
+            (Align::Start, true) => Align::Right,
+            (a, _) => a,
+        };
         for li in 0..self.lines.len() {
             let line = &self.lines[li];
-            // Right-to-left: the trailing whitespace hangs to the left, and
-            // the free space (negative on overflow) goes before the line.
+            let free = boxw - (line.advance - line.trailing);
+            let left = match align {
+                Align::Center => free / 2.0,
+                Align::Right => free,
+                _ => 0.0,
+            };
             let x = if self.base_rtl {
-                -line.trailing + (boxw - line.advance + line.trailing)
+                left - line.trailing
             } else {
-                0.0
+                left
             };
             let (baseline, segs) = (line.baseline, line.segs.clone());
             self.lines[li].x = x;
@@ -1003,7 +1038,7 @@ pub struct Shaper {
     /// Plans per (instance, right-to-left, script, letter-spaced). A
     /// plan is compiled once; HarfRust would compile one per call
     /// without it.
-    plans: HashMap<(FontInstanceId, bool, [u8; 4], bool), harfrust::ShapePlan>,
+    plans: HashMap<(FontInstanceId, bool, [u8; 4], bool, bool), harfrust::ShapePlan>,
     /// Variation instances per font instance with coordinates.
     instances: HashMap<FontInstanceId, harfrust::ShaperInstance>,
     metrics: HashMap<(FontInstanceId, u32, u32), RunMetrics>,
@@ -1107,6 +1142,7 @@ impl Shaper {
         };
         let mut p = Paragraph {
             text_len: text.len() as u32,
+            align: spans[0].style.align,
             ..Paragraph::default()
         };
         let attrs = |s: &TextStyle| FontAttrs {
@@ -1202,7 +1238,8 @@ impl Shaper {
                         && it.script == script
                         && it.font == font
                         && spans[it.span].style.size == style.size
-                        && spans[it.span].style.letter_spacing == style.letter_spacing =>
+                        && spans[it.span].style.letter_spacing == style.letter_spacing
+                        && spans[it.span].style.tabular == style.tabular =>
                 {
                     it.text.end = at + g.len();
                 }
@@ -1266,12 +1303,24 @@ impl Shaper {
             // clig, and dlig off. Required ligatures, contextual
             // alternates, and mark positioning stay on.
             let spaced = spans[it.span].style.letter_spacing != 0.0;
-            let off = |tag: &[u8; 4]| harfrust::Feature::new(harfrust::Tag::new(tag), 0, ..);
-            let unligated = [off(b"liga"), off(b"clig"), off(b"dlig")];
-            let features: &[harfrust::Feature] = if spaced { &unligated } else { &[] };
+            let tabular = spans[it.span].style.tabular;
+            let feature =
+                |tag: &[u8; 4], on| harfrust::Feature::new(harfrust::Tag::new(tag), on, ..);
+            let all = [
+                feature(b"tnum", 1),
+                feature(b"liga", 0),
+                feature(b"clig", 0),
+                feature(b"dlig", 0),
+            ];
+            let features: &[harfrust::Feature] = match (tabular, spaced) {
+                (true, true) => &all,
+                (true, false) => &all[..1],
+                (false, true) => &all[1..],
+                (false, false) => &[],
+            };
             let plan = self
                 .plans
-                .entry((font, rtl, it.script.0, spaced))
+                .entry((font, rtl, it.script.0, spaced, tabular))
                 .or_insert_with(|| {
                     harfrust::ShapePlan::new(&shaper, direction, script, None, features)
                 });

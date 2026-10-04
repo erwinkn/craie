@@ -450,6 +450,13 @@ export interface TextProps extends ListenerProps, PressProps, Variants, MotionPr
   /** Absolute line height, logical points (per paragraph: the outermost
    * Text's). */
   lineHeight?: number
+  /** Where lines sit in the Text's box (per paragraph: the outermost
+   * Text's). `auto` follows the direction; `justify` is not drawn yet,
+   * and draws as `auto`. */
+  textAlign?: "auto" | "left" | "center" | "right" | "justify"
+  /** React Native's `fontVariant`: `tabular-nums` gives every figure one
+   * advance (OpenType `tnum`), so counters and timers don't shift. */
+  fontVariant?: readonly ("tabular-nums" | "proportional-nums")[]
   /** Accessibility name; defaults to the text content. */
   accessibilityLabel?: string
   accessibilityRole?: AccessibilityRole
