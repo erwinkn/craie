@@ -883,12 +883,14 @@ impl Ui {
         self.settle_exits();
         self.seq = txn.seq;
         self.restyle();
-        self.end_hidden_exits();
         self.settle_traps();
         self.cancel_blocked_presses();
         // The focus and the presses settling moved (a key compare when
         // none did).
         self.restyle();
+        // Last: what hides an exit may be a variant on the state the
+        // steps above moved (`_focusWithin` losing the focus).
+        self.end_hidden_exits();
         Ok(())
     }
 

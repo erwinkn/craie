@@ -56,10 +56,10 @@ impl Ui {
         let parent = self.host.parent(node);
         if !self.attached(node) || self.host.kind(parent) == Some(NodeKind::List) {
             self.host.detach(node);
-            self.skipped_exits.push(node);
+            self.skipped_exits.insert(node);
             return;
         }
-        self.host.exiting.push(node);
+        self.host.exiting.insert(node);
         self.set_inert(node, true);
         self.start_exit_keyframes(node, anims, from);
     }
@@ -92,10 +92,10 @@ impl Ui {
     /// about to be skipped: the exit ends now (`removed`). False when
     /// `root` roots no exit.
     pub(crate) fn cut_exit(&mut self, root: NodeId) -> bool {
-        let exits = self.host.exiting.len() + self.skipped_exits.len();
-        self.host.exiting.retain(|&n| n != root);
-        self.skipped_exits.retain(|&n| n != root);
-        if self.host.exiting.len() + self.skipped_exits.len() == exits {
+        #[cfg(test)]
+        EXIT_WORK.with(|w| w.set(w.get() + 1));
+        let running = self.host.exiting.remove(&root);
+        if !(running || self.skipped_exits.remove(&root)) {
             return false;
         }
         self.free_exit(root, end_reason::REMOVED);
@@ -105,7 +105,7 @@ impl Ui {
     /// At the end of a transaction: exits that could not run end, and so
     /// do those whose parent left the tree.
     pub(crate) fn settle_exits(&mut self) {
-        while let Some(root) = self.skipped_exits.pop() {
+        while let Some(root) = self.skipped_exits.pop_first() {
             self.free_exit(root, end_reason::SKIPPED);
         }
         self.end_exits_where(end_reason::PARENT_GONE, |ui, root| !ui.attached(root));
@@ -129,12 +129,18 @@ impl Ui {
     }
 
     fn end_exits_where(&mut self, reason: u32, over: impl Fn(&Ui, NodeId) -> bool) {
-        // Freeing one may end others (inside it): look again from the
-        // start. Exits are few.
-        while let Some(i) = (0..self.host.exiting.len()).find(|&i| over(self, self.host.exiting[i]))
-        {
-            let root = self.host.exiting.remove(i);
-            self.free_exit(root, reason);
+        if self.host.exiting.is_empty() {
+            return;
+        }
+        let ending: Vec<NodeId> = (self.host.exiting.iter())
+            .copied()
+            .filter(|&root| over(self, root))
+            .collect();
+        for root in ending {
+            // Not when it went with an exit around it, freed before it.
+            if self.host.exiting.remove(&root) {
+                self.free_exit(root, reason);
+            }
         }
     }
 
@@ -151,34 +157,29 @@ impl Ui {
             nodes.extend_from_slice(self.host.children(n));
             k += 1;
         }
+        #[cfg(test)]
+        EXIT_WORK.with(|w| w.set(w.get() + nodes.len()));
         // Exits inside go with this one.
         let mut ends = std::mem::take(&mut self.exit_scratch);
         ends.clear();
         ends.push((root, reason));
         if !self.host.exiting.is_empty() {
-            self.host.exiting.retain(|&n| {
-                let inside = nodes.contains(&n);
-                if inside {
+            for &n in &nodes[1..] {
+                if self.host.exiting.remove(&n) {
                     ends.push((n, end_reason::PARENT_GONE));
                 }
-                !inside
-            });
+            }
         }
         for &n in &nodes {
+            let generation = self.host.node(n).map_or(0, |h| h.generation);
+            self.freed.push((n.0, generation));
             self.remove_node(n);
         }
-        // Events of the freed occupants (their slots moved one generation
-        // on) are dropped.
-        nodes.sort_unstable_by_key(|n| n.0);
-        let host = &self.host;
-        let freed = |n: NodeId| host.slot_generation(n).wrapping_sub(1);
-        self.pending_events.retain(|e| {
-            let n = NodeId(e.node);
-            nodes.binary_search_by_key(&n.0, |m| m.0).is_err() || e.generation != freed(n)
-        });
+        // Their queued events go when events are taken
+        // (`drop_exiting_events`): one pass for a batch of cuts.
         for &(n, reason) in &ends {
             let mut e = UiEvent::new(out_kind::EXIT_END, n.0);
-            e.generation = freed(n);
+            e.generation = self.host.slot_generation(n).wrapping_sub(1);
             e.key = reason;
             self.pending_events.push(e);
         }
@@ -186,8 +187,22 @@ impl Ui {
         self.exit_scratch = ends;
     }
 
-    /// Drops queued events of nodes inside a running exit.
+    /// Drops queued events of nodes exits freed (raised before, by the
+    /// occupant that went; not their `EXIT_END`s) and of nodes inside a
+    /// running exit.
     pub(crate) fn drop_exiting_events(&mut self) {
+        if !self.freed.is_empty() {
+            let mut freed = std::mem::take(&mut self.freed);
+            freed.sort_unstable();
+            #[cfg(test)]
+            EXIT_WORK.with(|w| w.set(w.get() + self.pending_events.len()));
+            self.pending_events.retain(|e| {
+                e.kind == out_kind::EXIT_END
+                    || freed.binary_search(&(e.node, e.generation)).is_err()
+            });
+            freed.clear();
+            self.freed = freed;
+        }
         if self.host.exiting.is_empty() {
             return;
         }
@@ -202,4 +217,11 @@ impl Ui {
         });
         self.pending_events = events;
     }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Work done ending exits, per element visited: cuts, freed nodes,
+    /// queued events filtered (the bulk test's budget).
+    pub(crate) static EXIT_WORK: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }

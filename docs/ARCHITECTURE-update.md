@@ -1414,8 +1414,10 @@ facade reuse B's two ids.
   where following the enter would have shown 0.24.
 - **Inert, not gone.** The root stays in its parent's child list with
   `inert` set (topic 3), so the subtree has no hit testing, focus or
-  AccessKit node. A focus inside moves on as for a removal, and a trap
-  or focus group inside stops counting. Only the removed root's exit
+  AccessKit node. A focus inside moves on as for a removal, a trap or
+  focus group inside stops counting, and its text leaves the text
+  selection: a selection inside drops, as at a plain detach, and one
+  around it no longer copies or highlights it. Only the removed root's exit
   runs: its descendants are not detached, so theirs never start, and an
   exit already running inside (removed earlier) ends with the outer one
   as parent gone.
@@ -1427,7 +1429,9 @@ facade reuse B's two ids.
   gone), or when the exit couldn't run, its root being out of the tree
   or a List row (skipped). So does one hidden (`display: none` on it or
   above), at the detach or by a later transaction, whether frames are
-  drawn or not (a minimized window draws none): #21 parks the
+  drawn or not (a minimized window draws none), judged after the
+  transaction's last restyle (a `_focusWithin` variant that showed it
+  hides it once the detach moved the focus out): #21 parks the
   animations of undrawn nodes, and a parked exit would hold its ids for
   good. A variant that hides it between transactions (hover, focus)
   ends it on the next frame. A visible exit in a window that draws no
@@ -1447,7 +1451,10 @@ facade reuse B's two ids.
   anything applies. Each cut walks only its subtree: the host's
   children and the batch's own placements, indexed by parent at the
   batch's first cut and kept as it places. Unmounting 1,000 exiting
-  toasts looks at 3,000 nodes and links, not half a million.
+  toasts looks at 3,000 nodes and links, not half a million. Ending
+  them is linear too: the running exits are a sorted set, and the
+  events queued for freed nodes are filtered once, when events are
+  next taken, not at each cut.
 - **Ids.** React detaches the removed root, then releases every node of
   the subtree. With an exit running, the facade parks each released id
   on the exit instead of sending `remove`, and recycles them all on the

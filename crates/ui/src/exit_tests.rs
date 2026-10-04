@@ -365,43 +365,59 @@ fn a_cut_exit_frees_its_subtree_in_validation() {
     assert_eq!(ui.host.children(NodeId(0)), [1, 3, 20].map(NodeId));
 }
 
-/// Unmounting 1,000 exiting toasts (each holding a button) walks each
-/// toast's subtree once: validation's work grows with the nodes cut,
-/// not with the cuts before them in the batch.
+/// Unmounting 1,000 exiting toasts (each holding a button) is linear,
+/// validation and application both: validation walks each toast's
+/// subtree once, and ending the exits looks at each cut, each freed
+/// node and each queued event once (no scan of the other exits or of
+/// the events queued before), whether `END_EXIT` or `REMOVE` cuts them.
 #[test]
-fn a_bulk_cut_walks_each_subtree_once() {
+fn a_bulk_cut_is_linear() {
     const N: u32 = 1000;
-    let mut ui = toasts();
-    apply(&mut ui, |t| {
-        for i in 0..N {
-            let (toast, button) = (30 + 2 * i, 31 + 2 * i);
-            t.create(toast, NodeKind::View)
-                .append(0, toast)
-                .create(button, NodeKind::View)
-                .append(toast, button)
-                .animation(toast, Trigger::Exit, false, &[fade_and_collapse()]);
-        }
-    });
-    apply(&mut ui, |t| {
-        for i in 0..N {
-            t.detach(30 + 2 * i);
-        }
-    });
-    assert_eq!(ui.host.exiting.len(), N as usize);
-    crate::executor::WALKED.with(|w| w.set(0));
-    let started = std::time::Instant::now();
-    apply(&mut ui, |t| {
-        for i in 0..N {
-            t.end_exit(30 + 2 * i);
-        }
-    });
-    let spent = started.elapsed();
-    let walked = crate::executor::WALKED.with(|w| w.get());
-    eprintln!("{N} exit cuts: {spent:?}, {walked} nodes and links looked at");
-    // Per toast: itself and its button, and the link between them.
-    assert_eq!(walked, 3 * N as usize);
-    assert!(ui.host.exiting.is_empty() && !ui.host.is_live(NodeId(31)));
-    assert_eq!(exit_ends(&ui.take_events()).len(), N as usize);
+    for remove in [false, true] {
+        let mut ui = toasts();
+        apply(&mut ui, |t| {
+            for i in 0..N {
+                let (toast, button) = (30 + 2 * i, 31 + 2 * i);
+                t.create(toast, NodeKind::View)
+                    .append(0, toast)
+                    .create(button, NodeKind::View)
+                    .append(toast, button)
+                    .animation(toast, Trigger::Exit, false, &[fade_and_collapse()]);
+            }
+        });
+        apply(&mut ui, |t| {
+            for i in 0..N {
+                t.detach(30 + 2 * i);
+            }
+        });
+        assert_eq!(ui.host.exiting.len(), N as usize);
+        ui.take_events();
+        crate::executor::WALKED.with(|w| w.set(0));
+        crate::exit::EXIT_WORK.with(|w| w.set(0));
+        let started = std::time::Instant::now();
+        apply(&mut ui, |t| {
+            for i in 0..N {
+                if remove {
+                    t.remove(30 + 2 * i);
+                } else {
+                    t.end_exit(30 + 2 * i);
+                }
+            }
+        });
+        let ends = exit_ends(&ui.take_events());
+        let spent = started.elapsed();
+        let walked = crate::executor::WALKED.with(|w| w.get());
+        let work = crate::exit::EXIT_WORK.with(|w| w.get());
+        eprintln!(
+            "{N} exit cuts (remove: {remove}): {spent:?}, validation {walked}, ending {work}"
+        );
+        // Per toast: itself and its button, and the link between them.
+        assert_eq!(walked, 3 * N as usize);
+        // Per toast: the cut, its two nodes, its EXIT_END filtered once.
+        assert_eq!(work, 4 * N as usize);
+        assert!(ui.host.exiting.is_empty() && !ui.host.is_live(NodeId(31)));
+        assert_eq!(ends.len(), N as usize);
+    }
 }
 
 /// Fades out over 0.5 s: only an end frame.
@@ -564,6 +580,119 @@ fn a_hidden_exit_is_skipped() {
     let ends = exit_ends(&ui.take_events());
     assert_eq!(ends.len(), 1);
     assert_eq!(ends[0].2, end_reason::SKIPPED);
+}
+
+/// A variant can show an exit only while its subtree holds the focus
+/// (`_focusWithin`): the detach moves the focus out, and the
+/// transaction's last restyle hides it. It ends with that transaction,
+/// frames or not, rather than holding its nodes and ids.
+#[test]
+fn an_exit_hidden_by_losing_its_focus_is_skipped() {
+    let mut ui = toasts();
+    let none = taffy::Style {
+        display: taffy::Display::None,
+        ..sized(100.0, 40.0)
+    };
+    let shown = taffy::Style {
+        display: taffy::Display::Flex,
+        ..sized(100.0, 40.0)
+    };
+    apply(&mut ui, |t| {
+        t.states(2, 0)
+            .layout(2, &none)
+            .variants(
+                2,
+                &[VariantDecl {
+                    terms: vec![TermDecl {
+                        scope: 2,
+                        mask: state_bit::FOCUS_WITHIN,
+                    }],
+                    values: crate::states::Values {
+                        mask: value_field::LAYOUT,
+                        layout_keys: crate::states::layout_key::DISPLAY,
+                        layout: (&shown).into(),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                }],
+            )
+            .command(20, Command::Focus);
+    });
+    assert_eq!(ui.focused(), Some(NodeId(20)));
+    assert_eq!(ui.host.layout[2].display(), taffy::Display::Flex);
+    ui.take_events();
+    detach(&mut ui, 2);
+    assert_eq!(ui.focused(), None);
+    assert!(!ui.host.is_live(NodeId(2)) && !ui.host.is_live(NodeId(20)));
+    let ends = exit_ends(&ui.take_events());
+    assert_eq!(
+        ends.iter().map(|e| (e.0, e.2)).collect::<Vec<_>>(),
+        [(2, end_reason::SKIPPED)]
+    );
+}
+
+/// Root 0, selectable, holding texts 1 ("A"), 2 ("B") and 3 ("C");
+/// `exit` declares one on that node.
+fn paragraphs(exit: u32) -> Ui {
+    let mut ui = Ui::new(1.0);
+    apply(&mut ui, |t| {
+        t.create(0, NodeKind::View)
+            .layout(0, &column())
+            .interaction_flags(0, 0, false, true)
+            .place(NIL, 0, NIL);
+        for (id, s) in [(1, "A"), (2, "B"), (3, "C")] {
+            t.create(id, NodeKind::Text)
+                .text(id, s, 16.0, 0xFFFF_FFFF)
+                .append(0, id);
+        }
+        t.animation(exit, Trigger::Exit, false, &[fade_out()]);
+    });
+    at(&mut ui, 0.0);
+    ui
+}
+
+fn select(ui: &mut Ui, from: u32, to: u32) {
+    use crate::selection::{TextPoint, TextSelection};
+    ui.set_text_selection(Some(TextSelection {
+        domain: NodeId(0),
+        anchor: TextPoint {
+            node: NodeId(from),
+            offset: 0,
+        },
+        focus: TextPoint {
+            node: NodeId(to),
+            offset: 1,
+        },
+    }));
+}
+
+/// Removed text is gone for selection as for everything else: a
+/// selection inside an exit drops at its detach, as with a plain one,
+/// and one around it no longer copies it or highlights it.
+#[test]
+fn an_exiting_text_leaves_the_selection() {
+    // The selection's domain exits.
+    let mut ui = paragraphs(0);
+    select(&mut ui, 1, 3);
+    assert_eq!(ui.selected_text(), "A\nB\nC");
+    detach(&mut ui, 0);
+    assert!(ui.host.is_live(NodeId(1)), "it exits");
+    assert_eq!(ui.text_selection(), None);
+    // An endpoint exits.
+    let mut ui = paragraphs(3);
+    select(&mut ui, 1, 3);
+    detach(&mut ui, 3);
+    assert_eq!(ui.text_selection(), None);
+    // A paragraph inside exits: the selection keeps the others.
+    let mut ui = paragraphs(2);
+    select(&mut ui, 1, 3);
+    detach(&mut ui, 2);
+    assert_eq!(ui.selected_text(), "A\nC");
+    at(&mut ui, 0.1);
+    assert_eq!(
+        ui.selection_ranges(),
+        vec![(NodeId(1), 0..1), (NodeId(3), 0..1)]
+    );
 }
 
 /// Only the detached root's exit runs: its descendants' stay declared

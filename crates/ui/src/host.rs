@@ -445,8 +445,9 @@ pub struct Host {
     /// Declared exits per node (`exit.rs`): what a detach starts.
     pub exits: HashMap<u32, Box<[crate::keyframes::Animation]>>,
     /// The roots whose exit runs (`exit.rs`): detached for the app,
-    /// still in the tree.
-    pub exiting: Vec<NodeId>,
+    /// still in the tree. Sorted: membership is a search, and a batch
+    /// that cuts thousands stays linear.
+    pub exiting: std::collections::BTreeSet<NodeId>,
     pub surfaces: HashMap<u32, SurfaceData>,
     /// Vector nodes' assets, id-keyed.
     pub vectors: HashMap<u32, VectorData>,
@@ -526,7 +527,7 @@ impl Host {
             labels: HashMap::new(),
             transitions: HashMap::new(),
             exits: HashMap::new(),
-            exiting: Vec::new(),
+            exiting: Default::default(),
             surfaces: HashMap::new(),
             vectors: HashMap::new(),
             images: HashMap::new(),
