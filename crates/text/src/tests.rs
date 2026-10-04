@@ -1045,12 +1045,13 @@ fn tabular_digits_share_one_advance() {
     );
 }
 
-/// Each line aligns by its own bidi paragraph's direction: after a
-/// newline the text may run the other way, and its trailing space hangs
-/// on that paragraph's side (#27 review).
+/// After a newline the text may run the other way: its trailing space
+/// hangs on its own paragraph's side, so left, center and right place
+/// the visible content (#27 review). `Start` follows the first
+/// paragraph, for every line, as Parley does.
 #[test]
 fn lines_align_by_their_own_direction() {
-    use crate::paragraph::{Align, PARA_RTL};
+    use crate::paragraph::Align;
     let mut e = engine();
     for (text, align) in [
         ("abc\nשלום ", Align::Left),
@@ -1085,7 +1086,7 @@ fn lines_align_by_their_own_direction() {
                 .iter()
                 .map(|g| g.x + g.advance)
                 .fold(f32::NEG_INFINITY, f32::max);
-            let rtl = p.analysis[line.text.start as usize] & PARA_RTL != 0;
+            let rtl = p.base_rtl;
             let free = 200.0 - (right - left);
             let want = match align {
                 Align::Left => 0.0,

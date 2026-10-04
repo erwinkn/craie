@@ -610,22 +610,22 @@ impl Paragraph {
         // whitespace) starts at `left`; the free space may be negative on
         // overflow. The trailing whitespace hangs past the content: to
         // the right in a left-to-right line, to the left in a
-        // right-to-left one. `Start` is right in a right-to-left
-        // paragraph. Each line takes its own bidi paragraph's direction
+        // right-to-left one: each line's own bidi paragraph's direction
         // (text after a newline may run the other way), as `push_line`
-        // does.
+        // lays its segments out. `Start` is right when the first
+        // paragraph runs right to left, for every line, as Parley does.
         let boxw = max_width.unwrap_or(width);
+        let align = match (self.align, self.base_rtl) {
+            (Align::Start, false) => Align::Left,
+            (Align::Start, true) => Align::Right,
+            (a, _) => a,
+        };
         for li in 0..self.lines.len() {
             let line = &self.lines[li];
             let rtl = self
                 .analysis
                 .get(line.text.start as usize)
                 .map_or(self.base_rtl, |f| f & PARA_RTL != 0);
-            let align = match (self.align, rtl) {
-                (Align::Start, false) => Align::Left,
-                (Align::Start, true) => Align::Right,
-                (a, _) => a,
-            };
             let free = boxw - (line.advance - line.trailing);
             let left = match align {
                 Align::Center => free / 2.0,
