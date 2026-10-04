@@ -19,7 +19,11 @@ cd "$(dirname "$0")/.."
 
 cargo fmt --all --check
 cargo fetch --locked
-cargo build --workspace --all-targets
+# The default members as `cargo test` builds them, then the addon as
+# `scripts/build-addon.sh` builds it. A `--workspace` build resolved
+# features differently from both, so most crates compiled a third time.
+cargo build --all-targets
+cargo build -p craie-node
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test
 cargo check --target wasm32-unknown-unknown \
