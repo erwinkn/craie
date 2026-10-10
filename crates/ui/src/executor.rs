@@ -1677,8 +1677,12 @@ impl Ui {
     }
 
     /// Writes a node's layout row; the one writer for layout inputs
-    /// (mutations and the animation driver).
-    pub(crate) fn set_layout(&mut self, node: NodeId, new: LayoutRow) {
+    /// (mutations and the animation driver). Its border is the one the
+    /// node paints, per side, so borders inset content as in CSS
+    /// (`box-sizing: border-box`) and React Native; the row's own border
+    /// is never read.
+    pub(crate) fn set_layout(&mut self, node: NodeId, mut new: LayoutRow) {
+        new.set_border(self.painted_border(node));
         let old = &self.host.layout[node.index()];
         if *old == new {
             return;
@@ -1783,11 +1787,13 @@ impl Ui {
                 geometry = true;
             }
         }
+        let mut relayout = false;
         if let Some(w) = border_width {
             let w = w.max(0.0);
             if p.border_width != w {
                 p.border_width = w;
                 geometry = true;
+                relayout = true;
             }
         }
         if let Some(c) = border_color
@@ -1805,6 +1811,32 @@ impl Ui {
         if geometry || color {
             self.host.revs.paint.bump();
         }
+        if relayout {
+            self.relayout_border(node);
+        }
+    }
+
+    /// The border node `node` paints, per side, in logical points: its
+    /// sides, falling back to its uniform border width (whatever its
+    /// color: a transparent border takes its space, as in CSS).
+    fn painted_border(&self, node: NodeId) -> taffy::Rect<taffy::LengthPercentage> {
+        let uniform = self.host.paint[node.index()].border_width;
+        let sides = self.host.border_sides.get(&node.0);
+        let w = |i| {
+            let w = sides.map_or(uniform, |s| s.width(i, uniform));
+            taffy::LengthPercentage::length(w)
+        };
+        taffy::Rect {
+            top: w(0),
+            right: w(1),
+            bottom: w(2),
+            left: w(3),
+        }
+    }
+
+    /// The node's painted border changed: its layout follows.
+    fn relayout_border(&mut self, node: NodeId) {
+        self.set_layout(node, self.host.layout[node.index()]);
     }
 }
 
@@ -1824,6 +1856,7 @@ impl Ui {
         };
         self.host.dirty.content.push(node.0);
         self.host.revs.paint.bump();
+        self.relayout_border(node);
     }
 
     /// Replaces a node's box shadows: its chunk rebuilds (shadows are

@@ -647,7 +647,6 @@ export interface StyleProps {
   maxHeight?: LengthPctAuto
   padding?: Edges<LengthPct>
   margin?: Edges<LengthPctAuto>
-  borderWidth?: Edges<LengthPct>
   inset?: Edges<LengthPctAuto>
   left?: LengthPctAuto
   right?: LengthPctAuto
@@ -819,7 +818,8 @@ function styleMask(s: StyleProps): bigint {
   if (s.maxWidth !== undefined || s.maxHeight !== undefined) m(11)
   if (s.padding !== undefined) m(12)
   if (s.margin !== undefined) m(13)
-  if (s.borderWidth !== undefined) m(14)
+  // Bit 14, a layout border, is never sent: a box lays out the border it
+  // paints (`borderWidth` and the sides; D164).
   if (s.inset !== undefined || s.left !== undefined || s.right !== undefined
     || s.top !== undefined || s.bottom !== undefined) m(15)
   if (s.flexBasis !== undefined) m(16)
@@ -873,7 +873,6 @@ function putStyleFields(w: Writer, s: StyleProps, mask: bigint) {
   if (has(12)) for (const e of edge4(s.padding, 0)) putLP(w, e)
   // Unset margin sides are 0 (CSS and React Native), not auto.
   if (has(13)) for (const e of edge4<LengthPctAuto>(s.margin, 0)) putLPA(w, e)
-  if (has(14)) for (const e of edge4(s.borderWidth, 0)) putLP(w, e)
   if (has(15)) {
     const base = edge4(s.inset, "auto" as const)
     putLPA(w, s.left ?? base[0])
@@ -957,7 +956,6 @@ export function layoutKeys(s: StyleProps): bigint {
   if (s.maxHeight !== undefined) k(15)
   sides(s.padding, 16)
   sides(s.margin, 20)
-  sides(s.borderWidth, 24)
   sides(s.inset, 28)
   ;[s.left, s.right, s.top, s.bottom].forEach((v, i) => { if (v !== undefined) k(28 + i) })
   if (s.flexBasis !== undefined) k(32)

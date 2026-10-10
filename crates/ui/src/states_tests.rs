@@ -8,7 +8,7 @@ use craie_scene::PaintSlot;
 
 use crate::animation::{Prop, Timing, Transition, Value};
 use crate::events::{Button, Event, Key, KeyInput, Mods, mask, out_kind};
-use crate::geom::Size;
+use crate::geom::{Point, Size};
 use crate::host::NodeId;
 use crate::mutation::{Mutation, NodeKind, TextSpan, Transaction};
 use crate::states::{TermDecl, Values, VariantDecl, env_bit, layout_key, state_bit, value_field};
@@ -976,7 +976,7 @@ fn layout_keys_compose() {
 }
 
 /// Border color and width are separate values: one variant's color and
-/// another's width both apply.
+/// another's width both apply, and the width lays out.
 #[test]
 fn border_color_and_width_compose() {
     let mut ui = app();
@@ -1006,9 +1006,17 @@ fn border_color_and_width_compose() {
         )
         .states(1, state_bit::SELECTED);
     });
+    // The variant's width lays out: the dot sits inside the border.
+    ui.render(WIDE);
+    assert_eq!(ui.layouts.rect(NodeId(2)).origin, Point::new(3.0, 3.0));
     move_to(&mut ui, 100.0, 30.0);
     let p = ui.host.paint[1];
     assert_eq!((p.border_color, p.border_width), (A, 3.0));
+    apply(&mut ui, |t| {
+        t.states(1, 0);
+    });
+    ui.render(WIDE);
+    assert_eq!(ui.layouts.rect(NodeId(2)).origin, Point::new(0.0, 0.0));
 }
 
 /// Equal depth compares only the latest rank; below it, declaration

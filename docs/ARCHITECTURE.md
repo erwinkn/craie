@@ -353,8 +353,16 @@ layout pass runs only when the layout queue is non-empty or the
 viewport changed, so an unchanged frame does zero layouts. React
 Native defaults hold natively: a node with no style, a partial style,
 or a reset style is a flex column whose children do not shrink
-(`flexShrink: 0`; `host::default_style`). Cold layout
-of 10k nodes costs 217 to 567 ms; one streaming append costs 0.65 ms.
+(`flexShrink: 0`; `host::default_style`). Borders take layout space
+as in CSS (`box-sizing: border-box`) and React Native (D164): a box
+lays out the border it paints, per side (its sides, falling back to the
+uniform `borderWidth`), whatever its color. `Ui::set_layout`, the one
+writer of layout rows, writes the row's border from the paint, and a
+change to the border width or the sides writes the row again, so
+variants of `borderWidth` lay out too; the style record's own border
+(bit 14) is decoded and never read, and the bridge no longer sends it.
+Cold layout of 10k nodes costs 217 to 567 ms; one streaming append
+costs 0.65 ms.
 
 The engine: `compute_flex`, `compute_leaf`, `compute_hidden`,
 `compute_root`, and `compute_cached` over a `LayoutTree` that
@@ -797,7 +805,8 @@ ones after it, under its content. Their rects are reserved in paint
 order and written after the kind's own paint slots, which keep their
 numbers. A shadow list rebuilds the chunk; it does not tween.
 Borders per side (protocol 18, `border.rs`) paint instead of the uniform
-border, inside the border box over the fill, after inset shadows. A side
+border, inside the border box over the fill, after inset shadows, and
+take their widths of layout space (§4). A side
 the app didn't set resolves from the uniform border as it draws: its
 width from the border width, its color as the border's own paint slot,
 so variants and animations of `borderColor` and `borderWidth` reach it

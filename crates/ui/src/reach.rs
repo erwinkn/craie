@@ -441,16 +441,21 @@ mod tests {
     }
 
     /// A clip that moves inside a box that does not: C's bottom border
-    /// is a percentage of its parent's width, so narrowing the parent
-    /// lowers C's clip (C clips y only) until it reaches C's child G,
-    /// which sticks out to the right. G's part of C's reach goes from
-    /// nothing to the box right of C. Only the layout pass sees it.
+    /// narrows, which lowers C's clip (C clips y only) until it reaches
+    /// C's child G, which sticks out to the right. G's part of C's reach
+    /// goes from nothing to the box right of C. Only the layout pass
+    /// sees it.
     #[test]
     fn index_follows_a_clip_that_moves_alone() {
         let px = |v: f32| taffy::Dimension::length(v);
-        let parent = |w: f32| taffy::Style {
+        let bottom = |w: f32| crate::border::BorderSides {
+            widths: [0.0, 0.0, w, 0.0],
+            colors: [0; 4],
+            fallback: 0,
+        };
+        let parent = taffy::Style {
             size: taffy::Size {
-                width: px(w),
+                width: px(400.0),
                 height: px(200.0),
             },
             ..taffy::Style::default()
@@ -459,10 +464,6 @@ mod tests {
             size: taffy::Size {
                 width: px(100.0),
                 height: px(100.0),
-            },
-            border: taffy::Rect {
-                bottom: taffy::LengthPercentage::percent(0.1),
-                ..taffy::Rect::zero()
             },
             overflow: taffy::Point {
                 x: taffy::Overflow::Visible,
@@ -485,9 +486,12 @@ mod tests {
         };
         let mut t = Transaction::new(1);
         t.create(0, NodeKind::View)
-            .layout(0, &parent(400.0))
+            .layout(0, &parent)
             .append(NIL, 0);
-        t.create(1, NodeKind::View).layout(1, &c).append(0, 1);
+        t.create(1, NodeKind::View)
+            .layout(1, &c)
+            .border_sides(1, bottom(40.0))
+            .append(0, 1);
         t.create(2, NodeKind::View).layout(2, &g).append(1, 2);
         let mut ui = Ui::new(1.0);
         ui.apply_txn(&t).unwrap();
@@ -495,7 +499,7 @@ mod tests {
         // A 40 pt border: C clips above y = 60, and G starts at 70.
         assert_eq!(ui.hit_test(150.0, 75.0), Some(NodeId(0)));
         let mut t = Transaction::new(2);
-        t.layout(0, &parent(200.0));
+        t.border_sides(1, bottom(20.0));
         ui.apply_txn(&t).unwrap();
         ui.layout(VIEW);
         // 20 pt: C clips above y = 80, and G shows from 70 to 80.

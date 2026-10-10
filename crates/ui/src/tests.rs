@@ -126,12 +126,6 @@ fn nested_insets_accumulate_once() {
         top: taffy::LengthPercentage::length(20.0),
         bottom: taffy::LengthPercentage::length(0.0),
     };
-    outer.border = taffy::Rect {
-        left: taffy::LengthPercentage::length(3.0),
-        right: taffy::LengthPercentage::length(0.0),
-        top: taffy::LengthPercentage::length(4.0),
-        bottom: taffy::LengthPercentage::length(0.0),
-    };
     let st1 = t.style(&outer);
     let mut inner = taffy::Style::default();
     inner.display = taffy::Display::Flex;
@@ -144,6 +138,15 @@ fn nested_insets_accumulate_once() {
     let st2 = t.style(&inner);
     t.create(0, NodeKind::View);
     t.push(Mutation::Layout { id: 0, style: st1 });
+    // Its painted border lays out: 4 on top, 3 on the left.
+    t.border_sides(
+        0,
+        crate::border::BorderSides {
+            widths: [4.0, 0.0, 0.0, 3.0],
+            colors: [0; 4],
+            fallback: 0,
+        },
+    );
     t.place(NIL, 0, NIL);
     t.create(1, NodeKind::View);
     t.push(Mutation::Layout { id: 1, style: st2 });

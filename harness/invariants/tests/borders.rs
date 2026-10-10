@@ -394,3 +394,36 @@ fn mixed_colors_keep_their_rounded_corners() {
     assert_eq!(px(&four, 47, 32), [0, 0, 255, 255]);
     assert_eq!(px(&four, 32, 47), [0, 255, 0, 255]);
 }
+
+/// Borders take layout space (D164): a child that fills a box with a
+/// divider stops above it, so its fill leaves the line showing.
+#[test]
+fn a_childs_fill_leaves_the_divider() {
+    let sides = BorderSides {
+        widths: [0.0, 0.0, 1.0, 0.0],
+        colors: [RED; 4],
+        fallback: 0,
+    };
+    let img = scene(32.0, 32.0, Some(sides), None, 0.0, |ui| {
+        let mut t = Transaction::new(ui.seq + 1);
+        let grow = taffy::Style {
+            flex_grow: 1.0,
+            ..Default::default()
+        };
+        t.create(2, NodeKind::View)
+            .layout(2, &grow)
+            .fill(2, 0x0000_ffff)
+            .append(1, 2);
+        ui.apply_txn(&t).unwrap();
+    });
+    if img.is_empty() {
+        eprintln!("no GPU adapter: skipped");
+        return;
+    }
+    assert_eq!(px(&img, 32, 47), RED_PX, "the divider");
+    assert_eq!(
+        px(&img, 32, 46),
+        [0, 0, 255, 255],
+        "the child's fill above it"
+    );
+}

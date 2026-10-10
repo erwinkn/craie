@@ -376,6 +376,13 @@ impl LayoutRow {
         self.set_lp_slot(PADDING_B, value.bottom);
     }
 
+    pub fn set_border(&mut self, value: Rect<LengthPercentage>) {
+        self.set_lp_slot(BORDER_L, value.left);
+        self.set_lp_slot(BORDER_R, value.right);
+        self.set_lp_slot(BORDER_T, value.top);
+        self.set_lp_slot(BORDER_B, value.bottom);
+    }
+
     pub fn set_gap(&mut self, value: Size<LengthPercentage>) {
         self.set_lp_slot(GAP_W, value.width);
         self.set_lp_slot(GAP_H, value.height);

@@ -5,10 +5,13 @@
 //! a field that the row loses shows up as a difference.
 //!
 //! Leaves are empty views. Their measure is zero on both sides, so the
-//! test does not depend on text or vector measurement.
+//! test does not depend on text or vector measurement. A node's border
+//! is the one it paints, so the test paints each style's border as
+//! transparent sides.
 
 use craie_core::geom::{Rect, Size};
 use craie_core::rng::Rng;
+use craie_harness::painted_border;
 use craie_ui::host::NodeId;
 use craie_ui::layout::LayoutData;
 use craie_ui::mutation::{NIL, NodeKind, Transaction};
@@ -122,6 +125,7 @@ fn assert_same_layout(tree: &Tree, label: &str) -> Ui {
         let id = i as u32 + 1;
         t.create(id, NodeKind::View)
             .layout(id, style)
+            .border_sides(id, painted_border(style))
             .append(*parent, id);
     }
     let mut ui = Ui::new(2.0);
@@ -241,11 +245,12 @@ fn gen_style(rng: &mut Rng) -> Style {
             top: gen_lp(rng),
             bottom: gen_lp(rng),
         },
+        // Borders are the painted widths (lengths, as React Native's).
         border: taffy::Rect {
-            left: gen_lp(rng),
-            right: gen_lp(rng),
-            top: gen_lp(rng),
-            bottom: gen_lp(rng),
+            left: LengthPercentage::length(gen_length(rng).max(0.0)),
+            right: LengthPercentage::length(gen_length(rng).max(0.0)),
+            top: LengthPercentage::length(gen_length(rng).max(0.0)),
+            bottom: LengthPercentage::length(gen_length(rng).max(0.0)),
         },
         inset: taffy::Rect {
             left: gen_lpa(rng),

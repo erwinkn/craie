@@ -4,7 +4,7 @@
 //! anchoring holds the top visible item (or the end) in place.
 
 use craie_core::geom::Size;
-use craie_harness::ListDriver;
+use craie_harness::{ListDriver, painted_border};
 use craie_ui::host::NodeId;
 use craie_ui::mutation::{Anchor, ItemDesc, NIL, NodeKind, Transaction};
 use craie_ui::ui::Ui;
@@ -181,6 +181,7 @@ fn oracle_with(list_style: taffy::Style, what: &str, expect_exact: bool) {
         .append(NIL, SCROLLER);
     t.create(LIST, NodeKind::List)
         .layout(LIST, &list_style)
+        .border_sides(LIST, painted_border(&list_style))
         .list_config(LIST, 100.0, 20.0, &[d.template()])
         .list_splice(LIST, 0, 0, &(0..n).map(desc).collect::<Vec<_>>())
         .append(SCROLLER, LIST);
@@ -207,6 +208,7 @@ fn oracle_with(list_style: taffy::Style, what: &str, expect_exact: bool) {
         .append(NIL, SCROLLER);
     t.create(LIST, NodeKind::View)
         .layout(LIST, &list_style)
+        .border_sides(LIST, painted_border(&list_style))
         .append(SCROLLER, LIST);
     for i in 0..n {
         t.create(100 + i, NodeKind::Text)
