@@ -148,10 +148,11 @@ enum Touch {
 
 /// An identity edit recorded against the host's sequence.
 enum Edit {
-    /// Items `at..at + removed.len()` became `inserted` (`fresh`: the
-    /// same identities, sorted).
+    /// Items `at..at + remove` became `inserted` (`removed`: the removed
+    /// identities, NIL dropped; `fresh`: the inserted ones, sorted).
     Splice {
         at: u32,
+        remove: u32,
         removed: IdIndex,
         inserted: Vec<u32>,
         fresh: IdIndex,
@@ -192,7 +193,7 @@ impl Touch {
             match e {
                 Edit::Splice {
                     at,
-                    removed,
+                    remove,
                     inserted,
                     ..
                 } => {
@@ -203,7 +204,7 @@ impl Touch {
                     if i < at + k {
                         return inserted[(i - at) as usize];
                     }
-                    i = i - k + removed.len() as u32;
+                    i = i - k + remove;
                 }
                 &Edit::Move(from, count, to) => {
                     i = if (to..to + count).contains(&i) {
@@ -246,11 +247,11 @@ impl Touch {
             match e {
                 Edit::Splice {
                     at,
-                    removed,
+                    remove,
                     inserted,
                     ..
                 } => {
-                    let range = at as usize..at as usize + removed.len();
+                    let range = at as usize..(at + remove) as usize;
                     ids.splice(range, inserted);
                 }
                 Edit::Move(f, c, t) => {
@@ -310,6 +311,7 @@ impl Touch {
                 *len = next as u32;
                 let e = Edit::Splice {
                     at,
+                    remove,
                     removed,
                     inserted,
                     fresh,
