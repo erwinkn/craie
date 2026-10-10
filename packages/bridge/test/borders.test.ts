@@ -61,3 +61,21 @@ test("widths native would reject are clamped", async () => {
   await tick()
   expect(t.take().find(o => o.tag === PAINT)!.sides!.widths).toEqual([0, 0, 4096, 0])
 })
+
+test("a borderWidth inside style is reported once: native lays out the painted border", async () => {
+  const t = new FakeTransport()
+  const root = createRoot(t)
+  const errors = console.error
+  const logged: string[] = []
+  console.error = (m: string) => logged.push(m)
+  const style = { borderWidth: 2, width: 10 } as any
+  try {
+    root.renderSync(createElement(View, { style }))
+    await tick()
+    root.renderSync(createElement(View, { style: { ...style, width: 20 } }))
+    await tick()
+  } finally {
+    console.error = errors
+  }
+  expect(logged).toEqual(["craie: style.borderWidth is ignored: pass borderWidth as a prop of the View, not inside style"])
+})
