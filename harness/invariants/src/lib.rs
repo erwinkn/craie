@@ -20,6 +20,18 @@ use craie_ui::host::{NodeId, Parts, ROOT};
 use craie_ui::mutation::{Mutation, NIL, NodeKind, Role, SpatialPatch, TextSpan, Transaction};
 use craie_ui::ui::Ui;
 
+/// `style`'s border as the node's painted sides (transparent), for
+/// tests that build layouts from `taffy::Style`: the border a node lays
+/// out is the one it paints. Lengths only, as React Native's.
+pub fn painted_border(style: &taffy::Style) -> craie_ui::border::BorderSides {
+    let w = style.border.map(|w| w.into_raw().value());
+    craie_ui::border::BorderSides {
+        widths: [w.top, w.right, w.bottom, w.left],
+        colors: [0; 4],
+        fallback: 0,
+    }
+}
+
 /// Host spans as transaction spans: family indices move from the host's
 /// family table to the transaction's.
 pub fn txn_spans(
