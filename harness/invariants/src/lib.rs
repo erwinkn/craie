@@ -10,6 +10,7 @@
 
 pub mod e01;
 pub mod flex_oracle;
+pub mod json;
 
 use std::collections::BTreeMap;
 
@@ -1199,19 +1200,19 @@ impl Gen {
     }
 }
 
-/// The identity index oracle: every list's index equals a fresh sorted
-/// projection of its items' non-NIL identities, which are unique.
+/// The identity index oracle: every list's index equals a fresh one
+/// built from its items' non-NIL identities, which are unique.
 pub fn check_list_index(ui: &Ui) -> Result<(), String> {
     for i in 0..ui.host.slot_count() as u32 {
         let Some(l) = ui.host.lists.get(i) else {
             continue;
         };
-        let fresh = craie_ui::list::IdIndex::build(l.items.iter().map(|d| d.id));
-        if fresh.has_duplicates() {
+        if craie_ui::list::IdIndex::build(l.items.iter().map(|d| d.id)).has_duplicates() {
             return Err(format!("list {i}: duplicate identities"));
         }
-        if fresh != l.ids {
-            let (a, b) = (l.ids.as_slice(), fresh.as_slice());
+        let fresh = craie_ui::list::ItemIndex::build(l.items.iter().map(|d| d.id));
+        if fresh != l.index {
+            let (a, b) = (l.index.as_slice(), fresh.as_slice());
             let k = a
                 .iter()
                 .zip(b)

@@ -393,6 +393,14 @@ impl Item {
         self.flags & Self::LOADED != 0
     }
 
+    /// Whether `other` shows the same content: the same version, loaded
+    /// and failed state. A measurement holds only while it does (the
+    /// kit's rule); a new estimate alone applies while unmeasured.
+    pub fn same_content(&self, other: &Item) -> bool {
+        let state = Self::LOADED | Self::FAILED;
+        self.version == other.version && self.flags & state == other.flags & state
+    }
+
     /// The numeric estimate, if it has one.
     pub fn size(&self) -> Option<f32> {
         (self.flags & Self::NUMERIC != 0).then(|| f32::from_bits(self.arg))
@@ -456,8 +464,10 @@ impl Item {
 #[derive(Clone, Debug, PartialEq)]
 pub enum Template {
     Fixed(f32),
-    /// (minimum width, size) bands, by increasing width: the last band
-    /// whose minimum the width reaches, else the first.
+    /// (minimum width, size) bands, in any order: the band with the
+    /// largest minimum the width reaches, else the one with the smallest
+    /// minimum; on equal minimums, the larger size. No band: the list's
+    /// fallback.
     Widths(Vec<(f32, f32)>),
     /// `base + line_height × max(1, ceil(text length × font_size ×
     /// char_width / (width − inset)))`.
@@ -480,16 +490,24 @@ impl Template {
         }
     }
 
-    /// The estimate of an item with text length `len` at `width`.
-    pub fn estimate(&self, len: u32, width: f32) -> f32 {
+    /// The estimate of an item with text length `len` at `width`; `None`
+    /// for a band template without bands.
+    pub fn estimate(&self, len: u32, width: f32) -> Option<f32> {
         match self {
-            Template::Fixed(s) => *s,
-            Template::Widths(bands) => bands
-                .iter()
-                .rev()
-                .find(|b| width >= b.0)
-                .or(bands.first())
-                .map_or(0.0, |b| b.1),
+            Template::Fixed(s) => Some(*s),
+            Template::Widths(bands) => {
+                // By minimum, then size: the last band the width
+                // reaches, else the last of those with the first minimum.
+                let order = |a: &&(f32, f32), b: &&(f32, f32)| {
+                    a.0.total_cmp(&b.0).then(a.1.total_cmp(&b.1))
+                };
+                let reached = bands.iter().filter(|b| width >= b.0).max_by(order);
+                let narrowest = || {
+                    let min = bands.iter().min_by(order)?.0;
+                    bands.iter().filter(|b| b.0 == min).max_by(order)
+                };
+                reached.or_else(narrowest).map(|b| b.1)
+            }
             Template::Text {
                 base,
                 inset,
@@ -497,11 +515,15 @@ impl Template {
                 line_height,
                 char_width,
             } => {
-                let advance = font_size * char_width;
-                // A column narrower than one character holds one a line.
-                let avail = (width - inset).max(advance).max(f32::MIN_POSITIVE);
-                let lines = (len as f32 * advance / avail).ceil().max(1.0);
-                base + line_height * lines
+                // In f64, as the kit computes it in JS; no room is one line.
+                let room = width as f64 - *inset as f64;
+                let advance = len as f64 * *font_size as f64 * *char_width as f64;
+                let lines = if room > 0.0 {
+                    (advance / room).ceil().max(1.0)
+                } else {
+                    1.0
+                };
+                Some((*base as f64 + *line_height as f64 * lines) as f32)
             }
         }
     }

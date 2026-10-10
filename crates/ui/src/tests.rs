@@ -1969,8 +1969,9 @@ fn list_identities_are_unique() {
         // The index matches the items after every accepted batch.
         let index_ok = |ui: &Ui| {
             let l = ui.host.lists.get(1).unwrap();
-            let fresh = crate::list::IdIndex::build(l.items.iter().map(|d| d.id));
-            !fresh.has_duplicates() && fresh == l.ids
+            let ids = crate::list::IdIndex::build(l.items.iter().map(|d| d.id));
+            let fresh = crate::list::ItemIndex::build(l.items.iter().map(|d| d.id));
+            !ids.has_duplicates() && fresh == l.index
         };
         assert!(index_ok(&ui));
         // Valid: move id 7 to the front across two splices, repeat NIL.

@@ -688,24 +688,33 @@ container:
   second set of ops beside these, which stay until callers migrate:
   - `LIST_CONFIG2` (0x94): overscan, lookahead, retain, fallback, a
     template epoch (a new one drops every measurement), and the
-    contract's templates (fixed, width bands, text at the kit's
-    formula).
+    contract's templates (fixed, width bands in any order, text at the
+    kit's formula). Both sides hold to the shared estimate fixture,
+    `packages/bridge/traces/estimates.json`.
   - `LIST_PATCH` (0x95): splice, move and update ops against a base
     revision, taking the list to the next one. Items are 16-byte
     descriptors (identity, version token, template, loaded and failed
     flags, a numeric estimate or a text length). A measurement holds
-    while its item keeps identity and version: through moves, and
-    through a splice that removes and re-inserts it. A patch whose base
+    while its item keeps identity, version, loaded and failed state (the
+    kit's rule): through moves, and through a splice that removes and
+    re-inserts it; a new estimate alone applies while the item is
+    unmeasured. A patch whose base
     isn't the list's revision is skipped, not an error, with a reliable
     `LIST_RESYNC` event (the list's revision, the patch's base); its ops
     are only checked for form, since they were made for another list.
     Validation follows the batch: ranges against the list as earlier
     ops leave it, identities unique, an update's identities those in
-    its place. The first edit of a batch checks against the host's
-    sequence and index; a second materializes the sequence once.
+    its place. Later edits of a batch read through the earlier ones
+    instead of copying the list: an identity at an index maps back
+    through each edit to the host's items, and an identity's presence
+    forward from the host's index, so an append and an update cost
+    O(k log n). Past 32 edits on one list, validation copies the
+    sequence once.
   - `LIST_ROW2` (0x96): tags a row with an item identity and version.
     The row follows its item through patches (its index resolves after
-    each patch and when tagged; it hides once the item is gone), and
+    each patch and when tagged, from the list's identity index, sorted
+    (identity, index) pairs that edits keep exact at their own cost; it
+    hides once the item is gone), and
     measures only while the item is at that version: a row rendered for
     older content is placed at the item's extent but records nothing,
     and a patch to other items needs no new tags. `LIST_INDEX` clears a

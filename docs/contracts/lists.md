@@ -135,6 +135,11 @@ interface ListViewport {                    // on demand, through readViewport
 }
 ```
 
+- **Width bands** come in any order. The band with the largest minimum
+  the column width reaches applies, else the one with the smallest
+  minimum; on equal minimums, the larger size. With no band, the list's
+  fallback. The shared fixture `packages/bridge/traces/estimates.json`
+  holds both implementations to this and to the text formula below.
 - **Text templates in JS.** Web and React Native can't shape a sample, so a
   `text` template's estimate in JS is
   `base + lineHeight × max(1, ceil(textLength × fontSize × charWidth / (width − inset)))`.
@@ -344,10 +349,13 @@ stays the one source of truth, and the list never flips `loaded` itself.
     holds, then any unchanged visible row, then the first visible place.
   - An explicit jump wins until reader input; end-follow wins when active.
   - `focus` policy first holds a visible focused row that survived.
-- **Measurement validity.** A measurement holds for (key, version, column
-  width, template epoch); a move keeps it. An `update` invalidates the
-  item's measurement, offscreen too: it takes the new estimate until laid
-  out. On a width change, every measured offscreen row takes its estimate
+- **Measurement validity.** A measurement holds for (key, version,
+  loaded, failed, column width, template epoch); a move keeps it, and so
+  does a splice that re-inserts the key unchanged. An `update` that
+  changes the version, loaded or failed state invalidates the item's
+  measurement, offscreen too: it takes the new estimate until laid out.
+  An `update` of the estimate alone applies while the item is
+  unmeasured. On a width change, every measured offscreen row takes its estimate
   again, on both sides (the kit's web list now does this too).
 - **Atomic batches.** A commit's ops apply as one batch against pre-change
   geometry. `followKey` and end jumps apply after the batch, before

@@ -56,10 +56,10 @@ const enum Op {
   ListConfig = 0x90,
   ListSplice = 0x91,
   ListIndex = 0x92,
+  ScrollAnchor = 0x93,
   ListConfig2 = 0x94,
   ListPatch = 0x95,
   ListRow2 = 0x96,
-  ScrollAnchor = 0x93,
   // animation
   Transition = 0xa0,
   Animate = 0xa1,
@@ -266,11 +266,10 @@ export interface ListTemplate {
   inset?: number
   fontSize?: number
 }
-/** An item's description for native estimates: its template and text
- * length in characters. `id` is the item's identity (the bridge interns
- * the item's key); NIL for none. */
 /** An estimate template of the lists contract (`docs/contracts/lists.md`)
- * — mirror mutation.rs `Template`. */
+ * — mirror mutation.rs `Template`. Width bands may come in any order:
+ * the band with the largest minimum the width reaches applies, else the
+ * one with the smallest minimum (the larger size on equal minimums). */
 export type EstimateTemplate =
   | { kind: "fixed"; size: number }
   | { kind: "widths"; bands: readonly (readonly [minWidth: number, size: number])[] }
@@ -308,6 +307,9 @@ const ITEM_FLAG = { loaded: 1, numeric: 2, failed: 4 } as const
 const TEMPLATE_KIND = { fixed: 0, widths: 1, text: 2 } as const
 const PATCH_OP = { splice: 0, move: 1, update: 2 } as const
 
+/** An item's description for native estimates: its template and text
+ * length in characters. `id` is the item's identity (the bridge interns
+ * the item's key); NIL for none. */
 export interface ItemDesc {
   template?: number
   textLength?: number

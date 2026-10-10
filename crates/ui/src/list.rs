@@ -116,6 +116,94 @@ impl IdIndex {
     }
 }
 
+/// Each item's index by identity (NIL excluded): (id, index) pairs
+/// sorted by id, so a row tagged by item finds its place in O(log n).
+/// Edits keep it exact at their own cost: an append adds its pairs, in
+/// O(k) when its ids sort after every other (the bridge interns keys in
+/// order), and an edit that shifts items, already O(n) in the extents,
+/// renumbers them in one pass. Sorted, not hashed, as `IdIndex`. 8 bytes
+/// per item.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ItemIndex(Vec<(u32, u32)>);
+
+impl ItemIndex {
+    /// The index of `ids`, item by item.
+    pub fn build(ids: impl IntoIterator<Item = u32>) -> ItemIndex {
+        let mut v: Vec<(u32, u32)> = (ids.into_iter().zip(0..)).filter(|p| p.0 != NIL).collect();
+        v.sort_unstable();
+        ItemIndex(v)
+    }
+
+    /// The index of the item with identity `id`.
+    pub fn get(&self, id: u32) -> Option<u32> {
+        let p = self.0.binary_search_by_key(&id, |p| p.0).ok()?;
+        Some(self.0[p].1)
+    }
+
+    pub fn contains(&self, id: u32) -> bool {
+        self.get(id).is_some()
+    }
+
+    /// (identity, index) pairs, by identity.
+    pub fn as_slice(&self) -> &[(u32, u32)] {
+        &self.0
+    }
+
+    /// Items `at..at + removed.len()`, identities `removed`, of a list
+    /// of `len` become `added`.
+    pub fn splice(&mut self, len: u32, at: u32, removed: &[u32], added: &[u32]) {
+        let end = at + removed.len() as u32;
+        let shift = added.len() as i64 - removed.len() as i64;
+        if shift != 0 && end < len {
+            for p in self.0.iter_mut().filter(|p| p.1 >= end) {
+                p.1 = (p.1 as i64 + shift) as u32;
+            }
+        }
+        let gone = IdIndex::build(removed.iter().copied());
+        if gone.len() <= 16 {
+            for &id in gone.as_slice() {
+                if let Ok(p) = self.0.binary_search_by_key(&id, |p| p.0) {
+                    self.0.remove(p);
+                }
+            }
+        } else {
+            self.0.retain(|p| !gone.contains(p.0));
+        }
+        let mut new: Vec<(u32, u32)> = (added.iter().copied().zip(at..))
+            .filter(|p| p.0 != NIL)
+            .collect();
+        new.sort_unstable();
+        if self
+            .0
+            .last()
+            .is_none_or(|l| new.first().is_none_or(|f| f.0 > l.0))
+        {
+            self.0.extend(new);
+        } else if new.len() <= 16 {
+            for p in new {
+                let at = self.0.partition_point(|q| q.0 < p.0);
+                self.0.insert(at, p);
+            }
+        } else {
+            let old = std::mem::take(&mut self.0);
+            self.0.reserve(old.len() + new.len());
+            let (mut a, mut b) = (old.into_iter().peekable(), new.into_iter().peekable());
+            while let (Some(x), Some(y)) = (a.peek(), b.peek()) {
+                let next = if x.0 < y.0 { a.next() } else { b.next() };
+                self.0.extend(next);
+            }
+            self.0.extend(a.chain(b));
+        }
+    }
+
+    /// Items `from..from + count` move to `to` (`moved_index`).
+    pub fn move_items(&mut self, from: u32, count: u32, to: u32) {
+        for p in &mut self.0 {
+            p.1 = moved_index(p.1, from, count, to);
+        }
+    }
+}
+
 /// Sample text for per-size metrics: a mix of letters, digits, and
 /// spaces close to running prose.
 const SAMPLE: &str = "The quick brown fox jumps over the lazy dog, 0123456789 times.";
@@ -135,13 +223,9 @@ pub struct ListState {
     /// Measurements are stale (a new epoch): the next estimate drops them.
     pub forget: bool,
     pub items: Vec<Item>,
-    /// The identities in `items` (NIL excluded): each appears once, which
-    /// validation checks against this index.
-    pub ids: IdIndex,
-    /// (identity, index) by identity, for rows tagged by item; rebuilt on
-    /// demand after the items change.
-    positions: Vec<(u32, u32)>,
-    positions_ok: bool,
+    /// Each identity's index in `items` (NIL excluded): each appears
+    /// once, which validation checks against this index.
+    pub index: ItemIndex,
     pub extents: Extents,
     /// Extra distance rendered beyond the viewport, each side (logical
     /// points).
@@ -178,9 +262,7 @@ impl Default for ListState {
             epoch: 0,
             forget: false,
             items: Vec::new(),
-            ids: IdIndex::default(),
-            positions: Vec::new(),
-            positions_ok: false,
+            index: ItemIndex::default(),
             extents: Extents::new(),
             overscan: 0.0,
             fallback: 0.0,
@@ -203,30 +285,6 @@ impl ListState {
 
     pub fn is_empty(&self) -> bool {
         self.items.is_empty()
-    }
-
-    /// The index of the item with identity `id`. O(log n), after an
-    /// O(n log n) rebuild when the items changed.
-    pub fn index_of(&mut self, id: u32) -> Option<u32> {
-        if id == NIL {
-            return None;
-        }
-        if !self.positions_ok {
-            self.positions.clear();
-            self.positions.extend(
-                self.items
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, d)| d.id != NIL)
-                    .map(|(i, d)| (d.id, i as u32)),
-            );
-            self.positions.sort_unstable();
-            self.positions_ok = true;
-        }
-        self.positions
-            .binary_search_by_key(&id, |p| p.0)
-            .ok()
-            .map(|p| self.positions[p].1)
     }
 
     /// Offset of item `i` in the list's content, gaps included.
@@ -293,10 +351,10 @@ impl Lists {
 
     /// The item index row `row` stands for by its tag, if it has one: the
     /// index of the tagged item in its list (NIL once the item is gone).
-    pub(crate) fn tagged_index(&mut self, row: u32) -> Option<u32> {
+    pub(crate) fn tagged_index(&self, row: u32) -> Option<u32> {
         let tag = *self.rows.get(&row)?;
-        let l = self.map.get_mut(&tag.list);
-        Some(l.and_then(|l| l.index_of(tag.item)).unwrap_or(NIL))
+        let l = self.map.get(&tag.list);
+        Some(l.and_then(|l| l.index.get(tag.item)).unwrap_or(NIL))
     }
 
     /// Whether row `row`, at item index `index` of list `list`, may
@@ -500,7 +558,7 @@ impl Lists {
             .collect();
         let gone: Vec<u32> = l.items[range.clone()].iter().map(|d| d.id).collect();
         let added: Vec<u32> = new.iter().map(|(d, _)| d.id).collect();
-        l.ids.update(&gone, &added);
+        l.index.splice(l.items.len() as u32, at, &gone, &added);
         // Where each saved anchor's item went: its new place if the
         // splice re-inserted it, else the splice start.
         let anchor_to = |old: u32| {
@@ -526,7 +584,6 @@ impl Lists {
         if !width.is_finite() {
             l.stale = true;
         }
-        l.positions_ok = false;
         l.resend = true;
     }
 
@@ -541,7 +598,7 @@ impl Lists {
             match op {
                 ListOp::Splice { at, remove, items } => {
                     let new: Vec<(Item, bool)> = Item::iter(items).map(|d| (d, false)).collect();
-                    let keep = |before: &Item, after: &Item, _| before.version == after.version;
+                    let keep = |before: &Item, after: &Item, _| before.same_content(after);
                     self.replace(&est, id, *at, *remove, &new, keep);
                 }
                 ListOp::Move { from, count, to } => self.move_items(id, *from, *count, *to),
@@ -551,9 +608,9 @@ impl Lists {
                     for (k, d) in Item::iter(items).enumerate() {
                         let i = *at as usize + k;
                         let before = std::mem::replace(&mut l.items[i], d);
-                        // A new version may lay out differently: it takes
+                        // New content may lay out differently: it takes
                         // its new estimate until its row measures it.
-                        if before.version != d.version || !l.extents.is_measured(i) {
+                        if !before.same_content(&d) || !l.extents.is_measured(i) {
                             let e = if width.is_finite() {
                                 est.of(&d, width)
                             } else {
@@ -588,10 +645,10 @@ impl Lists {
             .collect();
         l.extents.splice_items(f..f + c, []);
         l.extents.splice_items(t..t, ext);
+        l.index.move_items(from, count, to);
         for s in self.saved.values_mut().filter(|s| s.list == id) {
             s.index = moved_index(s.index, from, count, to);
         }
-        l.positions_ok = false;
         l.resend = true;
     }
 
@@ -667,9 +724,9 @@ impl Estimator {
         if let Some((tpl, m)) = self.v1.get(t) {
             return estimate(tpl, *m, d.arg, width);
         }
-        self.v2
-            .get(t)
-            .map_or(self.fallback, |tpl| tpl.estimate(d.arg, width))
+        (self.v2.get(t))
+            .and_then(|tpl| tpl.estimate(d.arg, width))
+            .unwrap_or(self.fallback)
     }
 }
 

@@ -55,3 +55,23 @@ for (const file of files) {
     }
   })
 }
+
+// The shared estimate fixture: templates as `EstimateTemplate`, the
+// column width, the text length, and the size (null: the fallback).
+test("estimates.json follows craie-list-estimates/1", () => {
+  const doc = JSON.parse(readFileSync(new URL("../traces/estimates.json", import.meta.url), "utf8"))
+  only("top level", doc, ["format", "about", "cases"])
+  expect(doc.format).toBe("craie-list-estimates/1")
+  const TEMPLATE: Record<string, string[]> = {
+    fixed: ["kind", "size"], widths: ["kind", "bands"],
+    text: ["kind", "base", "inset", "fontSize", "lineHeight", "charWidth"],
+  }
+  for (const c of doc.cases) {
+    only(c.name, c, ["name", "template", "width", "textLength", "size"])
+    only(`${c.name} template`, c.template, TEMPLATE[c.template.kind]!)
+    // Exact in f32, as the wire carries them.
+    const nums = [c.width, c.size ?? 0, ...Object.values(c.template).flat(2).filter(v => typeof v === "number")]
+    for (const v of nums) expect(Math.fround(v), c.name).toBe(v)
+  }
+  expect(doc.cases.filter((c: { template: { kind: string } }) => c.template.kind === "widths").length).toBeGreaterThanOrEqual(28)
+})

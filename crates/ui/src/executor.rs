@@ -49,15 +49,12 @@ fn length_ok(v: f32) -> bool {
 /// Largest accepted retain window, in viewport heights each side.
 const MAX_RETAIN: f32 = 1000.0;
 
-/// Width bands by increasing minimum width, so a width finds its band;
-/// a text template's character width a positive fraction of its size.
+/// Lengths in range, in any band order; a text template's character
+/// width a positive fraction of its size.
 fn template_ok(t: &Template) -> bool {
     match t {
         Template::Fixed(size) => length_ok(*size),
-        Template::Widths(bands) => {
-            bands.iter().all(|b| length_ok(b.0) && length_ok(b.1))
-                && bands.windows(2).all(|w| w[0].0 <= w[1].0)
-        }
+        Template::Widths(bands) => bands.iter().all(|b| length_ok(b.0) && length_ok(b.1)),
         Template::Text {
             base,
             inset,
@@ -133,19 +130,32 @@ fn valid_spans(text: &str, spans: &[TextSpan], families: usize) -> Result<(), Wi
     Ok(())
 }
 
+/// Edits a batch may record on a host list before validation copies its
+/// identity sequence: reading through them costs O(edits) per item.
+const MAX_EDITS: usize = 32;
+
 /// A list the batch edits, as the batch leaves it.
 enum Touch {
-    /// The host's list plus edits recorded (item count after them).
-    /// The first edit checks against the host's items and index; a
-    /// second one on the same list materializes the sequence.
+    /// The host's list plus edits recorded (item count after them). An
+    /// item's identity reads back through the edits to the host's items,
+    /// and an identity's presence forward from the host's index, so a
+    /// batch that appends and updates never copies the list.
     Host { len: u32, edits: Vec<Edit> },
-    /// The whole identity sequence and its index.
+    /// The whole identity sequence and its index: a list created in this
+    /// batch, or one past `MAX_EDITS` edits.
     Seq { ids: Vec<u32>, index: IdIndex },
 }
 
 /// An identity edit recorded against the host's sequence.
 enum Edit {
-    Splice(u32, u32, Vec<u32>),
+    /// Items `at..at + removed.len()` became `inserted` (`fresh`: the
+    /// same identities, sorted).
+    Splice {
+        at: u32,
+        removed: IdIndex,
+        inserted: Vec<u32>,
+        fresh: IdIndex,
+    },
     Move(u32, u32, u32),
 }
 
@@ -175,6 +185,56 @@ impl Touch {
         }
     }
 
+    /// The identity at index `i` of the list as the batch leaves it:
+    /// back through the edits, latest first, to the host's items.
+    fn id_at(edits: &[Edit], base: &crate::list::ListState, mut i: u32) -> u32 {
+        for e in edits.iter().rev() {
+            match e {
+                Edit::Splice {
+                    at,
+                    removed,
+                    inserted,
+                    ..
+                } => {
+                    if i < *at {
+                        continue;
+                    }
+                    let k = inserted.len() as u32;
+                    if i < at + k {
+                        return inserted[(i - at) as usize];
+                    }
+                    i = i - k + removed.len() as u32;
+                }
+                &Edit::Move(from, count, to) => {
+                    i = if (to..to + count).contains(&i) {
+                        from + (i - to)
+                    } else {
+                        let j = if i >= to { i - count } else { i };
+                        if j >= from { j + count } else { j }
+                    };
+                }
+            }
+        }
+        base.items[i as usize].id
+    }
+
+    /// Whether identity `id` is in the list as the batch leaves it: the
+    /// host's index, then each edit in order.
+    fn present(edits: &[Edit], base: &crate::list::ListState, id: u32) -> bool {
+        let mut here = base.index.contains(id);
+        for e in edits {
+            if let Edit::Splice { removed, fresh, .. } = e {
+                if removed.contains(id) {
+                    here = false;
+                }
+                if fresh.contains(id) {
+                    here = true;
+                }
+            }
+        }
+        here
+    }
+
     /// The host's sequence with the recorded edits, once.
     fn materialize(&mut self, base: Option<&crate::list::ListState>) {
         let Touch::Host { edits, .. } = self else {
@@ -184,8 +244,14 @@ impl Touch {
         let mut ids: Vec<u32> = base.items.iter().map(|d| d.id).collect();
         for e in edits.drain(..) {
             match e {
-                Edit::Splice(a, r, ins) => {
-                    ids.splice(a as usize..(a + r) as usize, ins);
+                Edit::Splice {
+                    at,
+                    removed,
+                    inserted,
+                    ..
+                } => {
+                    let range = at as usize..at as usize + removed.len();
+                    ids.splice(range, inserted);
                 }
                 Edit::Move(f, c, t) => {
                     let moved: Vec<u32> = ids.drain(f as usize..(f + c) as usize).collect();
@@ -195,6 +261,19 @@ impl Touch {
         }
         let index = IdIndex::build(ids.iter().copied());
         *self = Touch::Seq { ids, index };
+    }
+
+    /// A host touch past `MAX_EDITS` becomes a sequence.
+    fn record(&mut self, base: Option<&crate::list::ListState>, e: Edit) {
+        match self {
+            Touch::Host { edits, .. } => {
+                edits.push(e);
+                if edits.len() > MAX_EDITS {
+                    self.materialize(base);
+                }
+            }
+            Touch::Seq { .. } => unreachable!("sequences apply edits in place"),
+        }
     }
 
     /// Checks one splice (range, item limit, identities unique across the
@@ -207,7 +286,7 @@ impl Touch {
         at: u32,
         remove: u32,
         inserted: Vec<u32>,
-        fresh: &IdIndex,
+        fresh: IdIndex,
     ) -> Result<(), WireError> {
         let cur = self.len();
         if at > cur || remove > cur - at {
@@ -217,50 +296,53 @@ impl Touch {
         if next > MAX_ITEMS as u64 {
             return Err(invalid("list longer than the item limit"));
         }
-        let range = at as usize..(at + remove) as usize;
-        let clash = |index: &IdIndex, removed: &IdIndex| {
-            fresh
-                .as_slice()
-                .iter()
-                .any(|&i| index.contains(i) && !removed.contains(i))
+        let clash = |present: &dyn Fn(u32) -> bool, removed: &IdIndex| {
+            (fresh.as_slice().iter()).any(|&i| present(i) && !removed.contains(i))
         };
-        if let Touch::Host { edits, .. } = self
-            && edits.is_empty()
-        {
-            // First edit: the host's items and index, unmodified.
-            let base = base.expect("a host touch has a host list");
-            let removed = IdIndex::build(base.items[range].iter().map(|d| d.id));
-            if clash(&base.ids, &removed) {
-                return Err(invalid("duplicate item identity in a list"));
+        match self {
+            Touch::Host { len, edits } => {
+                let base = base.expect("a host touch has a host list");
+                let removed =
+                    IdIndex::build((at..at + remove).map(|i| Self::id_at(edits, base, i)));
+                if clash(&|i| Self::present(edits, base, i), &removed) {
+                    return Err(invalid("duplicate item identity in a list"));
+                }
+                *len = next as u32;
+                let e = Edit::Splice {
+                    at,
+                    removed,
+                    inserted,
+                    fresh,
+                };
+                self.record(Some(base), e);
             }
-            edits.push(Edit::Splice(at, remove, inserted));
-            *self = Touch::Host {
-                len: next as u32,
-                edits: std::mem::take(edits),
-            };
-            return Ok(());
+            Touch::Seq { ids, index } => {
+                let range = at as usize..(at + remove) as usize;
+                let removed = IdIndex::build(ids[range.clone()].iter().copied());
+                if clash(&|i| index.contains(i), &removed) {
+                    return Err(invalid("duplicate item identity in a list"));
+                }
+                index.update(removed.as_slice(), fresh.as_slice());
+                ids.splice(range, inserted);
+            }
         }
-        self.materialize(base);
-        let Touch::Seq { ids, index } = self else {
-            unreachable!()
-        };
-        let removed = IdIndex::build(ids[range.clone()].iter().copied());
-        if clash(index, &removed) {
-            return Err(invalid("duplicate item identity in a list"));
-        }
-        index.update(removed.as_slice(), fresh.as_slice());
-        ids.splice(range, inserted);
         Ok(())
     }
 
     /// Checks one move (both ranges inside the list) and records it.
-    fn move_items(&mut self, from: u32, count: u32, to: u32) -> Result<(), WireError> {
+    fn move_items(
+        &mut self,
+        base: Option<&crate::list::ListState>,
+        from: u32,
+        count: u32,
+        to: u32,
+    ) -> Result<(), WireError> {
         let cur = self.len();
         if from > cur || count > cur - from || to > cur - count {
             return Err(invalid("list move out of range"));
         }
         match self {
-            Touch::Host { edits, .. } => edits.push(Edit::Move(from, count, to)),
+            Touch::Host { .. } => self.record(base, Edit::Move(from, count, to)),
             Touch::Seq { ids, .. } => {
                 let moved: Vec<u32> = ids.drain(from as usize..(from + count) as usize).collect();
                 ids.splice(to as usize..to as usize, moved);
@@ -270,9 +352,10 @@ impl Touch {
     }
 
     /// Checks one update: in range, and the same identities in the same
-    /// places (an update never changes the sequence).
+    /// places (an update never changes the sequence, so it records
+    /// nothing).
     fn update(
-        &mut self,
+        &self,
         base: Option<&crate::list::ListState>,
         at: u32,
         updated: &[u32],
@@ -281,22 +364,14 @@ impl Touch {
         if at > cur || updated.len() as u64 > (cur - at) as u64 {
             return Err(invalid("list update out of range"));
         }
-        let range = at as usize..at as usize + updated.len();
         let same = match self {
-            Touch::Host { edits, .. } if edits.is_empty() => {
+            Touch::Host { edits, .. } => {
                 let base = base.expect("a host touch has a host list");
-                base.items[range]
-                    .iter()
-                    .map(|d| d.id)
-                    .eq(updated.iter().copied())
+                (at..)
+                    .zip(updated)
+                    .all(|(i, &id)| Self::id_at(edits, base, i) == id)
             }
-            _ => {
-                self.materialize(base);
-                let Touch::Seq { ids, .. } = self else {
-                    unreachable!()
-                };
-                ids[range] == *updated
-            }
+            Touch::Seq { ids, .. } => ids[at as usize..at as usize + updated.len()] == *updated,
         };
         if !same {
             return Err(invalid("list update changes item identities"));
@@ -830,7 +905,7 @@ pub fn validate(host: &Host, txn: &Transaction<'_>) -> Result<Validated, WireErr
                 }
                 let base = host.lists.get(*id);
                 let touch = lists.entry(*id).or_insert_with(|| Touch::of(base));
-                touch.splice(base, *at, *remove, inserted, &fresh)?;
+                touch.splice(base, *at, *remove, inserted, fresh)?;
                 let rev = revisions
                     .entry(*id)
                     .or_insert_with(|| base.map_or(0, |l| l.revision));
@@ -897,9 +972,11 @@ pub fn validate(host: &Host, txn: &Transaction<'_>) -> Result<Validated, WireErr
                             if fresh.has_duplicates() {
                                 return Err(invalid("duplicate item identity in a splice"));
                             }
-                            touch.splice(host_list, at, remove, inserted, &fresh)?;
+                            touch.splice(host_list, at, remove, inserted, fresh)?;
                         }
-                        ListOp::Move { from, count, to } => touch.move_items(from, count, to)?,
+                        ListOp::Move { from, count, to } => {
+                            touch.move_items(host_list, from, count, to)?
+                        }
                         ListOp::Update { at, items } => {
                             let updated: Vec<u32> = Item::iter(&items).map(|d| d.id).collect();
                             touch.update(host_list, at, &updated)?;
