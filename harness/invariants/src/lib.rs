@@ -24,6 +24,18 @@ use craie_ui::ui::Ui;
 /// tests that build layouts from `taffy::Style`: the border a node lays
 /// out is the one it paints. Lengths only, as React Native's.
 pub fn painted_border(style: &taffy::Style) -> craie_ui::border::BorderSides {
+    debug_assert!(
+        [
+            style.border.top,
+            style.border.right,
+            style.border.bottom,
+            style.border.left
+        ]
+        .iter()
+        .all(|w| w.into_raw().tag() == taffy::CompactLength::LENGTH_TAG),
+        "a painted border is lengths, not percentages: {:?}",
+        style.border
+    );
     let w = style.border.map(|w| w.into_raw().value());
     craie_ui::border::BorderSides {
         widths: [w.top, w.right, w.bottom, w.left],

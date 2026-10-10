@@ -399,17 +399,21 @@ node before the hit.
   changed since (a transaction or a scroll between frames).
 - A stale node is never pruned: until its refresh, the hit test walks it
   in full. `hit_test_walk` stays as the oracle. A randomized test (12
-  seeds, 24 rounds of random styles with borders and padding,
+  seeds, 24 rounds of random styles with padding, painted borders,
   transforms, moves, removals whose ids are reused at once, and
-  scrolls; 400 points per check, half aimed at box edges and corners;
-  checked before layout, after layout, and after the frame's refresh)
-  asserts they agree. Two more tests cover a million points around
-  boxes squashed up to 100,000-fold, and a clip that moves inside an
-  unchanged box (a percentage border). Deleting any one of the six
-  invalidation hooks (layout's touch, its clip term, `set_spatial`'s,
-  `scroll_to`'s, `mark_layout`'s, and `touch` marking the node itself
-  when it is already stale) fails at least one of the three; the clip
-  term fails only its own test. The harness asserts agreement on every
+  scrolls; 400 points per check, half aimed at box edges and corners,
+  and after a border change on a fresh tree, a check aimed inside the
+  node's children; checked before layout, after layout, and after the
+  frame's refresh) asserts they agree. Two more tests cover a million
+  points around boxes squashed up to 100,000-fold, and a clip that moves
+  inside an unchanged box (a painted border that narrows). Deleting any
+  one of the six invalidation hooks (layout's touch, its clip term,
+  `set_spatial`'s, `scroll_to`'s, `mark_layout`'s, and `touch` marking
+  the node itself when it is already stale) fails the randomized test,
+  except the clip term: a border change goes through `set_layout`, whose
+  `mark_layout` marks the node too, so only dropping both (for borders)
+  fails, and then both the randomized test and the clip test. The
+  harness asserts agreement on every
   tree too.
 
 With the index (µs per event; the walk and the index from the same run;

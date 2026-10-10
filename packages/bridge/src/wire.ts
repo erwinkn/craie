@@ -800,6 +800,15 @@ function canon(v: unknown): string {
 
 const OVERFLOW: Record<string, number> = { visible: 0, clip: 1, hidden: 2, scroll: 3 }
 
+const warned = new Set<string>()
+/** Logs a bad prop once: a typo should not take the app down, nor
+ * flood the console on every render. */
+export function warnOnce(msg: string) {
+  if (warned.has(msg)) return
+  warned.add(msg)
+  console.error(`craie: ${msg}`)
+}
+
 /** The style fields `s` has (`states.rs` `wire::field` bits). */
 function styleMask(s: StyleProps): bigint {
   let mask = 0n
@@ -819,7 +828,9 @@ function styleMask(s: StyleProps): bigint {
   if (s.padding !== undefined) m(12)
   if (s.margin !== undefined) m(13)
   // Bit 14, a layout border, is never sent: a box lays out the border it
-  // paints (`borderWidth` and the sides; D164).
+  // paints (`borderWidth` and the sides; D164). A `borderWidth` inside
+  // `style` is that layout border, and is dropped.
+  if ("borderWidth" in s) warnOnce("style.borderWidth is ignored: pass borderWidth as a prop of the View, not inside style")
   if (s.inset !== undefined || s.left !== undefined || s.right !== undefined
     || s.top !== undefined || s.bottom !== undefined) m(15)
   if (s.flexBasis !== undefined) m(16)

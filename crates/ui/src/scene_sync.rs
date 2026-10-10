@@ -779,7 +779,8 @@ impl Ui {
                 p.radius,
             );
             // An inset shadow is cut inside the painted border (the
-            // fill rect's `border_width`, or the sides), not the layout's.
+            // fill rect's `border_width`, or the sides), as the layout's
+            // border is the painted one (`Ui::set_layout`).
             let border_width = match &sides {
                 Some(s) => std::array::from_fn(|i| {
                     let uniform_clear = p.border_color & 0xFF == 0;

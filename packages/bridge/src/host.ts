@@ -36,6 +36,7 @@ import {
   type SubmitKey,
   layoutPart,
   styleKey,
+  warnOnce,
   partsOf,
   rotateTarget,
   scaleTarget,
@@ -203,14 +204,7 @@ interface Declared {
 
 const APPLE = typeof process !== "undefined" && process.platform === "darwin"
 
-const warned = new Set<string>()
-/** Logs a bad prop once: a typo should not take the app down, nor
- * flood the console on every render. */
-export function warnOnce(msg: string) {
-  if (warned.has(msg)) return
-  warned.add(msg)
-  console.error(`craie: ${msg}`)
-}
+export { warnOnce }
 
 /** Props that claim an event kind, in claim order after the keymap. */
 const CLAIM_PROPS = [

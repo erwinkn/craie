@@ -230,9 +230,7 @@ mod tests {
         }
     }
 
-    /// A border or padding width: fixed, or a percentage of the
-    /// parent's width (so a parent's resize moves a child's clip
-    /// without resizing the child).
+    /// A padding width: fixed, or a percentage of the parent's width.
     fn edge(rng: &mut Rng) -> taffy::LengthPercentage {
         match rng.below(3) {
             0 => taffy::LengthPercentage::length(0.0),
@@ -250,9 +248,28 @@ mod tests {
         }
     }
 
+    /// Painted borders on all four sides, each a length: none, or up to
+    /// 16 pt. A node lays out the border it paints, so these move its
+    /// clip (the padding box) and its content, not its box.
+    fn sides(rng: &mut Rng) -> crate::border::BorderSides {
+        let mut side = || {
+            if rng.chance(0.3) {
+                0.0
+            } else {
+                rng.unit() * 16.0
+            }
+        };
+        crate::border::BorderSides {
+            widths: [side(), side(), side(), side()],
+            colors: [0; 4],
+            fallback: 0,
+        }
+    }
+
     /// A random box: flex or absolutely placed (often past its
-    /// parent), with borders and padding, clipping or scrolling on
-    /// either axis, sometimes hidden.
+    /// parent), with padding, clipping or scrolling on either axis,
+    /// sometimes hidden. Its borders are painted (`sides`), not the
+    /// style's: native ignores `taffy::Style::border`.
     fn style(rng: &mut Rng) -> taffy::Style {
         let len = |rng: &mut Rng, max: f32| taffy::Dimension::length(4.0 + rng.unit() * max);
         let mut s = taffy::Style {
@@ -260,7 +277,6 @@ mod tests {
                 width: len(rng, 300.0),
                 height: len(rng, 300.0),
             },
-            border: edges(rng),
             padding: edges(rng),
             flex_shrink: 0.0,
             flex_wrap: taffy::FlexWrap::Wrap,
@@ -319,6 +335,7 @@ mod tests {
             live[rng.below(live.len() as u32) as usize]
         };
         t.create(id, NodeKind::View).layout(id, &style(rng));
+        t.border_sides(id, sides(rng));
         if rng.chance(0.3) {
             t.transform(id, transform(rng));
         }
@@ -332,6 +349,83 @@ mod tests {
         live.push(id);
     }
 
+    /// A box that clips y and not x, whose one child hangs out to its
+    /// right, just below its padding box: when the bottom border
+    /// narrows below 4 pt, the clip moves down over the child, while
+    /// the box and the child stay where they are. Random styles rarely
+    /// line up so (the child must lie wholly in the strip the clip moves
+    /// over). Returns the box.
+    fn ledge(
+        t: &mut Transaction,
+        rng: &mut Rng,
+        live: &mut Vec<u32>,
+        free: &mut Vec<u32>,
+        next: &mut u32,
+    ) -> u32 {
+        let mut take = |next: &mut u32| {
+            free.pop().unwrap_or_else(|| {
+                *next += 1;
+                *next - 1
+            })
+        };
+        let (id, kid) = (take(next), take(next));
+        let px = |v: f32| taffy::Dimension::length(v);
+        let (w, h) = (60.0 + rng.unit() * 140.0, 60.0 + rng.unit() * 140.0);
+        let parent = taffy::Style {
+            size: taffy::Size {
+                width: px(w),
+                height: px(h),
+            },
+            overflow: taffy::Point {
+                x: taffy::Overflow::Visible,
+                y: if rng.chance(0.5) {
+                    taffy::Overflow::Hidden
+                } else {
+                    taffy::Overflow::Clip
+                },
+            },
+            flex_shrink: 0.0,
+            ..taffy::Style::default()
+        };
+        // Lengths, not percentages, which the padding box (so the
+        // borders) would move: the child's top 4 pt above the box's
+        // bottom, below the padding box (it ends 8 to 16 pt above), and
+        // its left past the box's right.
+        let kid_style = taffy::Style {
+            position: taffy::Position::Absolute,
+            inset: taffy::Rect {
+                top: taffy::LengthPercentageAuto::length(h - 4.0),
+                left: taffy::LengthPercentageAuto::length(w + 5.0 + rng.unit() * 20.0),
+                ..taffy::Rect::auto()
+            },
+            size: taffy::Size {
+                width: px(10.0),
+                height: px(3.0),
+            },
+            ..taffy::Style::default()
+        };
+        let sides = crate::border::BorderSides {
+            widths: [0.0, 0.0, 8.0 + rng.unit() * 8.0, 0.0],
+            colors: [0; 4],
+            fallback: 0,
+        };
+        let at = if live.is_empty() || rng.chance(0.3) {
+            NIL
+        } else {
+            live[rng.below(live.len() as u32) as usize]
+        };
+        t.create(id, NodeKind::View)
+            .layout(id, &parent)
+            .border_sides(id, sides)
+            .append(at, id);
+        t.create(kid, NodeKind::View)
+            .layout(kid, &kid_style)
+            .append(id, kid);
+        live.push(id);
+        live.push(kid);
+        id
+    }
+
     /// Whether `a` is `b` or one of its ancestors.
     fn contains(ui: &Ui, a: u32, b: u32) -> bool {
         ui.ancestors(NodeId(b)).any(|n| n.0 == a)
@@ -339,9 +433,10 @@ mod tests {
 
     /// The pruned hit test answers as the full walk, with the index
     /// fresh and between a change and its refresh, as trees are built,
-    /// restyled (borders and padding alone, too), transformed,
+    /// restyled (painted borders and padding alone, too), transformed,
     /// reordered by z and layers, scrolled, moved and pruned, with
-    /// removed ids reused at once.
+    /// removed ids reused at once, and with boxes built for a clip that
+    /// moves alone (`ledge`).
     #[test]
     fn index_agrees_with_walk() {
         for seed in 1..=12u64 {
@@ -350,13 +445,23 @@ mod tests {
             let mut live: Vec<u32> = Vec::new();
             let mut free: Vec<u32> = Vec::new();
             let mut next = 0u32;
+            let mut ledges: Vec<u32> = Vec::new();
             for round in 0..24 {
                 let mut t = Transaction::new(round + 1);
                 // Grow.
                 for _ in 0..rng.below(24) {
                     spawn(&mut t, &mut rng, &mut live, &mut free, &mut next);
                 }
+                if rng.chance(0.5) {
+                    ledges.push(ledge(&mut t, &mut rng, &mut live, &mut free, &mut next));
+                }
                 ui.apply_txn(&t).unwrap();
+                // Often a frame in between: the edits below then land
+                // on fresh reaches, where nothing else has marked the
+                // node they change (a clip that moves alone).
+                if rng.chance(0.5) {
+                    ui.render(VIEW);
+                }
                 // Change, one edit per transaction (a move checks the
                 // tree it applies to for cycles).
                 for _ in 0..rng.below(12) {
@@ -364,23 +469,53 @@ mod tests {
                         break;
                     }
                     let mut t = Transaction::new(round + 1);
-                    let id = live[rng.below(live.len() as u32) as usize];
-                    match rng.below(8) {
+                    // A node whose borders change on a fresh tree, to be
+                    // checked as soon as it is laid out.
+                    let mut focus = None;
+                    let case = rng.below(10);
+                    let mut id = live[rng.below(live.len() as u32) as usize];
+                    ledges.retain(|n| live.contains(n));
+                    if matches!(case, 1 | 8 | 9) && !ledges.is_empty() && rng.chance(0.5) {
+                        id = ledges[rng.below(ledges.len() as u32) as usize];
+                    } else if matches!(case, 1 | 8 | 9) && rng.chance(0.8) {
+                        // Mostly a node with children: it is their
+                        // clip that moves.
+                        let parents: Vec<u32> = live
+                            .iter()
+                            .copied()
+                            .filter(|&n| !ui.host.children(NodeId(n)).is_empty())
+                            .collect();
+                        if !parents.is_empty() {
+                            id = parents[rng.below(parents.len() as u32) as usize];
+                        }
+                    }
+                    match case {
                         0 => {
                             t.layout(id, &style(&mut rng));
                         }
-                        1 => {
-                            // Borders and padding alone, or the width
-                            // alone (its children's percentage borders
-                            // move their clips, not their boxes).
-                            let mut s = ui.host.style(NodeId(id)).to_taffy();
+                        1 | 8 | 9 => {
+                            // Painted borders alone (the box stays, its
+                            // clip and content move), or padding alone.
                             if rng.chance(0.5) {
-                                s.border = edges(&mut rng);
-                                s.padding = edges(&mut rng);
+                                // Often the bottom and right alone: top and
+                                // left would shift the children too, which
+                                // marks the clip's node stale anyway. On a
+                                // fresh tree, nothing else has marked it.
+                                ui.render(VIEW);
+                                focus = Some(id);
+                                let mut new = sides(&mut rng);
+                                if let Some(old) = ui.host.border_sides.get(&id)
+                                    && rng.chance(0.7)
+                                {
+                                    new.widths[0] = old.widths[0];
+                                    new.widths[3] = old.widths[3];
+                                }
+                                t.border_sides(id, new);
                             } else {
-                                s.size.width = taffy::Dimension::length(4.0 + rng.unit() * 300.0);
+                                let mut s = ui.host.style(NodeId(id)).to_taffy();
+                                s.padding = edges(&mut rng);
+                                t.layout(id, &s);
                             }
-                            t.layout(id, &s);
                         }
                         2 => {
                             t.transform(id, transform(&mut rng));
@@ -412,13 +547,23 @@ mod tests {
                         }
                     }
                     ui.apply_txn(&t).unwrap();
+                    if let Some(id) = focus {
+                        ui.layout(VIEW);
+                        check(
+                            &ui,
+                            &mut rng,
+                            &live,
+                            &[id],
+                            "border changed, laid out, stale",
+                        );
+                    }
                 }
-                check(&ui, &mut rng, &live, "applied, before layout");
+                check(&ui, &mut rng, &live, &[], "applied, before layout");
                 ui.layout(VIEW);
-                check(&ui, &mut rng, &live, "laid out, stale");
+                check(&ui, &mut rng, &live, &[], "laid out, stale");
                 ui.render(VIEW);
                 assert!(fresh(&ui, &live), "a frame refreshes every attached node");
-                check(&ui, &mut rng, &live, "rendered, fresh");
+                check(&ui, &mut rng, &live, &[], "rendered, fresh");
                 // Scroll twice: from a fresh tree, then from one a
                 // dispatch refreshed.
                 for pass in 0..2 {
@@ -428,13 +573,25 @@ mod tests {
                             ui.scroll_to(NodeId(id), x, y);
                         }
                     }
-                    check(&ui, &mut rng, &live, &format!("scrolled ({pass}), stale"));
+                    check(
+                        &ui,
+                        &mut rng,
+                        &live,
+                        &[],
+                        &format!("scrolled ({pass}), stale"),
+                    );
                     ui.dispatch(&Event::PointerMove { x: 1.0, y: 1.0 });
                     assert!(
                         fresh(&ui, &live),
                         "a dispatch refreshes every attached node"
                     );
-                    check(&ui, &mut rng, &live, &format!("scrolled ({pass}), fresh"));
+                    check(
+                        &ui,
+                        &mut rng,
+                        &live,
+                        &[],
+                        &format!("scrolled ({pass}), fresh"),
+                    );
                 }
             }
         }
@@ -443,8 +600,9 @@ mod tests {
     /// A clip that moves inside a box that does not: C's bottom border
     /// narrows, which lowers C's clip (C clips y only) until it reaches
     /// C's child G, which sticks out to the right. G's part of C's reach
-    /// goes from nothing to the box right of C. Only the layout pass
-    /// sees it.
+    /// goes from nothing to the box right of C. Both `mark_layout` (the
+    /// border changed) and the layout pass (the clip moved) mark C
+    /// stale; with both gone, the index misses it.
     #[test]
     fn index_follows_a_clip_that_moves_alone() {
         let px = |v: f32| taffy::Dimension::length(v);
@@ -521,15 +679,28 @@ mod tests {
         ui.host.parent(top) == NodeId::NIL
     }
 
-    /// Index and walk agree at random points, and at points aimed at
-    /// random nodes' edges and corners (where rounding decides).
-    fn check(ui: &Ui, rng: &mut Rng, live: &[u32], when: &str) {
+    /// Index and walk agree at random points, at points aimed at random
+    /// nodes' edges and corners (where rounding decides), and, for the
+    /// `focus` nodes, at points inside their children (what a clip that
+    /// moved shows or hides, in a strip too thin for random points).
+    fn check(ui: &Ui, rng: &mut Rng, live: &[u32], focus: &[u32], when: &str) {
         for i in 0..400 {
             let (x, y) = if i % 2 == 0 || live.is_empty() {
                 (rng.unit() * 1000.0 - 100.0, rng.unit() * 800.0 - 100.0)
             } else {
-                let id = NodeId(live[rng.below(live.len() as u32) as usize]);
-                let p = near_edge(rng, &ui.node_to_window(id), ui.layouts.data(id).rect.size);
+                let id = match focus {
+                    [] => live[rng.below(live.len() as u32) as usize],
+                    _ if rng.chance(0.5) => focus[rng.below(focus.len() as u32) as usize],
+                    _ => live[rng.below(live.len() as u32) as usize],
+                };
+                let id = NodeId(id);
+                let m = ui.node_to_window(id);
+                let data = ui.layouts.data(id);
+                let p = if rng.chance(0.5) {
+                    near_edge(rng, &m, data.rect.size)
+                } else {
+                    in_child(ui, rng, id).unwrap_or_else(|| near_edge(rng, &m, data.rect.size))
+                };
                 (p.x, p.y)
             };
             assert_eq!(
@@ -538,6 +709,20 @@ mod tests {
                 "at ({x}, {y}), {when}"
             );
         }
+    }
+
+    /// A window point inside one of `id`'s children: what a clip that
+    /// moved over a child sticking out (out of its parent's box, along
+    /// the axis it does not clip) shows or hides, in a strip too thin for
+    /// random points to find.
+    fn in_child(ui: &Ui, rng: &mut Rng, id: NodeId) -> Option<Point> {
+        let kids = ui.host.children(id);
+        let kid = *kids.get(rng.below(kids.len().max(1) as u32) as usize)?;
+        let size = ui.layouts.data(kid).rect.size;
+        Some(ui.node_to_window(kid).apply(Point::new(
+            rng.unit() * size.width,
+            rng.unit() * size.height,
+        )))
     }
 
     /// A window point just inside or outside the edge of a `size` box
