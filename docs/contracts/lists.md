@@ -142,9 +142,12 @@ interface ListViewport {                    // on demand, through readViewport
   holds both implementations to this and to the text formula below.
 - **Text templates in JS.** Web and React Native can't shape a sample, so a
   `text` template's estimate in JS is
-  `base + lineHeight × max(1, ceil(textLength × fontSize × charWidth / (width − inset)))`.
-  Native may keep its shaped-sample estimate. Traces never compare
-  estimates, only what follows from given heights.
+  `base + lineHeight × max(1, ceil(textLength × fontSize × charWidth / (width − inset)))`;
+  a room (`width − inset`) of 0 or less is one line. Native computes it
+  from the f32 values on the wire, so a port should `Math.fround` its
+  inputs to agree at `ceil` boundaries. Native may keep its shaped-sample
+  estimate. Traces never compare estimates, only what follows from given
+  heights.
 - **Callback slots and their delivery classes** (`callbacks.md`):
 
   | Slot | Arguments | Delivery |

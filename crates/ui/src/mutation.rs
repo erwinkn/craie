@@ -357,7 +357,8 @@ impl ItemDesc {
 /// estimate's f32 bits (`NUMERIC`), else the text length in Unicode
 /// scalars for the template.
 ///
-/// A measurement holds while the item keeps its id and version.
+/// A measurement holds while the item keeps its id, version, loaded and
+/// failed state.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Item {
     pub id: u32,

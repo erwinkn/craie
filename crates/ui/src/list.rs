@@ -589,8 +589,8 @@ impl Lists {
 
     /// Applies a validated `LIST_PATCH`'s ops and takes list `id` to
     /// revision `next`. An item keeps its measurement while it keeps its
-    /// identity and version: through moves, and through a splice that
-    /// removes and re-inserts it.
+    /// identity, version, loaded and failed state: through moves, and
+    /// through a splice that removes and re-inserts it.
     pub(crate) fn patch(&mut self, text: &mut TextEngine, id: u32, next: u32, ops: &[ListOp]) {
         let est = self.estimator(text, id);
         self.map.entry(id).or_default();

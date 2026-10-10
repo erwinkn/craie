@@ -205,10 +205,11 @@ fn stale_patches_resync() {
     assert_eq!(resyncs, [(LIST, 1, 0), (LIST, 2, 5)]);
 }
 
-/// A measurement holds while the item keeps its identity and version:
-/// through a move, and through a splice that removes and re-inserts it.
-/// A new version takes its new estimate until measured; an unmeasured
-/// item always takes its descriptor's estimate.
+/// A measurement holds while the item keeps its identity, version,
+/// loaded and failed state: through a move, and through a splice that
+/// removes and re-inserts it. A new version takes its new estimate
+/// until measured; an unmeasured item always takes its descriptor's
+/// estimate.
 #[test]
 fn measurements_follow_identity_and_version() {
     let mut ui = list(5);
@@ -563,8 +564,8 @@ fn tricky_op(rng: &mut Rng, m: &mut Vec<u32>, next: &mut u32) -> (ListOp<'static
 }
 
 /// Validation reads a batch's later edits through its earlier ones
-/// (and copies the sequence past `MAX_EDITS`): seeded batches of tricky
-/// ops, in one patch or several, are accepted exactly when a plain copy
+/// (the copy past `MAX_EDITS` is `seeded_long_batches_validate_as_a_copy`):
+/// seeded batches of tricky ops, in one patch or several, are accepted exactly when a plain copy
 /// of the identities says they are valid, and then apply as it does.
 #[test]
 fn seeded_batches_validate_as_a_copy() {
@@ -604,4 +605,155 @@ fn seeded_batches_validate_as_a_copy() {
         }
     }
     assert!(accepted > 100 && rejected > 100, "{accepted} / {rejected}");
+}
+
+/// Past `MAX_EDITS` the batch's validation copies the sequence once:
+/// long seeded batches of valid ops (patches, one transaction) leave
+/// the identities as a plain model does, and the copy really happened.
+#[test]
+fn seeded_long_batches_validate_as_a_copy() {
+    use crate::executor::MATERIALIZED;
+    let mut rng = Rng::new(39);
+    let mut copies = 0;
+    for round in 0..60 {
+        let n = rng.below(30);
+        let mut ui = list(n);
+        let mut m: Model = items(1..=n).into_iter().map(|d| (d, None)).collect();
+        let mut next = 1000;
+        let ops: Vec<ListOp> = (0..60 + rng.below(40))
+            .map(|_| random_op(&mut rng, &mut m, &mut next))
+            .collect();
+        let patches = 1 + rng.below(3) as usize;
+        let before = MATERIALIZED.with(|c| c.get());
+        send(&mut ui, |t| {
+            for (k, chunk) in ops.chunks(ops.len().div_ceil(patches)).enumerate() {
+                t.list_patch(LIST, 1 + k as u32, 2 + k as u32, chunk);
+            }
+        })
+        .unwrap_or_else(|e| panic!("round {round}: {e:?}"));
+        copies += MATERIALIZED.with(|c| c.get()) - before;
+        let expect: Vec<u32> = m.iter().map(|e| e.0.id).collect();
+        assert_eq!(ids(&ui), expect, "round {round}");
+        let l = ui.host.lists.get(LIST).unwrap();
+        assert_eq!(l.index, ItemIndex::build(expect), "round {round}");
+    }
+    assert!(copies >= 50, "the copy path ran {copies} times");
+}
+
+/// Items may have no identity (NIL, v1 splices): the sequence the batch
+/// leaves counts them, whether validation reads edits back or copies.
+/// Seeded batches of v1 splices over lists with NIL items are accepted
+/// exactly when a plain copy says they are valid, and then apply as it
+/// does.
+#[test]
+fn seeded_nil_batches_validate_as_a_copy() {
+    use crate::executor::MATERIALIZED;
+    use crate::mutation::ItemDesc;
+    let desc = |id: u32| ItemDesc {
+        template: 0,
+        text_len: 5,
+        id,
+        unchanged: false,
+    };
+    let mut rng = Rng::new(40);
+    let (mut accepted, mut rejected, mut copies) = (0, 0, 0);
+    for round in 0..300 {
+        let mut ui = Ui::new(1.0);
+        let n = rng.below(20);
+        let mut next = 1000;
+        let mut m: Vec<u32> = (0..n)
+            .map(|_| {
+                next += 1;
+                if rng.chance(0.4) { NIL } else { next }
+            })
+            .collect();
+        let start = m.clone();
+        send(&mut ui, |t| {
+            let d: Vec<ItemDesc> = start.iter().map(|&i| desc(i)).collect();
+            t.create(0, NodeKind::View).append(NIL, 0);
+            t.create(LIST, NodeKind::List)
+                .list_splice(LIST, 0, 0, &d)
+                .append(0, LIST);
+        })
+        .unwrap();
+        let mut ok = true;
+        let long = rng.chance(0.4);
+        let ops: Vec<(u32, u32, Vec<u32>)> = (0..if long { 50 } else { 1 + rng.below(4) })
+            .map(|_| {
+                let at = rng.below(m.len() as u32 + 1);
+                let remove = rng.below(m.len() as u32 - at + 1).min(3);
+                let ins: Vec<u32> = (0..rng.below(3))
+                    .map(|_| {
+                        if rng.chance(0.4) {
+                            NIL
+                        } else if !m.is_empty() && rng.chance(0.2) {
+                            m[rng.below(m.len() as u32) as usize]
+                        } else {
+                            next += 1;
+                            next
+                        }
+                    })
+                    .collect();
+                m.drain(at as usize..(at + remove) as usize);
+                let mut seen: Vec<u32> = ins.iter().copied().filter(|&i| i != NIL).collect();
+                seen.sort_unstable();
+                ok &= seen.windows(2).all(|w| w[0] != w[1]) && seen.iter().all(|i| !m.contains(i));
+                m.splice(at as usize..at as usize, ins.iter().copied());
+                (at, remove, ins)
+            })
+            .collect();
+        let before = MATERIALIZED.with(|c| c.get());
+        let r = send(&mut ui, |t| {
+            for (at, remove, ins) in &ops {
+                let d: Vec<ItemDesc> = ins.iter().map(|&i| desc(i)).collect();
+                t.list_splice(LIST, *at, *remove, &d);
+            }
+        });
+        copies += MATERIALIZED.with(|c| c.get()) - before;
+        assert_eq!(r.is_ok(), ok, "round {round}: {r:?}");
+        if ok {
+            assert_eq!(ids(&ui), m, "round {round}");
+            accepted += 1;
+        } else {
+            assert_eq!(ids(&ui), start, "round {round}");
+            rejected += 1;
+        }
+    }
+    assert!(accepted > 100 && rejected > 20, "{accepted} / {rejected}");
+    assert!(copies > 10, "the copy path ran {copies} times");
+}
+
+/// Rows tagged by item follow their items through a v1 `LIST_SPLICE`
+/// as through a patch: shifted, and NIL once the item is gone.
+#[test]
+fn tagged_rows_follow_a_v1_splice() {
+    use crate::mutation::ItemDesc;
+    let desc = |id: u32| ItemDesc {
+        template: 0,
+        text_len: 5,
+        id,
+        unchanged: false,
+    };
+    let mut ui = Ui::new(1.0);
+    send(&mut ui, |t| {
+        t.create(0, NodeKind::View).append(NIL, 0);
+        t.create(LIST, NodeKind::List)
+            .list_splice(LIST, 0, 0, &[desc(1), desc(2), desc(3)])
+            .append(0, LIST);
+        for (row, item) in [(100, 2), (101, 3), (102, 9)] {
+            t.create(row, NodeKind::View).list_row(row, LIST, item, 0);
+        }
+    })
+    .unwrap();
+    let rows = |ui: &Ui| [100, 101, 102].map(|r| ui.host.list_index[r]);
+    assert_eq!(rows(&ui), [1, 2, NIL]);
+    // Two in front, item 2 removed, item 9 arrives at the end.
+    send(&mut ui, |t| {
+        t.list_splice(LIST, 0, 0, &[desc(7), desc(8)])
+            .list_splice(LIST, 3, 1, &[])
+            .list_splice(LIST, 4, 0, &[desc(9)]);
+    })
+    .unwrap();
+    assert_eq!(ids(&ui), [7, 8, 1, 3, 9]);
+    assert_eq!(rows(&ui), [NIL, 3, 4]);
 }

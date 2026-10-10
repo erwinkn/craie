@@ -134,6 +134,13 @@ fn valid_spans(text: &str, spans: &[TextSpan], families: usize) -> Result<(), Wi
 /// identity sequence: reading through them costs O(edits) per item.
 const MAX_EDITS: usize = 32;
 
+#[cfg(test)]
+thread_local! {
+    /// Copies `Touch::materialize` made on this thread: tests check the
+    /// past-`MAX_EDITS` path runs.
+    pub(crate) static MATERIALIZED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 /// A list the batch edits, as the batch leaves it.
 enum Touch {
     /// The host's list plus edits recorded (item count after them). An
@@ -241,6 +248,8 @@ impl Touch {
         let Touch::Host { edits, .. } = self else {
             return;
         };
+        #[cfg(test)]
+        MATERIALIZED.with(|c| c.set(c.get() + 1));
         let base = base.expect("a host touch has a host list");
         let mut ids: Vec<u32> = base.items.iter().map(|d| d.id).collect();
         for e in edits.drain(..) {
@@ -1610,6 +1619,7 @@ impl Ui {
                     .splice(&mut self.text, *id, *at, *remove, items);
                 self.host.revs.layout_input.bump();
                 self.host.mark_layout(NodeId(*id));
+                self.follow_tagged_rows(*id);
             }
             Mutation::ListIndex { id, index } => {
                 self.host.lists.rows.remove(id);
@@ -1649,15 +1659,7 @@ impl Ui {
                 self.host.lists.patch(&mut self.text, *id, *next, &ops);
                 self.host.revs.layout_input.bump();
                 self.host.mark_layout(NodeId(*id));
-                // Tagged rows follow their items, placed yet or not.
-                let rows: Vec<u32> = (self.host.lists.rows.iter())
-                    .filter(|(_, t)| t.list == *id)
-                    .map(|(&r, _)| r)
-                    .collect();
-                for row in rows {
-                    let index = self.host.lists.tagged_index(row).unwrap_or(NIL);
-                    self.set_list_index(NodeId(row), index);
-                }
+                self.follow_tagged_rows(*id);
             }
             Mutation::ListRow {
                 id,
@@ -1828,6 +1830,19 @@ impl Ui {
             self.pressed = None;
         }
         self.pending_scrolls.retain(|(n, _, _)| *n != node);
+    }
+
+    /// Rows of list `id` tagged by item follow their items after an edit,
+    /// placed yet or not.
+    fn follow_tagged_rows(&mut self, id: u32) {
+        let rows: Vec<u32> = (self.host.lists.rows.iter())
+            .filter(|(_, t)| t.list == id)
+            .map(|(&r, _)| r)
+            .collect();
+        for row in rows {
+            let index = self.host.lists.tagged_index(row).unwrap_or(NIL);
+            self.set_list_index(NodeId(row), index);
+        }
     }
 
     /// Row `node` stands for item `index` of its list (NIL: none).
