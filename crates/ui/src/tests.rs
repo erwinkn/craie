@@ -2005,11 +2005,11 @@ fn list_identities_are_unique() {
             .append(0, 3);
         apply(&mut ui, &t).unwrap();
         // Dropping both NILs leaves [1, 2]; 2 is replaced by itself.
-        let mut t = Transaction::new(7);
+        let mut t = Transaction::new(6);
         t.list_splice(3, 1, 2, &[]).list_splice(3, 1, 1, &[item(2)]);
         apply(&mut ui, &t).unwrap();
         // Dropping the NIL item leaves [1, 2, 3]; 3 becomes a second 2.
-        let mut t = Transaction::new(6);
+        let mut t = Transaction::new(7);
         t.fill(0, 0xFF00_00FF)
             .list_splice(2, 1, 1, &[])
             .list_splice(2, 2, 1, &[item(2)]);

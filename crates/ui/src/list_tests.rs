@@ -723,6 +723,45 @@ fn seeded_nil_batches_validate_as_a_copy() {
     assert!(copies > 10, "the copy path ran {copies} times");
 }
 
+/// The copy past `MAX_EDITS` removes by count, NIL items included.
+#[test]
+fn the_copy_removes_nil_items_by_count() {
+    use crate::executor::MATERIALIZED;
+    use crate::mutation::ItemDesc;
+    let desc = |id: u32| ItemDesc {
+        template: 0,
+        text_len: 5,
+        id,
+        unchanged: false,
+    };
+    let mut ui = Ui::new(1.0);
+    let start: Vec<u32> = (1..=40).flat_map(|k| [NIL, NIL, k]).collect();
+    send(&mut ui, |t| {
+        let d: Vec<ItemDesc> = start.iter().map(|&i| desc(i)).collect();
+        t.create(0, NodeKind::View).append(NIL, 0);
+        t.create(LIST, NodeKind::List)
+            .list_splice(LIST, 0, 0, &d)
+            .append(0, LIST);
+    })
+    .unwrap();
+    let before = MATERIALIZED.with(|c| c.get());
+    // 33 splices drop [NIL, NIL, k] for k in 1..=33; then item 20, gone,
+    // comes back.
+    send(&mut ui, |t| {
+        for _ in 0..33 {
+            t.list_splice(LIST, 0, 3, &[]);
+        }
+        t.list_splice(LIST, 0, 0, &[desc(20)]);
+    })
+    .unwrap();
+    assert_eq!(MATERIALIZED.with(|c| c.get()) - before, 1);
+    let expect: Vec<u32> = [20]
+        .into_iter()
+        .chain((34..=40).flat_map(|k| [NIL, NIL, k]))
+        .collect();
+    assert_eq!(ids(&ui), expect);
+}
+
 /// Rows tagged by item follow their items through a v1 `LIST_SPLICE`
 /// as through a patch: shifted, and NIL once the item is gone.
 #[test]

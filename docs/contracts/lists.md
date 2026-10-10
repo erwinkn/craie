@@ -144,8 +144,8 @@ interface ListViewport {                    // on demand, through readViewport
   `text` template's estimate in JS is
   `base + lineHeight × max(1, ceil(textLength × fontSize × charWidth / (width − inset)))`;
   a room (`width − inset`) of 0 or less is one line. Native computes it
-  from the f32 values on the wire, so a port should `Math.fround` its
-  inputs to agree at `ceil` boundaries. Native may keep its shaped-sample
+  from f32 values (the template fields and the width), so a port should
+  `Math.fround` all of them to agree at `ceil` boundaries. Native may keep its shaped-sample
   estimate. Traces never compare estimates, only what follows from given
   heights.
 - **Callback slots and their delivery classes** (`callbacks.md`):
