@@ -15,7 +15,7 @@
 // across transactions.
 
 const MAGIC = 0x3257_5243 // "CRW2" little-endian
-export const VERSION = 19
+export const VERSION = 20
 export const NIL = 0xffff_ffff // no node / append / default style
 
 const enum Op {
@@ -57,6 +57,9 @@ const enum Op {
   ListSplice = 0x91,
   ListIndex = 0x92,
   ScrollAnchor = 0x93,
+  ListConfig2 = 0x94,
+  ListPatch = 0x95,
+  ListRow2 = 0x96,
   // animation
   Transition = 0xa0,
   Animate = 0xa1,
@@ -263,6 +266,47 @@ export interface ListTemplate {
   inset?: number
   fontSize?: number
 }
+/** An estimate template of the lists contract (`docs/contracts/lists.md`)
+ * — mirror mutation.rs `Template`. Width bands may come in any order:
+ * the band with the largest minimum the width reaches applies, else the
+ * one with the smallest minimum (the larger size on equal minimums). */
+export type EstimateTemplate =
+  | { kind: "fixed"; size: number }
+  | { kind: "widths"; bands: readonly (readonly [minWidth: number, size: number])[] }
+  | { kind: "text"; base: number; inset: number; fontSize: number; lineHeight: number; charWidth?: number }
+/** `LIST_CONFIG2`'s numbers: distances in logical points (a negative
+ * lookahead is one viewport height), `retain` in viewport heights, and
+ * the template epoch (a new one drops every measurement). */
+export interface ListConfig2 {
+  overscan: number
+  lookahead: number
+  retain: number
+  fallback: number
+  epoch: number
+}
+/** A list item's 16-byte descriptor — mirror mutation.rs `Item`. `id`
+ * is the interned key and `version` a token the bridge assigns; `size`
+ * is a numeric estimate, else the item's `template` estimates it from
+ * `textLength` (Unicode scalars). */
+export interface ItemDescriptor {
+  id: number
+  version?: number
+  template?: number
+  loaded?: boolean
+  failed?: boolean
+  size?: number
+  textLength?: number
+}
+/** One op of a `LIST_PATCH`, against the list as the earlier ops leave
+ * it; `to` is an index in the list without the moved items. */
+export type ListPatchOp =
+  | { kind: "splice"; at: number; remove: number; items: readonly ItemDescriptor[] }
+  | { kind: "move"; from: number; count: number; to: number }
+  | { kind: "update"; at: number; items: readonly ItemDescriptor[] }
+const ITEM_FLAG = { loaded: 1, numeric: 2, failed: 4 } as const
+const TEMPLATE_KIND = { fixed: 0, widths: 1, text: 2 } as const
+const PATCH_OP = { splice: 0, move: 1, update: 2 } as const
+
 /** An item's description for native estimates: its template and text
  * length in characters. `id` is the item's identity (the bridge interns
  * the item's key); NIL for none. */
@@ -465,6 +509,9 @@ export const EVENT_KIND = {
   /** A `presented` answer (node NIL): key = the request, revision = the
    * frame's number, x/y = its pixel size, text = why a capture failed. */
   presented: 26,
+  /** A `listPatch` with a stale base was skipped (always sent):
+   * revision = the list's revision, key = the patch's base. */
+  listResync: 27,
 } as const
 
 /** A press event's phase — mirror events.rs `press_phase`. */
@@ -1813,6 +1860,76 @@ export class Encoder {
       b.u32(d.id ?? NIL)
       b.u8(d.unchanged ? 1 : 0)
     }
+  }
+  /** The lists contract's configuration and templates. */
+  listConfig2(id: number, c: ListConfig2, templates: readonly EstimateTemplate[]) {
+    const b = this.ops
+    b.u8(Op.ListConfig2)
+    b.u32(id)
+    b.f32(c.overscan)
+    b.f32(c.lookahead)
+    b.f32(c.retain)
+    b.f32(c.fallback)
+    b.u32(c.epoch)
+    b.u16(templates.length)
+    for (const t of templates) {
+      b.u8(TEMPLATE_KIND[t.kind])
+      if (t.kind === "fixed") {
+        b.u32(4)
+        b.f32(t.size)
+      } else if (t.kind === "widths") {
+        b.u32(2 + 8 * t.bands.length)
+        b.u16(t.bands.length)
+        for (const [w, size] of t.bands) { b.f32(w); b.f32(size) }
+      } else {
+        b.u32(20)
+        for (const v of [t.base, t.inset, t.fontSize, t.lineHeight, t.charWidth ?? 0.5]) b.f32(v)
+      }
+    }
+  }
+  /** Takes list `id` from revision `base` to `next` (16 bytes per
+   * descriptor). A stale base is skipped natively with `LIST_RESYNC`. */
+  listPatch(id: number, base: number, next: number, ops: readonly ListPatchOp[]) {
+    const b = this.ops
+    b.u8(Op.ListPatch)
+    b.u32(id)
+    b.u32(base)
+    b.u32(next)
+    b.u32(ops.length)
+    const items = (list: readonly ItemDescriptor[]) => {
+      b.u32(list.length)
+      b.reserve(list.length * 16)
+      for (const d of list) {
+        const numeric = d.size !== undefined
+        const flags = (d.loaded === false ? 0 : ITEM_FLAG.loaded)
+          | (numeric ? ITEM_FLAG.numeric : 0)
+          | (d.failed ? ITEM_FLAG.failed : 0)
+        b.u32(d.id)
+        b.u32(d.version ?? 0)
+        b.u16(d.template ?? 0)
+        b.u8(flags)
+        b.u8(0)
+        if (numeric) b.f32(d.size!)
+        else b.u32(d.textLength ?? 0)
+      }
+    }
+    for (const op of ops) {
+      b.u8(PATCH_OP[op.kind])
+      if (op.kind === "splice") { b.u32(op.at); b.u32(op.remove); items(op.items) }
+      else if (op.kind === "move") { b.u32(op.from); b.u32(op.count); b.u32(op.to) }
+      else { b.u32(op.at); items(op.items) }
+    }
+  }
+  /** Tags row `id` with item `item` of list `list` at version token
+   * `version`: placed at the item wherever it moves, measuring it only
+   * while the item is at that version. Item NIL clears. */
+  listRow(id: number, list: number, item: number, version: number) {
+    const b = this.ops
+    b.u8(Op.ListRow2)
+    b.u32(id)
+    b.u32(list)
+    b.u32(item)
+    b.u32(version)
   }
   /** Tags a list row with its item index (NIL clears). */
   listIndex(id: number, index: number) {

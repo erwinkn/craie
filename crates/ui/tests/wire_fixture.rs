@@ -58,8 +58,8 @@ fn js_fixture_decodes_and_executes() {
         Some(&Mutation::EndExit { id: 1 })
     );
     // view + input + surface + list + row + two vectors + an image +
-    // layer remain.
-    assert_eq!(host.len(), 9);
+    // layer + a contract list and its row remain.
+    assert_eq!(host.len(), 11);
     assert_eq!(host.paragraphs[1].max_lines, 2, "the line limit");
     assert_eq!(host.kind(NodeId(0)), Some(NodeKind::View));
     let paint = host.paint[0];
@@ -231,6 +231,7 @@ fn js_fixture_decodes_and_executes() {
             NodeId(3),
             NodeId(2),
             NodeId(4),
+            NodeId(10),
             NodeId(6),
             NodeId(8),
             NodeId(9)
@@ -245,11 +246,50 @@ fn js_fixture_decodes_and_executes() {
     assert_eq!(l.templates[1].font_size, 0.0);
     assert_eq!(l.len(), 2);
     // Moved (swapped) unchanged, identities kept.
-    assert_eq!(l.descs[0].text_len, 70_000);
-    assert_eq!((l.descs[0].id, l.descs[0].unchanged), (7, true));
-    assert_eq!((l.descs[1].id, l.descs[1].text_len), (5, 42));
+    assert_eq!((l.items[0].id, l.items[0].arg), (7, 70_000));
+    assert_eq!((l.items[1].id, l.items[1].arg), (5, 42));
     assert_eq!(host.list_index[5], 1);
     assert_eq!(host.lists.policy(0), craie_ui::mutation::Anchor::StickToEnd);
+
+    // The contract list: config, templates, two patches (the third,
+    // stale, skipped with a resync), and a row tagged by item.
+    use craie_ui::mutation::{Item, Template};
+    let l = host.lists.get(10).unwrap();
+    assert!(l.v2);
+    let config = (l.overscan, l.lookahead, l.retain, l.fallback, l.epoch);
+    assert_eq!(config, (600.0, -1.0, 3.0, 48.0, 1));
+    assert_eq!(
+        l.templates2,
+        [
+            Template::Fixed(40.0),
+            Template::Widths(vec![(0.0, 60.0), (600.0, 44.0)]),
+            Template::Text {
+                base: 16.0,
+                inset: 24.0,
+                font_size: 14.0,
+                line_height: 20.0,
+                char_width: 0.55,
+            },
+        ]
+    );
+    assert_eq!(l.revision, 2);
+    let ids: Vec<u32> = l.items.iter().map(|d| d.id).collect();
+    assert_eq!(ids, [21, 22, 20, 23]);
+    assert_eq!((l.items[0].template, l.items[0].arg), (2, 300));
+    assert_eq!((l.items[1].version, l.items[1].loaded()), (2, true));
+    assert_eq!(l.items[2], Item::sized(20, 1, 40.0));
+    assert_eq!(l.items[3].flags, Item::NUMERIC | Item::FAILED);
+    assert_eq!(host.list_index[11], 2, "the row follows item 20");
+    let tag = host.lists.rows[&11];
+    assert_eq!((tag.list, tag.item, tag.version), (10, 20, 1));
+    let resync: Vec<_> = ui
+        .take_events()
+        .into_iter()
+        .filter(|e| e.kind == craie_ui::events::out_kind::LIST_RESYNC)
+        .map(|e| (e.node, e.revision, e.key))
+        .collect();
+    assert_eq!(resync, [(10, 2, 1)]);
+    let host = &ui.host;
 
     // Animation: declared transitions (property order; milliseconds
     // arrive as seconds) and two running tweens.

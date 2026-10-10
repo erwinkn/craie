@@ -314,6 +314,10 @@ pub mod out_kind {
     /// the request, revision = the presented frame's number, x/y = its
     /// size in pixels, `text` = why its capture failed ("": none).
     pub const PRESENTED: u8 = 26;
+    /// A `LIST_PATCH` with a stale base was skipped (always sent):
+    /// revision = the list's revision, key = the patch's base. JS
+    /// reconciles from that revision.
+    pub const LIST_RESYNC: u8 = 27;
 }
 
 /// Whether events of `kind` must never drop from the session's queue:
@@ -331,6 +335,7 @@ pub fn reliable(kind: u8) -> bool {
             | out_kind::MEASURE
             | out_kind::WINDOW
             | out_kind::PRESENTED
+            | out_kind::LIST_RESYNC
     )
 }
 

@@ -1501,3 +1501,199 @@ fn appends_equal_rebuild_across_powers_of_two() {
         check(&mut ui, &format!("append to {to} after the splice"));
     }
 }
+
+/// The lists contract's driver: rows tagged by item identity and
+/// version (`LIST_ROW2`), keyed by item as React keys them, and the
+/// table as (identity, version, text).
+struct TaggedDriver {
+    rows: std::collections::BTreeMap<u32, u32>,
+    free: Vec<u32>,
+    next_node: u32,
+    table: Vec<(u32, u32, String)>,
+    seq: u64,
+}
+
+impl TaggedDriver {
+    fn item(&self, i: usize) -> craie_ui::mutation::Item {
+        let (id, version, s) = &self.table[i];
+        craie_ui::mutation::Item {
+            id: *id,
+            version: *version,
+            template: 0,
+            flags: craie_ui::mutation::Item::LOADED,
+            arg: s.chars().count() as u32,
+        }
+    }
+
+    /// Mounts the rows of the latest range event, as one commit.
+    fn pump(&mut self, ui: &mut Ui) -> bool {
+        let want = (ui.take_events().into_iter())
+            .rfind(|e| e.kind == craie_ui::events::out_kind::LIST_RANGE && e.node == LIST)
+            .map(|e| (e.a as usize, e.b as usize));
+        let Some((first, end)) = want else {
+            return false;
+        };
+        let wanted: Vec<u32> = self.table[first..end].iter().map(|e| e.0).collect();
+        self.seq += 1;
+        let mut t = Transaction::new(self.seq);
+        for (id, node) in std::mem::take(&mut self.rows) {
+            if wanted.contains(&id) {
+                self.rows.insert(id, node);
+            } else {
+                t.remove(node);
+                self.free.push(node);
+            }
+        }
+        for i in first..end {
+            let (id, version, s) = self.table[i].clone();
+            if self.rows.contains_key(&id) {
+                continue;
+            }
+            let node = self.free.pop().unwrap_or_else(|| {
+                self.next_node += 1;
+                self.next_node
+            });
+            t.create(node, NodeKind::Text)
+                .text(node, s, FONT, 0xFFFF_FFFF)
+                .list_row(node, LIST, id, version)
+                .append(LIST, node);
+            self.rows.insert(id, node);
+        }
+        ui.apply_txn(&t).expect("tagged rows apply");
+        true
+    }
+
+    fn settle(&mut self, ui: &mut Ui) {
+        ui.render(VIEW);
+        for _ in 0..8 {
+            if !self.pump(ui) {
+                return;
+            }
+            ui.render(VIEW);
+        }
+    }
+}
+
+/// Incremental equals clean rebuild with the lists contract's patches:
+/// seeded splices, moves and updates (several ops per patch), rows
+/// tagged by item and re-rendered only when their item's version
+/// changes, and scrolls, compared at rest against a rebuild.
+#[test]
+fn tagged_patches_equal_rebuild() {
+    use craie_core::rng::Rng;
+    use craie_ui::mutation::{ListOp, Template};
+    let templates = [Template::Text {
+        base: 0.0,
+        inset: 0.0,
+        font_size: FONT,
+        line_height: 18.0,
+        char_width: 0.5,
+    }];
+    for seed in [1u64, 2, 3] {
+        let mut rng = Rng::new(seed);
+        let mut ui = Ui::new(2.0);
+        let mut d = TaggedDriver {
+            rows: Default::default(),
+            free: Vec::new(),
+            next_node: 100,
+            table: (0..300).map(|i| (i + 1, 0, text(i))).collect(),
+            seq: 1000,
+        };
+        let descs: Vec<_> = (0..d.table.len()).map(|i| d.item(i)).collect();
+        let mut t = Transaction::new(1);
+        t.create(SCROLLER, NodeKind::View)
+            .layout(SCROLLER, &scroller_style())
+            .append(NIL, SCROLLER);
+        t.create(LIST, NodeKind::List)
+            .list_config2(LIST, 150.0, -1.0, 3.0, 20.0, 0, &templates)
+            .list_patch(LIST, 0, 1, &[ListOp::splice(0, 0, &descs)])
+            .append(SCROLLER, LIST);
+        ui.apply_txn(&t).unwrap();
+        d.settle(&mut ui);
+        let (mut revision, mut next_id, mut now) = (1, 10_000, 0.0);
+        for step in 0..40u64 {
+            now += 0.05;
+            ui.set_time(now);
+            d.seq += 1;
+            let mut t = Transaction::new(d.seq);
+            let mut ops = Vec::new();
+            for _ in 0..1 + rng.below(3) {
+                let n = d.table.len() as u32;
+                match rng.below(4) {
+                    0 => {
+                        let at = rng.below(n + 1);
+                        let rm = rng.below(4).min(n - at);
+                        let add: Vec<(u32, u32, String)> = (0..rng.below(4))
+                            .map(|k| {
+                                next_id += 1;
+                                (next_id, 0, text(step as u32 * 13 + k))
+                            })
+                            .collect();
+                        let k = add.len();
+                        d.table.splice(at as usize..(at + rm) as usize, add);
+                        let items: Vec<_> =
+                            (at as usize..at as usize + k).map(|i| d.item(i)).collect();
+                        ops.push(ListOp::splice(at, rm, &items));
+                    }
+                    1 if n > 1 => {
+                        let from = rng.below(n);
+                        let count = 1 + rng.below((n - from).min(3));
+                        let to = rng.below(n - count + 1);
+                        let moved: Vec<_> = d
+                            .table
+                            .drain(from as usize..(from + count) as usize)
+                            .collect();
+                        d.table.splice(to as usize..to as usize, moved);
+                        ops.push(ListOp::Move { from, count, to });
+                    }
+                    2 if n > 0 => {
+                        // A new version of an item: new text, its row
+                        // re-rendered and re-tagged in the same commit.
+                        let at = rng.below(n) as usize;
+                        let e = &mut d.table[at];
+                        e.1 += 1;
+                        e.2 = text(at as u32 * 31 + step as u32);
+                        if let Some(&node) = d.rows.get(&e.0) {
+                            t.text(node, e.2.clone(), FONT, 0xFFFF_FFFF)
+                                .list_row(node, LIST, e.0, e.1);
+                        }
+                        ops.push(ListOp::update(at as u32, &[d.item(at)]));
+                    }
+                    _ => {
+                        let extent = ui.layouts.data(NodeId(SCROLLER)).scroll_extent[1];
+                        ui.scroll_to(NodeId(SCROLLER), 0.0, rng.unit() * extent);
+                    }
+                }
+            }
+            if !ops.is_empty() {
+                t.list_patch(LIST, revision, revision + 1, &ops);
+                revision += 1;
+            }
+            // Rows of removed items unmount with the patch.
+            for (id, node) in std::mem::take(&mut d.rows) {
+                if d.table.iter().any(|e| e.0 == id) {
+                    d.rows.insert(id, node);
+                } else {
+                    t.remove(node);
+                    d.free.push(node);
+                }
+            }
+            if !t.mutations.is_empty() {
+                ui.apply_txn(&t).unwrap();
+            }
+            craie_harness::check_list_index(&ui)
+                .unwrap_or_else(|e| panic!("seed {seed} step {step}: {e}"));
+            d.settle(&mut ui);
+            if step % 5 == 4 {
+                now += 1.0;
+                ui.set_time(now);
+                ui.settle();
+                ui.render(VIEW);
+                let clean = craie_harness::rebuild(&ui, VIEW);
+                if let Err(m) = craie_harness::compare(&ui, &clean, VIEW, 0.01) {
+                    panic!("seed {seed} step {step}: {}", m.0);
+                }
+            }
+        }
+    }
+}

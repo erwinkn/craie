@@ -135,11 +135,19 @@ interface ListViewport {                    // on demand, through readViewport
 }
 ```
 
+- **Width bands** come in any order. The band with the largest minimum
+  the column width reaches applies, else the one with the smallest
+  minimum; on equal minimums, the larger size. With no band, the list's
+  fallback. The shared fixture `packages/bridge/traces/estimates.json`
+  holds both implementations to this and to the text formula below.
 - **Text templates in JS.** Web and React Native can't shape a sample, so a
   `text` template's estimate in JS is
-  `base + lineHeight × max(1, ceil(textLength × fontSize × charWidth / (width − inset)))`.
-  Native may keep its shaped-sample estimate. Traces never compare
-  estimates, only what follows from given heights.
+  `base + lineHeight × max(1, ceil(textLength × fontSize × charWidth / (width − inset)))`;
+  a room (`width − inset`) of 0 or less is one line. Native computes it
+  from f32 values (the template fields and the width), so a port should
+  `Math.fround` all of them to agree at `ceil` boundaries. Native may keep its shaped-sample
+  estimate. Traces never compare estimates, only what follows from given
+  heights.
 - **Callback slots and their delivery classes** (`callbacks.md`):
 
   | Slot | Arguments | Delivery |
@@ -344,10 +352,13 @@ stays the one source of truth, and the list never flips `loaded` itself.
     holds, then any unchanged visible row, then the first visible place.
   - An explicit jump wins until reader input; end-follow wins when active.
   - `focus` policy first holds a visible focused row that survived.
-- **Measurement validity.** A measurement holds for (key, version, column
-  width, template epoch); a move keeps it. An `update` invalidates the
-  item's measurement, offscreen too: it takes the new estimate until laid
-  out. On a width change, every measured offscreen row takes its estimate
+- **Measurement validity.** A measurement holds for (key, version,
+  loaded, failed, column width, template epoch); a move keeps it, and so
+  does a splice that re-inserts the key unchanged. An `update` that
+  changes the version, loaded or failed state invalidates the item's
+  measurement, offscreen too: it takes the new estimate until laid out.
+  An `update` of the estimate alone applies while the item is
+  unmeasured. On a width change, every measured offscreen row takes its estimate
   again, on both sides (the kit's web list now does this too).
 - **Atomic batches.** A commit's ops apply as one batch against pre-change
   geometry. `followKey` and end jumps apply after the batch, before
@@ -367,7 +378,7 @@ stays the one source of truth, and the list never flips `loaded` itself.
 |---|---|---|
 | 0x94 | `LIST_CONFIG2` | node, overscan f32, lookahead f32, retain f32 (viewport heights), fallback f32, template epoch u32, count u16, templates (kind u8, payload bytes u32, then fixed: size f32; widths: u16 count + f32 pairs; text: base, inset, font size, line height, char width f32) |
 | 0x95 | `LIST_PATCH` | node, base revision u32, next revision u32, op count u32, then ops: splice (tag, at, remove, add count u32, descriptors), move (tag, from, count, to u32), update (tag, at, count u32, descriptors with the same item ids) |
-| 0x96 | `LIST_ROW2` | row node, list node, item id, revision u32: a row measures for that item at that revision only, so a stale row never measures a new item |
+| 0x96 | `LIST_ROW2` | row node, list node, item id, version token u32: the row follows the item and measures it only at that version, so a row rendered for older content never records its height, and edits to other items need no new tags |
 | 0x97 | `LIST_POLICY` | scroller node, mode u8 (keep-visible, stick-to-end, none), anchor policy u8, end threshold f32, covered start f32, padding end f32 |
 | 0x98 | `LIST_COMMAND` | list node, revision, request id u32, kind u8 (index, key, end, offset, read), then index or item id u32 + align u8, or offset f64 |
 | 0x99 | `LIST_CACHE` | scroller, list, cache token u32, action u8 (attach, retain, release): warm restore by `restoreKey`, bounded natively |
@@ -381,8 +392,9 @@ stays the one source of truth, and the list never flips `loaded` itself.
   - The 4 MiB session commit cap allows about 250,000 rows in one
     transaction. Past that, the bridge sends the first patch in pieces
     under one revision chain.
-- **Revisions.** A patch with a stale base is rejected (a resync event, and
-  JS resends a full reconciliation), not applied wrongly.
+- **Revisions.** A patch with a stale base is skipped, not applied
+  wrongly: a reliable `LIST_RESYNC` event (kind 27: the list's revision,
+  the patch's base) asks JS to reconcile from the list's revision.
 - **Events.**
   - `LIST_VIEWPORT`: list node, revision, mounted first/end, visible
     first/end, held first/end, pinned ids, anchor id, index and offset,

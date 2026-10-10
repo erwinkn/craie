@@ -1969,8 +1969,9 @@ fn list_identities_are_unique() {
         // The index matches the items after every accepted batch.
         let index_ok = |ui: &Ui| {
             let l = ui.host.lists.get(1).unwrap();
-            let fresh = crate::list::IdIndex::build(l.descs.iter().map(|d| d.id));
-            !fresh.has_duplicates() && fresh == l.ids
+            let ids = crate::list::IdIndex::build(l.items.iter().map(|d| d.id));
+            let fresh = crate::list::ItemIndex::build(l.items.iter().map(|d| d.id));
+            !ids.has_duplicates() && fresh == l.index
         };
         assert!(index_ok(&ui));
         // Valid: move id 7 to the front across two splices, repeat NIL.
@@ -1980,7 +1981,7 @@ fn list_identities_are_unique() {
         apply(&mut ui, &t).unwrap();
         let l = ui.host.lists.get(1).unwrap();
         assert_eq!(
-            l.descs.iter().map(|d| d.id).collect::<Vec<_>>(),
+            l.items.iter().map(|d| d.id).collect::<Vec<_>>(),
             [7, NIL, NIL, 1, 2, 3]
         );
         assert!(index_ok(&ui));
@@ -1993,6 +1994,34 @@ fn list_identities_are_unique() {
         apply(&mut ui, &t).unwrap();
         assert_eq!(ui.host.lists.get(1).unwrap().len(), 2);
         assert!(index_ok(&ui), "after node reuse");
+        // NIL identities are removed by count, not by identity: a later
+        // edit in the same batch still sees the right items.
+        let mut t = Transaction::new(5);
+        t.create(2, NodeKind::List)
+            .list_splice(2, 0, 0, &[item(1), item(NIL), item(2), item(3)])
+            .append(0, 2)
+            .create(3, NodeKind::List)
+            .list_splice(3, 0, 0, &[item(1), item(NIL), item(NIL), item(2)])
+            .append(0, 3);
+        apply(&mut ui, &t).unwrap();
+        // Dropping both NILs leaves [1, 2]; 2 is replaced by itself.
+        let mut t = Transaction::new(6);
+        t.list_splice(3, 1, 2, &[]).list_splice(3, 1, 1, &[item(2)]);
+        apply(&mut ui, &t).unwrap();
+        // Dropping the NIL item leaves [1, 2, 3]; 3 becomes a second 2.
+        let mut t = Transaction::new(7);
+        t.fill(0, 0xFF00_00FF)
+            .list_splice(2, 1, 1, &[])
+            .list_splice(2, 2, 1, &[item(2)]);
+        assert!(apply(&mut ui, &t).is_err(), "NIL removed, then a clash");
+        assert_eq!(ui.host.paint[0].fill, 0, "atomic");
+        let ids = |ui: &Ui, list| -> Vec<u32> {
+            (ui.host.lists.get(list).unwrap().items.iter())
+                .map(|d| d.id)
+                .collect()
+        };
+        assert_eq!(ids(&ui, 2), [1, NIL, 2, 3]);
+        assert_eq!(ids(&ui, 3), [1, 2]);
         ui.render(Size::new(100.0, 100.0));
     }
 }

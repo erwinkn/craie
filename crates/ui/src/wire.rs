@@ -41,13 +41,13 @@ use craie_vector::{FillRule, LineCap, LineJoin, Stroke};
 use crate::states::{TermDecl, Values, VariantDecl, layout_key, value_field};
 
 use crate::mutation::{
-    Anchor, Claim, Command, ItemDesc, ItemTemplate, Mutation, NIL, NodeKind, Role, SubmitKey,
-    TextSpan, Transaction, reported,
+    Anchor, Claim, Command, Item, ItemDesc, ItemTemplate, ListOp, Mutation, NIL, NodeKind, Role,
+    SubmitKey, Template, TextSpan, Transaction, reported,
 };
 pub use crate::mutation::{group_flag, interaction_flag, trap_flag};
 
 pub const MAGIC: u32 = 0x3257_5243; // "CRW2"
-pub const VERSION: u16 = 19;
+pub const VERSION: u16 = 20;
 
 pub mod op {
     // structure
@@ -111,6 +111,11 @@ pub mod op {
     pub const LIST_SPLICE: u8 = 0x91;
     pub const LIST_INDEX: u8 = 0x92;
     pub const SCROLL_ANCHOR: u8 = 0x93;
+    /// The lists contract (protocol 20): configuration, revisioned
+    /// patches, and rows tagged by item identity and version.
+    pub const LIST_CONFIG2: u8 = 0x94;
+    pub const LIST_PATCH: u8 = 0x95;
+    pub const LIST_ROW2: u8 = 0x96;
     // animation
     pub const TRANSITION: u8 = 0xA0;
     pub const ANIMATE: u8 = 0xA1;
@@ -800,6 +805,75 @@ pub fn encode(txn: &Transaction<'_>) -> Vec<u8> {
                 ops.push(op::LIST_INDEX);
                 u32le(&mut ops, *id);
                 u32le(&mut ops, *index);
+            }
+            Mutation::ListConfig2 {
+                id,
+                overscan,
+                lookahead,
+                retain,
+                fallback,
+                epoch,
+                templates,
+            } => {
+                ops.push(op::LIST_CONFIG2);
+                u32le(&mut ops, *id);
+                for v in [overscan, lookahead, retain, fallback] {
+                    f32le(&mut ops, *v);
+                }
+                u32le(&mut ops, *epoch);
+                ops.extend_from_slice(&(templates.len() as u16).to_le_bytes());
+                for t in templates.iter() {
+                    let mut p = Vec::new();
+                    match t {
+                        Template::Fixed(s) => f32le(&mut p, *s),
+                        Template::Widths(bands) => {
+                            p.extend_from_slice(&(bands.len() as u16).to_le_bytes());
+                            for &(w, s) in bands {
+                                f32le(&mut p, w);
+                                f32le(&mut p, s);
+                            }
+                        }
+                        Template::Text {
+                            base,
+                            inset,
+                            font_size,
+                            line_height,
+                            char_width,
+                        } => {
+                            for v in [base, inset, font_size, line_height, char_width] {
+                                f32le(&mut p, *v);
+                            }
+                        }
+                    }
+                    ops.push(t.kind());
+                    u32le(&mut ops, p.len() as u32);
+                    ops.extend_from_slice(&p);
+                }
+            }
+            Mutation::ListPatch {
+                id,
+                base,
+                next,
+                ops: patch,
+            } => {
+                ops.push(op::LIST_PATCH);
+                u32le(&mut ops, *id);
+                u32le(&mut ops, *base);
+                u32le(&mut ops, *next);
+                let count = ListOp::parse(patch).map_or(0, |o| o.len());
+                u32le(&mut ops, count as u32);
+                ops.extend_from_slice(patch);
+            }
+            Mutation::ListRow {
+                id,
+                list,
+                item,
+                version,
+            } => {
+                ops.push(op::LIST_ROW2);
+                for v in [id, list, item, version] {
+                    u32le(&mut ops, *v);
+                }
             }
             Mutation::ScrollAnchor { id, anchor } => {
                 ops.push(op::SCROLL_ANCHOR);
@@ -1557,6 +1631,84 @@ pub fn decode(buf: &[u8]) -> Result<Transaction<'_>, WireError> {
                 id: r.u32()?,
                 index: r.u32()?,
             },
+            op::LIST_CONFIG2 => {
+                let id = r.u32()?;
+                let (overscan, lookahead, retain, fallback) =
+                    (r.f32()?, r.f32()?, r.f32()?, r.f32()?);
+                let epoch = r.u32()?;
+                let n = r.u16()? as usize;
+                let mut templates = Vec::with_capacity(n.min(r.remaining() / 9));
+                for _ in 0..n {
+                    let kind = r.u8()?;
+                    let len = r.u32()? as usize;
+                    let mut p = Reader::new(r.take(len)?);
+                    let t = match kind {
+                        0 => Template::Fixed(p.f32()?),
+                        1 => {
+                            let k = p.u16()? as usize;
+                            let mut bands = Vec::with_capacity(k.min(p.remaining() / 8));
+                            for _ in 0..k {
+                                bands.push((p.f32()?, p.f32()?));
+                            }
+                            Template::Widths(bands)
+                        }
+                        2 => Template::Text {
+                            base: p.f32()?,
+                            inset: p.f32()?,
+                            font_size: p.f32()?,
+                            line_height: p.f32()?,
+                            char_width: p.f32()?,
+                        },
+                        _ => return Err(WireError::BadRef("list template kind")),
+                    };
+                    if p.remaining() != 0 {
+                        return Err(WireError::BadRef("list template length"));
+                    }
+                    templates.push(t);
+                }
+                Mutation::ListConfig2 {
+                    id,
+                    overscan,
+                    lookahead,
+                    retain,
+                    fallback,
+                    epoch,
+                    templates: templates.into(),
+                }
+            }
+            op::LIST_PATCH => {
+                let (id, base, next, count) = (r.u32()?, r.u32()?, r.u32()?, r.u32()?);
+                // Walk the ops for their length; the executor parses
+                // them again from the borrowed bytes.
+                let start = r.pos();
+                for _ in 0..count {
+                    let (descs, fields) = match r.u8()? {
+                        ListOp::SPLICE => (true, 2),
+                        ListOp::MOVE => (false, 3),
+                        ListOp::UPDATE => (true, 1),
+                        _ => return Err(WireError::BadRef("list op")),
+                    };
+                    for _ in 0..fields {
+                        r.u32()?;
+                    }
+                    if descs {
+                        let n = r.u32()? as usize;
+                        r.take(n.checked_mul(Item::BYTES).ok_or(WireError::Truncated)?)?;
+                    }
+                }
+                Mutation::ListPatch {
+                    id,
+                    base,
+                    next,
+                    ops: r.since(start).into(),
+                }
+            }
+            op::LIST_ROW2 => Mutation::ListRow {
+                id: r.u32()?,
+                list: r.u32()?,
+                item: r.u32()?,
+                version: r.u32()?,
+            },
             op::SCROLL_ANCHOR => {
                 let id = r.u32()?;
                 let anchor = Anchor::from_u8(r.u8()?).ok_or(WireError::BadRef("anchor"))?;
@@ -2164,6 +2316,16 @@ impl Reader<'_> {
 }
 
 impl<'a> Reader<'a> {
+    fn new(buf: &'a [u8]) -> Reader<'a> {
+        Reader { buf, pos: 0 }
+    }
+    fn pos(&self) -> usize {
+        self.pos
+    }
+    /// The bytes read since position `start`.
+    fn since(&self, start: usize) -> &'a [u8] {
+        &self.buf[start..self.pos]
+    }
     fn remaining(&self) -> usize {
         self.buf.len() - self.pos
     }

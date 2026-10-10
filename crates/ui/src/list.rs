@@ -24,7 +24,7 @@ use craie_core::extents::Extents;
 use crate::events::out_kind;
 use crate::geom::{Point, Rect, Size};
 use crate::host::NodeId;
-use crate::mutation::{Anchor, ItemDesc, ItemTemplate, NIL};
+use crate::mutation::{Anchor, Item, ItemDesc, ItemTemplate, ListOp, NIL, Template};
 use crate::text::TextEngine;
 use crate::text::paragraph::{SpanStyle, TextSpec, TextStyle};
 use craie_core::Affine;
@@ -116,16 +116,116 @@ impl IdIndex {
     }
 }
 
+/// Each item's index by identity (NIL excluded): (id, index) pairs
+/// sorted by id, so a row tagged by item finds its place in O(log n).
+/// Edits keep it exact at their own cost: an append adds its pairs, in
+/// O(k) when its ids sort after every other (ids handed out in order
+/// do), and an edit that shifts items, already O(n) in the extents,
+/// renumbers them in one pass. Sorted, not hashed, as `IdIndex`. 8 bytes
+/// per item.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ItemIndex(Vec<(u32, u32)>);
+
+impl ItemIndex {
+    /// The index of `ids`, item by item.
+    pub fn build(ids: impl IntoIterator<Item = u32>) -> ItemIndex {
+        let mut v: Vec<(u32, u32)> = (ids.into_iter().zip(0..)).filter(|p| p.0 != NIL).collect();
+        v.sort_unstable();
+        ItemIndex(v)
+    }
+
+    /// The index of the item with identity `id`.
+    pub fn get(&self, id: u32) -> Option<u32> {
+        let p = self.0.binary_search_by_key(&id, |p| p.0).ok()?;
+        Some(self.0[p].1)
+    }
+
+    pub fn contains(&self, id: u32) -> bool {
+        self.get(id).is_some()
+    }
+
+    /// (identity, index) pairs, by identity.
+    pub fn as_slice(&self) -> &[(u32, u32)] {
+        &self.0
+    }
+
+    /// Items `at..at + removed.len()`, identities `removed`, of a list
+    /// of `len` become `added`.
+    pub fn splice(&mut self, len: u32, at: u32, removed: &[u32], added: &[u32]) {
+        let end = at + removed.len() as u32;
+        let shift = added.len() as i64 - removed.len() as i64;
+        if shift != 0 && end < len {
+            for p in self.0.iter_mut().filter(|p| p.1 >= end) {
+                p.1 = (p.1 as i64 + shift) as u32;
+            }
+        }
+        let gone = IdIndex::build(removed.iter().copied());
+        if gone.len() <= 16 {
+            for &id in gone.as_slice() {
+                if let Ok(p) = self.0.binary_search_by_key(&id, |p| p.0) {
+                    self.0.remove(p);
+                }
+            }
+        } else {
+            self.0.retain(|p| !gone.contains(p.0));
+        }
+        let mut new: Vec<(u32, u32)> = (added.iter().copied().zip(at..))
+            .filter(|p| p.0 != NIL)
+            .collect();
+        new.sort_unstable();
+        if self
+            .0
+            .last()
+            .is_none_or(|l| new.first().is_none_or(|f| f.0 > l.0))
+        {
+            self.0.extend(new);
+        } else if new.len() <= 16 {
+            for p in new {
+                let at = self.0.partition_point(|q| q.0 < p.0);
+                self.0.insert(at, p);
+            }
+        } else {
+            let old = std::mem::take(&mut self.0);
+            self.0.reserve(old.len() + new.len());
+            let (mut a, mut b) = (old.into_iter().peekable(), new.into_iter().peekable());
+            while let (Some(x), Some(y)) = (a.peek(), b.peek()) {
+                let next = if x.0 < y.0 { a.next() } else { b.next() };
+                self.0.extend(next);
+            }
+            self.0.extend(a.chain(b));
+        }
+    }
+
+    /// Items `from..from + count` move to `to` (`moved_index`).
+    pub fn move_items(&mut self, from: u32, count: u32, to: u32) {
+        for p in &mut self.0 {
+            p.1 = moved_index(p.1, from, count, to);
+        }
+    }
+}
+
 /// Sample text for per-size metrics: a mix of letters, digits, and
 /// spaces close to running prose.
 const SAMPLE: &str = "The quick brown fox jumps over the lazy dog, 0123456789 times.";
 
 pub struct ListState {
+    /// `LIST_CONFIG`'s templates (shaped text), used unless `v2`.
     pub templates: Vec<ItemTemplate>,
-    pub descs: Vec<ItemDesc>,
-    /// The identities in `descs` (NIL excluded): each appears once, which
-    /// validation checks against this index.
-    pub ids: IdIndex,
+    /// `LIST_CONFIG2`'s templates, used when `v2`.
+    pub templates2: Vec<Template>,
+    pub v2: bool,
+    /// Lookahead (logical points; negative: one viewport height) and
+    /// retain (viewport heights), from `LIST_CONFIG2`.
+    pub lookahead: f32,
+    pub retain: f32,
+    /// Template epoch: a new one drops every measurement.
+    pub epoch: u32,
+    /// Measurements are stale (a new epoch): the next estimate drops them.
+    pub forget: bool,
+    pub items: Vec<Item>,
+    /// Each identity's index in `items` (NIL excluded): each appears
+    /// once, which validation checks against this index.
+    pub index: ItemIndex,
     pub extents: Extents,
     /// Extra distance rendered beyond the viewport, each side (logical
     /// points).
@@ -155,8 +255,14 @@ impl Default for ListState {
     fn default() -> ListState {
         ListState {
             templates: Vec::new(),
-            descs: Vec::new(),
-            ids: IdIndex::default(),
+            templates2: Vec::new(),
+            v2: false,
+            lookahead: -1.0,
+            retain: 3.0,
+            epoch: 0,
+            forget: false,
+            items: Vec::new(),
+            index: ItemIndex::default(),
             extents: Extents::new(),
             overscan: 0.0,
             fallback: 0.0,
@@ -174,11 +280,11 @@ impl Default for ListState {
 
 impl ListState {
     pub fn len(&self) -> u32 {
-        self.descs.len() as u32
+        self.items.len() as u32
     }
 
     pub fn is_empty(&self) -> bool {
-        self.descs.is_empty()
+        self.items.is_empty()
     }
 
     /// Offset of item `i` in the list's content, gaps included.
@@ -211,6 +317,15 @@ pub struct Saved {
     pub at_end: bool,
 }
 
+/// A row's tag: it renders version `version` of item `item` of list
+/// `list`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RowTag {
+    pub list: u32,
+    pub item: u32,
+    pub version: u32,
+}
+
 /// Every list's state, the scroll anchors, and per-size text metrics.
 /// Lists are few: a map by node id.
 #[derive(Default)]
@@ -220,6 +335,8 @@ pub struct Lists {
     pub(crate) policies: HashMap<u32, Anchor>,
     /// Captured anchors by scroller, refreshed after every frame.
     pub(crate) saved: HashMap<u32, Saved>,
+    /// Rows tagged by item (`LIST_ROW2`), by row node.
+    pub rows: HashMap<u32, RowTag>,
     /// (average advance, line height) per font size (f32 bits).
     metrics: HashMap<u32, (f32, f32)>,
     /// Per-frame scratch: list ids in order, scrollers anchored.
@@ -232,6 +349,29 @@ impl Lists {
         self.map.get(&id)
     }
 
+    /// The item index row `row` stands for by its tag, if it has one: the
+    /// index of the tagged item in its list (NIL once the item is gone).
+    pub(crate) fn tagged_index(&self, row: u32) -> Option<u32> {
+        let tag = *self.rows.get(&row)?;
+        let l = self.map.get(&tag.list);
+        Some(l.and_then(|l| l.index.get(tag.item)).unwrap_or(NIL))
+    }
+
+    /// Whether row `row`, at item index `index` of list `list`, may
+    /// measure the item: untagged (`LIST_INDEX`), or tagged with the
+    /// item's version. A row rendered for an older version shows older
+    /// content: it is placed, but its height isn't the item's.
+    pub fn row_measures(&self, list: u32, row: u32, index: u32) -> bool {
+        let Some(t) = self.rows.get(&row) else {
+            return true;
+        };
+        let item = self
+            .map
+            .get(&list)
+            .and_then(|l| l.items.get(index as usize));
+        t.list == list && item.is_some_and(|d| d.id == t.item && d.version == t.version)
+    }
+
     pub fn policy(&self, scroller: u32) -> Anchor {
         self.policies.get(&scroller).copied().unwrap_or_default()
     }
@@ -239,6 +379,8 @@ impl Lists {
     /// Forgets everything a freed node held.
     pub(crate) fn forget(&mut self, id: u32) {
         self.map.remove(&id);
+        self.rows.remove(&id);
+        self.rows.retain(|_, t| t.list != id);
         self.policies.remove(&id);
         self.saved.remove(&id);
         self.saved.retain(|_, s| s.list != id);
@@ -259,18 +401,77 @@ impl Lists {
             l.fallback = fallback;
             l.stale = true;
         }
-        if l.templates != templates {
+        if l.templates != templates || l.v2 {
             l.templates = templates.to_vec();
+            l.v2 = false;
             l.stale = true;
         }
     }
 
-    /// Replaces items `at..at + remove` with `items`. An item that moves
-    /// within the splice marked `unchanged` (same id removed and
-    /// inserted) keeps its extent and measurement; other new items are estimated at the list's width
-    /// when it is known (else at the next layout). A captured anchor
-    /// follows its item: to its new place when it moved, to the splice
-    /// start only when it was removed.
+    /// `LIST_CONFIG2`: as `configure`, with the contract's templates; a
+    /// new epoch drops every measurement.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn configure2(
+        &mut self,
+        id: u32,
+        overscan: f32,
+        lookahead: f32,
+        retain: f32,
+        fallback: f32,
+        epoch: u32,
+        templates: &[Template],
+    ) {
+        let l = self.map.entry(id).or_default();
+        (l.overscan, l.lookahead, l.retain) = (overscan, lookahead, retain);
+        if l.fallback != fallback {
+            l.fallback = fallback;
+            l.stale = true;
+        }
+        if l.templates2 != templates || !l.v2 {
+            l.templates2 = templates.to_vec();
+            l.v2 = true;
+            l.stale = true;
+        }
+        if l.epoch != epoch {
+            l.epoch = epoch;
+            l.forget = true;
+            l.stale = true;
+        }
+    }
+
+    /// How list `id` estimates its items now (shaping v1 templates'
+    /// samples once).
+    fn estimator(&mut self, text: &mut TextEngine, id: u32) -> Estimator {
+        let Some(l) = self.map.get(&id) else {
+            return Estimator::default();
+        };
+        let (v2, fallback) = (l.v2, l.fallback);
+        let v1: Vec<ItemTemplate> = if v2 { Vec::new() } else { l.templates.clone() };
+        let templates2 = if v2 { l.templates2.clone() } else { Vec::new() };
+        let v1 = v1
+            .into_iter()
+            .map(|t| {
+                let m = if t.font_size > 0.0 {
+                    self.metrics(text, t.font_size)
+                } else {
+                    (1.0, 0.0)
+                };
+                (t, m)
+            })
+            .collect();
+        Estimator {
+            v1,
+            v2: templates2,
+            fallback,
+        }
+    }
+
+    /// Replaces items `at..at + remove` with `items` (`LIST_SPLICE`). An
+    /// item that moves within the splice marked `unchanged` (same id
+    /// removed and inserted) keeps its extent and measurement; other new
+    /// items are estimated at the list's width when it is known (else at
+    /// the next layout). A captured anchor follows its item: to its new
+    /// place when it moved, to the splice start only when it was removed.
     pub(crate) fn splice(
         &mut self,
         text: &mut TextEngine,
@@ -279,24 +480,60 @@ impl Lists {
         remove: u32,
         items: &[u8],
     ) {
+        let est = self.estimator(text, id);
         let l = self.map.entry(id).or_default();
-        let n = l.descs.len() as u32;
+        let n = l.len();
         // Validation guarantees the range; clamp rather than panic.
         debug_assert!(at <= n && remove <= n - at.min(n), "splice out of range");
         let at = at.min(n);
         let remove = remove.min(n - at);
+        let new: Vec<(Item, bool)> = ItemDesc::iter(items)
+            .map(|d| {
+                let item = Item {
+                    id: d.id,
+                    version: 0,
+                    template: d.template,
+                    flags: Item::LOADED,
+                    arg: d.text_len,
+                };
+                (item, d.unchanged)
+            })
+            .collect();
+        // Only the bridge knows the content is the same (the same object
+        // moved): then it keeps its extent. Otherwise it is estimated
+        // again (its row, if rendered, measures it).
+        let keep = |before: &Item, after: &Item, unchanged: bool| {
+            unchanged && before.template == after.template
+        };
+        self.replace(&est, id, at, remove, &new, keep);
+        let l = self.map.get_mut(&id).unwrap();
+        l.revision = l.revision.wrapping_add(1);
+    }
+
+    /// Replaces items `at..at + remove` with `new` (an item and a flag
+    /// for `keep`): an item that `keep`s the removed one with its
+    /// identity takes its measurement. Anchors follow.
+    fn replace(
+        &mut self,
+        est: &Estimator,
+        id: u32,
+        at: u32,
+        remove: u32,
+        new: &[(Item, bool)],
+        keep: impl Fn(&Item, &Item, bool) -> bool,
+    ) {
+        let l = self.map.get_mut(&id).unwrap();
         let range = at as usize..(at + remove) as usize;
-        let (width, fallback) = (l.width, l.fallback);
-        let templates = l.templates.clone();
-        // Removed items by identity, sorted: (id, description, extent,
-        // measured). Binary search, no hashing of wire ids.
-        let mut removed: Vec<(u32, ItemDesc, f32, bool)> = range
+        let width = l.width;
+        // Removed items by identity, sorted: (id, item, extent, measured).
+        // Binary search, no hashing of wire ids.
+        let mut removed: Vec<(u32, Item, f32, bool)> = range
             .clone()
-            .filter(|&i| l.descs[i].id != NIL)
+            .filter(|&i| l.items[i].id != NIL)
             .map(|i| {
                 (
-                    l.descs[i].id,
-                    l.descs[i],
+                    l.items[i].id,
+                    l.items[i],
                     l.extents.size(i),
                     l.extents.is_measured(i),
                 )
@@ -309,39 +546,23 @@ impl Lists {
                 .ok()
                 .map(|p| removed[p])
         };
-        let mut new_items = Vec::with_capacity(items.len() / ItemDesc::BYTES);
-        for d in ItemDesc::iter(items) {
-            if let Some((_, before, e, m)) = find(d.id) {
-                // Only the bridge knows the content is the same (the same
-                // object moved): then it keeps its extent. Otherwise it is
-                // estimated again (its row, if rendered, measures it).
-                if d.unchanged && before.template == d.template {
-                    new_items.push((e, m));
-                    continue;
-                }
-            }
-            let e = match templates.get(d.template as usize) {
-                Some(t) if width.is_finite() => {
-                    let m = if t.font_size > 0.0 {
-                        self.metrics(text, t.font_size)
-                    } else {
-                        (1.0, 0.0)
-                    };
-                    estimate(t, m, d.text_len, width)
-                }
-                _ => fallback,
-            };
-            new_items.push((e, false));
-        }
-        let l = self.map.get_mut(&id).unwrap();
-        let inserted = new_items.len();
-        let gone: Vec<u32> = l.descs[range.clone()].iter().map(|d| d.id).collect();
-        let added: Vec<u32> = ItemDesc::iter(items).map(|d| d.id).collect();
-        l.ids.update(&gone, &added);
+        // A kept item keeps its measurement; an unmeasured one takes its
+        // new descriptor's estimate.
+        let extents: Vec<(f32, bool)> = new
+            .iter()
+            .map(|(d, flag)| match find(d.id) {
+                Some((_, before, e, true)) if keep(&before, d, *flag) => (e, true),
+                _ if width.is_finite() => (est.of(d, width), false),
+                _ => (est.fallback, false),
+            })
+            .collect();
+        let gone: Vec<u32> = l.items[range.clone()].iter().map(|d| d.id).collect();
+        let added: Vec<u32> = new.iter().map(|(d, _)| d.id).collect();
+        l.index.splice(l.items.len() as u32, at, &gone, &added);
         // Where each saved anchor's item went: its new place if the
         // splice re-inserted it, else the splice start.
         let anchor_to = |old: u32| {
-            let id = l.descs[old as usize].id;
+            let id = l.items[old as usize].id;
             if id == NIL {
                 return at;
             }
@@ -350,7 +571,7 @@ impl Lists {
                 .position(|&a| a == id)
                 .map_or(at, |k| at + k as u32)
         };
-        let shift = inserted as i64 - remove as i64;
+        let shift = new.len() as i64 - remove as i64;
         for s in self.saved.values_mut().filter(|s| s.list == id) {
             if s.index >= at + remove {
                 s.index = (s.index as i64 + shift) as u32;
@@ -358,12 +579,76 @@ impl Lists {
                 s.index = anchor_to(s.index);
             }
         }
-        l.descs.splice(range.clone(), ItemDesc::iter(items));
-        l.extents.splice_items(range, new_items);
+        l.items.splice(range.clone(), new.iter().map(|(d, _)| *d));
+        l.extents.splice_items(range, extents);
         if !width.is_finite() {
             l.stale = true;
         }
-        l.revision = l.revision.wrapping_add(1);
+        l.resend = true;
+    }
+
+    /// Applies a validated `LIST_PATCH`'s ops and takes list `id` to
+    /// revision `next`. An item keeps its measurement while it keeps its
+    /// identity, version, loaded and failed state: through moves, and
+    /// through a splice that removes and re-inserts it.
+    pub(crate) fn patch(&mut self, text: &mut TextEngine, id: u32, next: u32, ops: &[ListOp]) {
+        let est = self.estimator(text, id);
+        self.map.entry(id).or_default();
+        for op in ops {
+            match op {
+                ListOp::Splice { at, remove, items } => {
+                    let new: Vec<(Item, bool)> = Item::iter(items).map(|d| (d, false)).collect();
+                    let keep = |before: &Item, after: &Item, _| before.same_content(after);
+                    self.replace(&est, id, *at, *remove, &new, keep);
+                }
+                ListOp::Move { from, count, to } => self.move_items(id, *from, *count, *to),
+                ListOp::Update { at, items } => {
+                    let l = self.map.get_mut(&id).unwrap();
+                    let width = l.width;
+                    for (k, d) in Item::iter(items).enumerate() {
+                        let i = *at as usize + k;
+                        let before = std::mem::replace(&mut l.items[i], d);
+                        // New content may lay out differently: it takes
+                        // its new estimate until its row measures it.
+                        if !before.same_content(&d) || !l.extents.is_measured(i) {
+                            let e = if width.is_finite() {
+                                est.of(&d, width)
+                            } else {
+                                est.fallback
+                            };
+                            l.extents.estimate(i, e);
+                        }
+                    }
+                    if !width.is_finite() {
+                        l.stale = true;
+                    }
+                    l.resend = true;
+                }
+            }
+        }
+        let l = self.map.get_mut(&id).unwrap();
+        l.revision = next;
+    }
+
+    /// Moves items `from..from + count` to `to` (an index without them):
+    /// extents, measurements and captured anchors go with them.
+    fn move_items(&mut self, id: u32, from: u32, count: u32, to: u32) {
+        let l = self.map.get_mut(&id).unwrap();
+        let (f, c, t) = (from as usize, count as usize, to as usize);
+        if c == 0 || f == t {
+            return;
+        }
+        let moved: Vec<Item> = l.items.drain(f..f + c).collect();
+        l.items.splice(t..t, moved);
+        let ext: Vec<(f32, bool)> = (f..f + c)
+            .map(|i| (l.extents.size(i), l.extents.is_measured(i)))
+            .collect();
+        l.extents.splice_items(f..f + c, []);
+        l.extents.splice_items(t..t, ext);
+        l.index.move_items(from, count, to);
+        for s in self.saved.values_mut().filter(|s| s.list == id) {
+            s.index = moved_index(s.index, from, count, to);
+        }
         l.resend = true;
     }
 
@@ -391,37 +676,57 @@ impl Lists {
     }
 
     /// Brings list `id`'s estimates up to date for content width
-    /// `width`. A width change forgets measurements (they were made at
-    /// another width); rendered rows measure again in the same pass.
+    /// `width`. A width change, or a new template epoch, forgets
+    /// measurements (they were made at another width or with other
+    /// templates); rendered rows measure again in the same pass.
     pub(crate) fn estimate(&mut self, text: &mut TextEngine, id: u32, width: f32) {
         let Some(l) = self.map.get(&id) else { return };
         let resized = l.width != width;
         if !resized && !l.stale {
             return;
         }
-        // Metrics per template, then one pass over the items.
-        let sizes: Vec<f32> = l.templates.iter().map(|t| t.font_size).collect();
-        let metrics: Vec<(f32, f32)> = sizes
-            .iter()
-            .map(|&fs| {
-                if fs > 0.0 {
-                    self.metrics(text, fs)
-                } else {
-                    (1.0, 0.0)
-                }
-            })
-            .collect();
+        let est = self.estimator(text, id);
         let l = self.map.get_mut(&id).unwrap();
-        let (templates, descs, fallback) = (&l.templates, &l.descs, l.fallback);
-        l.extents.reestimate(resized, |i| {
-            let d = descs[i];
-            match templates.get(d.template as usize) {
-                Some(t) => estimate(t, metrics[d.template as usize], d.text_len, width),
-                None => fallback,
-            }
-        });
+        let items = &l.items;
+        l.extents
+            .reestimate(resized || l.forget, |i| est.of(&items[i], width));
         l.width = width;
         l.stale = false;
+        l.forget = false;
+    }
+}
+
+/// Where item index `i` goes when items `from..from + count` move to
+/// `to` (an index in the list without them).
+pub fn moved_index(i: u32, from: u32, count: u32, to: u32) -> u32 {
+    if (from..from + count).contains(&i) {
+        return to + (i - from);
+    }
+    let j = if i >= from + count { i - count } else { i };
+    if j >= to { j + count } else { j }
+}
+
+/// A list's estimates: shaped v1 templates with their metrics, or the
+/// contract's templates, else the fallback; a numeric estimate wins.
+#[derive(Default)]
+struct Estimator {
+    v1: Vec<(ItemTemplate, (f32, f32))>,
+    v2: Vec<Template>,
+    fallback: f32,
+}
+
+impl Estimator {
+    fn of(&self, d: &Item, width: f32) -> f32 {
+        if let Some(s) = d.size() {
+            return s;
+        }
+        let t = d.template as usize;
+        if let Some((tpl, m)) = self.v1.get(t) {
+            return estimate(tpl, *m, d.arg, width);
+        }
+        (self.v2.get(t))
+            .and_then(|tpl| tpl.estimate(d.arg, width))
+            .unwrap_or(self.fallback)
     }
 }
 
@@ -471,7 +776,7 @@ impl Lists {
         };
         // In f64 throughout, rounded once at the end: an f32 correction
         // of widely differing extents rounds away (1e6 -> 0.01 is -1e6).
-        let gaps = l.descs.len().saturating_sub(1) as f64 * gap as f64;
+        let gaps = l.items.len().saturating_sub(1) as f64 * gap as f64;
         if l.width == width && !l.stale {
             let mut t = l.extents.total_f64();
             for &(i, e) in rows {
@@ -479,31 +784,17 @@ impl Lists {
             }
             return (t + gaps) as f32;
         }
-        let sizes: Vec<f32> = l.templates.iter().map(|t| t.font_size).collect();
-        let metrics: Vec<(f32, f32)> = sizes
-            .iter()
-            .map(|&fs| {
-                if fs > 0.0 {
-                    self.metrics(text, fs)
-                } else {
-                    (1.0, 0.0)
-                }
-            })
-            .collect();
+        let est = self.estimator(text, id);
         let l = &self.map[&id];
         // Measurements hold at their own width only.
-        let keep = l.width == width;
+        let keep = l.width == width && !l.forget;
         let item = |i: usize| {
             if keep && l.extents.is_measured(i) {
                 return l.extents.size(i);
             }
-            let d = l.descs[i];
-            match l.templates.get(d.template as usize) {
-                Some(t) => estimate(t, metrics[d.template as usize], d.text_len, width),
-                None => l.fallback,
-            }
+            est.of(&l.items[i], width)
         };
-        let mut t: f64 = (0..l.descs.len()).map(|i| item(i) as f64).sum();
+        let mut t: f64 = (0..l.items.len()).map(|i| item(i) as f64).sum();
         for &(i, e) in rows {
             t += e as f64 - item(i as usize) as f64;
         }
@@ -782,7 +1073,7 @@ impl crate::ui::Ui {
             let keep_id = if keep == NIL {
                 NIL
             } else {
-                l.descs.get(keep as usize).map_or(NIL, |d| d.id)
+                l.items.get(keep as usize).map_or(NIL, |d| d.id)
             };
             // After a splice the event goes out even with the same range:
             // it names the item order (revision) its indices refer to.

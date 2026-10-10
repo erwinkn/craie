@@ -14,11 +14,13 @@ use craie_layout::LayoutRow;
 
 use crate::animation::{Prop, Transition, Value};
 use crate::claims::{Claim, claim_kind};
+use crate::events::out_kind;
 use crate::host::{Host, MAX_NODES, NodeId, SpatialPatch};
 use crate::keyframes::{Animation, Trigger, frame_field};
 use crate::list::{IdIndex, MAX_ITEMS};
 use crate::mutation::{
-    Command, ItemDesc, Mutation, NIL, NodeKind, TextSpan, Transaction, interaction_flag,
+    Command, Item, ItemDesc, ListOp, Mutation, NIL, NodeKind, Template, TextSpan, Transaction,
+    interaction_flag,
 };
 use crate::states::{env_bit, state_bit, value_field};
 use crate::ui::Ui;
@@ -42,6 +44,33 @@ const MAX_LIST_LENGTH: f32 = 1.0e6;
 
 fn length_ok(v: f32) -> bool {
     finite(v) && (0.0..=MAX_LIST_LENGTH).contains(&v)
+}
+
+/// Largest accepted retain window, in viewport heights each side.
+const MAX_RETAIN: f32 = 1000.0;
+
+/// Lengths in range, in any band order; a text template's character
+/// width a positive fraction of its size.
+fn template_ok(t: &Template) -> bool {
+    match t {
+        Template::Fixed(size) => length_ok(*size),
+        Template::Widths(bands) => bands.iter().all(|b| length_ok(b.0) && length_ok(b.1)),
+        Template::Text {
+            base,
+            inset,
+            font_size,
+            line_height,
+            char_width,
+        } => {
+            length_ok(*base)
+                && length_ok(*inset)
+                && font_size_ok(*font_size)
+                && length_ok(*line_height)
+                && finite(*char_width)
+                && *char_width > 0.0
+                && *char_width <= 16.0
+        }
+    }
 }
 
 fn invalid(why: &'static str) -> WireError {
@@ -101,17 +130,41 @@ fn valid_spans(text: &str, spans: &[TextSpan], families: usize) -> Result<(), Wi
     Ok(())
 }
 
-/// A list the batch splices, as the batch leaves it.
+/// Edits a batch may record on a host list before validation copies its
+/// identity sequence: reading through them costs O(edits) per item.
+const MAX_EDITS: usize = 32;
+
+#[cfg(test)]
+thread_local! {
+    /// Copies `Touch::materialize` made on this thread: tests check the
+    /// past-`MAX_EDITS` path runs.
+    pub(crate) static MATERIALIZED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// A list the batch edits, as the batch leaves it.
 enum Touch {
-    /// The host's list plus splices recorded (item count after them).
-    /// The first splice checks identities against the host's index; a
-    /// second one on the same list materializes the sequence.
-    Host {
-        len: u32,
-        splices: Vec<(u32, u32, Vec<u32>)>,
-    },
-    /// The whole identity sequence and its index.
+    /// The host's list plus edits recorded (item count after them). An
+    /// item's identity reads back through the edits to the host's items,
+    /// and an identity's presence forward from the host's index, so a
+    /// batch that appends and updates never copies the list.
+    Host { len: u32, edits: Vec<Edit> },
+    /// The whole identity sequence and its index: a list created in this
+    /// batch, or one past `MAX_EDITS` edits.
     Seq { ids: Vec<u32>, index: IdIndex },
+}
+
+/// An identity edit recorded against the host's sequence.
+enum Edit {
+    /// Items `at..at + remove` became `inserted` (`removed`: the removed
+    /// identities, NIL dropped; `fresh`: the inserted ones, sorted).
+    Splice {
+        at: u32,
+        remove: u32,
+        removed: IdIndex,
+        inserted: Vec<u32>,
+        fresh: IdIndex,
+    },
+    Move(u32, u32, u32),
 }
 
 impl Touch {
@@ -122,10 +175,114 @@ impl Touch {
         }
     }
 
+    fn of(base: Option<&crate::list::ListState>) -> Touch {
+        match base {
+            // A list created in this batch starts empty.
+            None => Touch::empty(),
+            Some(l) => Touch::Host {
+                len: l.len(),
+                edits: Vec::new(),
+            },
+        }
+    }
+
     fn len(&self) -> u32 {
         match self {
             Touch::Host { len, .. } => *len,
             Touch::Seq { ids, .. } => ids.len() as u32,
+        }
+    }
+
+    /// The identity at index `i` of the list as the batch leaves it:
+    /// back through the edits, latest first, to the host's items.
+    fn id_at(edits: &[Edit], base: &crate::list::ListState, mut i: u32) -> u32 {
+        for e in edits.iter().rev() {
+            match e {
+                Edit::Splice {
+                    at,
+                    remove,
+                    inserted,
+                    ..
+                } => {
+                    if i < *at {
+                        continue;
+                    }
+                    let k = inserted.len() as u32;
+                    if i < at + k {
+                        return inserted[(i - at) as usize];
+                    }
+                    i = i - k + remove;
+                }
+                &Edit::Move(from, count, to) => {
+                    i = if (to..to + count).contains(&i) {
+                        from + (i - to)
+                    } else {
+                        let j = if i >= to { i - count } else { i };
+                        if j >= from { j + count } else { j }
+                    };
+                }
+            }
+        }
+        base.items[i as usize].id
+    }
+
+    /// Whether identity `id` is in the list as the batch leaves it: the
+    /// host's index, then each edit in order.
+    fn present(edits: &[Edit], base: &crate::list::ListState, id: u32) -> bool {
+        let mut here = base.index.contains(id);
+        for e in edits {
+            if let Edit::Splice { removed, fresh, .. } = e {
+                if removed.contains(id) {
+                    here = false;
+                }
+                if fresh.contains(id) {
+                    here = true;
+                }
+            }
+        }
+        here
+    }
+
+    /// The host's sequence with the recorded edits, once.
+    fn materialize(&mut self, base: Option<&crate::list::ListState>) {
+        let Touch::Host { edits, .. } = self else {
+            return;
+        };
+        #[cfg(test)]
+        MATERIALIZED.with(|c| c.set(c.get() + 1));
+        let base = base.expect("a host touch has a host list");
+        let mut ids: Vec<u32> = base.items.iter().map(|d| d.id).collect();
+        for e in edits.drain(..) {
+            match e {
+                Edit::Splice {
+                    at,
+                    remove,
+                    inserted,
+                    ..
+                } => {
+                    let range = at as usize..(at + remove) as usize;
+                    ids.splice(range, inserted);
+                }
+                Edit::Move(f, c, t) => {
+                    let moved: Vec<u32> = ids.drain(f as usize..(f + c) as usize).collect();
+                    ids.splice(t as usize..t as usize, moved);
+                }
+            }
+        }
+        let index = IdIndex::build(ids.iter().copied());
+        *self = Touch::Seq { ids, index };
+    }
+
+    /// A host touch past `MAX_EDITS` becomes a sequence.
+    fn record(&mut self, base: Option<&crate::list::ListState>, e: Edit) {
+        match self {
+            Touch::Host { edits, .. } => {
+                edits.push(e);
+                if edits.len() > MAX_EDITS {
+                    self.materialize(base);
+                }
+            }
+            Touch::Seq { .. } => unreachable!("sequences apply edits in place"),
         }
     }
 
@@ -139,7 +296,7 @@ impl Touch {
         at: u32,
         remove: u32,
         inserted: Vec<u32>,
-        fresh: &IdIndex,
+        fresh: IdIndex,
     ) -> Result<(), WireError> {
         let cur = self.len();
         if at > cur || remove > cur - at {
@@ -149,45 +306,87 @@ impl Touch {
         if next > MAX_ITEMS as u64 {
             return Err(invalid("list longer than the item limit"));
         }
-        let range = at as usize..(at + remove) as usize;
-        let clash = |index: &IdIndex, removed: &IdIndex| {
-            fresh
-                .as_slice()
-                .iter()
-                .any(|&i| index.contains(i) && !removed.contains(i))
+        let clash = |present: &dyn Fn(u32) -> bool, removed: &IdIndex| {
+            (fresh.as_slice().iter()).any(|&i| present(i) && !removed.contains(i))
         };
-        if let Touch::Host { splices, .. } = self {
-            let base = base.expect("a host touch has a host list");
-            if splices.is_empty() {
-                // First splice: the host's items and index, unmodified.
-                let removed = IdIndex::build(base.descs[range].iter().map(|d| d.id));
-                if clash(&base.ids, &removed) {
+        match self {
+            Touch::Host { len, edits } => {
+                let base = base.expect("a host touch has a host list");
+                let removed =
+                    IdIndex::build((at..at + remove).map(|i| Self::id_at(edits, base, i)));
+                if clash(&|i| Self::present(edits, base, i), &removed) {
                     return Err(invalid("duplicate item identity in a list"));
                 }
-                splices.push((at, remove, inserted));
-                *self = Touch::Host {
-                    len: next as u32,
-                    splices: std::mem::take(splices),
+                *len = next as u32;
+                let e = Edit::Splice {
+                    at,
+                    remove,
+                    removed,
+                    inserted,
+                    fresh,
                 };
-                return Ok(());
+                self.record(Some(base), e);
             }
-            // Materialize: the host's sequence with the recorded splices.
-            let mut ids: Vec<u32> = base.descs.iter().map(|d| d.id).collect();
-            for (a, r, ins) in splices.drain(..) {
-                ids.splice(a as usize..(a + r) as usize, ins);
+            Touch::Seq { ids, index } => {
+                let range = at as usize..(at + remove) as usize;
+                let removed = IdIndex::build(ids[range.clone()].iter().copied());
+                if clash(&|i| index.contains(i), &removed) {
+                    return Err(invalid("duplicate item identity in a list"));
+                }
+                index.update(removed.as_slice(), fresh.as_slice());
+                ids.splice(range, inserted);
             }
-            let index = IdIndex::build(ids.iter().copied());
-            *self = Touch::Seq { ids, index };
         }
-        let Touch::Seq { ids, index } = self else {
-            unreachable!()
+        Ok(())
+    }
+
+    /// Checks one move (both ranges inside the list) and records it.
+    fn move_items(
+        &mut self,
+        base: Option<&crate::list::ListState>,
+        from: u32,
+        count: u32,
+        to: u32,
+    ) -> Result<(), WireError> {
+        let cur = self.len();
+        if from > cur || count > cur - from || to > cur - count {
+            return Err(invalid("list move out of range"));
+        }
+        match self {
+            Touch::Host { .. } => self.record(base, Edit::Move(from, count, to)),
+            Touch::Seq { ids, .. } => {
+                let moved: Vec<u32> = ids.drain(from as usize..(from + count) as usize).collect();
+                ids.splice(to as usize..to as usize, moved);
+            }
+        }
+        Ok(())
+    }
+
+    /// Checks one update: in range, and the same identities in the same
+    /// places (an update never changes the sequence, so it records
+    /// nothing).
+    fn update(
+        &self,
+        base: Option<&crate::list::ListState>,
+        at: u32,
+        updated: &[u32],
+    ) -> Result<(), WireError> {
+        let cur = self.len();
+        if at > cur || updated.len() as u64 > (cur - at) as u64 {
+            return Err(invalid("list update out of range"));
+        }
+        let same = match self {
+            Touch::Host { edits, .. } => {
+                let base = base.expect("a host touch has a host list");
+                (at..)
+                    .zip(updated)
+                    .all(|(i, &id)| Self::id_at(edits, base, i) == id)
+            }
+            Touch::Seq { ids, .. } => ids[at as usize..at as usize + updated.len()] == *updated,
         };
-        let removed = IdIndex::build(ids[range.clone()].iter().copied());
-        if clash(index, &removed) {
-            return Err(invalid("duplicate item identity in a list"));
+        if !same {
+            return Err(invalid("list update changes item identities"));
         }
-        index.update(removed.as_slice(), fresh.as_slice());
-        ids.splice(range, inserted);
         Ok(())
     }
 }
@@ -393,9 +592,11 @@ pub fn validate(host: &Host, txn: &Transaction<'_>) -> Result<Validated, WireErr
         placed: None,
         scratch: Vec::new(),
     };
-    // Lists the batch splices, as the batch leaves them (item counts and
-    // identities).
+    // Lists the batch edits, as the batch leaves them (item counts and
+    // identities), and their revisions: a patch with a stale base is
+    // skipped, so later patches of the batch check against what applies.
     let mut lists: HashMap<u32, Touch> = HashMap::new();
+    let mut revisions: HashMap<u32, u32> = HashMap::new();
     let need_live = |o: &Overlay, id: u32, why: &'static str| {
         if o.live(id) {
             Ok(())
@@ -427,6 +628,7 @@ pub fn validate(host: &Host, txn: &Transaction<'_>) -> Result<Validated, WireErr
                 // A node created here holds no items, whatever an earlier
                 // occupant of the id held.
                 lists.insert(*id, Touch::empty());
+                revisions.insert(*id, 0);
             }
             Mutation::Place {
                 parent,
@@ -713,15 +915,91 @@ pub fn validate(host: &Host, txn: &Transaction<'_>) -> Result<Validated, WireErr
                     return Err(invalid("duplicate item identity in a splice"));
                 }
                 let base = host.lists.get(*id);
-                let touch = lists.entry(*id).or_insert_with(|| match base {
-                    // A list created in this batch starts empty.
-                    None => Touch::empty(),
-                    Some(l) => Touch::Host {
-                        len: l.len(),
-                        splices: Vec::new(),
-                    },
-                });
-                touch.splice(base, *at, *remove, inserted, &fresh)?;
+                let touch = lists.entry(*id).or_insert_with(|| Touch::of(base));
+                touch.splice(base, *at, *remove, inserted, fresh)?;
+                let rev = revisions
+                    .entry(*id)
+                    .or_insert_with(|| base.map_or(0, |l| l.revision));
+                *rev = rev.wrapping_add(1);
+            }
+            Mutation::ListConfig2 {
+                id,
+                overscan,
+                lookahead,
+                retain,
+                fallback,
+                templates,
+                ..
+            } => {
+                if o.kind(*id) != Some(NodeKind::List) {
+                    return Err(invalid("list config on a non-list node"));
+                }
+                // A negative lookahead is one viewport height.
+                if !length_ok(*overscan)
+                    || !length_ok(*fallback)
+                    || !(*lookahead < 0.0 || length_ok(*lookahead))
+                    || !(finite(*retain) && (0.0..=MAX_RETAIN).contains(retain))
+                {
+                    return Err(invalid("list config out of range"));
+                }
+                if !templates.iter().all(template_ok) {
+                    return Err(invalid("list template out of range"));
+                }
+            }
+            Mutation::ListPatch {
+                id,
+                base,
+                next,
+                ops,
+            } => {
+                if o.kind(*id) != Some(NodeKind::List) {
+                    return Err(invalid("list patch on a non-list node"));
+                }
+                let Some(ops) = ListOp::parse(ops) else {
+                    return Err(invalid("malformed list patch"));
+                };
+                for op in &ops {
+                    if let ListOp::Splice { items, .. } | ListOp::Update { items, .. } = op {
+                        Item::check(items, MAX_LIST_LENGTH).map_err(invalid)?;
+                    }
+                }
+                let host_list = host.lists.get(*id);
+                let rev = revisions
+                    .entry(*id)
+                    .or_insert_with(|| host_list.map_or(0, |l| l.revision));
+                // A stale base: the patch is skipped (with a resync
+                // event), not an error; JS reconciles from the revision
+                // native is at.
+                if *base != *rev {
+                    continue;
+                }
+                *rev = *next;
+                let touch = lists.entry(*id).or_insert_with(|| Touch::of(host_list));
+                for op in ops {
+                    match op {
+                        ListOp::Splice { at, remove, items } => {
+                            let inserted: Vec<u32> = Item::iter(&items).map(|d| d.id).collect();
+                            let fresh = IdIndex::build(inserted.iter().copied());
+                            if fresh.has_duplicates() {
+                                return Err(invalid("duplicate item identity in a splice"));
+                            }
+                            touch.splice(host_list, at, remove, inserted, fresh)?;
+                        }
+                        ListOp::Move { from, count, to } => {
+                            touch.move_items(host_list, from, count, to)?
+                        }
+                        ListOp::Update { at, items } => {
+                            let updated: Vec<u32> = Item::iter(&items).map(|d| d.id).collect();
+                            touch.update(host_list, at, &updated)?;
+                        }
+                    }
+                }
+            }
+            Mutation::ListRow { id, list, item, .. } => {
+                need_live(&o, *id, "list row on an absent node")?;
+                if *item != NIL && o.kind(*list) != Some(NodeKind::List) {
+                    return Err(invalid("list row of a non-list node"));
+                }
             }
             Mutation::ListIndex { id, .. } => {
                 need_live(&o, *id, "list index on an absent node")?;
@@ -1341,16 +1619,70 @@ impl Ui {
                     .splice(&mut self.text, *id, *at, *remove, items);
                 self.host.revs.layout_input.bump();
                 self.host.mark_layout(NodeId(*id));
+                self.follow_tagged_rows(*id);
             }
             Mutation::ListIndex { id, index } => {
-                let node = NodeId(*id);
-                if self.host.list_index[node.index()] != *index {
-                    self.host.list_index[node.index()] = *index;
-                    self.host.revs.layout_input.bump();
-                    // Invalidation walks up to the list, which places it.
-                    self.host.mark_layout(node);
-                    self.host.dirty.semantic.push(*id);
+                self.host.lists.rows.remove(id);
+                self.set_list_index(NodeId(*id), *index);
+            }
+            Mutation::ListConfig2 {
+                id,
+                overscan,
+                lookahead,
+                retain,
+                fallback,
+                epoch,
+                templates,
+            } => {
+                self.host.lists.configure2(
+                    *id, *overscan, *lookahead, *retain, *fallback, *epoch, templates,
+                );
+                self.host.revs.layout_input.bump();
+                self.host.mark_layout(NodeId(*id));
+            }
+            Mutation::ListPatch {
+                id,
+                base,
+                next,
+                ops,
+            } => {
+                let cur = self.host.lists.get(*id).map_or(0, |l| l.revision);
+                if *base != cur {
+                    let mut e = self.event(out_kind::LIST_RESYNC, NodeId(*id));
+                    e.revision = cur;
+                    e.key = *base;
+                    self.pending_events.push(e);
+                    return;
                 }
+                self.host.copied_bytes += ops.len() as u64;
+                let ops = ListOp::parse(ops).expect("validated list patch");
+                self.host.lists.patch(&mut self.text, *id, *next, &ops);
+                self.host.revs.layout_input.bump();
+                self.host.mark_layout(NodeId(*id));
+                self.follow_tagged_rows(*id);
+            }
+            Mutation::ListRow {
+                id,
+                list,
+                item,
+                version,
+            } => {
+                let index = if *item == NIL {
+                    self.host.lists.rows.remove(id);
+                    NIL
+                } else {
+                    let tag = crate::list::RowTag {
+                        list: *list,
+                        item: *item,
+                        version: *version,
+                    };
+                    if self.host.lists.rows.insert(*id, tag) != Some(tag) {
+                        // Measuring may start or stop with the version.
+                        self.host.mark_layout(NodeId(*id));
+                    }
+                    self.host.lists.tagged_index(*id).unwrap_or(NIL)
+                };
+                self.set_list_index(NodeId(*id), index);
             }
             Mutation::ScrollAnchor { id, anchor } => {
                 if *anchor == crate::mutation::Anchor::default() {
@@ -1498,6 +1830,30 @@ impl Ui {
             self.pressed = None;
         }
         self.pending_scrolls.retain(|(n, _, _)| *n != node);
+    }
+
+    /// Rows of list `id` tagged by item follow their items after an edit,
+    /// placed yet or not.
+    fn follow_tagged_rows(&mut self, id: u32) {
+        let rows: Vec<u32> = (self.host.lists.rows.iter())
+            .filter(|(_, t)| t.list == id)
+            .map(|(&r, _)| r)
+            .collect();
+        for row in rows {
+            let index = self.host.lists.tagged_index(row).unwrap_or(NIL);
+            self.set_list_index(NodeId(row), index);
+        }
+    }
+
+    /// Row `node` stands for item `index` of its list (NIL: none).
+    fn set_list_index(&mut self, node: NodeId, index: u32) {
+        if self.host.list_index[node.index()] != index {
+            self.host.list_index[node.index()] = index;
+            self.host.revs.layout_input.bump();
+            // Invalidation walks up to the list, which places it.
+            self.host.mark_layout(node);
+            self.host.dirty.semantic.push(node.0);
+        }
     }
 
     fn forget_node_state(&mut self, node: NodeId) {
