@@ -119,8 +119,8 @@ impl IdIndex {
 /// Each item's index by identity (NIL excluded): (id, index) pairs
 /// sorted by id, so a row tagged by item finds its place in O(log n).
 /// Edits keep it exact at their own cost: an append adds its pairs, in
-/// O(k) when its ids sort after every other (the bridge interns keys in
-/// order), and an edit that shifts items, already O(n) in the extents,
+/// O(k) when its ids sort after every other (ids handed out in order
+/// do), and an edit that shifts items, already O(n) in the extents,
 /// renumbers them in one pass. Sorted, not hashed, as `IdIndex`. 8 bytes
 /// per item.
 #[derive(Clone, Debug, Default, PartialEq)]
